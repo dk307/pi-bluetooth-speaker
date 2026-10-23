@@ -1,0 +1,17 @@
+[Unit]
+Description=BlueALSA Bluetooth Audio Daemon (v4.3.1)
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+User=root
+StateDirectory=bluealsa
+ExecStart=/usr/bin/bluealsa -S -p a2dp-sink \
+  -c aptX-HD -c aptX -c AAC -c Opus -c MP3 -c FastStream -c SBC \
+  --sbc-quality=xq
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

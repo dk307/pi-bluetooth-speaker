@@ -1,0 +1,123 @@
+import { Button, Slider } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    title: "Pi Audio Console";
+    width: 800px;
+    height: 480px;
+    background: #0d1117;
+    default-font-family: "sans-serif";
+
+    in-out property <string> track-title: "Waiting for Bluetooth Connection...";
+    in-out property <string> track-artist: "DietPi Speaker";
+    in-out property <string> track-album: "Audiophile DSP Sink";
+    in-out property <float> volume-value: 75.0;
+    in-out property <bool> is-playing: false;
+    in-out property <string> stream-codec: "aptX-HD 48kHz";
+
+    callback toggle-play-pause();
+    callback volume-changed(float);
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 16px;
+
+        // Top Status Bar (800 x 48)
+        HorizontalLayout {
+            height: 40px;
+            alignment: space-between;
+
+            Text {
+                text: "DIETPI AUDIO CONSOLE";
+                color: #58a6ff;
+                font-size: 16px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                background: #161b22;
+                border-radius: 12px;
+                border-color: #30363d;
+                border-width: 1px;
+                width: 150px;
+                height: 28px;
+
+                Text {
+                    text: root.stream-codec;
+                    color: #7ee787;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Center Now Playing / Artwork Canvas
+        Rectangle {
+            background: #161b22;
+            border-radius: 16px;
+            border-color: #30363d;
+            border-width: 1px;
+            clip: true;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 8px;
+
+                Text {
+                    text: root.track-title;
+                    color: #f0f6fc;
+                    font-size: 24px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: root.track-artist;
+                    color: #8b949e;
+                    font-size: 18px;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: root.track-album;
+                    color: #6e7681;
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        // Bottom Control Bar
+        HorizontalLayout {
+            height: 56px;
+            spacing: 20px;
+            alignment: center;
+
+            Text {
+                text: "VOL";
+                color: #8b949e;
+                font-size: 14px;
+                vertical-alignment: center;
+            }
+
+            Slider {
+                width: 300px;
+                minimum: 0.0;
+                maximum: 100.0;
+                value: root.volume-value;
+                changed(val) => {
+                    root.volume-changed(val);
+                }
+            }
+
+            Text {
+                text: @tr("{0}%", Math.round(root.volume-value));
+                color: #f0f6fc;
+                font-size: 14px;
+                width: 45px;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

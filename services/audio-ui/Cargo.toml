@@ -1,0 +1,58 @@
+[package]
+name = "audio-ui"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.99.1"
+authors = ["Audio Appliance Team"]
+description = "High-Performance Audiophile Appliance UI & Hardware Console for Raspberry Pi"
+
+[dependencies]
+# UI Framework (Slint with Linux Framebuffer & KMS/DRM backends)
+slint = { version = "=1.9.2", default-features = false, features = ["compat-1-2", "backend-linuxkms", "renderer-software"] }
+
+# Asynchronous Concurrency Runtime
+tokio = { version = "=1.53.3", features = ["full"] }
+tokio-tungstenite = { version = "=0.30.0", features = ["connect"] }
+futures-util = "=0.3.34"
+
+# D-Bus Engine for BlueZ 5 & BlueALSA
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
+
+# Serialization & JSON-RPC
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.140"
+
+# Raspberry Pi Hardware Peripherals (GPIO, Hardware PWM, I2C)
+rppal = { version = "=0.22.1", features = ["hal"] }
+
+# Image Processing (Cover Art Scaling & Procedural Vinyl)
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
+
+# System Telemetry & Thermals
+sysinfo = "=0.39.6"
+
+# Lightweight Web Remote Companion
+axum = "=0.8.9"
+tower-http = { version = "=0.7.1", features = ["cors", "fs"] }
+
+# PeppyMeter meters.txt INI Configuration Parser
+rust-ini = "=0.21.3"
+
+# Logging & Structured Tracing
+tracing = "=0.1.44"
+tracing-subscriber = "=0.3.23"
+
+# Async Trait for Trait-based Dependency Injection / Mocks
+async-trait = "=0.1.86"
+
+[features]
+default = []
+simulator = ["slint/backend-winit", "slint/renderer-femtovg"]
+
+[dev-dependencies]
+tokio-test = "=0.4.4"
+tempfile = "=3.17.1"
+
+[build-dependencies]
+slint-build = "=1.9.2"
+

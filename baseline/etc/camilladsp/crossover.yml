@@ -1,0 +1,94 @@
+devices:
+  samplerate: 48000
+  chunksize: 1024
+  queuelimit: 4
+  enable_rate_adjust: true
+  capture:
+    type: Alsa
+    channels: 2
+    device: "hw:Loopback,1,0"
+    format: S32_LE
+  playback:
+    type: Alsa
+    channels: 2
+    device: "hw:sndrpimerusamp,0"
+    format: S32_LE
+
+mixers:
+  sub_sat_mono_split:
+    channels:
+      in: 2
+      out: 2
+    mapping:
+      - dest: 0
+        sources:
+          - channel: 0
+            gain: -6.0
+          - channel: 1
+            gain: -6.0
+      - dest: 1
+        sources:
+          - channel: 0
+            gain: -6.0
+          - channel: 1
+            gain: -6.0
+
+filters:
+  sub_infrasonic_hpf:
+    type: Biquad
+    parameters:
+      type: Highpass
+      freq: 45
+      q: 0.707
+
+  sub_crossover_lpf:
+    type: Biquad
+    parameters:
+      type: Lowpass
+      freq: 180
+      q: 0.707
+
+  sub_limiter:
+    type: Limiter
+    parameters:
+      soft_clip: true
+      clip_limit: -3.5
+
+  coax_crossover_hpf:
+    type: Biquad
+    parameters:
+      type: Highpass
+      freq: 180
+      q: 0.707
+
+  coax_tweeter_pad_shelf:
+    type: Biquad
+    parameters:
+      type: Highshelf
+      freq: 3000
+      gain: -2.0
+      q: 0.707
+
+  coax_limiter:
+    type: Limiter
+    parameters:
+      soft_clip: true
+      clip_limit: -3.0
+
+pipeline:
+  - type: Mixer
+    name: sub_sat_mono_split
+
+  - type: Filter
+    channels: [0]
+    names:
+      - sub_infrasonic_hpf
+      - sub_crossover_lpf
+      - sub_limiter
+
+  - type: Filter
+    channels: [1]
+    names:
+      - coax_crossover_hpf
+      - coax_tweeter_pad_shelf
+      - coax_limiter

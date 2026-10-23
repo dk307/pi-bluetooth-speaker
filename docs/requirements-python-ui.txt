@@ -1,0 +1,35 @@
+# ==============================================================================
+# Dedicated Audiophile Appliance UI & Telemetry Stack
+# Target: Raspberry Pi 3 Model B (DietPi / Debian 13 Trixie, aarch64)
+# ==============================================================================
+
+# Core Display & Rendering Engine (Community Edition)
+pygame-ce==2.5.8
+
+# Real-Time CamillaDSP WebSocket Telemetry & JSON-RPC
+websockets==17.3
+
+# Asynchronous D-Bus Engine (BlueZ Bluetooth & BlueALSA)
+dbus-fast==5.2.0
+
+# Image Engine (Album Artwork Scaling & Compositing)
+Pillow==13.0.0
+
+# Lightweight Web Remote Companion & WebSocket Streamer
+aiohttp==3.14.5
+
+# System Hardware Telemetry (CPU load, memory, thermals)
+psutil==7.2.2
+
+# Hardware I2C Communication (BH1750 Light Sensor & Merus Amp)
+smbus2==0.6.1
+
+# Hardware GPIO: EC12 Rotary Encoder, Push Button, RGB LED & Fan PWM
+gpiozero==2.0.1.post3
+rpi-lgpio==0.6
+
+# ------------------------------------------------------------------------------
+# System-Level Apt Packages (Pre-installed via DietPi / Debian Trixie):
+# - libsdl2-2.0-0, libsdl2-image-2.0-0, libsdl2-ttf-2.0-0
+# - i2c-tools, libgpiod-dev
+# ------------------------------------------------------------------------------

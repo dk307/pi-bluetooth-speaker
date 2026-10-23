@@ -1,0 +1,15 @@
+[Unit]
+Description=BlueALSA A2DP Playback Forwarder
+After=bluealsa.service sound.target camilladsp.service
+Requires=bluealsa.service
+Wants=camilladsp.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/bluealsa-aplay -S -D default
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

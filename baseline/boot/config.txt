@@ -1,0 +1,27 @@
+# Added by DietPi:
+gpu_mem_1024=64
+gpu_mem_512=64
+gpu_mem_256=64
+dtparam=i2c_arm=on
+dtparam=audio=off
+dtoverlay=disable-wifi
+initial_turbo=20
+dtoverlay=disable-bt
+
+# InnoMaker AMP Pro (Infineon MERUS MA12070P) Native Upstream Driver
+dtoverlay=merus-amp-custom
+
+# 1-Wire Thermal Sensor - GPIO 26 (Physical Pin 37)
+dtoverlay=w1-gpio,gpiopin=26,pullup=0
+
+# Elecrow FT6336U Capacitive Touch Controller
+#dtoverlay=edt-ft5406,i2c_arm=on,interrupt=4,reset=17
+
+# --- Elecrow DLS30035B1 DRM/KMS Display ---
+#dtoverlay=mipi-dbi-spi,spi0-0,speed=48000000
+#dtparam=width=480,height=320
+#dtparam=width-mm=73,height-mm=49
+#dtparam=reset-gpio=27
+#dtparam=dc-gpio=25
+#dtparam=backlight-gpio=12
+#dtparam=write-only
