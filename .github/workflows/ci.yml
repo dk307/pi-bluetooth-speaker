@@ -1,0 +1,45 @@
+name: Cross-Compile Speaker Core
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  build-aarch64:
+    name: Cross-Compile for Raspberry Pi 3 (aarch64)
+    runs-on: ubuntu-latest
+
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ARM64 Cross-Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Build Speaker Core (Release)
+        run: cargo build --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release
+
+      - name: Verify Binary Architecture
+        run: |
+          file target/aarch64-unknown-linux-gnu/release/core
+          ls -lh target/aarch64-unknown-linux-gnu/release/core
+
+      - name: Upload Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-aarch64-rpi3
+          path: target/aarch64-unknown-linux-gnu/release/core
+          if-no-files-found: error
