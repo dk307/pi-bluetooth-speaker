@@ -4,6 +4,9 @@
 
 [build]
 target = "aarch64-unknown-linux-gnu"
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
 rustflags = [
     # 1. Target the exact in-order dual-issue pipeline of the BCM2837 Cortex-A53
     "-C", "target-cpu=cortex-a53",
