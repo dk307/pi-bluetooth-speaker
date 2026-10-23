@@ -51,9 +51,11 @@ jobs:
         run: |
           file target/aarch64-unknown-linux-gnu/release/core
           file target/aarch64-unknown-linux-gnu/release/read_temp
+          file target/aarch64-unknown-linux-gnu/release/read_light
           readelf -h target/aarch64-unknown-linux-gnu/release/core
           readelf -h target/aarch64-unknown-linux-gnu/release/read_temp
-          ls -lh target/aarch64-unknown-linux-gnu/release/core target/aarch64-unknown-linux-gnu/release/read_temp
+          readelf -h target/aarch64-unknown-linux-gnu/release/read_light
+          ls -lh target/aarch64-unknown-linux-gnu/release/core target/aarch64-unknown-linux-gnu/release/read_temp target/aarch64-unknown-linux-gnu/release/read_light
 
       - name: Upload Binary Artifacts
         uses: actions/upload-artifact@v4
@@ -62,4 +64,5 @@ jobs:
           path: |
             target/aarch64-unknown-linux-gnu/release/core
             target/aarch64-unknown-linux-gnu/release/read_temp
+            target/aarch64-unknown-linux-gnu/release/read_light
           if-no-files-found: error

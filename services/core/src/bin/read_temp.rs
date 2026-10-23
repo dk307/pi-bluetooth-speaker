@@ -344,26 +344,12 @@ fn select_target_devices(
     }
 }
 
-fn main() -> ExitCode {
-    let opts = match parse_cli_args() {
-        Ok(Some(o)) => o,
-        Ok(None) => {
-            let bin_name = env::args().next().unwrap_or_else(|| "read_temp".into());
-            print_usage(&bin_name);
-            return ExitCode::SUCCESS;
-        }
-        Err(err) => {
-            eprintln!("Error: {err}\nRun with --help for usage information.");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let sensor = TempSensor::new();
+fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
     if opts.format == OutputFormat::Human {
-        print_header(&sensor);
+        print_header(sensor);
     }
 
-    let target_devices = match select_target_devices(&sensor, opts.target_sensor.as_ref()) {
+    let target_devices = match select_target_devices(sensor, opts.target_sensor.as_ref()) {
         Ok(devs) => devs,
         Err(err) => {
             if opts.format == OutputFormat::Json {
@@ -381,7 +367,7 @@ fn main() -> ExitCode {
             println!("  • {dev}");
         }
         if opts.flags.verbose {
-            print_diagnostic_registers(&sensor, &target_devices);
+            print_diagnostic_registers(sensor, &target_devices);
         }
         if opts.max_count.is_none() {
             println!("\nPress Ctrl+C to stop.\n");
@@ -402,7 +388,7 @@ fn main() -> ExitCode {
             None
         };
 
-        handle_sensor_iteration(&sensor, &target_devices, &opts, &timestamp, soc, &mut stats);
+        handle_sensor_iteration(sensor, &target_devices, opts, &timestamp, soc, &mut stats);
 
         iteration += 1;
         if let Some(limit) = opts.max_count {
@@ -422,4 +408,199 @@ fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn main() -> ExitCode {
+    let opts = match parse_cli_args() {
+        Ok(Some(o)) => o,
+        Ok(None) => {
+            let bin_name = env::args().next().unwrap_or_else(|| "read_temp".into());
+            print_usage(&bin_name);
+            return ExitCode::SUCCESS;
+        }
+        Err(err) => {
+            eprintln!("Error: {err}\nRun with --help for usage information.");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let sensor = TempSensor::new();
+    run_app(&sensor, &opts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_timestamp_returns_valid_time() {
+        let ts = format_timestamp();
+        assert_eq!(ts.len(), 8);
+        assert_eq!(&ts[2..3], ":");
+        assert_eq!(&ts[5..6], ":");
+    }
+
+    #[test]
+    fn print_usage_runs_cleanly() {
+        print_usage("read_temp");
+    }
+
+    #[test]
+    fn statistics_computations_and_summary() {
+        let mut stats = Statistics::default();
+        assert!(stats.average_celsius().is_none());
+
+        stats.record_success(Temperature::from_celsius(20.0).unwrap());
+        stats.record_success(Temperature::from_celsius(30.0).unwrap());
+
+        let crc_err =
+            speaker_core::hardware::parse_w1_slave("00 : crc=00 NO\n00 t=1000\n").unwrap_err();
+        stats.record_error(&crc_err);
+
+        let io_err = TempError::from(std::io::Error::other("bus down"));
+        stats.record_error(&io_err);
+
+        assert_eq!(stats.total_reads, 4);
+        assert_eq!(stats.successful_reads, 2);
+        assert_eq!(stats.crc_errors, 1);
+        assert_eq!(stats.other_errors, 1);
+        assert_eq!(stats.min_temp.unwrap().celsius(), 20.0);
+        assert_eq!(stats.max_temp.unwrap().celsius(), 30.0);
+        assert!((stats.average_celsius().unwrap() - 25.0).abs() < 1e-4);
+
+        print_session_summary(&stats);
+
+        let empty_stats = Statistics::default();
+        print_session_summary(&empty_stats);
+    }
+
+    #[test]
+    fn header_diagnostics_and_iterations_with_mock() {
+        let (sensor, mock) = TempSensor::new_mocked();
+        let id = SensorId::parse("28-000000000001").unwrap();
+        mock.set_temperature(id.clone(), Temperature::from_celsius(24.5).unwrap());
+
+        print_header(&sensor);
+        print_diagnostic_registers(&sensor, std::slice::from_ref(&id));
+
+        // Error path for diagnostic registers
+        let bad_id = SensorId::parse("28-000000000099").unwrap();
+        print_diagnostic_registers(&sensor, &[bad_id]);
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("read_temp_bin_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let soc_file = temp_dir.join("temp");
+        std::fs::write(&soc_file, "42000\n").unwrap();
+        let soc = SocThermal::read_from_path(&soc_file).ok();
+
+        let opts_human = CliOptions {
+            max_count: Some(1),
+            interval: Duration::from_millis(10),
+            format: OutputFormat::Human,
+            flags: DiagnosticFlags {
+                verbose: true,
+                include_soc: true,
+                show_raw: true,
+            },
+            target_sensor: None,
+        };
+
+        let mut stats = Statistics::default();
+        handle_sensor_iteration(
+            &sensor,
+            std::slice::from_ref(&id),
+            &opts_human,
+            "12:00:00",
+            soc,
+            &mut stats,
+        );
+        assert_eq!(stats.successful_reads, 1);
+
+        // JSON format with SoC
+        let opts_json = CliOptions {
+            format: OutputFormat::Json,
+            ..opts_human.clone()
+        };
+        handle_sensor_iteration(
+            &sensor,
+            std::slice::from_ref(&id),
+            &opts_json,
+            "12:00:01",
+            soc,
+            &mut stats,
+        );
+        assert_eq!(stats.successful_reads, 2);
+
+        // Injected error iteration
+        mock.set_io_error("device removed");
+        handle_sensor_iteration(
+            &sensor,
+            std::slice::from_ref(&id),
+            &opts_human,
+            "12:00:02",
+            None,
+            &mut stats,
+        );
+        handle_sensor_iteration(
+            &sensor,
+            std::slice::from_ref(&id),
+            &opts_json,
+            "12:00:03",
+            None,
+            &mut stats,
+        );
+        assert_eq!(stats.other_errors, 2);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn run_app_iterations_and_failure_modes() {
+        let (sensor, mock) = TempSensor::new_mocked();
+        let id = SensorId::parse("28-000000000001").unwrap();
+        mock.set_temperature(id.clone(), Temperature::from_celsius(24.5).unwrap());
+
+        // Test run_app in human mode with iterations
+        let opts_run = CliOptions {
+            max_count: Some(2),
+            interval: Duration::from_millis(1),
+            format: OutputFormat::Human,
+            flags: DiagnosticFlags {
+                verbose: true,
+                include_soc: false,
+                show_raw: false,
+            },
+            target_sensor: None,
+        };
+        assert_eq!(run_app(&sensor, &opts_run), ExitCode::SUCCESS);
+
+        // Test run_app in JSON mode
+        let opts_run_json = CliOptions {
+            max_count: Some(1),
+            interval: Duration::from_millis(1),
+            format: OutputFormat::Json,
+            flags: DiagnosticFlags::default(),
+            target_sensor: Some(id),
+        };
+        assert_eq!(run_app(&sensor, &opts_run_json), ExitCode::SUCCESS);
+
+        // Test run_app error when sensor not found
+        let bad_sensor_id = SensorId::parse("28-000000000999").unwrap();
+        let opts_fail = CliOptions {
+            max_count: Some(1),
+            interval: Duration::from_millis(1),
+            format: OutputFormat::Human,
+            flags: DiagnosticFlags::default(),
+            target_sensor: Some(bad_sensor_id.clone()),
+        };
+        assert_eq!(run_app(&sensor, &opts_fail), ExitCode::FAILURE);
+
+        let opts_fail_json = CliOptions {
+            format: OutputFormat::Json,
+            target_sensor: Some(bad_sensor_id),
+            ..opts_run_json
+        };
+        assert_eq!(run_app(&sensor, &opts_fail_json), ExitCode::FAILURE);
+    }
 }

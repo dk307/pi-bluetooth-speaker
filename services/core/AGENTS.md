@@ -47,3 +47,8 @@ Before designing types, writing modules, implementing error handling, or writing
    * Every module must begin with `//!` documentation; every public item must have `///` documentation whose first sentence is a single line of ~15 words or fewer, followed by `# Examples`, `# Errors`, and `# Panics` sections where applicable. Do not write `# Parameters` tables or meta design journals (`M-NO-META-DESIGN-DOCUMENTATION`).
    * Use `#[expect(..., reason = "...")]` instead of `#[allow(...)]` for lint overrides.
    * All code must format cleanly with `cargo fmt --check` and pass `cargo clippy --all-targets -- -D warnings` with zero warnings.
+7. **Mandatory Code Coverage Verification (`M-TEST-COVERAGE`):**
+   * **Always check code coverage:** Run `cargo llvm-cov --manifest-path services/core/Cargo.toml` before completing tasks or submitting changes.
+   * **Target Standards:** Maintain **>85%–90%+** line and function coverage across the library, hardware modules, and diagnostic CLI binaries.
+   * **Testable CLI Utilities:** Architect CLI diagnostic binaries with modular, testable entrypoints (`fn run_app(sensor: &Sensor, opts: &CliOptions) -> ExitCode`) to enable deterministic unit and integration testing of CLI flags, JSON outputs, session summaries, and error handling without physical hardware.
+   * **Thorough Mock & Invariant Coverage:** Test domain invariant bounds, conversions, all mock state controls, and fault injections. Isolated physical hardware syscalls (e.g., `/dev/i2c-1`) must have their surrounding logic completely tested.

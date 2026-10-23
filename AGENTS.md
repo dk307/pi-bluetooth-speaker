@@ -26,3 +26,18 @@ All Rust code in this repository **MUST** strictly adhere to the **Microsoft Pra
 * **Service Instructions:** [`services/core/AGENTS.md`](services/core/AGENTS.md)
 
 Before designing types, writing modules, implementing error handling, or writing tests, consult [`services/.guidelines/microsoft-rust-guidelines.md`](services/.guidelines/microsoft-rust-guidelines.md) and ensure all newly created or modified code complies with its rules.
+
+---
+
+## 3. Mandatory Code Coverage Verification
+
+All code developed in this repository must maintain high, verifiable test coverage:
+* **Tooling:** Use `cargo llvm-cov` to measure line, function, and region coverage across crates, modules, and CLI utilities:
+  ```bash
+  cargo llvm-cov --manifest-path services/core/Cargo.toml
+  ```
+* **Coverage Standards:**
+  * Always check code coverage when writing, modifying, or refactoring code, and improve coverage to a reasonable extent (target **>85%–90%+** line and function coverage).
+  * Every new driver, peripheral module, mock controller, and standalone CLI utility must include comprehensive unit tests and integration tests covering happy paths, edge cases, domain invariants, error conversions, and failure injection.
+  * Code that depends on physical hardware (e.g., Broadcom I2C bus ioctl or 1-Wire sysfs) must isolate hardware-dependent calls behind mockable backends (`new_mocked()`) so all application logic, calculations, error paths, and diagnostic reporting are thoroughly exercised on any development host and CI.
+
