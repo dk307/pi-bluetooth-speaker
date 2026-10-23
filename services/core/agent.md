@@ -1,6 +1,6 @@
-# Agent Instructions: `audio-ui` Service
+# Agent Instructions: `core` Service
 
-This document defines the behavioral and engineering rules for AI agents developing, refactoring, and maintaining the `audio-ui` service.
+This document defines the behavioral and engineering rules for AI agents developing, refactoring, and maintaining the `core` service (responsible for the central speaker logic, audio console UI, hardware orchestration, and state synchronization).
 
 ---
 
@@ -13,7 +13,7 @@ Before designing APIs, writing modules, implementing error handling, or writing 
 
 ---
 
-## 2. Core Directives for `audio-ui`
+## 2. Core Directives for `core`
 
 ### 2.1. Design with AI & Testability in Mind (`M-DESIGN-FOR-AI`, `M-TESTABLE-API`)
 * **Trait Abstraction:** Hardware interfaces (GPIO, I2C, BlueZ D-Bus, CamillaDSP WebSocket) must be abstracted behind asynchronous traits (e.g., `PeripheralController`, `DspClient`, `BluetoothManager`).

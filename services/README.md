@@ -8,7 +8,7 @@ This directory contains the modular microservices that power the **Raspberry Pi 
 
 | Service | Language / Stack | Status | Description |
 | :--- | :--- | :--- | :--- |
-| [`audio-ui`](file:///home/deepak/server/services/audio-ui) | Rust 2024 / Slint / Tokio | **In Progress** | Dedicated audiophile touchscreen console (800x480 DSI `/dev/fb0`), dual PeppyMeter VU visualizers, rotary encoder volume sync, and BlueZ D-Bus integration. |
+| [`core`](file:///home/deepak/server/services/core) | Rust 2024 / Slint / Tokio | **In Progress** | Central speaker daemon & logic: audiophile touchscreen console (800x480 DSI `/dev/fb0`), dual PeppyMeter VU visualizers, rotary encoder volume sync, BlueZ D-Bus integration, and hardware orchestration. |
 
 ---
 

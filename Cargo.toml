@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "services/audio-ui",
+    "services/core",
 ]
 
 [workspace.package]

@@ -66,10 +66,12 @@ pi-bluetooth-speaker/
 │   └── requirements-python-ui.txt    # Pinned Python requirements for reference UI
 └── services/                 # Microservices powering the appliance
     ├── README.md             # Service architecture and roadmap
-    └── audio-ui/             # Dedicated Slint UI & Hardware Console
+    └── core/                 # Central Speaker Logic, Appliance UI & Hardware Console
         ├── .cargo/
         │   └── config.toml   # Cortex-A53 NEON vectorization & cross-compile tuning
-        ├── Cargo.toml        # audio-ui package manifest
+        ├── Cargo.toml        # speaker-core package manifest (binary: core)
+        ├── README.md         # Service documentation
+        ├── agent.md          # Agent instructions & guidelines
         ├── build.rs          # Slint AOT build script
         ├── src/main.rs       # Entrypoint & Tokio actor runtime
         └── ui/appwindow.slint# Declarative 800x480 UI layout
@@ -103,12 +105,12 @@ cd baseline
 ./verify.sh
 ```
 
-### Building the Audio UI Console
+### Building the Speaker Core Service
 
 ```bash
 # Build release binary optimized for Cortex-A53
-cargo build --release -p audio-ui
+cargo build --release -p speaker-core
 
 # Run interactive desktop simulator on workstation
-cargo run -p audio-ui --features simulator
+cargo run -p speaker-core --features simulator
 ```

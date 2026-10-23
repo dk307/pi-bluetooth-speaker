@@ -1,10 +1,15 @@
 [package]
-name = "audio-ui"
+name = "speaker-core"
 version = "2.0.0"
 edition = "2024"
 rust-version = "1.99.1"
 authors = ["Audio Appliance Team"]
-description = "High-Performance Audiophile Appliance UI & Hardware Console for Raspberry Pi"
+description = "Core Appliance Daemon & Logic for Raspberry Pi Bluetooth Speaker"
+default-run = "core"
+
+[[bin]]
+name = "core"
+path = "src/main.rs"
 
 [dependencies]
 # UI Framework (Slint with Linux Framebuffer & KMS/DRM backends)

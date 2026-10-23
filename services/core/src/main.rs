@@ -1,5 +1,5 @@
 // ==============================================================================
-// Pi Audio UI — Dedicated Audiophile Appliance UI & Hardware Console
+// Speaker Core — Central Speaker Logic, Appliance UI & Hardware Console
 // ==============================================================================
 
 slint::include_modules!();
@@ -7,7 +7,7 @@ slint::include_modules!();
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
-    tracing::info!("Starting Pi Audio UI Console Service...");
+    tracing::info!("Starting Speaker Core Service...");
 
     let main_window = MainWindow::new()?;
 
