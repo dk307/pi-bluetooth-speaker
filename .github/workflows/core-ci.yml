@@ -1,4 +1,4 @@
-name: Cross-Compile Speaker Core
+name: Build Speaker Core (ARM64 / RPi 3)
 
 on:
   push:
@@ -8,33 +8,32 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-aarch64:
-    name: Cross-Compile for Raspberry Pi 3 (aarch64)
-    runs-on: ubuntu-latest
-
-    env:
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+  build-rpi3:
+    name: Build for Raspberry Pi 3 (Cortex-A53 / aarch64)
+    runs-on: ubuntu-24.04-arm
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Install ARM64 Cross-Compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
 
-      - name: Build Speaker Core (Release)
+      - name: Configure Target Linker
+        run: |
+          if ! command -v aarch64-linux-gnu-gcc &>/dev/null; then
+            sudo ln -sf "$(which gcc)" /usr/local/bin/aarch64-linux-gnu-gcc
+          fi
+
+      - name: Build Speaker Core (Release for RPi 3)
         run: cargo build --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release
 
-      - name: Verify Binary Architecture
+      - name: Verify Binary Architecture & Compatibility
         run: |
           file target/aarch64-unknown-linux-gnu/release/core
+          readelf -h target/aarch64-unknown-linux-gnu/release/core
           ls -lh target/aarch64-unknown-linux-gnu/release/core
 
       - name: Upload Binary Artifact
