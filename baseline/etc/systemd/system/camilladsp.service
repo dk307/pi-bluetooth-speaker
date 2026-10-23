@@ -1,0 +1,14 @@
+[Unit]
+Description=CamillaDSP ALSA Crossover Engine
+After=sound.target
+Requires=sound.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/camilladsp -p 1234 -o /var/log/camilladsp/camilladsp.log /etc/camilladsp/crossover.yml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,44 @@
+name: Build Speaker Core (ARM64 / RPi 3)
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  build-rpi3:
+    name: Build for Raspberry Pi 3 (Cortex-A53 / aarch64)
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Configure Target Linker
+        run: |
+          if ! command -v aarch64-linux-gnu-gcc &>/dev/null; then
+            sudo ln -sf "$(which gcc)" /usr/local/bin/aarch64-linux-gnu-gcc
+          fi
+
+      - name: Build Speaker Core (Release for RPi 3)
+        run: cargo build --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release
+
+      - name: Verify Binary Architecture & Compatibility
+        run: |
+          file target/aarch64-unknown-linux-gnu/release/core
+          readelf -h target/aarch64-unknown-linux-gnu/release/core
+          ls -lh target/aarch64-unknown-linux-gnu/release/core
+
+      - name: Upload Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-aarch64-rpi3
+          path: target/aarch64-unknown-linux-gnu/release/core
+          if-no-files-found: error

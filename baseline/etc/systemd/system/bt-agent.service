@@ -1,0 +1,14 @@
+[Unit]
+Description=Bluetooth Auto-Trust Headless Agent
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/bt-auto-trust-agent.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
