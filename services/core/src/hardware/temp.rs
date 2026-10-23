@@ -33,6 +33,9 @@ pub const DS18B20_DTOVERLAY: &str = "dtoverlay=w1-gpio,gpiopin=26,pullup=0";
 /// Default Linux sysfs directory containing discovered 1-Wire slave devices.
 pub const DS18B20_SYSFS_BASE_PATH: &str = "/sys/bus/w1/devices";
 
+/// Default Linux sysfs path for the BCM2837 `SoC` thermal sensor.
+pub const SOC_THERMAL_SYSFS_PATH: &str = "/sys/devices/virtual/thermal/thermal_zone0/temp";
+
 /// Mandatory 1-Wire family prefix for Dallas DS18B20 digital thermometers (`0x28`).
 const DS18B20_FAMILY_PREFIX: &str = "28-";
 
@@ -240,6 +243,130 @@ impl Display for SensorReading {
             self.temperature.celsius(),
             self.temperature.fahrenheit()
         )
+    }
+}
+
+/// DS18B20 power supply mode reported by the kernel driver (`ext_power`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerSupplyMode {
+    /// Powered through an external Vdd line (active 3.3V).
+    External,
+    /// Parasite powered directly from the 1-Wire data line.
+    Parasite,
+    /// Unknown or unsupported kernel driver mode.
+    Unknown(u8),
+}
+
+impl Display for PowerSupplyMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::External => f.write_str("External 3.3V (Vdd pin)"),
+            Self::Parasite => f.write_str("Parasite power (data line)"),
+            Self::Unknown(v) => write!(f, "Unknown ({v})"),
+        }
+    }
+}
+
+/// Detailed hardware diagnostics read from a DS18B20 sysfs device directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SensorDiagnostics {
+    /// Sensor identifier.
+    pub sensor_id: SensorId,
+    /// Latest temperature reading.
+    pub temperature: Temperature,
+    /// Analog-to-digital converter resolution in bits (typically 9, 10, 11, or 12-bit).
+    pub resolution_bits: Option<u8>,
+    /// Power supply mode (external or parasite).
+    pub power_mode: Option<PowerSupplyMode>,
+    /// ADC conversion duration in milliseconds (typically 750 ms for 12-bit).
+    pub conversion_time_ms: Option<u32>,
+    /// Temperature alarm threshold registers (Low, High) in integer degrees Celsius.
+    pub alarms: Option<(i8, i8)>,
+    /// Raw ASCII scratchpad hex frame emitted by `w1_slave`.
+    pub raw_payload: Box<str>,
+}
+
+impl Display for SensorDiagnostics {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "[Sensor Diagnostics: {}]", self.sensor_id)?;
+        writeln!(f, "  • Temperature    : {}", self.temperature)?;
+        if let Some(res) = self.resolution_bits {
+            let prec = match res {
+                9 => "0.5°C",
+                10 => "0.25°C",
+                11 => "0.125°C",
+                12 => "0.0625°C",
+                _ => "variable",
+            };
+            writeln!(f, "  • ADC Resolution : {res}-bit ({prec} precision)")?;
+        }
+        if let Some(pwr) = self.power_mode {
+            writeln!(f, "  • Power Mode     : {pwr}")?;
+        }
+        if let Some(ms) = self.conversion_time_ms {
+            writeln!(f, "  • Conv Time      : {ms} ms")?;
+        }
+        if let Some((low, high)) = self.alarms {
+            writeln!(f, "  • Alarms (TL/TH) : Low: {low}°C | High: {high}°C")?;
+        }
+        write!(
+            f,
+            "  • Raw Scratchpad :\n    {}",
+            self.raw_payload.trim_end().replace('\n', "\n    ")
+        )
+    }
+}
+
+/// Broadcom `SoC` core temperature reading from Linux thermal zone 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SocThermal {
+    temperature: Temperature,
+}
+
+impl SocThermal {
+    /// Reads the `SoC` temperature from `/sys/devices/virtual/thermal/thermal_zone0/temp`.
+    ///
+    /// # Errors
+    /// Returns [`TempError`] if the thermal zone file cannot be read or parsed.
+    pub fn read() -> Result<Self, TempError> {
+        Self::read_from_path(SOC_THERMAL_SYSFS_PATH)
+    }
+
+    /// Reads the `SoC` temperature from a specific sysfs path.
+    ///
+    /// # Errors
+    /// Returns [`TempError`] if the file cannot be read or parsed into an integer millidegrees value.
+    pub fn read_from_path(path: impl AsRef<Path>) -> Result<Self, TempError> {
+        let content = fs::read_to_string(path.as_ref())?;
+        let millidegrees = content.trim().parse::<i32>().map_err(|parse_err| {
+            TempError::new(ErrorKind::ParseError {
+                detail: format!(
+                    "invalid SoC thermal integer in '{}': {parse_err}",
+                    path.as_ref().display()
+                )
+                .into(),
+            })
+        })?;
+        let temperature = Temperature::from_millidegrees_celsius(millidegrees)?;
+        Ok(Self { temperature })
+    }
+
+    /// Returns the `SoC` temperature measurement.
+    #[must_use]
+    pub const fn temperature(self) -> Temperature {
+        self.temperature
+    }
+
+    /// Computes the thermal gradient ($\Delta T = T_{\text{SoC}} - T_{\text{Chassis}}$) in degrees Celsius.
+    #[must_use]
+    pub fn delta_from_chassis(self, chassis: Temperature) -> f32 {
+        self.temperature.celsius() - chassis.celsius()
+    }
+}
+
+impl Display for SocThermal {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "SoC: {}", self.temperature)
     }
 }
 
@@ -453,9 +580,18 @@ enum MockSensorEntry {
     RawPayload(Box<str>),
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct MockDiagnosticEntry {
+    resolution_bits: Option<u8>,
+    power_mode: Option<PowerSupplyMode>,
+    conversion_time_ms: Option<u32>,
+    alarms: Option<(i8, i8)>,
+}
+
 #[derive(Debug, Default)]
 struct MockState {
     sensors: BTreeMap<SensorId, MockSensorEntry>,
+    diagnostics: BTreeMap<SensorId, MockDiagnosticEntry>,
     forced_io_error: Option<Box<str>>,
 }
 
@@ -510,6 +646,30 @@ impl TempSensorMock {
             .insert(sensor_id, MockSensorEntry::RawPayload(raw_payload.into()));
     }
 
+    /// Sets mock extended diagnostic parameters for a sensor.
+    ///
+    /// # Panics
+    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
+    pub fn set_diagnostics(
+        &self,
+        sensor_id: SensorId,
+        resolution_bits: Option<u8>,
+        power_mode: Option<PowerSupplyMode>,
+        conversion_time_ms: Option<u32>,
+        alarms: Option<(i8, i8)>,
+    ) {
+        let mut guard = self.state.lock().expect("mock state lock poisoned");
+        guard.diagnostics.insert(
+            sensor_id,
+            MockDiagnosticEntry {
+                resolution_bits,
+                power_mode,
+                conversion_time_ms,
+                alarms,
+            },
+        );
+    }
+
     /// Forces all subsequent sensor discovery and read operations to fail with an I/O error.
     ///
     /// Simulates a disconnected 1-Wire bus or kernel driver fault.
@@ -537,6 +697,7 @@ impl TempSensorMock {
     pub fn clear_sensors(&self) {
         let mut guard = self.state.lock().expect("mock state lock poisoned");
         guard.sensors.clear();
+        guard.diagnostics.clear();
     }
 
     fn discover(&self) -> Result<Vec<SensorId>, TempError> {
@@ -570,6 +731,38 @@ impl TempSensorMock {
         Ok(SensorReading {
             sensor_id: sensor_id.clone(),
             temperature,
+        })
+    }
+
+    fn read_diagnostics(&self, sensor_id: &SensorId) -> Result<SensorDiagnostics, TempError> {
+        let reading = self.read_sensor(sensor_id)?;
+        let guard = self.state.lock().expect("mock state lock poisoned");
+        let raw_payload = match guard.sensors.get(sensor_id) {
+            Some(MockSensorEntry::RawPayload(raw)) => raw.clone(),
+            _ => format!(
+                "00 00 00 00 00 00 00 00 00 : crc=00 YES\n00 00 00 00 00 00 00 00 00 t={}\n",
+                reading.temperature.millidegrees_celsius()
+            )
+            .into_boxed_str(),
+        };
+        let diag_entry = guard
+            .diagnostics
+            .get(sensor_id)
+            .copied()
+            .unwrap_or(MockDiagnosticEntry {
+                resolution_bits: Some(12),
+                power_mode: Some(PowerSupplyMode::External),
+                conversion_time_ms: Some(750),
+                alarms: None,
+            });
+        Ok(SensorDiagnostics {
+            sensor_id: sensor_id.clone(),
+            temperature: reading.temperature,
+            resolution_bits: diag_entry.resolution_bits,
+            power_mode: diag_entry.power_mode,
+            conversion_time_ms: diag_entry.conversion_time_ms,
+            alarms: diag_entry.alarms,
+            raw_payload,
         })
     }
 }
@@ -690,6 +883,59 @@ impl TempSensor {
         }
     }
 
+    /// Reads detailed hardware diagnostics from a specific DS18B20 sensor.
+    ///
+    /// Queries `w1_slave`, `resolution`, `ext_power`, `conv_time`, and `alarms`.
+    ///
+    /// # Errors
+    /// Returns [`TempError`] if reading or parsing the primary temperature fails.
+    pub fn read_diagnostics(&self, sensor_id: &SensorId) -> Result<SensorDiagnostics, TempError> {
+        match self.inner.as_ref() {
+            Backend::Sysfs { base_path } => {
+                let dev_dir = base_path.join(sensor_id.as_str());
+                let slave_path = dev_dir.join("w1_slave");
+                let raw_payload = fs::read_to_string(slave_path)?;
+                let temperature = parse_w1_slave_for_sensor(&raw_payload, Some(sensor_id))?;
+
+                let resolution_bits = fs::read_to_string(dev_dir.join("resolution"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u8>().ok());
+
+                let power_mode = fs::read_to_string(dev_dir.join("ext_power"))
+                    .ok()
+                    .and_then(|s| match s.trim() {
+                        "1" => Some(PowerSupplyMode::External),
+                        "0" => Some(PowerSupplyMode::Parasite),
+                        val => val.parse::<u8>().ok().map(PowerSupplyMode::Unknown),
+                    });
+
+                let conversion_time_ms = fs::read_to_string(dev_dir.join("conv_time"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok());
+
+                let alarms = fs::read_to_string(dev_dir.join("alarms"))
+                    .ok()
+                    .and_then(|s| {
+                        let mut parts = s.split_whitespace();
+                        let low = parts.next()?.parse::<i8>().ok()?;
+                        let high = parts.next()?.parse::<i8>().ok()?;
+                        Some((low, high))
+                    });
+
+                Ok(SensorDiagnostics {
+                    sensor_id: sensor_id.clone(),
+                    temperature,
+                    resolution_bits,
+                    power_mode,
+                    conversion_time_ms,
+                    alarms,
+                    raw_payload: raw_payload.into_boxed_str(),
+                })
+            }
+            Backend::Mock(mock) => mock.read_diagnostics(sensor_id),
+        }
+    }
+
     /// Discovers and reads all attached DS18B20 sensors on the 1-Wire bus.
     ///
     /// # Errors
@@ -741,6 +987,21 @@ impl TempSensor {
         let this = self.clone();
         let id = sensor_id.clone();
         tokio::task::spawn_blocking(move || this.read_sensor(&id))
+            .await
+            .map_err(|join_err| TempError::from(io::Error::other(join_err)))?
+    }
+
+    /// Asynchronously reads diagnostics from a DS18B20 sensor on the blocking threadpool.
+    ///
+    /// # Errors
+    /// Returns [`TempError`] if reading diagnostics fails.
+    pub async fn read_diagnostics_async(
+        &self,
+        sensor_id: &SensorId,
+    ) -> Result<SensorDiagnostics, TempError> {
+        let this = self.clone();
+        let id = sensor_id.clone();
+        tokio::task::spawn_blocking(move || this.read_diagnostics(&id))
             .await
             .map_err(|join_err| TempError::from(io::Error::other(join_err)))?
     }
@@ -896,6 +1157,11 @@ a7 01 4b 46 7f ff 0c 10 5c
         assert_eq!(all[1].sensor_id, id2);
         assert_eq!(all[1].temperature.millidegrees_celsius(), 31_250);
 
+        // Extended diagnostics
+        let diag = sensor.read_diagnostics(&id1).unwrap();
+        assert_eq!(diag.resolution_bits, Some(12));
+        assert_eq!(diag.power_mode, Some(PowerSupplyMode::External));
+
         // Inject CRC error on id2
         mock.set_raw_w1_slave(id2.clone(), "00 : crc=00 NO\n00 t=31250\n");
         assert!(sensor.read_sensor(&id2).unwrap_err().is_crc_mismatch());
@@ -931,5 +1197,26 @@ a7 01 4b 46 7f ff 0c 10 5c
 
         let reading = sensor.read_sensor_async(&id).await.unwrap();
         assert_eq!(reading.temperature.millidegrees_celsius(), 28_500);
+
+        let diag = sensor.read_diagnostics_async(&id).await.unwrap();
+        assert_eq!(diag.temperature.millidegrees_celsius(), 28_500);
+    }
+
+    #[test]
+    fn soc_thermal_parses_content() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("soc_thermal_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        let path = temp_dir.join("temp");
+        fs::write(&path, "41856\n").unwrap();
+
+        let soc = SocThermal::read_from_path(&path).unwrap();
+        assert_eq!(soc.temperature().millidegrees_celsius(), 41_856);
+        assert!((soc.temperature().celsius() - 41.856).abs() < 1e-3);
+
+        let chassis = Temperature::from_millidegrees_celsius(24_000).unwrap();
+        assert!((soc.delta_from_chassis(chassis) - 17.856).abs() < 1e-2);
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

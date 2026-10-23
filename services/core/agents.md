@@ -34,7 +34,7 @@ Before designing types, writing modules, implementing error handling, or writing
    Every hardware peripheral abstraction in `speaker_core::hardware` must serve three purposes:
    * **Core Service:** Cheaply cloneable (`Arc`-backed per `M-SERVICES-CLONE`), `Send + Sync` (`M-TYPES-SEND`), with non-blocking `async` methods that isolate slow/blocking hardware I/O on `tokio::task::spawn_blocking`.
    * **Tests & Mocking:** Controllable via its companion mock handle (`new_mocked()`) and/or custom sysfs paths for unit and integration testing (`tests/`).
-   * **Diagnostic CLI Utilities (`src/bin/*.rs`):** Usable directly in standalone Rust utilities (replacing legacy Python scripts such as `read_temp.py`) that print hardware GPIO pinout metadata (`GpioPinInfo`: BCM pin, physical header pin, bus protocol, DT overlay) alongside live telemetry.
+   * **Diagnostic CLI Utilities (`src/bin/*.rs`):** Usable directly in standalone Rust utilities that print hardware GPIO pinout metadata (`GpioPinInfo`: BCM pin, physical header pin, bus protocol, DT overlay) alongside live telemetry.
 3. **Strong Typing & Invariant Guards (`M-STRONG-TYPES`, `M-STRONG-TYPES-GUARD`, `C-NEWTYPE`):**
    * Avoid primitive obsession. Use domain newtypes (`BcmPin`, `PhysicalPin`, `Temperature`, `SensorId`, `VolumePercent`, `AttenuationDb`) that guard their invariants at construction time via fallible constructors (`from_*`, `parse`, `TryFrom`, `FromStr`).
    * Use `Path` / `PathBuf` for filesystem paths (`M-STRONG-TYPES`) and `Box<str>` / `Box<[T]>` for immutable owned sequences (`M-BOX-DST`).

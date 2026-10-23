@@ -21,7 +21,8 @@ pub(crate) mod temp;
 #[doc(inline)]
 pub use temp::{
     DS18B20_BCM_GPIO_PIN, DS18B20_DTOVERLAY, DS18B20_PHYSICAL_PIN, DS18B20_SYSFS_BASE_PATH,
-    SensorId, SensorReading, TempError, TempSensor, TempSensorMock, Temperature, parse_w1_slave,
+    PowerSupplyMode, SensorDiagnostics, SensorId, SensorReading, SocThermal, TempError, TempSensor,
+    TempSensorMock, Temperature, parse_w1_slave,
 };
 
 /// Maximum valid BCM GPIO number on the Raspberry Pi 40-pin header.
