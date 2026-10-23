@@ -27,18 +27,25 @@ jobs:
             sudo ln -sf "$(which gcc)" /usr/local/bin/aarch64-linux-gnu-gcc
           fi
 
-      - name: Build Speaker Core (Release for RPi 3)
-        run: cargo build --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release
+      - name: Run Speaker Core Test Suite
+        run: cargo test --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu
+
+      - name: Build Speaker Core & Utilities (Release for RPi 3)
+        run: cargo build --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins
 
       - name: Verify Binary Architecture & Compatibility
         run: |
           file target/aarch64-unknown-linux-gnu/release/core
+          file target/aarch64-unknown-linux-gnu/release/read_temp
           readelf -h target/aarch64-unknown-linux-gnu/release/core
-          ls -lh target/aarch64-unknown-linux-gnu/release/core
+          readelf -h target/aarch64-unknown-linux-gnu/release/read_temp
+          ls -lh target/aarch64-unknown-linux-gnu/release/core target/aarch64-unknown-linux-gnu/release/read_temp
 
-      - name: Upload Binary Artifact
+      - name: Upload Binary Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: core-aarch64-rpi3
-          path: target/aarch64-unknown-linux-gnu/release/core
+          name: core-binaries-aarch64-rpi3
+          path: |
+            target/aarch64-unknown-linux-gnu/release/core
+            target/aarch64-unknown-linux-gnu/release/read_temp
           if-no-files-found: error

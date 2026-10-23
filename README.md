@@ -71,7 +71,7 @@ pi-bluetooth-speaker/
         │   └── config.toml   # Cortex-A53 NEON vectorization & cross-compile tuning
         ├── Cargo.toml        # speaker-core package manifest (binary: core)
         ├── README.md         # Service documentation
-        ├── agent.md          # Agent instructions & guidelines
+        ├── agents.md         # Agent instructions & guidelines
         ├── build.rs          # Slint AOT build script
         ├── src/main.rs       # Entrypoint & Tokio actor runtime
         └── ui/appwindow.slint# Declarative 800x480 UI layout
