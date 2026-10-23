@@ -20,6 +20,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Configure Target Linker
         run: |
@@ -27,8 +31,15 @@ jobs:
             sudo ln -sf "$(which gcc)" /usr/local/bin/aarch64-linux-gnu-gcc
           fi
 
-      - name: Run Speaker Core Test Suite
-        run: cargo test --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu
+      - name: Run Speaker Core Test Suite with Code Coverage
+        run: cargo llvm-cov --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --lcov --output-path lcov.info
+
+      - name: Upload Coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: false
 
       - name: Build Speaker Core & Utilities (Release for RPi 3)
         run: cargo build --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins
