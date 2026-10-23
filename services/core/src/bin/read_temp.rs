@@ -11,7 +11,9 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use speaker_core::hardware::{SensorDiagnostics, SensorId, SocThermal, TempSensor, Temperature};
+use speaker_core::hardware::{
+    SensorDiagnostics, SensorId, SocThermal, TempError, TempSensor, Temperature,
+};
 
 /// Formats UTC wall-clock time as `HH:MM:SS`.
 fn format_timestamp() -> String {
@@ -112,10 +114,12 @@ fn parse_cli_args() -> Result<Option<CliOptions>, String> {
                 let secs = val
                     .parse::<f32>()
                     .map_err(|e| format!("invalid interval '{val}': {e}"))?;
-                if secs <= 0.0 {
-                    return Err("interval must be greater than 0".into());
-                }
-                opts.interval = Duration::from_secs_f32(secs);
+                opts.interval = Duration::try_from_secs_f32(secs)
+                    .ok()
+                    .filter(|d| !d.is_zero())
+                    .ok_or_else(|| {
+                        format!("interval must be a finite value greater than 0, got '{val}'")
+                    })?;
             }
             "-d" | "--device" => {
                 let Some(val) = args.next() else {
@@ -136,7 +140,9 @@ fn parse_cli_args() -> Result<Option<CliOptions>, String> {
 #[derive(Debug, Default)]
 struct Statistics {
     total_reads: usize,
+    successful_reads: usize,
     crc_errors: usize,
+    other_errors: usize,
     min_temp: Option<Temperature>,
     max_temp: Option<Temperature>,
     temp_sum_celsius: f64,
@@ -145,19 +151,23 @@ struct Statistics {
 impl Statistics {
     fn record_success(&mut self, temp: Temperature) {
         self.total_reads += 1;
+        self.successful_reads += 1;
         self.temp_sum_celsius += f64::from(temp.celsius());
         self.min_temp = Some(self.min_temp.map_or(temp, |cur| cur.min(temp)));
         self.max_temp = Some(self.max_temp.map_or(temp, |cur| cur.max(temp)));
     }
 
-    fn record_crc_error(&mut self) {
+    fn record_error(&mut self, err: &TempError) {
         self.total_reads += 1;
-        self.crc_errors += 1;
+        if err.is_crc_mismatch() {
+            self.crc_errors += 1;
+        } else {
+            self.other_errors += 1;
+        }
     }
 
     fn average_celsius(&self) -> Option<f64> {
-        let valid_reads = self.total_reads - self.crc_errors;
-        (valid_reads > 0).then(|| self.temp_sum_celsius / valid_reads as f64)
+        (self.successful_reads > 0).then(|| self.temp_sum_celsius / self.successful_reads as f64)
     }
 }
 
@@ -194,11 +204,24 @@ fn print_diagnostic_registers(sensor: &TempSensor, devices: &[SensorId]) {
 fn print_session_summary(stats: &Statistics) {
     println!("\n--- Diagnostic Session Summary ---");
     println!("Total reads : {}", stats.total_reads);
-    println!(
-        "CRC errors  : {} ({:.2}% error rate)",
-        stats.crc_errors,
-        (stats.crc_errors as f32 / stats.total_reads as f32) * 100.0
-    );
+    println!("Successful  : {}", stats.successful_reads);
+    if stats.total_reads > 0 {
+        let total = stats.total_reads as f32;
+        println!(
+            "CRC errors  : {} ({:.2}% error rate)",
+            stats.crc_errors,
+            (stats.crc_errors as f32 / total) * 100.0
+        );
+        if stats.other_errors > 0 {
+            println!(
+                "Other errors: {} ({:.2}% error rate)",
+                stats.other_errors,
+                (stats.other_errors as f32 / total) * 100.0
+            );
+        }
+    } else {
+        println!("CRC errors  : 0 (0.00% error rate)");
+    }
     if let (Some(min), Some(max), Some(avg)) =
         (stats.min_temp, stats.max_temp, stats.average_celsius())
     {
@@ -282,11 +305,16 @@ fn handle_sensor_iteration(
                 }
             }
             Err(err) => {
-                stats.record_crc_error();
+                stats.record_error(&err);
                 match opts.format {
                     OutputFormat::Json => {
                         println!(
-                            r#"{{"timestamp":"{timestamp}","sensor_id":"{dev}","error":"{err}"}}"#
+                            "{}",
+                            serde_json::json!({
+                                "timestamp": timestamp,
+                                "sensor_id": dev.as_str(),
+                                "error": err.to_string(),
+                            })
                         );
                     }
                     OutputFormat::Human => {
@@ -339,7 +367,7 @@ fn main() -> ExitCode {
         Ok(devs) => devs,
         Err(err) => {
             if opts.format == OutputFormat::Json {
-                println!(r#"{{"error":"{err}"}}"#);
+                println!("{}", serde_json::json!({ "error": err }));
             } else {
                 eprintln!("Error: {err}");
             }

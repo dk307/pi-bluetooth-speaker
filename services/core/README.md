@@ -13,7 +13,7 @@
   - BlueZ 5 & BlueALSA D-Bus integration (`zbus`) for metadata, AVRCP volume sync, and auto-pairing agent.
 - **Hardware Integration:**
   - Direct GPIO & I2C via `rppal` for TOP-UP EC12 rotary encoder, RGB LED, Noctua PWM fan, and BH1750 ambient light sensor.
-- **Architecture Guidelines:** Governed by [agents.md](agents.md) referencing the Microsoft Pragmatic Rust Guidelines.
+- **Architecture Guidelines:** Governed by [AGENTS.md](AGENTS.md) referencing the Microsoft Pragmatic Rust Guidelines.
 
 ---
 
@@ -25,7 +25,7 @@ services/core/
 │   └── config.toml     # Cortex-A53 NEON vectorization & cross-compile tuning
 ├── Cargo.toml          # Crate dependencies & build configuration (package: speaker-core, bins: core, read_temp)
 ├── README.md           # Service documentation
-├── agents.md           # Agent instructions & guidelines
+├── AGENTS.md           # Agent instructions & guidelines
 ├── build.rs            # Slint ahead-of-time (AOT) UI compiler
 ├── src/
 │   ├── lib.rs          # Core library root (hardware drivers, mocks, domain types)
