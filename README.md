@@ -47,8 +47,6 @@ Repository: [https://github.com/dk307/pi-bluetooth-speaker](https://github.com/d
 
 ```text
 pi-bluetooth-speaker/
-├── .cargo/
-│   └── config.toml           # Cortex-A53 NEON vectorization & cross-compile tuning
 ├── Cargo.toml                # Root Cargo workspace manifest
 ├── rust-toolchain.toml       # Pinned Rust toolchain (rustc 1.99.1)
 ├── LICENSE                   # Apache License 2.0
@@ -69,6 +67,8 @@ pi-bluetooth-speaker/
 └── services/                 # Microservices powering the appliance
     ├── README.md             # Service architecture and roadmap
     └── audio-ui/             # Dedicated Slint UI & Hardware Console
+        ├── .cargo/
+        │   └── config.toml   # Cortex-A53 NEON vectorization & cross-compile tuning
         ├── Cargo.toml        # audio-ui package manifest
         ├── build.rs          # Slint AOT build script
         ├── src/main.rs       # Entrypoint & Tokio actor runtime
