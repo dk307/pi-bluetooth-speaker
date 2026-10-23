@@ -7,7 +7,7 @@ This document defines the behavioral and engineering rules for AI agents develop
 ## 1. Primary Rule: Microsoft Pragmatic Rust Guidelines
 
 All Rust code in this service **MUST** strictly adhere to the **Microsoft Pragmatic Rust Guidelines**:
-* **Source:** [microsoft-rust-guidelines.md](file:///home/deepak/server/services/.guidelines/microsoft-rust-guidelines.md)
+* **Source:** [microsoft-rust-guidelines.md](../.guidelines/microsoft-rust-guidelines.md)
 
 Before designing APIs, writing modules, implementing error handling, or writing tests, consult the corresponding sections of `microsoft-rust-guidelines.md`.
 

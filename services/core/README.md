@@ -13,7 +13,7 @@
   - BlueZ 5 & BlueALSA D-Bus integration (`zbus`) for metadata, AVRCP volume sync, and auto-pairing agent.
 - **Hardware Integration:**
   - Direct GPIO & I2C via `rppal` for TOP-UP EC12 rotary encoder, RGB LED, Noctua PWM fan, and BH1750 ambient light sensor.
-- **Architecture Guidelines:** Governed by [agent.md](file:///home/deepak/server/services/core/agent.md) referencing the Microsoft Pragmatic Rust Guidelines.
+- **Architecture Guidelines:** Governed by [agent.md](agent.md) referencing the Microsoft Pragmatic Rust Guidelines.
 
 ---
 

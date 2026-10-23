@@ -1200,7 +1200,7 @@ When the binary is deployed to the physical appliance at `192.168.2.110`, verifi
      - **Fan Step Benchmark:** Steps fan PWM through 0%, 25%, 50%, 75%, 100% and displays real-time RPM tachometer feedback.
      - **Encoder Counter:** Displays live tick count and button push state.
 
-3. **Automated Baseline Audit Script ([`baseline/verify.sh`](file:///home/deepak/server/baseline/verify.sh)):**
+3. **Automated Baseline Audit Script ([`baseline/verify.sh`](../baseline/verify.sh)):**
    * Run remotely over SSH:
      ```bash
      ssh root@192.168.2.110 "/root/baseline/verify.sh"

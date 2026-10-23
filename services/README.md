@@ -8,7 +8,7 @@ This directory contains the modular microservices that power the **Raspberry Pi 
 
 | Service | Language / Stack | Status | Description |
 | :--- | :--- | :--- | :--- |
-| [`core`](file:///home/deepak/server/services/core) | Rust 2024 / Slint / Tokio | **In Progress** | Central speaker daemon & logic: audiophile touchscreen console (800x480 DSI `/dev/fb0`), dual PeppyMeter VU visualizers, rotary encoder volume sync, BlueZ D-Bus integration, and hardware orchestration. |
+| [`core`](core) | Rust 2024 / Slint / Tokio | **In Progress** | Central speaker daemon & logic: audiophile touchscreen console (800x480 DSI `/dev/fb0`), dual PeppyMeter VU visualizers, rotary encoder volume sync, BlueZ D-Bus integration, and hardware orchestration. |
 
 ---
 
@@ -31,5 +31,5 @@ The appliance architecture is designed to support independent, lightweight daemo
 
 To add a new Rust service to the workspace:
 1. Create `services/<service-name>/` with its own `Cargo.toml`.
-2. Add `"services/<service-name>"` to the `members` array in the root [Cargo.toml](file:///home/deepak/server/Cargo.toml).
+2. Add `"services/<service-name>"` to the `members` array in the root [Cargo.toml](../Cargo.toml).
 3. The new service will automatically inherit the Cortex-A53 compiler flags and release profiles from the root workspace and `.cargo/config.toml`.
