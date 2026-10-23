@@ -11,8 +11,8 @@ rustflags = [
     # 1. Target the exact in-order dual-issue pipeline of the BCM2837 Cortex-A53
     "-C", "target-cpu=cortex-a53",
 
-    # 2. Enable ARM NEON 128-bit vectorization & ARMv8 hardware floating point
-    "-C", "target-feature=+neon,+fp-armv8",
+    # 2. Enable ARM NEON 128-bit vectorization & hardware floating point
+    "-C", "target-feature=+neon",
 
     # 3. LLVM vectorizer passes for pixel blitting, Slint rasterization & meter math
     "-C", "llvm-args=-vectorize-loops",
