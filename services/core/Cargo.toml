@@ -42,7 +42,6 @@ serde_json = "=1.0.140"
 
 # Raspberry Pi Hardware Peripherals (GPIO, Hardware PWM, I2C)
 rppal = { version = "=0.22.1", features = ["hal"] }
-embedded-hal = "=1.0.0"
 bh1750-embedded = "=0.1.0"
 
 # Image Processing (Cover Art Scaling & Procedural Vinyl)

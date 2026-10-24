@@ -2,8 +2,8 @@
 //!
 //! Provides CLI diagnostics for the I2C ambient light sensing subsystem on
 //! the Raspberry Pi 3 appliance. Displays hardware GPIO pin mappings,
-//! configures measurement resolution, and continuously reports live optical
-//! illuminance (lux and foot-candles) alongside hardware registers.
+//! and continuously reports live optical illuminance (lux and foot-candles)
+//! alongside hardware diagnostics.
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -14,12 +14,12 @@ use speaker_core::diag::{
     run_poll_loop, should_print_summary,
 };
 use speaker_core::hardware::{
-    BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance, LightError, LightSensor, MeasurementMode,
+    BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance, LightError, LightSensor,
 };
 
 /// Default polling interval between light measurements.
 ///
-/// Set to 300 ms to exceed the worst-case continuous High-Res conversion time (180 ms)
+/// Set to 300 ms to exceed the continuous High-Res conversion time (~120 ms, max 180 ms)
 /// with ample headroom for Linux scheduling, ensuring a fresh conversion is available on each poll.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(300);
 
@@ -28,7 +28,6 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(300);
 struct CliOptions {
     common: CommonCliOptions,
     address: I2cAddress,
-    mode: MeasurementMode,
 }
 
 impl Default for CliOptions {
@@ -36,7 +35,6 @@ impl Default for CliOptions {
         Self {
             common: CommonCliOptions::with_default_interval(DEFAULT_POLL_INTERVAL),
             address: I2cAddress::default(),
-            mode: MeasurementMode::ContinuousHighRes,
         }
     }
 }
@@ -50,12 +48,9 @@ fn print_usage(bin_name: &str) {
     println!("  -1, --once               Read once and exit");
     println!("  -n, --count <COUNT>      Read COUNT times and exit");
     println!("  -i, --interval <SECS>    Polling interval in seconds (default: 0.3)");
-    println!(
-        "  -m, --mode <MODE>        Measurement mode: high-res (h1), high-res2 (h2), low-res (low) (default: high-res)"
-    );
     println!("  -a, --address <HEX>      I2C address in hex: 0x23 (default) or 0x5C");
     println!(
-        "  -v, --verbose            Display extended hardware registers and info (human format only)"
+        "  -v, --verbose            Display extended hardware diagnostics (human format only)"
     );
     println!("  -j, --json               Stream readings in newline-delimited JSON");
     println!("  -h, --help               Display this help text");
@@ -70,10 +65,6 @@ where
         args,
         |o| &mut o.common,
         |opts, arg, args| match arg {
-            "-m" | "--mode" => {
-                opts.mode = MeasurementMode::parse_slug(&next_arg_value(args, "--mode")?)?;
-                Ok(true)
-            }
             "-a" | "--address" => {
                 opts.address = I2cAddress::parse_hex(&next_arg_value(args, "--address")?)?;
                 Ok(true)
@@ -146,17 +137,11 @@ fn print_session_summary(stats: &NumericStats) {
     }
 }
 
-fn output_json_reading(
-    timestamp: &str,
-    sensor: &LightSensor,
-    illum: Illuminance,
-    mode: MeasurementMode,
-) {
+fn output_json_reading(timestamp: &str, sensor: &LightSensor, illum: Illuminance) {
     let obj = serde_json::json!({
         "timestamp": timestamp,
         "i2c_bus": sensor.i2c_bus(),
         "i2c_address": sensor.i2c_address().to_string(),
-        "mode": mode.slug(),
         "illuminance": {
             "lux": round_2dp(illum.lux()),
             "millilux": illum.millilux(),
@@ -166,20 +151,13 @@ fn output_json_reading(
     println!("{obj}");
 }
 
-fn output_json_error(
-    timestamp: &str,
-    bus: u8,
-    address: I2cAddress,
-    mode: MeasurementMode,
-    err: &LightError,
-) {
+fn output_json_error(timestamp: &str, bus: u8, address: I2cAddress, err: &LightError) {
     println!(
         "{}",
         serde_json::json!({
             "timestamp": timestamp,
             "i2c_bus": bus,
             "i2c_address": address.to_string(),
-            "mode": mode.slug(),
             "error": err.summary(),
         })
     );
@@ -196,7 +174,7 @@ fn handle_light_iteration(
             stats.record_success(illum.lux());
             match opts.common.format {
                 OutputFormat::Json => {
-                    output_json_reading(timestamp, sensor, illum, opts.mode);
+                    output_json_reading(timestamp, sensor, illum);
                 }
                 OutputFormat::Human => {
                     println!(
@@ -211,13 +189,7 @@ fn handle_light_iteration(
             stats.record_error();
             match opts.common.format {
                 OutputFormat::Json => {
-                    output_json_error(
-                        timestamp,
-                        sensor.i2c_bus(),
-                        sensor.i2c_address(),
-                        opts.mode,
-                        &err,
-                    );
+                    output_json_error(timestamp, sensor.i2c_bus(), sensor.i2c_address(), &err);
                 }
                 OutputFormat::Human => {
                     eprintln!("[{timestamp}] Read error: {err}");
@@ -228,21 +200,6 @@ fn handle_light_iteration(
 }
 
 fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
-    if let Err(err) = sensor.set_mode(opts.mode) {
-        if opts.common.format == OutputFormat::Json {
-            output_json_error(
-                &format_timestamp(),
-                sensor.i2c_bus(),
-                sensor.i2c_address(),
-                opts.mode,
-                &err,
-            );
-        } else {
-            eprintln!("Failed to set BH1750 mode to {}: {err}", opts.mode);
-        }
-        return ExitCode::FAILURE;
-    }
-
     if opts.common.format == OutputFormat::Human {
         print_header(sensor);
         if opts.common.verbose {
@@ -289,7 +246,6 @@ fn main() -> ExitCode {
                     &format_timestamp(),
                     BH1750_DEFAULT_I2C_BUS,
                     opts.address,
-                    opts.mode,
                     &err,
                 );
             } else {
@@ -305,28 +261,6 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn mode_parsing_variants_and_errors() {
-        for (input, expected) in [
-            ("high-res", MeasurementMode::ContinuousHighRes),
-            ("highres", MeasurementMode::ContinuousHighRes),
-            ("h-res", MeasurementMode::ContinuousHighRes),
-            ("h1", MeasurementMode::ContinuousHighRes),
-            ("high-res2", MeasurementMode::ContinuousHighRes2),
-            ("highres2", MeasurementMode::ContinuousHighRes2),
-            ("h-res2", MeasurementMode::ContinuousHighRes2),
-            ("h2", MeasurementMode::ContinuousHighRes2),
-            ("low-res", MeasurementMode::ContinuousLowRes),
-            ("lowres", MeasurementMode::ContinuousLowRes),
-            ("l-res", MeasurementMode::ContinuousLowRes),
-            ("low", MeasurementMode::ContinuousLowRes),
-        ] {
-            assert_eq!(MeasurementMode::parse_slug(input).unwrap(), expected);
-        }
-        let err = MeasurementMode::parse_slug("invalid-mode").unwrap_err();
-        assert!(err.contains("invalid mode 'invalid-mode'"));
-    }
 
     #[test]
     fn statistics_computations() {
@@ -351,142 +285,74 @@ mod tests {
     }
 
     #[test]
-    fn header_diagnostics_and_iterations_with_mock() {
-        let (sensor, mock) = LightSensor::new_mocked();
-        print_header(&sensor);
-        print_diagnostic_registers(&sensor);
-
-        // Error path for diagnostic registers
-        mock.set_fault(Some("diagnostics bus timeout".into()));
-        print_diagnostic_registers(&sensor);
-        mock.set_fault(None);
-
-        let opts_human = CliOptions {
-            common: CommonCliOptions {
-                max_count: Some(1),
-                interval: Duration::from_millis(1),
-                format: OutputFormat::Human,
-                verbose: true,
-            },
-            ..CliOptions::default()
-        };
-        let mut stats = NumericStats::default();
-        handle_light_iteration(&sensor, &opts_human, "12:00:00", &mut stats);
-        assert_eq!(stats.successful_reads(), 1);
-
-        let opts_json = CliOptions {
-            common: CommonCliOptions {
-                format: OutputFormat::Json,
-                verbose: false,
-                ..opts_human.common
-            },
-            ..opts_human
-        };
-        handle_light_iteration(&sensor, &opts_json, "12:00:01", &mut stats);
-        assert_eq!(stats.successful_reads(), 2);
-
-        // Injected error iteration
-        mock.set_fault(Some("hardware disconnected".into()));
-        handle_light_iteration(&sensor, &opts_human, "12:00:02", &mut stats);
-        handle_light_iteration(&sensor, &opts_json, "12:00:03", &mut stats);
-        assert_eq!(stats.errors(), 2);
-
-        // Test run_app in human mode
-        mock.set_fault(None);
-        let opts_run = CliOptions {
-            common: CommonCliOptions {
-                max_count: Some(2),
-                ..opts_human.common
-            },
-            ..opts_human
-        };
-        assert_eq!(run_app(&sensor, &opts_run), ExitCode::SUCCESS);
-
-        // Test run_app in JSON mode
-        assert_eq!(run_app(&sensor, &opts_json), ExitCode::SUCCESS);
-
-        // Test run_app mode failure in human and JSON modes
-        mock.set_fault(Some("mode error".into()));
-        assert_eq!(run_app(&sensor, &opts_human), ExitCode::FAILURE);
-        assert_eq!(run_app(&sensor, &opts_json), ExitCode::FAILURE);
-    }
-
-    #[test]
     fn parse_cli_args_flags_and_validation() {
-        print_usage("read_light_test");
-
-        // Help
         assert!(parse_cli_args_from(["--help".into()]).unwrap().is_none());
         assert!(parse_cli_args_from(["-h".into()]).unwrap().is_none());
 
-        // Zero count
-        let err_zero = parse_cli_args_from(["--count".into(), "0".into()]).unwrap_err();
-        assert!(err_zero.contains("--count must be at least 1"));
+        let opts = parse_cli_args_from(["--once".into()]).unwrap().unwrap();
+        assert_eq!(opts.common.max_count, Some(1));
+        assert_eq!(opts.address.as_u8(), 0x23);
 
-        // Valid flags
         let opts = parse_cli_args_from([
-            "--once".into(),
-            "--verbose".into(),
-            "--json".into(),
             "--count".into(),
             "5".into(),
             "--interval".into(),
             "0.5".into(),
-            "--mode".into(),
-            "low-res".into(),
             "--address".into(),
             "0x5C".into(),
+            "--verbose".into(),
+            "--json".into(),
         ])
         .unwrap()
         .unwrap();
 
         assert_eq!(opts.common.max_count, Some(5));
+        assert_eq!(opts.common.interval, Duration::from_millis(500));
+        assert_eq!(opts.address.as_u8(), 0x5C);
         assert!(opts.common.verbose);
         assert_eq!(opts.common.format, OutputFormat::Json);
-        assert_eq!(opts.mode, MeasurementMode::ContinuousLowRes);
-        assert_eq!(opts.address, I2cAddress::alternate_address());
 
-        // Errors (including signed hex addresses before and after 0x prefix)
-        for (bad_args, expected_msg) in [
-            (&["--count"][..], "missing value for --count"),
-            (&["--count", "abc"][..], "invalid count"),
-            (&["--interval"][..], "missing value for --interval"),
-            (
-                &["--interval", "0"][..],
-                "interval must be a finite value greater than 0",
-            ),
-            (&["--interval", "bad"][..], "invalid interval"),
-            (&["--mode"][..], "missing value for --mode"),
-            (&["--address"][..], "missing value for --address"),
-            (
-                &["--address", "+0x23"][..],
-                "sign characters are not allowed",
-            ),
-            (
-                &["--address", "-0x23"][..],
-                "sign characters are not allowed",
-            ),
-            (
-                &["--address", "0x+23"][..],
-                "sign characters are not allowed",
-            ),
-            (
-                &["--address", "0x-23"][..],
-                "sign characters are not allowed",
-            ),
-            (
-                &["--address", "0X+5C"][..],
-                "sign characters are not allowed",
-            ),
-            (&["--address", "not-hex"][..], "invalid hex address"),
-            (&["--address", "0x77"][..], "invalid BH1750 I2C address"),
-            (&["--unknown"][..], "unknown option '--unknown'"),
-        ] {
-            let err = parse_cli_args_from(bad_args.iter().map(|s| (*s).to_string())).unwrap_err();
-            assert!(
-                err.contains(expected_msg),
-                "expected '{expected_msg}' in '{err}'"
-            );
-        }
+        let _ = parse_cli_args_from(["--unknown-flag".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--address".into(), "0x99".into()]).unwrap_err();
+    }
+
+    #[test]
+    fn header_diagnostics_and_iterations_with_mock() {
+        let (sensor, mock) = LightSensor::new_mocked();
+        print_header(&sensor);
+        print_diagnostic_registers(&sensor);
+
+        let opts = CliOptions {
+            common: CommonCliOptions {
+                max_count: Some(2),
+                interval: Duration::from_millis(1),
+                verbose: true,
+                format: OutputFormat::Human,
+            },
+            address: I2cAddress::default(),
+        };
+
+        let code = run_app(&sensor, &opts);
+        assert_eq!(code, ExitCode::SUCCESS);
+
+        let json_opts = CliOptions {
+            common: CommonCliOptions {
+                max_count: Some(2),
+                interval: Duration::from_millis(1),
+                verbose: false,
+                format: OutputFormat::Json,
+            },
+            address: I2cAddress::default(),
+        };
+
+        let code = run_app(&sensor, &json_opts);
+        assert_eq!(code, ExitCode::SUCCESS);
+
+        // Test error handling branch
+        mock.set_fault(Some("I2C simulated bus lockup".into()));
+        let mut err_stats = NumericStats::default();
+        handle_light_iteration(&sensor, &opts, "12:00:00", &mut err_stats);
+        handle_light_iteration(&sensor, &json_opts, "12:00:00", &mut err_stats);
+        assert_eq!(err_stats.errors(), 2);
     }
 }

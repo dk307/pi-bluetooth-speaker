@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use speaker_core::diag::LUX_TO_FOOT_CANDLES;
-use speaker_core::hardware::{I2cAddress, Illuminance, LightSensor, MeasurementMode};
+use speaker_core::hardware::{I2cAddress, Illuminance, LightSensor};
 
 #[test]
 fn address_validation_and_hardware_metadata() {
@@ -55,19 +55,22 @@ async fn shared_clones_and_async_polling_observe_mock_updates() {
 }
 
 #[test]
-fn measurement_mode_switching_and_diagnostics() {
+fn diagnostics_and_power_management() {
     let (sensor, mock) = LightSensor::new_mocked();
 
-    sensor
-        .set_mode(MeasurementMode::ContinuousHighRes2)
-        .unwrap();
-    assert_eq!(mock.current_mode(), MeasurementMode::ContinuousHighRes2);
-
-    mock.set_raw_word(240); // 240 / 1.2 / 2.0 = 100 lx in HighRes2 mode
+    mock.set_lux(240.0);
     let diag = sensor.read_diagnostics().unwrap();
-    assert_eq!(diag.mode, MeasurementMode::ContinuousHighRes2);
-    assert_eq!(diag.raw_word, 240);
-    assert!((diag.illuminance.lux() - 100.0).abs() < 1e-2);
+    assert!(diag.powered);
+    assert!((diag.illuminance.lux() - 240.0).abs() < 1e-2);
+
+    sensor.power_down().unwrap();
+    assert!(sensor.read_diagnostics().unwrap_err().is_powered_down());
+    assert!(sensor.read_lux().unwrap_err().is_powered_down());
+
+    sensor.reset().unwrap();
+    let reset_diag = sensor.read_diagnostics().unwrap();
+    assert!(reset_diag.powered);
+    assert_eq!(reset_diag.illuminance.lux(), 0.0);
 }
 
 #[tokio::test]
@@ -78,7 +81,6 @@ async fn concurrent_sensor_clones_power_and_mode_operations() {
 
     let h1 = tokio::spawn(async move {
         for _ in 0..10 {
-            s1.set_mode(MeasurementMode::ContinuousLowRes).unwrap();
             if let Err(err) = s1.read_lux_async().await {
                 assert!(err.is_powered_down(), "unexpected error: {err}");
             }

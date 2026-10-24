@@ -4267,7 +4267,6 @@ dependencies = [
  "async-trait",
  "axum",
  "bh1750-embedded",
- "embedded-hal 1.0.0",
  "futures-util",
  "image 0.25.10",
  "rppal",

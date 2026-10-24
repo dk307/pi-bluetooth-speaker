@@ -212,7 +212,6 @@ fn read_light_cli_help_displays() {
     assert!(status.success());
     assert!(stdout.contains("BH1750 Ambient Light Diagnostic Utility"));
     assert!(stdout.contains("Usage:"));
-    assert!(stdout.contains("--mode"));
     assert!(stdout.contains("--address"));
 
     let (short_status, _, _) = run_cli(bin_path, &["-h"]);
@@ -230,8 +229,6 @@ fn read_light_cli_argument_validation() {
     assert_cli_rejects(
         bin_path,
         &[
-            (&["--mode"], "missing value for --mode"),
-            (&["--mode", "ultra-mode"], "invalid mode 'ultra-mode'"),
             (&["--address"], "missing value for --address"),
             (&["--address", "+0x23"], "sign characters are not allowed"),
             (&["--address", "-0x23"], "sign characters are not allowed"),

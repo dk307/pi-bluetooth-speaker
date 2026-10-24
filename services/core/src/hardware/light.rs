@@ -1,7 +1,7 @@
 //! BH1750FVI digital ambient light sensor driver with typed domain models and inherent mocking.
 //!
 //! Provides strongly-typed, non-blocking interfaces for the ROHM BH1750FVI on the
-//! Raspberry Pi I2C-1 bus (`/dev/i2c-1`).
+//! Raspberry Pi I2C-1 bus (`/dev/i2c-1`) in continuous high-resolution mode (1 lx resolution).
 //!
 //! # Hardware Configuration
 //! - **Bus:** I2C-1 (`/dev/i2c-1`)
@@ -15,7 +15,7 @@
 //! - [`LightSensor`] is cheaply cloneable (`Arc`-backed handle) and `Send + Sync`,
 //!   providing non-blocking asynchronous APIs.
 //! - Companion [`LightSensorMock`] enables deterministic testing without physical hardware.
-//! - Strongly typed domain models [`Illuminance`], [`I2cAddress`], and [`MeasurementMode`].
+//! - Strongly typed domain models [`Illuminance`] and [`I2cAddress`].
 
 use std::backtrace::Backtrace;
 use std::fmt::{self, Display, Formatter};
@@ -29,7 +29,7 @@ use crate::runtime::{FromJoinError, run_blocking};
 
 use super::{BcmPin, GpioPinInfo, PhysicalPin};
 
-/// BH1750 optical measurement accuracy coefficient from datasheet: lux = raw / 1.2 at default `MTreg`.
+/// BH1750 optical measurement accuracy coefficient from datasheet: lux = raw / 1.2.
 pub const BH1750_ACCURACY_FACTOR: f32 = 1.2;
 
 /// Default 7-bit I2C slave address for the BH1750 (ADDR pin pulled low / GND).
@@ -40,186 +40,6 @@ pub const BH1750_ALT_I2C_ADDR: u8 = 0x5C;
 
 /// Default I2C bus device on Raspberry Pi 3.
 pub const BH1750_DEFAULT_I2C_BUS: u8 = 1;
-
-/// Supported mode slug table for CLI parsing and machine-oriented telemetry.
-const MODE_SLUGS: &[(&str, MeasurementMode)] = &[
-    ("high-res", MeasurementMode::ContinuousHighRes),
-    ("highres", MeasurementMode::ContinuousHighRes),
-    ("h-res", MeasurementMode::ContinuousHighRes),
-    ("h1", MeasurementMode::ContinuousHighRes),
-    ("high-res2", MeasurementMode::ContinuousHighRes2),
-    ("highres2", MeasurementMode::ContinuousHighRes2),
-    ("h-res2", MeasurementMode::ContinuousHighRes2),
-    ("h2", MeasurementMode::ContinuousHighRes2),
-    ("low-res", MeasurementMode::ContinuousLowRes),
-    ("lowres", MeasurementMode::ContinuousLowRes),
-    ("l-res", MeasurementMode::ContinuousLowRes),
-    ("low", MeasurementMode::ContinuousLowRes),
-    ("oneshot-high-res", MeasurementMode::OneShotHighRes),
-    ("oneshot-high-res2", MeasurementMode::OneShotHighRes2),
-    ("oneshot-low-res", MeasurementMode::OneShotLowRes),
-];
-
-/// Measurement operating mode of the BH1750 digital ambient light sensor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum MeasurementMode {
-    /// Continuous High-Resolution Mode: 1 lx resolution, ~120 ms conversion time.
-    #[default]
-    ContinuousHighRes,
-    /// Continuous High-Resolution Mode 2: 0.5 lx resolution, ~120 ms conversion time.
-    ContinuousHighRes2,
-    /// Continuous Low-Resolution Mode: 4 lx resolution, ~16 ms conversion time.
-    ContinuousLowRes,
-    /// One-Time High-Resolution Mode: 1 lx resolution, automatically powers down.
-    OneShotHighRes,
-    /// One-Time High-Resolution Mode 2: 0.5 lx resolution, automatically powers down.
-    OneShotHighRes2,
-    /// One-Time Low-Resolution Mode: 4 lx resolution, automatically powers down.
-    OneShotLowRes,
-}
-
-impl MeasurementMode {
-    /// Returns the BH1750 command byte opcode for this measurement mode.
-    #[must_use]
-    pub const fn opcode(self) -> u8 {
-        match self {
-            Self::ContinuousHighRes => 0x10,
-            Self::ContinuousHighRes2 => 0x11,
-            Self::ContinuousLowRes => 0x13,
-            Self::OneShotHighRes => 0x20,
-            Self::OneShotHighRes2 => 0x21,
-            Self::OneShotLowRes => 0x23,
-        }
-    }
-
-    /// Returns the nominal resolution in lux for this mode.
-    #[must_use]
-    pub const fn resolution_lux(self) -> f32 {
-        match self {
-            Self::ContinuousHighRes | Self::OneShotHighRes => 1.0,
-            Self::ContinuousHighRes2 | Self::OneShotHighRes2 => 0.5,
-            Self::ContinuousLowRes | Self::OneShotLowRes => 4.0,
-        }
-    }
-
-    /// Returns the resolution divisor: 2.0 for `HighRes2` modes (0.5 lx), 1.0 otherwise.
-    #[must_use]
-    pub const fn divisor(self) -> f32 {
-        match self {
-            Self::ContinuousHighRes2 | Self::OneShotHighRes2 => 2.0,
-            Self::ContinuousHighRes
-            | Self::ContinuousLowRes
-            | Self::OneShotHighRes
-            | Self::OneShotLowRes => 1.0,
-        }
-    }
-
-    /// Converts this mode to the corresponding [`bh1750_embedded::Resolution`].
-    #[must_use]
-    pub const fn resolution(self) -> BhResolution {
-        match self {
-            Self::ContinuousHighRes | Self::OneShotHighRes => BhResolution::High,
-            Self::ContinuousHighRes2 | Self::OneShotHighRes2 => BhResolution::High2,
-            Self::ContinuousLowRes | Self::OneShotLowRes => BhResolution::Low,
-        }
-    }
-
-    /// Parses a mode slug or alias into a [`MeasurementMode`].
-    ///
-    /// # Errors
-    /// Returns an error message if `s` is not a recognized measurement mode slug.
-    pub fn parse_slug(s: &str) -> Result<Self, String> {
-        let lower = s.to_ascii_lowercase();
-        for (slug, mode) in MODE_SLUGS {
-            if *slug == lower {
-                return Ok(*mode);
-            }
-        }
-        Err(format!(
-            "invalid mode '{lower}'. Supported: high-res (h1), high-res2 (h2), low-res (low)"
-        ))
-    }
-
-    /// Converts lux to the raw 16-bit register word for this mode.
-    #[must_use]
-    #[expect(
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-        reason = "clamped to 0.0..=65535.0, so fits in u16"
-    )]
-    pub fn to_raw_word(self, lux: f32) -> u16 {
-        let raw = (lux * BH1750_ACCURACY_FACTOR * self.divisor()).round();
-        raw.clamp(0.0, f32::from(u16::MAX)) as u16
-    }
-
-    /// Returns the typical measurement integration time for this mode.
-    #[must_use]
-    pub const fn typical_measurement_time(self) -> Duration {
-        match self {
-            Self::ContinuousLowRes | Self::OneShotLowRes => Duration::from_millis(16),
-            Self::ContinuousHighRes
-            | Self::ContinuousHighRes2
-            | Self::OneShotHighRes
-            | Self::OneShotHighRes2 => Duration::from_millis(120),
-        }
-    }
-
-    /// Returns the maximum measurement integration time guaranteed by the BH1750 datasheet.
-    ///
-    /// Low-resolution conversion is guaranteed within 24 ms (typ. 16 ms).
-    /// High-resolution conversion is guaranteed within 180 ms (typ. 120 ms).
-    #[must_use]
-    pub const fn max_measurement_time(self) -> Duration {
-        match self {
-            Self::ContinuousLowRes | Self::OneShotLowRes => Duration::from_millis(24),
-            Self::ContinuousHighRes
-            | Self::ContinuousHighRes2
-            | Self::OneShotHighRes
-            | Self::OneShotHighRes2 => Duration::from_millis(180),
-        }
-    }
-
-    /// Returns `true` if the mode continuously samples optical illuminance.
-    #[must_use]
-    pub const fn is_continuous(self) -> bool {
-        matches!(
-            self,
-            Self::ContinuousHighRes | Self::ContinuousHighRes2 | Self::ContinuousLowRes
-        )
-    }
-
-    /// Returns a human-readable identifier for the mode.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ContinuousHighRes => "Continuous H-Resolution (1 lx, 120ms)",
-            Self::ContinuousHighRes2 => "Continuous H-Resolution 2 (0.5 lx, 120ms)",
-            Self::ContinuousLowRes => "Continuous Low-Resolution (4 lx, 16ms)",
-            Self::OneShotHighRes => "One-Time H-Resolution (1 lx)",
-            Self::OneShotHighRes2 => "One-Time H-Resolution 2 (0.5 lx)",
-            Self::OneShotLowRes => "One-Time Low-Resolution (4 lx)",
-        }
-    }
-
-    /// Returns a stable machine-readable slug for CLI flags and NDJSON telemetry.
-    #[must_use]
-    pub const fn slug(self) -> &'static str {
-        match self {
-            Self::ContinuousHighRes => "high-res",
-            Self::ContinuousHighRes2 => "high-res2",
-            Self::ContinuousLowRes => "low-res",
-            Self::OneShotHighRes => "oneshot-high-res",
-            Self::OneShotHighRes2 => "oneshot-high-res2",
-            Self::OneShotLowRes => "oneshot-low-res",
-        }
-    }
-}
-
-impl Display for MeasurementMode {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
 
 /// Validated 7-bit I2C address for the BH1750 ambient light sensor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -343,14 +163,7 @@ pub struct Illuminance {
 
 impl Illuminance {
     /// Maximum valid illuminance reading supported by the BH1750FVI datasheet (120,000 lux).
-    ///
-    /// Bounds the full datasheet range including extended-`MTreg` sensitivity configurations;
-    /// this driver pins the default `MTreg = 69`, so raw-derived readings peak at
-    /// [`Self::MAX_LUX_DEFAULT_MTREG`] (`65535 / 1.2 ≈ 54,612.5 lx`).
     pub const MAX_LUX: f32 = 120_000.0;
-
-    /// Maximum illuminance reading representable with the default `MTreg = 69` configuration (~54,612.5 lux).
-    pub const MAX_LUX_DEFAULT_MTREG: f32 = 54_612.5;
 
     /// Creates an [`Illuminance`] from a raw float in lux.
     ///
@@ -368,15 +181,15 @@ impl Illuminance {
         Ok(Self { lux })
     }
 
-    /// Converts a raw 16-bit register word and measurement mode into [`Illuminance`].
+    /// Converts a raw 16-bit register word into [`Illuminance`] using the standard BH1750 accuracy factor.
     ///
     /// Note: primitive `raw as f32` is used here because `f32::from(u16)` is not `const fn` in stable Rust.
     ///
     /// # Panics
     /// Panics in debug builds if the converted lux value falls outside `0.0..=Self::MAX_LUX`.
     #[must_use]
-    pub const fn from_raw_and_mode(raw: u16, mode: MeasurementMode) -> Self {
-        let lux = (raw as f32 / BH1750_ACCURACY_FACTOR) / mode.divisor();
+    pub const fn from_raw(raw: u16) -> Self {
+        let lux = (raw as f32) / BH1750_ACCURACY_FACTOR;
         debug_assert!(
             lux >= 0.0 && lux <= Self::MAX_LUX,
             "raw conversion breached Illuminance invariant"
@@ -423,10 +236,8 @@ impl Display for Illuminance {
 pub struct LightDiagnostics {
     /// Measured illuminance.
     pub illuminance: Illuminance,
-    /// Active measurement mode.
-    pub mode: MeasurementMode,
-    /// Raw 16-bit ADC scratchpad value read over I2C.
-    pub raw_word: u16,
+    /// Sensor power state (true = active, false = powered down).
+    pub powered: bool,
     /// I2C slave address.
     pub address: I2cAddress,
     /// I2C bus number.
@@ -446,17 +257,18 @@ impl Display for LightDiagnostics {
             self.illuminance,
             self.illuminance.foot_candles()
         )?;
-        writeln!(f, "  • Operating Mode : {}", self.mode)?;
         writeln!(
             f,
-            "  • Raw I2C Word   : 0x{:04X} ({})",
-            self.raw_word, self.raw_word
+            "  • Power State    : {}",
+            if self.powered {
+                "Active"
+            } else {
+                "Powered Down"
+            }
         )?;
         write!(
             f,
-            "  • Est. Res / Time: {:.1} lx / {:?}",
-            self.mode.resolution_lux(),
-            self.mode.typical_measurement_time()
+            "  • Operating Mode : Continuous High-Resolution (1 lx, ~120 ms)"
         )
     }
 }
@@ -619,9 +431,6 @@ impl LightError {
     }
 
     /// Returns `true` if this error was caused by task cancellation or runtime shutdown.
-    ///
-    /// Daemon services should inspect this predicate during graceful shutdown to avoid
-    /// treating normal task cancellation or service termination as hardware faults.
     #[must_use]
     pub const fn is_cancelled(&self) -> bool {
         matches!(self.kind, LightErrorKind::Cancelled { .. })
@@ -655,10 +464,9 @@ impl LightError {
         match &self.kind {
             LightErrorKind::I2c(I2cDetail::Message(msg)) => write!(f, "I2C bus error: {msg}"),
             LightErrorKind::I2c(I2cDetail::Source(err)) => write!(f, "I2C bus error: {err}"),
-            LightErrorKind::PowerDown => write!(
-                f,
-                "sensor is powered down; call set_mode() or reset() before reading"
-            ),
+            LightErrorKind::PowerDown => {
+                write!(f, "sensor is powered down; call reset() before reading")
+            }
             LightErrorKind::Cancelled { message } => write!(f, "task cancelled: {message}"),
             LightErrorKind::InvalidAddress { address } => {
                 write!(
@@ -697,15 +505,6 @@ impl FromJoinError for LightError {
     }
 }
 
-/// Simulated measurement source for [`LightSensorMock`].
-#[derive(Debug, Clone, Copy)]
-enum SimSource {
-    /// Mode-adaptive illuminance in lux (`0.0..=Illuminance::MAX_LUX`).
-    Lux(f32),
-    /// Direct 16-bit raw register word override.
-    Raw(u16),
-}
-
 /// Controllable in-memory mock for [`LightSensor`].
 #[derive(Debug, Clone)]
 pub struct LightSensorMock {
@@ -714,8 +513,7 @@ pub struct LightSensorMock {
 
 #[derive(Debug)]
 struct MockState {
-    source: SimSource,
-    mode: MeasurementMode,
+    lux: f32,
     powered: bool,
     fault: Option<Box<str>>,
 }
@@ -724,20 +522,14 @@ impl LightSensorMock {
     fn new() -> Self {
         Self {
             state: Arc::new(RwLock::new(MockState {
-                source: SimSource::Lux(100.0),
-                mode: MeasurementMode::ContinuousHighRes,
+                lux: 100.0,
                 powered: true,
                 fault: None,
             })),
         }
     }
 
-    /// Sets the simulated illuminance in lux across operating modes.
-    ///
-    /// The mock calculates the mode-appropriate raw register word on read,
-    /// accounting for High-Res 2 scaling (0.5 lx resolution). Values above
-    /// the 16-bit register word ceiling (~54,612.5 lx at default `MTreg`)
-    /// are saturated to `u16::MAX` when encoded into the raw register.
+    /// Sets the simulated illuminance in lux.
     ///
     /// # Panics
     /// Panics if `lux` is negative or not finite (`NaN` or infinite), or if the mock state lock is poisoned.
@@ -747,18 +539,7 @@ impl LightSensorMock {
             "mock lux must be finite and non-negative, got {lux}"
         );
         let mut state = self.state.write().expect("mock lock poisoned");
-        state.source = SimSource::Lux(lux.min(Illuminance::MAX_LUX));
-    }
-
-    /// Sets the raw 16-bit register word directly.
-    ///
-    /// Clears any mode-adaptive lux setting.
-    ///
-    /// # Panics
-    /// Panics if the mock state lock is poisoned.
-    pub fn set_raw_word(&self, raw: u16) {
-        let mut state = self.state.write().expect("mock lock poisoned");
-        state.source = SimSource::Raw(raw);
+        state.lux = lux.min(Illuminance::MAX_LUX);
     }
 
     /// Injects or clears a simulated hardware fault.
@@ -770,23 +551,17 @@ impl LightSensorMock {
         state.fault = fault;
     }
 
-    /// Returns the active measurement mode set on the sensor.
+    /// Returns `true` if the mock sensor is currently powered on.
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
     #[must_use]
-    pub fn current_mode(&self) -> MeasurementMode {
+    pub fn is_powered(&self) -> bool {
         let state = self.state.read().expect("mock lock poisoned");
-        state.mode
+        state.powered
     }
 
-    /// Reads the simulated raw 16-bit word and active mode.
-    ///
-    /// Note: on physical BH1750 hardware, one-shot modes automatically enter power-down
-    /// after completing a conversion (and [`LightSensor::read_raw_word`] re-sends `CMD_POWER_ON`
-    /// before each one-shot trigger). The mock retains `powered = true` across one-shot reads
-    /// unless [`power_down()`](Self::power_down) is explicitly called.
-    fn read_raw(&self) -> Result<(u16, MeasurementMode), LightError> {
+    fn read_lux(&self) -> Result<Illuminance, LightError> {
         let state = self.state.read().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(LightError::mock_fault(fault.clone()));
@@ -794,21 +569,7 @@ impl LightSensorMock {
         if !state.powered {
             return Err(LightError::powered_down());
         }
-        let raw = match state.source {
-            SimSource::Lux(lux) => state.mode.to_raw_word(lux),
-            SimSource::Raw(raw) => raw,
-        };
-        Ok((raw, state.mode))
-    }
-
-    fn set_mode(&self, mode: MeasurementMode) -> Result<(), LightError> {
-        let mut state = self.state.write().expect("mock lock poisoned");
-        if let Some(ref fault) = state.fault {
-            return Err(LightError::mock_fault(fault.clone()));
-        }
-        state.mode = mode;
-        state.powered = true;
-        Ok(())
+        Illuminance::from_lux(state.lux)
     }
 
     fn power_down(&self) -> Result<(), LightError> {
@@ -820,34 +581,30 @@ impl LightSensorMock {
         Ok(())
     }
 
-    /// Resets the mock measurement register.
-    ///
-    /// Note: unlike physical hardware in continuous mode (which automatically re-arms
-    /// continuous conversion after `CMD_RESET`), the mock zeroes the simulated reading
-    /// until the next [`set_lux()`](Self::set_lux) or [`set_raw_word()`](Self::set_raw_word) call
-    /// so tests can deterministically verify that a reset occurred.
     fn reset(&self) -> Result<(), LightError> {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(LightError::mock_fault(fault.clone()));
         }
-        state.source = SimSource::Lux(0.0);
+        state.lux = 0.0;
         state.powered = true;
         Ok(())
     }
 }
 
+/// Host-testable hardware state machine tracking power state and integration settle times.
 #[derive(Debug)]
 struct HwState {
-    mode: MeasurementMode,
     powered: bool,
     last_transition: Instant,
 }
 
 impl HwState {
+    /// Maximum continuous high-resolution conversion time guaranteed by the BH1750 datasheet (180 ms).
+    const SETTLE_DURATION: Duration = Duration::from_millis(180);
+
     const fn new(now: Instant) -> Self {
         Self {
-            mode: MeasurementMode::ContinuousHighRes,
             powered: true,
             last_transition: now,
         }
@@ -862,26 +619,12 @@ impl HwState {
         self.last_transition = now;
     }
 
-    fn record_mode_change(&mut self, new_mode: MeasurementMode, now: Instant) {
-        self.mode = new_mode;
-        self.powered = true;
-        self.last_transition = now;
-    }
-
-    fn prepare_read(
-        &self,
-        now: Instant,
-    ) -> Result<(MeasurementMode, Option<Duration>), LightError> {
+    fn prepare_read(&self, now: Instant) -> Result<Option<Duration>, LightError> {
         if !self.powered {
             return Err(LightError::powered_down());
         }
-        let sleep_dur = if self.mode.is_continuous() {
-            let elapsed = now.saturating_duration_since(self.last_transition);
-            self.mode.max_measurement_time().checked_sub(elapsed)
-        } else {
-            None
-        };
-        Ok((self.mode, sleep_dur))
+        let elapsed = now.saturating_duration_since(self.last_transition);
+        Ok(Self::SETTLE_DURATION.checked_sub(elapsed))
     }
 }
 
@@ -897,7 +640,7 @@ impl HardwareDevice {
         let mut driver = Bh1750::new(i2c, rppal::hal::Delay::new(), address.into());
         driver.power_on().map_err(LightError::from_bh_err)?;
         driver
-            .start_continuous_measurement(bh1750_embedded::Resolution::High)
+            .start_continuous_measurement(BhResolution::High)
             .map_err(LightError::from_bh_err)?;
         Ok(Self {
             driver,
@@ -914,49 +657,27 @@ impl HardwareDevice {
     fn reset(&mut self) -> Result<(), LightError> {
         self.driver.power_on().map_err(LightError::from_bh_err)?;
         self.driver.reset().map_err(LightError::from_bh_err)?;
-        if self.state.mode.is_continuous() {
-            self.driver
-                .start_continuous_measurement(self.state.mode.resolution())
-                .map_err(LightError::from_bh_err)?;
-        }
+        self.driver
+            .start_continuous_measurement(BhResolution::High)
+            .map_err(LightError::from_bh_err)?;
         self.state.record_wake_or_reset(Instant::now());
         Ok(())
     }
 
-    fn set_mode(&mut self, new_mode: MeasurementMode) -> Result<(), LightError> {
-        self.driver.power_on().map_err(LightError::from_bh_err)?;
-        if new_mode.is_continuous() {
-            self.driver
-                .start_continuous_measurement(new_mode.resolution())
-                .map_err(LightError::from_bh_err)?;
-        }
-        self.state.record_mode_change(new_mode, Instant::now());
-        Ok(())
-    }
-
     fn read_lux(&mut self) -> Result<Illuminance, LightError> {
-        let (mode, sleep_dur) = self.state.prepare_read(Instant::now())?;
-        let lux = if mode.is_continuous() {
-            if let Some(dur) = sleep_dur {
-                std::thread::sleep(dur);
-            }
-            self.driver
-                .current_measurement_lux(mode.resolution())
-                .map_err(LightError::from_bh_err)?
-        } else {
-            self.driver
-                .one_time_measurement(mode.resolution())
-                .map_err(LightError::from_bh_err)?
-        };
+        let sleep_dur = self.state.prepare_read(Instant::now())?;
+        if let Some(dur) = sleep_dur {
+            std::thread::sleep(dur);
+        }
+        let lux = self
+            .driver
+            .current_measurement_lux(BhResolution::High)
+            .map_err(LightError::from_bh_err)?;
         Illuminance::from_lux(lux)
     }
 }
 
 /// Internal I2C / mock backend dispatch for [`LightSensor`].
-///
-/// Coverage note: `Backend::Hardware` delegates to the [`bh1750_embedded`] driver over
-/// the Linux kernel I2C device (`/dev/i2c-1` via `rppal::i2c::I2c`), while `Backend::Mock`
-/// exercises all domain invariants, scaling calculations, error predicates, and CLI telemetry on host/CI.
 enum Backend {
     Hardware {
         device: Mutex<HardwareDevice>,
@@ -1048,13 +769,12 @@ impl LightSensor {
         I2cHardwareInfo::rpi3_with_bus_and_address(self.i2c_bus(), self.i2c_address())
     }
 
-    /// Powers down the sensor to enter sleep mode.
+    /// Powers down the sensor to enter sleep mode (<1 µA current consumption).
     ///
-    /// In sleep mode, current consumption drops to <1 µA. Conversions cease until
-    /// the sensor is re-awakened via [`set_mode()`](Self::set_mode) or [`reset()`](Self::reset).
+    /// Conversions cease until the sensor is re-awakened via [`reset()`](Self::reset).
     ///
     /// # Errors
-    /// Returns [`LightError`] if writing the command opcode fails.
+    /// Returns [`LightError`] if communication fails.
     ///
     /// # Panics
     /// Panics if an internal mutex lock is poisoned.
@@ -1068,15 +788,14 @@ impl LightSensor {
         }
     }
 
-    /// Resets the sensor measurement data register and awakens the sensor if powered down.
+    /// Resets the sensor measurement data register, awakens the sensor if sleeping,
+    /// and restarts continuous high-resolution measurement.
     ///
-    /// In continuous modes, re-arms continuous measurement per the BH1750 datasheet
-    /// so subsequent reads receive freshly converted values instead of lingering at 0 lx.
-    /// In mock mode, `reset()` zeroes the simulated illuminance and raw register word
-    /// until the next [`LightSensorMock::set_lux()`] or [`LightSensorMock::set_raw_word()`] call.
+    /// In mock mode, `reset()` zeroes the simulated illuminance until the next
+    /// [`LightSensorMock::set_lux()`] call.
     ///
     /// # Errors
-    /// Returns [`LightError`] if writing the command opcode fails.
+    /// Returns [`LightError`] if communication fails.
     ///
     /// # Panics
     /// Panics if an internal mutex lock is poisoned.
@@ -1090,38 +809,7 @@ impl LightSensor {
         }
     }
 
-    /// Configures the measurement operating mode on the sensor.
-    ///
-    /// # Errors
-    /// Returns [`LightError`] if writing the command opcode fails.
-    ///
-    /// # Panics
-    /// Panics if an internal mutex lock is poisoned.
-    pub fn set_mode(&self, new_mode: MeasurementMode) -> Result<(), LightError> {
-        match self.inner.as_ref() {
-            Backend::Hardware { device, .. } => device
-                .lock()
-                .expect("hardware device lock poisoned")
-                .set_mode(new_mode),
-            Backend::Mock(mock) => mock.set_mode(new_mode),
-        }
-    }
-
     /// Reads the current ambient illuminance from the sensor.
-    ///
-    /// # Power State & Settle Semantics
-    /// If [`power_down()`](Self::power_down) was previously invoked, conversions
-    /// cease and this method returns an error with [`LightError::is_powered_down()`]
-    /// until the sensor is re-awakened via [`set_mode()`](Self::set_mode) or
-    /// [`reset()`](Self::reset).
-    ///
-    /// In continuous modes (`Continuous*`), the first read after construction, [`set_mode()`](Self::set_mode),
-    /// or [`reset()`](Self::reset) waits until the initial [`max_measurement_time()`](MeasurementMode::max_measurement_time)
-    /// settle window has elapsed; subsequent reads return the most recently completed conversion
-    /// latched in the BH1750 data register without blocking per read. In `OneShot*` modes (while
-    /// not explicitly powered down), each call automatically issues `CMD_POWER_ON` and the one-shot
-    /// trigger opcode and waits the full [`max_measurement_time()`](MeasurementMode::max_measurement_time)
-    /// before reading the converted word.
     ///
     /// # Errors
     /// Returns [`LightError`] if the sensor is powered down or I2C communication fails.
@@ -1134,10 +822,7 @@ impl LightSensor {
                 .lock()
                 .expect("hardware device lock poisoned")
                 .read_lux(),
-            Backend::Mock(mock) => {
-                let (raw, mode) = mock.read_raw()?;
-                Ok(Illuminance::from_raw_and_mode(raw, mode))
-            }
+            Backend::Mock(mock) => mock.read_lux(),
         }
     }
 
@@ -1156,24 +841,21 @@ impl LightSensor {
                 address,
             } => {
                 let mut guard = device.lock().expect("hardware device lock poisoned");
-                let mode = guard.state.mode;
+                let powered = guard.state.powered;
                 let illuminance = guard.read_lux()?;
-                let raw_word = mode.to_raw_word(illuminance.lux());
                 Ok(LightDiagnostics {
                     illuminance,
-                    mode,
-                    raw_word,
+                    powered,
                     address: *address,
                     bus: *bus,
                 })
             }
             Backend::Mock(mock) => {
-                let (raw_word, mode) = mock.read_raw()?;
-                let illuminance = Illuminance::from_raw_and_mode(raw_word, mode);
+                let powered = mock.is_powered();
+                let illuminance = mock.read_lux()?;
                 Ok(LightDiagnostics {
                     illuminance,
-                    mode,
-                    raw_word,
+                    powered,
                     address: self.i2c_address(),
                     bus: self.i2c_bus(),
                 })
@@ -1214,8 +896,6 @@ const _: () = {
     assert_send_sync::<LightSensorMock>();
 
     // Compile-time invariant proofs:
-    // Note: primitive `as` casts (`u32::MAX as u128`, `u16::MAX as f32`) are required here
-    // because `From::from` trait methods cannot be invoked inside a `const` block in stable Rust.
     #[expect(
         clippy::cast_sign_loss,
         clippy::cast_possible_truncation,
@@ -1225,7 +905,7 @@ const _: () = {
     assert!(max_mlx <= u32::MAX as u128);
 
     // Compile-time invariant proof: maximum raw register u16::MAX / 1.2 (54,612.5 lx) <= MAX_LUX (120,000.0 lx)
-    let max_from_raw = Illuminance::from_raw_and_mode(u16::MAX, MeasurementMode::ContinuousHighRes);
+    let max_from_raw = Illuminance::from_raw(u16::MAX);
     assert!(max_from_raw.lux() <= Illuminance::MAX_LUX);
 };
 
@@ -1242,13 +922,9 @@ mod tests {
         assert_eq!(illum.millilux(), 100_000);
         assert!((illum.foot_candles() - 9.2903).abs() < 1e-3);
 
-        // Raw conversion for H-Res 1 (120 raw -> 100 lx)
-        let converted = Illuminance::from_raw_and_mode(120, MeasurementMode::ContinuousHighRes);
+        // Raw conversion (120 raw -> 100 lx)
+        let converted = Illuminance::from_raw(120);
         assert!((converted.lux() - 100.0).abs() < 1e-3);
-
-        // Raw conversion for H-Res 2 (120 raw -> 50 lx)
-        let converted2 = Illuminance::from_raw_and_mode(120, MeasurementMode::ContinuousHighRes2);
-        assert!((converted2.lux() - 50.0).abs() < 1e-3);
 
         // Validation rejects negative and NaN
         let _ = Illuminance::from_lux(-1.0).unwrap_err();
@@ -1296,6 +972,7 @@ mod tests {
     #[test]
     fn mock_sensor_supports_readings_and_fault_injection() {
         let (sensor, mock) = LightSensor::new_mocked();
+        assert!(mock.is_powered());
 
         // Default mock value: 100 lx
         let reading = sensor.read_lux().unwrap();
@@ -1310,16 +987,31 @@ mod tests {
         let diag = sensor.read_diagnostics().unwrap();
         assert_eq!(diag.bus, BH1750_DEFAULT_I2C_BUS);
         assert_eq!(diag.address.as_u8(), BH1750_DEFAULT_I2C_ADDR);
+        assert!(diag.powered);
+        assert!(diag.to_string().contains("Continuous High-Resolution"));
+
+        // Power down
+        sensor.power_down().unwrap();
+        assert!(!mock.is_powered());
+        assert!(sensor.read_lux().unwrap_err().is_powered_down());
+
+        // Reset re-awakens
+        sensor.reset().unwrap();
+        assert!(mock.is_powered());
+        assert_eq!(sensor.read_lux().unwrap().lux(), 0.0);
 
         // Fault injection
         mock.set_fault(Some("bus arbitration lost".into()));
         let err = sensor.read_lux().unwrap_err();
         assert!(err.is_mock_fault());
         assert!(sensor.read_diagnostics().unwrap_err().is_mock_fault());
+        assert!(sensor.power_down().unwrap_err().is_mock_fault());
+        assert!(sensor.reset().unwrap_err().is_mock_fault());
 
         // Clear fault
         mock.set_fault(None);
-        let _ = sensor.read_lux().unwrap();
+        mock.set_lux(150.0);
+        assert_eq!(sensor.read_lux().unwrap().lux(), 150.0);
     }
 
     #[test]
@@ -1337,410 +1029,157 @@ mod tests {
     }
 
     #[test]
-    fn raw_and_mode_u16_max_boundary_and_mock_saturation() {
-        let max_hres = Illuminance::from_raw_and_mode(u16::MAX, MeasurementMode::ContinuousHighRes);
-        assert!((max_hres.lux() - (65535.0 / 1.2)).abs() < 1e-2);
-        assert!(max_hres.lux() <= Illuminance::MAX_LUX);
+    fn hw_state_settle_math_and_transitions() {
+        let now = Instant::now();
+        let mut state = HwState::new(now);
 
-        let max_hres2 =
-            Illuminance::from_raw_and_mode(u16::MAX, MeasurementMode::ContinuousHighRes2);
-        assert!((max_hres2.lux() - (65535.0 / 2.4)).abs() < 1e-2);
-        assert!(max_hres2.lux() <= Illuminance::MAX_LUX);
+        // Within 180ms window, settle delay is required
+        let delay = state.prepare_read(now).unwrap();
+        assert!(delay.is_some());
+        assert!(delay.unwrap() <= HwState::SETTLE_DURATION);
 
-        let (sensor, mock) = LightSensor::new_mocked();
-        mock.set_lux(54_612.0);
-        let reading = sensor.read_lux().unwrap();
-        assert!((reading.lux() - 54_612.0).abs() < 1.0);
+        // After 180ms window, settle delay is None
+        let later = now + Duration::from_millis(200);
+        assert_eq!(state.prepare_read(later).unwrap(), None);
 
-        mock.set_lux(Illuminance::MAX_LUX);
-        let reading_saturated = sensor.read_lux().unwrap();
-        assert_eq!(reading_saturated.lux(), 65535.0 / 1.2);
-    }
+        // Power down
+        state.record_power_down();
+        assert!(state.prepare_read(later).unwrap_err().is_powered_down());
 
-    #[tokio::test]
-    async fn async_methods_read_from_mock_sensor() {
-        fn assert_send<T: Send>(_: T) {}
-        let (sensor, mock) = LightSensor::new_mocked();
-        assert_send(sensor.read_lux_async());
-        assert_send(sensor.read_diagnostics_async());
-
-        mock.set_lux(250.0);
-
-        let reading = sensor.read_lux_async().await.unwrap();
-        assert!((reading.lux() - 250.0).abs() < 1e-1);
-
-        let diag = sensor.read_diagnostics_async().await.unwrap();
-        assert!((diag.illuminance.lux() - 250.0).abs() < 1e-1);
-    }
-
-    #[tokio::test]
-    async fn cancelled_blocking_task_maps_to_light_error_cancelled() {
-        let err: LightError = abort_and_map("BH1750 illuminance read").await;
-        assert!(err.is_cancelled());
-        assert!(!err.is_i2c());
-        assert!(
-            err.to_string()
-                .contains("BH1750 illuminance read task was cancelled")
-        );
-    }
-
-    #[test]
-    fn measurement_modes_and_opcodes_all_variants() {
-        let modes = [
-            (MeasurementMode::ContinuousHighRes, 0x10, 1.0, true),
-            (MeasurementMode::ContinuousHighRes2, 0x11, 0.5, true),
-            (MeasurementMode::ContinuousLowRes, 0x13, 4.0, true),
-            (MeasurementMode::OneShotHighRes, 0x20, 1.0, false),
-            (MeasurementMode::OneShotHighRes2, 0x21, 0.5, false),
-            (MeasurementMode::OneShotLowRes, 0x23, 4.0, false),
-        ];
-
-        for (mode, opcode, res, is_cont) in modes {
-            assert_eq!(mode.opcode(), opcode);
-            assert_eq!(mode.resolution_lux(), res);
-            assert_eq!(mode.is_continuous(), is_cont);
-            assert_ne!(mode.as_str(), "");
-            assert_ne!(mode.slug(), "");
-            assert_eq!(mode.to_string(), mode.as_str());
-            assert!(mode.typical_measurement_time() > Duration::ZERO);
-            assert!(mode.max_measurement_time() >= mode.typical_measurement_time());
-        }
-    }
-
-    #[test]
-    fn illuminance_bounds_and_millilux_edge_cases() {
-        let zero = Illuminance::from_lux(0.0).unwrap();
-        assert_eq!(zero.lux(), 0.0);
-        assert_eq!(zero.millilux(), 0);
-        assert_eq!(zero.to_string(), "0.00 lx");
-
-        let small = Illuminance::from_lux(0.001).unwrap();
-        assert_eq!(small.millilux(), 1);
-
-        let max = Illuminance::from_lux(Illuminance::MAX_LUX).unwrap();
-        assert_eq!(max.lux(), Illuminance::MAX_LUX);
-        assert_eq!(max.millilux(), 120_000_000);
-
-        let over = Illuminance::from_lux(Illuminance::MAX_LUX + 1.0).unwrap_err();
-        assert!(over.to_string().contains("invalid illuminance"));
-
-        let neg = Illuminance::from_lux(-1.0).unwrap_err();
-        assert!(neg.to_string().contains("invalid illuminance"));
-
-        let nan_err = Illuminance::from_lux(f32::NAN).unwrap_err();
-        assert!(nan_err.to_string().contains("invalid illuminance"));
-
-        let inf_err = Illuminance::from_lux(f32::INFINITY).unwrap_err();
-        assert!(inf_err.to_string().contains("invalid illuminance"));
-
-        // Raw conversions for remaining modes (tolerance accounts for BH1750 1.2 divisor precision)
-        let raw_low = Illuminance::from_raw_and_mode(120, MeasurementMode::ContinuousLowRes);
-        assert!((raw_low.lux() - 100.0).abs() < 1e-2);
-
-        let raw_oneshot_h = Illuminance::from_raw_and_mode(120, MeasurementMode::OneShotHighRes);
-        assert!((raw_oneshot_h.lux() - 100.0).abs() < 1e-2);
-
-        let raw_oneshot_h2 = Illuminance::from_raw_and_mode(120, MeasurementMode::OneShotHighRes2);
-        assert!((raw_oneshot_h2.lux() - 50.0).abs() < 1e-2);
-
-        let raw_oneshot_l = Illuminance::from_raw_and_mode(120, MeasurementMode::OneShotLowRes);
-        assert!((raw_oneshot_l.lux() - 100.0).abs() < 1e-2);
-    }
-
-    #[test]
-    fn i2c_address_methods_and_formatting() {
-        let def = I2cAddress::default();
-        assert_eq!(def, I2cAddress::default_address());
-        assert_eq!(def.as_u8(), 0x23);
-        assert_eq!(def.as_u16(), 0x0023);
-        assert_eq!(def.to_string(), "0x23");
-
-        let alt = I2cAddress::alternate_address();
-        assert_eq!(alt.as_u8(), 0x5C);
-        assert_eq!(alt.as_u16(), 0x005C);
-        assert_eq!(alt.to_string(), "0x5C");
+        // Reset re-arms and records new transition
+        state.record_wake_or_reset(later);
+        let reset_delay = state.prepare_read(later).unwrap();
+        assert!(reset_delay.is_some());
+        assert!(reset_delay.unwrap() <= HwState::SETTLE_DURATION);
     }
 
     #[test]
     fn light_diagnostics_formatting_and_hardware_info() {
         let (sensor, _) = LightSensor::new_mocked();
         let diag = sensor.read_diagnostics().unwrap();
-        let formatted = diag.to_string();
-        assert!(formatted.contains("BH1750 Light Diagnostics"));
-        assert!(formatted.contains("Bus 1"));
-        assert!(formatted.contains("Addr 0x23"));
-        assert!(formatted.contains("Illuminance"));
-        assert!(formatted.contains("Operating Mode"));
-        assert!(formatted.contains("Raw I2C Word"));
+        let diag_str = diag.to_string();
+        assert!(diag_str.contains("BH1750 Light Diagnostics: Bus 1, Addr 0x23"));
+        assert!(diag_str.contains("Illuminance"));
+        assert!(diag_str.contains("Power State    : Active"));
 
         let hw = sensor.hardware_info();
         assert_eq!(hw.bus, 1);
         assert_eq!(hw.address.as_u8(), 0x23);
         assert_eq!(hw.device_path.as_ref(), "/dev/i2c-1");
-        assert_eq!(hw.vcc_pin, PhysicalPin::new(1));
-        assert_eq!(hw.gnd_pin, PhysicalPin::new(9));
-        assert_eq!(hw.sda_pin.signal_name, "I2C-1 Data (SDA)");
-        assert_eq!(hw.scl_pin.signal_name, "I2C-1 Clock (SCL)");
+        assert_eq!(hw.sda_pin.physical_pin.as_u8(), 3);
+        assert_eq!(hw.scl_pin.physical_pin.as_u8(), 5);
+        assert_eq!(hw.vcc_pin.as_u8(), 1);
+        assert_eq!(hw.gnd_pin.as_u8(), 9);
+    }
 
-        let hw_alt = I2cHardwareInfo::rpi3_default(I2cAddress::alternate_address());
-        assert_eq!(hw_alt.bus, 1);
-        assert_eq!(hw_alt.device_path.as_ref(), "/dev/i2c-1");
-        assert_eq!(hw_alt.address.as_u8(), 0x5C);
+    #[test]
+    fn light_error_variants_predicates_and_conversions() {
+        let err_i2c = LightError::i2c("arbitration lost");
+        assert!(err_i2c.is_i2c());
+        assert!(!err_i2c.is_powered_down());
+        assert_eq!(err_i2c.summary(), "I2C bus error: arbitration lost");
+        assert!(err_i2c.to_string().contains("arbitration lost"));
+        assert!(err_i2c.source().is_none());
+
+        let err_down = LightError::powered_down();
+        assert!(err_down.is_powered_down());
+        assert_eq!(
+            err_down.summary(),
+            "sensor is powered down; call reset() before reading"
+        );
+
+        let err_cancel = LightError::cancelled("aborted");
+        assert!(err_cancel.is_cancelled());
+        assert_eq!(err_cancel.summary(), "task cancelled: aborted");
+
+        let err_addr = LightError::invalid_address(0x42);
+        assert!(err_addr.is_invalid_address());
+        assert!(err_addr.summary().contains("0x42"));
+
+        let err_illum = LightError::invalid_illuminance("negative");
+        assert!(err_illum.is_invalid_illuminance());
+        assert_eq!(err_illum.summary(), "invalid illuminance: negative");
+
+        let err_mock = LightError::mock_fault("test fault");
+        assert!(err_mock.is_mock_fault());
+        assert_eq!(err_mock.summary(), "injected mock fault: test fault");
+
+        let err_bh = LightError::from_bh_err(BhError::MeasurementTimeOutOfRange);
+        assert!(err_bh.is_i2c());
+        assert_eq!(
+            err_bh.summary(),
+            "I2C bus error: measurement time out of range"
+        );
+    }
+
+    #[tokio::test]
+    async fn async_methods_read_from_mock_sensor() {
+        let (sensor, mock) = LightSensor::new_mocked();
+        mock.set_lux(350.0);
+
+        let illum = sensor.read_lux_async().await.unwrap();
+        assert!((illum.lux() - 350.0).abs() < 1e-1);
+
+        let diag = sensor.read_diagnostics_async().await.unwrap();
+        assert!((diag.illuminance.lux() - 350.0).abs() < 1e-1);
+        assert!(diag.powered);
+    }
+
+    #[tokio::test]
+    async fn cancelled_blocking_task_maps_to_light_error_cancelled() {
+        let err: LightError = abort_and_map("BH1750 test task").await;
+        assert!(err.is_cancelled());
+        assert!(err.summary().contains("BH1750 test task"));
+    }
+
+    #[test]
+    fn sensor_new_and_debug_formatting() {
+        let _ = LightSensor::new();
+        let (sensor, _) = LightSensor::new_mocked();
+        let debug = format!("{sensor:?}");
+        assert!(debug.contains("Mock"));
+    }
+
+    #[test]
+    fn i2c_address_methods_and_formatting() {
+        let addr = I2cAddress::default_address();
+        assert_eq!(addr.as_u8(), 0x23);
+        assert_eq!(addr.as_u16(), 0x0023);
+        assert_eq!(addr.to_string(), "0x23");
+
+        let alt = I2cAddress::alternate_address();
+        assert_eq!(alt.as_u8(), 0x5C);
+        assert_eq!(alt.as_u16(), 0x005C);
+        assert_eq!(alt.to_string(), "0x5C");
+
+        let default_hw = I2cHardwareInfo::rpi3_default(addr);
+        assert_eq!(default_hw.bus, 1);
+        assert_eq!(default_hw.address, addr);
+    }
+
+    #[test]
+    fn illuminance_bounds_and_millilux_edge_cases() {
+        let zero = Illuminance::from_lux(0.0).unwrap();
+        assert_eq!(zero.millilux(), 0);
+        assert_eq!(zero.foot_candles(), 0.0);
+        assert_eq!(zero.to_string(), "0.00 lx");
+
+        let max = Illuminance::from_lux(Illuminance::MAX_LUX).unwrap();
+        assert_eq!(max.millilux(), 120_000_000);
+
+        let err_over = Illuminance::from_lux(Illuminance::MAX_LUX + 1.0).unwrap_err();
+        assert!(err_over.is_invalid_illuminance());
+    }
+
+    #[test]
+    fn light_error_backtrace_and_predicates() {
+        let err = LightError::i2c("test");
+        let _ = err.backtrace();
     }
 
     #[test]
     #[should_panic(expected = "GPIO metadata models Raspberry Pi 3 BSC1")]
     fn rpi3_hardware_info_panics_on_non_default_bus() {
         let _ = I2cHardwareInfo::rpi3_with_bus_and_address(2, I2cAddress::default());
-    }
-
-    #[test]
-    fn light_error_variants_predicates_and_conversions() {
-        let i2c_err = LightError::i2c("bus busy");
-        assert!(i2c_err.is_i2c());
-        assert!(!i2c_err.is_invalid_address());
-        assert!(!i2c_err.is_mock_fault());
-        assert!(i2c_err.to_string().contains("I2C bus error: bus busy"));
-
-        let addr_err = LightError::invalid_address(0x42);
-        assert!(addr_err.is_invalid_address());
-        assert!(!addr_err.is_i2c());
-        assert!(
-            addr_err
-                .to_string()
-                .contains("invalid BH1750 I2C address: 0x42")
-        );
-
-        let fault_err = LightError::mock_fault("simulated bus drop");
-        assert!(fault_err.is_mock_fault());
-        assert!(
-            fault_err
-                .to_string()
-                .contains("injected mock fault: simulated bus drop")
-        );
-
-        let illum_err = LightError::invalid_illuminance("NaN lux");
-        assert!(illum_err.is_invalid_illuminance());
-        assert!(!illum_err.is_i2c());
-        assert!(
-            illum_err
-                .to_string()
-                .contains("invalid illuminance: NaN lux")
-        );
-
-        let cancel_err = LightError::cancelled("operation aborted");
-        assert!(cancel_err.is_cancelled());
-        assert!(!cancel_err.is_i2c());
-        assert!(!cancel_err.is_powered_down());
-        assert!(matches!(
-            cancel_err.backtrace().status(),
-            std::backtrace::BacktraceStatus::Captured | std::backtrace::BacktraceStatus::Disabled
-        ));
-        assert!(
-            cancel_err
-                .to_string()
-                .contains("task cancelled: operation aborted")
-        );
-
-        let pwr_err = LightError::powered_down();
-        assert!(pwr_err.is_powered_down());
-        assert!(!pwr_err.is_i2c());
-        assert!(pwr_err.to_string().contains("sensor is powered down"));
-        assert!(pwr_err.source().is_none());
-
-        // std::error::Error trait
-        assert!(i2c_err.source().is_none());
-        assert!(fault_err.source().is_none());
-        assert!(illum_err.source().is_none());
-        assert!(addr_err.source().is_none());
-        assert!(cancel_err.source().is_none());
-
-        // From conversions and error cause preservation
-        let rppal_err = rppal::i2c::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "timed out",
-        ));
-        let from_rppal = LightError::from(rppal_err);
-        assert!(from_rppal.is_i2c());
-        assert!(from_rppal.source().is_some());
-        assert!(from_rppal.to_string().contains("timed out"));
-
-        let bh_err =
-            bh1750_embedded::Error::I2c(rppal::i2c::Error::Io(std::io::Error::other("bus down")));
-        let mapped = LightError::from_bh_err(bh_err);
-        assert!(mapped.is_i2c());
-        assert!(mapped.to_string().contains("bus down"));
-
-        let mt_err = bh1750_embedded::Error::MeasurementTimeOutOfRange;
-        let mapped_mt = LightError::from_bh_err(mt_err);
-        assert!(mapped_mt.is_i2c());
-        assert!(
-            mapped_mt
-                .to_string()
-                .contains("measurement time out of range")
-        );
-
-        // Machine-oriented single-line summary omits captured backtrace
-        for err in [
-            &i2c_err,
-            &addr_err,
-            &fault_err,
-            &illum_err,
-            &cancel_err,
-            &pwr_err,
-            &from_rppal,
-            &mapped,
-            &mapped_mt,
-        ] {
-            let s = err.summary();
-            assert!(!s.contains('\n'), "summary contained newline: {s}");
-            assert!(
-                !s.contains("Backtrace:"),
-                "summary contained backtrace: {s}"
-            );
-            assert!(err.to_string().starts_with(&s));
-        }
-    }
-
-    #[test]
-    fn hw_state_settle_math_and_transitions() {
-        let t0 = Instant::now();
-        let mut hw = HwState::new(t0);
-
-        // Immediately after transition in ContinuousHighRes (180 ms max), full settle sleep required
-        let (mode, sleep0) = hw.prepare_read(t0).unwrap();
-        assert_eq!(mode, MeasurementMode::ContinuousHighRes);
-        assert_eq!(sleep0, Some(Duration::from_millis(180)));
-
-        // After 100 ms elapsed, 80 ms remaining
-        let (_, sleep_partial) = hw.prepare_read(t0 + Duration::from_millis(100)).unwrap();
-        assert_eq!(sleep_partial, Some(Duration::from_millis(80)));
-
-        // After 200 ms elapsed (>= 180 ms), no sleep required
-        let (_, sleep_settled) = hw.prepare_read(t0 + Duration::from_millis(200)).unwrap();
-        assert_eq!(sleep_settled, None);
-
-        // Power down rejects reads until wake/reset or mode change
-        hw.record_power_down();
-        assert!(
-            hw.prepare_read(t0 + Duration::from_millis(300))
-                .unwrap_err()
-                .is_powered_down()
-        );
-
-        // Reset awakens sensor, resets transition timestamp
-        let t1 = t0 + Duration::from_millis(500);
-        hw.record_wake_or_reset(t1);
-        let (_, r_sleep) = hw.prepare_read(t1).unwrap();
-        assert_eq!(r_sleep, Some(Duration::from_millis(180)));
-
-        // One-shot mode does not require continuous settle sleep
-        let t2 = t1 + Duration::from_secs(5);
-        hw.record_mode_change(MeasurementMode::OneShotLowRes, t1);
-        let (os_mode, os_sleep) = hw.prepare_read(t2).unwrap();
-        assert_eq!(os_mode, MeasurementMode::OneShotLowRes);
-        assert_eq!(os_sleep, None);
-    }
-
-    #[test]
-    fn measurement_mode_slug_parsing_and_divisors() {
-        assert_eq!(
-            MeasurementMode::parse_slug("high-res").unwrap(),
-            MeasurementMode::ContinuousHighRes
-        );
-        assert_eq!(
-            MeasurementMode::parse_slug("h1").unwrap(),
-            MeasurementMode::ContinuousHighRes
-        );
-        assert_eq!(
-            MeasurementMode::parse_slug("high-res2").unwrap(),
-            MeasurementMode::ContinuousHighRes2
-        );
-        assert_eq!(
-            MeasurementMode::parse_slug("h2").unwrap(),
-            MeasurementMode::ContinuousHighRes2
-        );
-        assert_eq!(
-            MeasurementMode::parse_slug("low-res").unwrap(),
-            MeasurementMode::ContinuousLowRes
-        );
-        assert_eq!(
-            MeasurementMode::parse_slug("low").unwrap(),
-            MeasurementMode::ContinuousLowRes
-        );
-        assert_eq!(
-            MeasurementMode::parse_slug("oneshot-high-res").unwrap(),
-            MeasurementMode::OneShotHighRes
-        );
-        let _ = MeasurementMode::parse_slug("unknown-mode").unwrap_err();
-
-        assert_eq!(MeasurementMode::ContinuousHighRes.divisor(), 1.0);
-        assert_eq!(MeasurementMode::ContinuousHighRes2.divisor(), 2.0);
-        assert_eq!(MeasurementMode::ContinuousLowRes.divisor(), 1.0);
-    }
-
-    #[test]
-    fn sensor_mock_controls_and_error_paths() {
-        let (sensor, mock) = LightSensor::new_mocked();
-        assert_eq!(sensor.i2c_bus(), 1);
-        assert_eq!(sensor.i2c_address(), I2cAddress::default());
-
-        // Test mock raw word and reset
-        mock.set_raw_word(600);
-        let reading = sensor.read_lux().unwrap();
-        assert!((reading.lux() - 500.0).abs() < 1e-1);
-
-        // Test mode-adaptive set_lux across modes
-        mock.set_lux(1200.0);
-        let reading_h1 = sensor.read_lux().unwrap();
-        assert!((reading_h1.lux() - 1200.0).abs() < 1e-1);
-
-        sensor
-            .set_mode(MeasurementMode::ContinuousHighRes2)
-            .unwrap();
-        let reading_h2 = sensor.read_lux().unwrap();
-        assert!((reading_h2.lux() - 1200.0).abs() < 1e-1);
-
-        sensor.reset().unwrap();
-        assert_eq!(sensor.read_lux().unwrap().lux(), 0.0);
-
-        sensor.power_down().unwrap();
-        let pwr_err = sensor.read_lux().unwrap_err();
-        assert!(pwr_err.is_powered_down());
-        assert!(sensor.read_diagnostics().unwrap_err().is_powered_down());
-
-        // set_mode re-awakens sensor after power_down
-        mock.set_lux(300.0);
-        sensor.set_mode(MeasurementMode::ContinuousLowRes).unwrap();
-        assert_eq!(mock.current_mode(), MeasurementMode::ContinuousLowRes);
-        assert!((sensor.read_lux().unwrap().lux() - 300.0).abs() < 1.0);
-
-        // reset also re-awakens sensor after power_down
-        sensor.power_down().unwrap();
-        assert!(sensor.read_lux().unwrap_err().is_powered_down());
-        sensor.reset().unwrap();
-        assert_eq!(sensor.read_lux().unwrap().lux(), 0.0);
-
-        // Debug output
-        let debug_str = format!("{sensor:?}");
-        assert!(debug_str.contains("LightSensor"));
-
-        // Injected fault in sensor controls
-        mock.set_fault(Some("I2C NACK".into()));
-        assert!(sensor.power_down().unwrap_err().is_mock_fault());
-        assert!(sensor.reset().unwrap_err().is_mock_fault());
-        assert!(
-            sensor
-                .set_mode(MeasurementMode::ContinuousHighRes)
-                .unwrap_err()
-                .is_mock_fault()
-        );
-
-        // Hardware constructor error path is covered hermetically by the bus-validation check;
-        // do NOT invoke `LightSensor::new()` in unit tests as it opens `/dev/i2c-1` on the host.
-        let bus_err =
-            LightSensor::with_bus_and_address(99, I2cAddress::alternate_address()).unwrap_err();
-        assert!(bus_err.is_i2c());
-        assert!(bus_err.to_string().contains("unsupported I2C bus 99"));
     }
 }
