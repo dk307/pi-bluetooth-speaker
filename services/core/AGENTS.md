@@ -30,6 +30,7 @@ Before designing types, writing modules, implementing error handling, or writing
 1. **Mockable I/O & Hardware (`M-MOCKABLE-SYSCALLS`, `M-DI-HIERARCHY`):**
    * Hardware drivers and external I/O types must never perform unmockable ad-hoc syscalls or offer `Default` implementations (`#[expect(clippy::new_without_default, reason = "...")]`).
    * Provide inherent mocking via `new_mocked() -> (Self, MockCtrl)` using an internal backend enum (`Sysfs`/`Hardware` vs. `Mock`) so tests can inject readings and faults deterministically without physical hardware.
+   * *Project Convention (`M-TEST-UTIL`):* Diagnostic and peripheral drivers intentionally provide inherent `new_mocked()` companion controllers unconditionally in production builds (and `speaker_core::diag::ScopedTempDir` is similarly exported unconditionally) to guarantee that CI coverage verification, binary unit tests, integration tests, and standalone diagnostic utilities execute host-agnostically without physical hardware or separate test-only feature flags.
 2. **Three-Fold Purpose for Hardware Classes:**
    Every hardware peripheral abstraction in `speaker_core::hardware` must serve three purposes:
    * **Core Service:** Cheaply cloneable (`Arc`-backed per `M-SERVICES-CLONE`), `Send + Sync` (`M-TYPES-SEND`), with non-blocking `async` methods that isolate slow/blocking hardware I/O on `tokio::task::spawn_blocking`.
@@ -47,3 +48,29 @@ Before designing types, writing modules, implementing error handling, or writing
    * Every module must begin with `//!` documentation; every public item must have `///` documentation whose first sentence is a single line of ~15 words or fewer, followed by `# Examples`, `# Errors`, and `# Panics` sections where applicable. Do not write `# Parameters` tables or meta design journals (`M-NO-META-DESIGN-DOCUMENTATION`).
    * Use `#[expect(..., reason = "...")]` instead of `#[allow(...)]` for lint overrides.
    * All code must format cleanly with `cargo fmt --check` and pass `cargo clippy --all-targets -- -D warnings` with zero warnings.
+7. **Mandatory Code Coverage Verification (`M-INTEGRATION-TESTS`, `M-TEST-UTIL` & Repository Coverage Mandate):**
+   * **Always check code coverage:** Run `cargo llvm-cov --manifest-path services/core/Cargo.toml` before completing tasks or submitting changes.
+   * **Target Standards:** Maintain **>85%–90%+** line and function coverage across the library, hardware modules, and diagnostic CLI binaries.
+   * **Testable CLI Utilities:** Architect CLI diagnostic binaries with modular, testable entrypoints (`fn run_app(sensor: &Sensor, opts: &CliOptions) -> ExitCode`) to enable deterministic unit and integration testing of CLI flags, JSON outputs, session summaries, and error handling without physical hardware.
+   * **Thorough Mock & Invariant Coverage:** Test domain invariant bounds, conversions, all mock state controls, and fault injections. Isolated physical hardware syscalls (e.g., `/dev/i2c-1`) must have their surrounding logic completely tested.
+8. **Code Simplification & Deduplication (`speaker-core` Architecture):**
+   * **Shared Diagnostic & Runtime Infrastructure (`crate::diag`, `crate::runtime`):** Do not copy-paste CLI scaffolding (`OutputFormat`, `NumericStats`, `resolve_cli_opts`, `format_timestamp`, `next_arg_value`, `parse_count_arg`, `parse_interval_arg`, `fahrenheit`, `round_2dp`, `ScopedTempDir`) across `src/bin/read_*.rs` utilities or `tests/*.rs`. Use `crate::diag` for shared CLI/test helpers and `crate::runtime::run_blocking` / `abort_and_map` for `spawn_blocking` task execution and cancellation testing.
+   * **Make Invalid States Unrepresentable:** Use sum types (`I2cDetail::Message | I2cDetail::Source`, `SimSource::Lux | SimSource::Raw`) instead of parallel `Option` fields in error kinds and mock state structs. Do not duplicate `min`/`max` tracking alongside `NumericStats`.
+   * **Enforce Parsing at the Domain Type Boundary (`M-STRONG-TYPES-GUARD`):** Implement both programmatic constructors (`SensorId::parse`, `I2cAddress::new`, `TryFrom`) and soft user-facing string parsers (`SensorId::parse_str`, `I2cAddress::parse_hex` returning `Result<Self, String>`) on the domain type in `hardware::*` rather than in individual CLI binaries.
+   * **Minimal Surface Area & Direct Control Flow:** Prefer `#[derive(Copy)]` on small value-type option structs, bare `?` error propagation via `From`, `Duration::checked_sub` for settle calculations, and explicit `drop(guard)` before blocking sleeps rather than nested anonymous blocks.
+   * **Upfront Datasheet & Concurrency Checklist for `hardware::*`:**
+     1. Use datasheet **maximum** conversion times (`max_measurement_time()`), never typical times, when sleeping on conversions.
+     2. Track mode/reset transitions (`last_transition: Instant`) and explicit sleep state (`powered: bool`) inside `Mutex<HwState>` under `op_lock` so callers never have to guess settle times and reads while powered down return a typed `is_powered_down()` error. Document how `OneShot*` auto-power-down differs from explicit `power_down()`.
+     3. Precede mode opcodes with `CMD_POWER_ON` when waking from `power_down`.
+     4. Serialize all bus transactions (`power_down`, `reset`, `set_mode`, `read_raw_word`) behind `op_lock` on cloneable handles.
+     5. Assert that bus numbers passed to platform-specific pinout constructors (`I2cHardwareInfo::rpi3_with_bus_and_address`) match the physical hardware controller modeled.
+
+---
+
+## 3. Zero-Retry Pre-Push Gate, Simplification Review & Continuous Learning
+
+AI agents working on `speaker-core` **MUST** follow the repository-wide **First-Pass PR Quality, Code Simplification & Continuous Learning Protocol** in [root `AGENTS.md` (§4)](../../AGENTS.md):
+* **Mandatory Local Pre-Push Gate:** Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo llvm-cov --fail-under-lines 90 --fail-under-functions 90`, and the `aarch64-unknown-linux-gnu` release build locally before *every* commit/push. Never rely on CI or AI review to catch compile, lint, or test failures.
+* **Batch Fixes & Class-of-Bug Sweeps:** Resolve 100% of review findings in a single commit and sweep all sibling drivers, binaries (`read_temp`, `read_light`, `core`), and integration tests for the same class of defect before pushing.
+* **Mandatory Code Simplification Review:** Every self-review and PR review must evaluate how the code can be simplified — identifying duplicated code to unify, over-engineered abstractions to flatten, and unnecessary complexity to remove.
+* **Continuous Post-Review Distillation:** Record all newly discovered anti-patterns or review learnings into [root `AGENTS.md` (§4.3)](../../AGENTS.md) and this file before completing the task.

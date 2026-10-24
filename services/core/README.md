@@ -23,19 +23,24 @@
 services/core/
 ├── .cargo/
 │   └── config.toml     # Cortex-A53 NEON vectorization & cross-compile tuning
-├── Cargo.toml          # Crate dependencies & build configuration (package: speaker-core, bins: core, read_temp)
+├── Cargo.toml          # Crate dependencies & build configuration (package: speaker-core, bins: core, read_temp, read_light)
 ├── README.md           # Service documentation
 ├── AGENTS.md           # Agent instructions & guidelines
 ├── build.rs            # Slint ahead-of-time (AOT) UI compiler
 ├── src/
-│   ├── lib.rs          # Core library root (hardware drivers, mocks, domain types)
+│   ├── diag.rs         # Shared CLI diagnostic helpers (formatting, flag parsing, exit codes)
+│   ├── lib.rs          # Core library root (hardware drivers, mocks, domain types, task runtime)
 │   ├── main.rs         # Core daemon entrypoint, Tokio runtime, and event dispatch
+│   ├── runtime.rs      # Asynchronous task join helpers & panic propagation
 │   ├── bin/
-│   │   └── read_temp.rs# DS18B20 1-Wire temperature diagnostic utility
+│   │   ├── read_light.rs   # BH1750 I2C ambient light diagnostic utility
+│   │   └── read_temp.rs    # DS18B20 1-Wire temperature diagnostic utility
 │   └── hardware/
+│       ├── light.rs    # BH1750 I2C driver, domain types, and mock controller
 │       ├── mod.rs      # Hardware GPIO pin types & shared abstractions
 │       └── temp.rs     # DS18B20 1-Wire driver, parser, and mock controller
 ├── tests/
+│   ├── light_sensor_integration.rs # Integration tests for I2C & mocked light sensor
 │   └── temp_sensor_integration.rs # Integration tests for sysfs & mocked temperature sensor
 └── ui/
     └── appwindow.slint # Slint declarative UI components (800x480)
@@ -56,3 +61,11 @@ cargo build --release -p speaker-core
 ```bash
 cargo run -p speaker-core --features simulator
 ```
+
+### Diagnostic CLI Utilities
+
+The crate provides standalone diagnostics for testing and inspecting physical hardware sensors:
+- `read_temp`: Scans `/sys/bus/w1/devices/28-*/w1_slave` for attached DS18B20 1-Wire temperature sensors.
+- `read_light`: Queries `/dev/i2c-1` for BH1750 ambient light sensors at addresses `0x23` and `0x5C`.
+
+Both utilities output in human-readable or NDJSON formats (`--json`), support bounded iterations (`--once`, `--count N`), print a statistical session summary on exit for multi-sample human-readable runs (suppressed for `--once` / `--count 1`), report human-mode read errors to `stderr`, and return exit code `0` on successful reads or `1` if all polling attempts fail.
