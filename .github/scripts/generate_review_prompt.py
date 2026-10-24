@@ -34,15 +34,20 @@ def split_top_level_sections(md: str) -> list[str]:
     lines = md.splitlines(keepends=True)
     sections = []
     current_section = []
-    in_fence = False
+    current_fence = None
 
     for line in lines:
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
+        m = FENCE_RE.match(line)
+        if m:
+            fence_chars = m.group(1)
+            if current_fence is None:
+                current_fence = fence_chars
+            elif current_fence == fence_chars:
+                current_fence = None
             current_section.append(line)
             continue
 
-        if not in_fence and re.match(r"^# [A-Z]", line) and current_section:
+        if current_fence is None and re.match(r"^# [A-Z]", line) and current_section:
             sections.append("".join(current_section))
             current_section = [line]
         else:
@@ -83,8 +88,9 @@ def build_review_prompt(repo_root: Path) -> str:
     guidelines_body = "\n".join(kept_sections)
 
     # 2. Strip markdown link anchors ({ #M-... }), URLs in links ([text](url) -> text),
-    #    HTML comments, and consecutive blank lines.
+    #    link-reference definitions ([name]: url), HTML comments, and consecutive blank lines.
     guidelines_body = re.sub(r"<!--.*?-->", "", guidelines_body, flags=re.DOTALL)
+    guidelines_body = re.sub(r"^\s*\[[^\]]+\]:\s+\S+.*$", "", guidelines_body, flags=re.MULTILINE)
     guidelines_body = re.sub(r"\s*\{\s*#[A-Za-z0-9\-_]+\s*\}", "", guidelines_body)
     guidelines_body = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", guidelines_body)
     guidelines_body = re.sub(r"\n{3,}", "\n\n", guidelines_body).strip()

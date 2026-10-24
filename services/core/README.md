@@ -31,8 +31,8 @@ services/core/
 │   ├── lib.rs          # Core library root (hardware drivers, mocks, domain types)
 │   ├── main.rs         # Core daemon entrypoint, Tokio runtime, and event dispatch
 │   ├── bin/
-│   │   ├── read_light.rs# BH1750 I2C ambient light diagnostic utility
-│   │   └── read_temp.rs# DS18B20 1-Wire temperature diagnostic utility
+│   │   ├── read_light.rs   # BH1750 I2C ambient light diagnostic utility
+│   │   └── read_temp.rs    # DS18B20 1-Wire temperature diagnostic utility
 │   └── hardware/
 │       ├── light.rs    # BH1750 I2C driver, domain types, and mock controller
 │       ├── mod.rs      # Hardware GPIO pin types & shared abstractions

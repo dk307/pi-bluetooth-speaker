@@ -22,9 +22,9 @@ pub(crate) mod temp;
 
 #[doc(inline)]
 pub use light::{
-    BH1750_ALT_I2C_ADDR, BH1750_DEFAULT_I2C_ADDR, BH1750_DEFAULT_I2C_BUS, I2cAddress,
-    I2cHardwareInfo, Illuminance, LUX_TO_FOOT_CANDLES, LightDiagnostics, LightError, LightSensor,
-    LightSensorMock, MeasurementMode,
+    BH1750_ACCURACY_FACTOR, BH1750_ALT_I2C_ADDR, BH1750_DEFAULT_I2C_ADDR, BH1750_DEFAULT_I2C_BUS,
+    I2cAddress, I2cHardwareInfo, Illuminance, LUX_TO_FOOT_CANDLES, LightDiagnostics, LightError,
+    LightSensor, LightSensorMock, MeasurementMode,
 };
 
 #[doc(inline)]
@@ -260,17 +260,41 @@ impl Display for GpioPinInfo {
     }
 }
 
+/// Conversion trait for domain errors produced from Tokio join errors.
+pub(crate) trait FromJoinError: From<io::Error> {
+    fn from_cancelled(message: String) -> Self;
+}
+
+impl FromJoinError for LightError {
+    fn from_cancelled(message: String) -> Self {
+        Self::cancelled(message)
+    }
+}
+
+impl FromJoinError for TempError {
+    fn from_cancelled(message: String) -> Self {
+        Self::cancelled(message)
+    }
+}
+
+#[cfg(test)]
+impl FromJoinError for io::Error {
+    fn from_cancelled(message: String) -> Self {
+        Self::new(io::ErrorKind::Interrupted, message)
+    }
+}
+
 /// Helper to map `tokio::task::JoinError` from asynchronous blocking operations.
 ///
-/// Under `M-PANIC-IS-STOP`, worker panics are resumed with `resume_unwind`
-/// rather than converted into recoverable I/O errors. Task cancellations
-/// and runtime shutdowns are converted into `E::from(io::Error)`.
-pub(crate) fn map_join_result<T, E: From<io::Error>>(
+/// Worker panics are resumed with `resume_unwind` rather than converted into
+/// recoverable I/O errors. Task cancellations are converted into domain cancelled errors.
+pub(crate) fn map_join_result<T, E: FromJoinError>(
     res: Result<Result<T, E>, tokio::task::JoinError>,
 ) -> Result<T, E> {
     match res {
         Ok(result) => result,
         Err(join_err) if join_err.is_panic() => std::panic::resume_unwind(join_err.into_panic()),
+        Err(join_err) if join_err.is_cancelled() => Err(E::from_cancelled(join_err.to_string())),
         Err(join_err) => Err(E::from(io::Error::other(join_err))),
     }
 }
@@ -381,11 +405,14 @@ mod tests {
     async fn map_join_result_handles_cancellation() {
         let handle = tokio::task::spawn(async {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            Ok::<i32, io::Error>(42)
+            Ok::<i32, LightError>(42)
         });
         handle.abort();
         let res = map_join_result(handle.await);
         let err = res.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(err.is_cancelled());
+        assert!(!err.is_i2c());
+        assert!(!err.is_io());
+        assert!(err.to_string().contains("task cancelled"));
     }
 }

@@ -35,7 +35,7 @@ jobs:
           fi
 
       - name: Run Speaker Core Test Suite with Code Coverage
-        run: cargo llvm-cov --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --lcov --output-path lcov.info
+        run: cargo llvm-cov --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --fail-under-lines 85 --fail-under-functions 85 --lcov --output-path lcov.info
 
       - name: Upload Coverage to Codecov
         uses: codecov/codecov-action@v5

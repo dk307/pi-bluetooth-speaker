@@ -385,6 +385,8 @@ pub(crate) enum ErrorKind {
     InvalidSensorId { value: Box<str> },
     /// Underlying filesystem or bus I/O failure.
     Io(io::Error),
+    /// Asynchronous task was cancelled or the runtime shut down.
+    Cancelled { message: String },
 }
 
 /// Error returned by DS18B20 1-Wire temperature sensor operations.
@@ -441,6 +443,18 @@ impl TempError {
         matches!(self.kind, ErrorKind::Io(_))
     }
 
+    /// Returns `true` if this error was caused by task cancellation or runtime shutdown.
+    #[must_use]
+    pub const fn is_cancelled(&self) -> bool {
+        matches!(self.kind, ErrorKind::Cancelled { .. })
+    }
+
+    pub(crate) fn cancelled(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Cancelled {
+            message: message.into(),
+        })
+    }
+
     /// Returns the captured backtrace for this error.
     #[must_use]
     pub const fn backtrace(&self) -> &Backtrace {
@@ -483,6 +497,9 @@ impl Display for TempError {
             }
             ErrorKind::Io(err) => {
                 write!(f, "1-Wire sysfs I/O error: {err}")?;
+            }
+            ErrorKind::Cancelled { message } => {
+                write!(f, "task cancelled: {message}")?;
             }
         }
         if self.backtrace.status() == BacktraceStatus::Captured {
@@ -971,8 +988,8 @@ impl TempSensor {
     /// Returns [`TempError`] if no sensors are found or if sysfs I/O fails.
     ///
     /// # Panics
-    /// Panics if the underlying blocking task panics, resuming unwinding via
-    /// [`std::panic::resume_unwind`] under `M-PANIC-IS-STOP`.
+    /// Panics if the underlying blocking task panics, resuming unwinding to propagate
+    /// programming errors to the caller.
     pub async fn discover_sensors_async(&self) -> Result<Vec<SensorId>, TempError> {
         let this = self.clone();
         map_join_result(tokio::task::spawn_blocking(move || this.discover_sensors()).await)
@@ -984,8 +1001,8 @@ impl TempSensor {
     /// Returns [`TempError`] if reading or parsing `w1_slave` fails.
     ///
     /// # Panics
-    /// Panics if the underlying blocking task panics, resuming unwinding via
-    /// [`std::panic::resume_unwind`] under `M-PANIC-IS-STOP`.
+    /// Panics if the underlying blocking task panics, resuming unwinding to propagate
+    /// programming errors to the caller.
     pub async fn read_sensor_async(
         &self,
         sensor_id: &SensorId,
@@ -1001,8 +1018,8 @@ impl TempSensor {
     /// Returns [`TempError`] if reading diagnostics fails.
     ///
     /// # Panics
-    /// Panics if the underlying blocking task panics, resuming unwinding via
-    /// [`std::panic::resume_unwind`] under `M-PANIC-IS-STOP`.
+    /// Panics if the underlying blocking task panics, resuming unwinding to propagate
+    /// programming errors to the caller.
     pub async fn read_diagnostics_async(
         &self,
         sensor_id: &SensorId,
@@ -1018,8 +1035,8 @@ impl TempSensor {
     /// Returns [`TempError`] if no sensors are discovered or if any sensor read fails.
     ///
     /// # Panics
-    /// Panics if the underlying blocking task panics, resuming unwinding via
-    /// [`std::panic::resume_unwind`] under `M-PANIC-IS-STOP`.
+    /// Panics if the underlying blocking task panics, resuming unwinding to propagate
+    /// programming errors to the caller.
     pub async fn read_all_async(&self) -> Result<Vec<SensorReading>, TempError> {
         let this = self.clone();
         map_join_result(tokio::task::spawn_blocking(move || this.read_all()).await)
@@ -1031,8 +1048,8 @@ impl TempSensor {
     /// Returns [`TempError`] if no sensors are present or if the sensor read fails.
     ///
     /// # Panics
-    /// Panics if the underlying blocking task panics, resuming unwinding via
-    /// [`std::panic::resume_unwind`] under `M-PANIC-IS-STOP`.
+    /// Panics if the underlying blocking task panics, resuming unwinding to propagate
+    /// programming errors to the caller.
     pub async fn read_primary_temperature_async(&self) -> Result<Temperature, TempError> {
         let this = self.clone();
         map_join_result(tokio::task::spawn_blocking(move || this.read_primary_temperature()).await)
@@ -1074,6 +1091,12 @@ fn discover_sysfs_sensors(base_path: &Path) -> Result<Vec<SensorId>, TempError> 
 
     Ok(sensors)
 }
+
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<TempSensor>();
+    assert_send_sync::<TempSensorMock>();
+};
 
 #[cfg(test)]
 mod tests {

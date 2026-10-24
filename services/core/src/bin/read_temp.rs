@@ -143,7 +143,11 @@ where
 }
 
 fn parse_cli_args() -> Result<Option<CliOptions>, String> {
-    parse_cli_args_from(env::args().skip(1))
+    parse_cli_args_from(
+        env::args_os()
+            .skip(1)
+            .map(|a| a.to_string_lossy().into_owned()),
+    )
 }
 
 /// Running statistical summary.
