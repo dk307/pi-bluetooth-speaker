@@ -27,6 +27,14 @@ All Rust code in this repository **MUST** strictly adhere to the **Microsoft Pra
 Before designing types, writing modules, implementing error handling, or writing tests, consult [`microsoft-rust-guidelines.md`](../.guidelines/microsoft-rust-guidelines.md) and ensure all newly created or modified code complies with its rules.
 
 ### Key Guidelines Checklist
+0. **Mandatory Ecosystem Reuse over Reinvention (Kernel & Crates First):**
+   * Never implement raw register/byte-level hardware protocols from scratch without evaluating existing solutions:
+     1. **Linux Kernel Subsystems First:** Check if Linux has a kernel driver (e.g., Industrial I/O `IIO` for ambient light/IMUs, `hwmon` for thermals, ALSA for audio DACs, `w1-gpio`/`w1_therm` for 1-Wire). Consuming sysfs/devfs is preferred over bit-banging raw bus transactions in user space.
+     2. **Crates.io & `embedded-hal` Drivers Second:** If user-space I2C/SPI is required (via `rppal`), search `crates.io` for existing drivers.
+   * **Interactive User Decision Mandate:**
+     - When multiple options exist, research each (maintenance, license, dependencies, `embedded-hal` compatibility, async support) and present a structured trade-off comparison to the user to choose.
+     - When a single option exists, explicitly inform and prompt the user before adding a new crate to `Cargo.toml`.
+   * **Domain Wrapping & Mocking:** Wrap the external driver or kernel interface inside `Backend::Hardware` behind the project's domain models (`new_mocked()`, canonical errors, strong newtypes) so host-testability and CI coverage are preserved.
 1. **Mockable I/O & Hardware (`M-MOCKABLE-SYSCALLS`, `M-DI-HIERARCHY`):**
    * Hardware drivers and external I/O types must never perform unmockable ad-hoc syscalls or offer `Default` implementations (`#[expect(clippy::new_without_default, reason = "...")]`).
    * Provide inherent mocking via `new_mocked() -> (Self, MockCtrl)` using an internal backend enum (`Sysfs`/`Hardware` vs. `Mock`) so tests can inject readings and faults deterministically without physical hardware.
@@ -65,6 +73,7 @@ Before designing types, writing modules, implementing error handling, or writing
      4. Serialize all bus transactions (`power_down`, `reset`, `set_mode`, `read_raw_word`) behind `op_lock` on cloneable handles (collapse with a `with_hw_transaction` helper).
      5. Assert that bus numbers passed to platform-specific pinout constructors (`I2cHardwareInfo::rpi3_with_bus_and_address`) match the physical hardware controller modeled.
      6. Re-arm continuous mode conversions on reset per datasheet (`CMD_POWER_ON` + `CMD_RESET` leaves chip in "waiting for measurement instruction", so `reset()` must re-send the continuous mode opcode to restart conversions; model this in `HwState::record_wake_or_reset` returning `Option<u8>`).
+     7. Mutate internal driver state (`HwState: powered, mode, last_transition`) strictly **after** all fallible bus transactions succeed.
 
 ---
 
@@ -72,6 +81,12 @@ Before designing types, writing modules, implementing error handling, or writing
 
 AI agents working on `speaker-core` **MUST** follow the repository-wide **First-Pass PR Quality, Code Simplification & Continuous Learning Protocol** in [root `AGENTS.md` (§4)](../../AGENTS.md):
 * **Mandatory Local Pre-Push Gate:** Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo llvm-cov --fail-under-lines 90 --fail-under-functions 90`, and the `aarch64-unknown-linux-gnu` release build locally before *every* commit/push. Never rely on CI or AI review to catch compile, lint, or test failures.
-* **Batch Fixes & Class-of-Bug Sweeps:** Resolve 100% of review findings in a single commit and sweep all sibling drivers, binaries (`read_temp`, `read_light`, `core`), and integration tests for the same class of defect before pushing.
+* **Review Triage Classification (The 3-Tier Rule):**
+  - **Tier 1 (Correctness/Protocol/Safety):** Must fix in a single batched commit.
+  - **Tier 2 (Hard Gates):** Compile errors, clippy warnings, test failures, coverage `< 90%`. Must fix.
+  - **Tier 3 (Advisory Simplifications/Refactoring Suggestions):** Do NOT touch in active feature PR.
+* **Strict PR Scope Boundaries:** Feature PRs must strictly touch only their declared files. Never refactor already-merged, working sibling drivers or CLI utilities (e.g. modifying `read_temp` during a `read_light` PR).
+* **Zero-Trust on External AI Suggestions:** Never copy-paste action SHAs, crate versions, or URLs suggested by AI review bots without verifying them via live CLI queries (`git ls-remote`, `cargo search`) first.
+* **Batch Fixes & Class-of-Bug Sweeps:** Resolve 100% of review findings in a single commit and sweep within the PR's own files, binaries, and tests for the same class of defect before pushing.
 * **Mandatory Code Simplification Review:** Every self-review and PR review must evaluate how the code can be simplified — identifying duplicated code to unify, over-engineered abstractions to flatten, and unnecessary complexity to remove.
 * **Continuous Post-Review Distillation:** Record all newly discovered anti-patterns or review learnings into [root `AGENTS.md` (§4.3)](../../AGENTS.md) and this file before completing the task.

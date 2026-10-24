@@ -1027,9 +1027,10 @@ impl LightSensor {
             Backend::Hardware { .. } => self.with_hw_transaction(|i2c, state| {
                 i2c.write(&[CMD_POWER_ON])?;
                 i2c.write(&[CMD_RESET])?;
-                if let Some(opcode) = state.record_wake_or_reset(Instant::now()) {
-                    i2c.write(&[opcode])?;
+                if state.mode.is_continuous() {
+                    i2c.write(&[state.mode.opcode()])?;
                 }
+                state.record_wake_or_reset(Instant::now());
                 Ok(())
             }),
             Backend::Mock(mock) => mock.reset(),

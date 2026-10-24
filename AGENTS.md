@@ -47,19 +47,21 @@ All code developed in this repository must maintain high, verifiable test covera
 
 To prevent multi-iteration PR review churn and excessive token/CI consumption, AI agents working in this repository **MUST** follow these engineering and review rules:
 
-### 4.1 Zero-Retry Pre-Push Gate (Never Use CI as a Linter)
+### 4.1 Zero-Retry Pre-Push Gate & Review Triage
 * **Mandatory Local Verification Before Every Push:** Never push a commit without first passing all local gates in order:
   1. `cargo fmt --manifest-path services/core/Cargo.toml -- --check`
   2. `cargo clippy --manifest-path services/core/Cargo.toml --all-targets -- -D warnings`
   3. `cargo llvm-cov --manifest-path services/core/Cargo.toml --fail-under-lines 90 --fail-under-functions 90`
   4. `cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins`
   5. If any CI script (`.github/scripts/*.py`) or workflow is touched, execute its unit tests (`python3 -m unittest discover -s .github/scripts -p "test_*.py" -v`) and verify prompt generation locally against real repository inputs before committing.
-* **Batch All Fixes & Sweep by Bug Class:** Never trickle-push partial fixes. When addressing code review feedback, read the *entire* review (Critical Issues, Compliance Findings, Simplification Opportunities, and Recommendations) and resolve 100% of items in a single commit. For every defect found in one place, sweep all sibling methods, binaries, and tests for the same class of bug before committing.
-* **Upfront Hardware Datasheet & Concurrency Audit:** Before writing or modifying a hardware driver, verify:
-  1. Maximum (not typical) datasheet conversion/integration times.
-  2. Power-state wake-up sequences (e.g., `CMD_POWER_ON` before mode commands) and first-conversion settle times (`last_transition: Mutex<Instant>`).
-  3. Transaction-level locking (`op_lock`) across all state-mutating and multi-step bus operations on cloned handles.
-  4. Hardware controller pinout accuracy (assert valid bus numbers for fixed GPIO pin descriptors).
+* **Strict PR Scope Boundaries (Blast Radius Containment):** A feature or bugfix PR must touch **only** the files within its declared scope. **Never refactor already-merged, working sibling drivers or CLI utilities** (e.g., modifying `read_temp` during a `read_light` PR). The rule *"sweep by bug class"* applies strictly to the new files and tests introduced in the PR.
+* **Review Triage Classification (The 3-Tier Rule to Stop Review Churn):**
+  Automated review bots (DiffGuard, CodeRabbit) will always generate critiques. Agents must classify feedback into three strict tiers:
+  - **Tier 1 (Correctness & Safety):** Hardware protocol violations, data races, error-path state desyncs, and security flaws. **Must fix** immediately in a single batched commit.
+  - **Tier 2 (Hard Gates):** Broken builds, clippy warnings, test failures, and coverage `< 90%`. **Must fix** immediately before pushing.
+  - **Tier 3 (Advisory Simplifications & Scope Creep):** Subjective refactorings (e.g., *"extract `poll_loop`"*, *"unify main functions"*, *"change print formatting asymmetry in sibling CLI"*). **DO NOT TOUCH in the active feature PR.** Defer them to a separate dedicated tech-debt PR.
+* **Zero-Trust Verification of External AI Artifacts:** Never trust or copy-paste commit SHAs, package versions, or URLs suggested by an AI reviewer without verifying them against live registries or remotes first (e.g., running `git ls-remote <url> <tag>` or `cargo search <crate>`).
+* **Transactional State Mutation:** In hardware drivers, internal state (`HwState: powered, mode, last_transition`) must be mutated **strictly after all fallible bus writes have completed successfully**. Never mutate driver state between or before fallible bus transactions.
 
 ### 4.2 Code Simplification & Anti-Bloat Mandate (Authoring & Review)
 * **Actively Minimize Code Volume & Duplication:** Every line of duplicated boilerplate doubles the surface area for bugs and review churn. Extract shared helpers (CLI argument/interval parsing, session statistics, timestamp formatting, test temp-dir cleanup guards) into shared modules instead of copy-pasting across binaries or test files.
@@ -113,4 +115,20 @@ To prevent multi-iteration PR review churn and excessive token/CI consumption, A
   * **Deduplicate Canonical Error Display & Telemetry Formatting:** Use macro helpers (`impl_canonical_error_display!`) across domain errors to deduplicate single-line `summary()` formatting and `Display` backtrace rendering, preventing divergence across peripheral drivers.
   * **Action SHA Pinning & Step-Scoped Secrets:** Always SHA-pin third-party GitHub Actions (`actions/checkout`, `actions/setup-python`, `actions/upload-artifact`, `codecov/codecov-action`) with version comments in workflows, and never inject high-privilege credentials (like `OPENROUTER_API_KEY`) into whole jobs; scope secrets strictly to individual steps that require them.
   * **Harmonized Loop-Break Termination on Cumulative Stats:** Polling loops across diagnostic CLI utilities must terminate on cumulative stats (`stats.total_reads() >= max_count` / `stats.samples.total_reads() >= max_count`) rather than independent loop counter variables, ensuring summary reporting, error rate calculations, and process exit codes remain perfectly synchronized.
+
+---
+
+## 5. Ecosystem Reuse, Dependency Evaluation & User Approval Protocol
+
+Before writing any new hardware driver, protocol parser, or peripheral module, agents **MUST** prioritize using existing, battle-tested solutions over writing from scratch.
+
+### 5.1 Mandatory Reuse Hierarchy
+1. **Linux Kernel Subsystems First:** Check if the Linux kernel already models the device (e.g., Industrial I/O `IIO` for ambient light/IMUs, `hwmon` for thermals/voltages, ALSA for audio DACs/codecs, `w1-gpio`/`w1_therm` for 1-Wire). Consuming a kernel sysfs/ioctl interface is preferred over bit-banging raw bus transactions in user space.
+2. **Crates.io & `embedded-hal` Drivers Second:** If user-space bus communication is required (via `rppal`), search `crates.io` for existing drivers (e.g., `embedded-hal` drivers) where physical silicon quirks, timing, and register maps are already mastered.
+3. **Raw Protocol Drivers as Last Resort:** Writing raw register/byte sequences (`i2c.write(&[0x01])`) from scratch is strictly forbidden unless no kernel driver and no maintained crate exists.
+
+### 5.2 Research & User Choice Mandate (No Blind Additions)
+* **Multiple Options Available:** If multiple crates or architectural approaches exist (e.g., Kernel IIO vs `embedded-hal` crate A vs crate B), agents **MUST NOT** choose blindly. Research each option (maintenance status, license, dependencies, `embedded-hal` version, async support, and suitability for Raspberry Pi 3) and present a structured trade-off comparison to the user to select one.
+* **Single Option Available:** Even if there is only one viable crate or solution, agents **MUST explicitly inform and prompt the user** that a new external crate is being added (stating crate name, version, purpose, and license) before adding it to `Cargo.toml`.
+* **Application Wrapping & Mocking:** Using an external crate does not bypass project architectural standards. The external driver must be wrapped inside the project's domain model (`new_mocked()`, canonical errors, strong newtypes) inside `Backend::Hardware`, preserving host-testability and CI coverage.
 
