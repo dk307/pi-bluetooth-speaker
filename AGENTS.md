@@ -41,3 +41,19 @@ All code developed in this repository must maintain high, verifiable test covera
   * Every new driver, peripheral module, mock controller, and standalone CLI utility must include comprehensive unit tests and integration tests covering happy paths, edge cases, domain invariants, error conversions, and failure injection.
   * Code that depends on physical hardware (e.g., Broadcom I2C bus ioctl or 1-Wire sysfs) must isolate hardware-dependent calls behind mockable backends (`new_mocked()`) so all application logic, calculations, error paths, and diagnostic reporting are thoroughly exercised on any development host and CI.
 
+---
+
+## 4. Continuous Engineering Learnings & Self-Improvement Protocol
+
+To eliminate repetitive code review churn across sessions, AI agents working in this repository **MUST** continuously capture and record engineering learnings into the instructions:
+
+* **Mandatory Post-Review Distillation:** Whenever code review feedback (DiffGuard AI review, human reviewer comments, or CI failures) identifies architectural placement issues, anti-patterns, or subtle edge cases, the agent **MUST** distill the root cause and record actionable rules in the relevant `AGENTS.md` before finishing the task.
+* **How to Apply Guidelines (Practical Anti-Churn Rules):**
+  * **Keep Hardware and Async Runtime Separated:** Generic task join helpers and error-mapping glue (`map_join_result`, `FromJoinError`) belong in `crate::runtime` or `crate::util`, never mixed into peripheral hardware modules (`hardware::*`). Concrete trait implementations belong alongside the respective domain error.
+  * **Do Not Create Dead Branches for Tokio JoinError:** In Tokio, `JoinError` is guaranteed to be either a panic or cancellation. Never add artificial trait bounds (such as forcing `From<io::Error>`) just to serve an unreachable branch; use `unreachable!()` with a descriptive message.
+  * **Preserve Panic Unwinding on Bug:** Always re-raise thread panics using `std::panic::resume_unwind(err.into_panic())` rather than converting worker crashes into recoverable I/O errors (**M-PANIC-ON-BUG**).
+  * **Distinguish Task Cancellation from Hardware Faults:** Map aborted tasks to domain `Cancelled` errors containing `Box<str>` messages. Document clearly that callers/supervisors must treat cancellations during graceful shutdown as expected termination, not hardware failures.
+  * **Table-Drive CLI Subprocess Tests:** Subprocess CLI tests must never silently pass on CI runners (fail loudly if native binary execution fails in CI). Avoid repetitive boilerplate by using table-driven test cases covering boundary values (`0`, `-1.0`, infinity, `u64::MAX` overflow, missing arguments).
+  * **Ensure Hermetic Tests:** Never depend on host-specific paths like `/dev/null` for negative sysfs tests; always create temporary files in `env::temp_dir()`.
+  * **Lint Placement Hygiene:** Place compile-time `assert_send_sync` assertions before `mod tests` to prevent `clippy::items-after-test-module`. Apply `#[expect(...)]` to `let` statements or functions rather than raw expressions.
+

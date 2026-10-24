@@ -53,3 +53,30 @@ Before designing types, writing modules, implementing error handling, or writing
    * **Target Standards:** Maintain **>85%–90%+** line and function coverage across the library, hardware modules, and diagnostic CLI binaries.
    * **Testable CLI Utilities:** Architect CLI diagnostic binaries with modular, testable entrypoints (`fn run_app(sensor: &Sensor, opts: &CliOptions) -> ExitCode`) to enable deterministic unit and integration testing of CLI flags, JSON outputs, session summaries, and error handling without physical hardware.
    * **Thorough Mock & Invariant Coverage:** Test domain invariant bounds, conversions, all mock state controls, and fault injections. Isolated physical hardware syscalls (e.g., `/dev/i2c-1`) must have their surrounding logic completely tested.
+8. **Applied Engineering Hardening & Anti-Churn Patterns:**
+   * **Module Boundaries (Runtime vs Hardware):**
+     * Generic async runtime helpers (`map_join_result`, `FromJoinError`) belong in `crate::runtime` with dedicated unit tests. Do not place Tokio runtime glue in `crate::hardware`.
+     * Concrete implementations (`impl FromJoinError for <Error>`) must live next to the respective error type in its own module.
+   * **Tokio Task Join Semantics:**
+     * `tokio::task::JoinError` represents either worker panics (`is_panic()`) or task cancellations (`is_cancelled()`).
+     * Always propagate panics with `std::panic::resume_unwind(join_err.into_panic())`. Never convert thread crashes into recoverable I/O errors (**M-PANIC-ON-BUG**).
+     * Do not attach `From<io::Error>` or other unrelated supertraits to `FromJoinError` to serve an unreachable branch; mark dead fallbacks with `unreachable!()`.
+   * **Cancellation Domain Semantics:**
+     * Map cancelled tasks to domain `Cancelled { message: Box<str> }` variants per **M-BOX-DST**.
+     * Document in `is_cancelled()` predicates that cancellations represent expected termination during graceful daemon shutdown and must not be retried or logged as hardware faults by callers or supervisor loops.
+   * **Hermetic Tests & Subprocess Assertions:**
+     * Never depend on `/dev/null` or ambient system paths; generate temporary files/directories inside `std::env::temp_dir()`.
+     * In `cli_tests.rs`, helper `can_exec_binary` must assert that binaries successfully run under CI (i.e., native Linux runners must never silently skip CLI tests).
+     * Use table-driven tests `(args, expected_stderr_fragment)` to cover negative values (`-1.0`), infinities (`1e400`), zero rejection, large number overflows, and missing arguments without repetitive boilerplate.
+   * **Clippy & Lint Placement Hygiene:**
+     * In stable Rust, `#[expect(...)]` cannot annotate raw expressions; attach to statements (`let`), items, or functions.
+     * Place compile-time `const _: () = { assert_send_sync::<T>(); };` checks before `#[cfg(test)] mod tests` to avoid `clippy::items-after-test-module`.
+
+---
+
+## 3. Continuous Learning & Self-Improvement Protocol
+
+AI agents working on this codebase **MUST** maintain and update these instructions:
+* After any code review (whether from DiffGuard AI review, human reviewer comments, or CI compiler/lint errors), review what caused churn or rework.
+* If a pattern was corrected or an architectural principle clarified, **immediately update this document** with the concrete rule and practical example before marking the task complete.
+* Ensure future agents inherit the learnings so that recurring review comments and anti-patterns are permanently avoided.
