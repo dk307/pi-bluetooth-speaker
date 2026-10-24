@@ -51,60 +51,39 @@ fn wait_with_deadline(mut child: Child, timeout: Duration, context: &str) -> Out
     }
 }
 
-/// Panics with `msg` when running inside a CI environment (`CI` env var set).
-fn fail_if_ci(msg: &str) {
-    assert!(std::env::var("CI").is_err(), "{msg}");
-}
-
-/// Spawns `bin` with `args` and waits up to `timeout`, returning `None` if the binary cannot be spawned.
-fn try_run_cli(
+/// Spawns `bin` with `args` and waits up to `timeout`, panicking if spawning fails or times out.
+fn run_cli_with_timeout(
     bin: &str,
     args: &[&str],
     timeout: Duration,
-) -> Option<(ExitStatus, String, String)> {
-    let Ok(child) = Command::new(bin)
+) -> (ExitStatus, String, String) {
+    let child = Command::new(bin)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-    else {
-        fail_if_ci(&format!("failed to spawn {bin} in CI environment"));
-        return None;
-    };
+        .unwrap_or_else(|e| panic!("failed to spawn '{bin}' with args {args:?}: {e}"));
     let output = wait_with_deadline(child, timeout, bin);
-    Some((
+    (
         output.status,
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
-    ))
-}
-
-/// Probes whether a compiled binary is executable in the current environment via `--help`.
-///
-/// Returns `Some((status, stdout, stderr))` when `--help` succeeds, allowing callers to
-/// inspect the help output directly without spawning a duplicate `--help` subprocess.
-/// In CI environments, any execution failure or timeout panics loudly to prevent
-/// silent skips from masking test regressions or binfmt misconfigurations.
-fn probe_help(bin_path: &str) -> Option<(ExitStatus, String, String)> {
-    let (status, stdout, stderr) = try_run_cli(bin_path, &["--help"], CLI_PROBE_TIMEOUT)?;
-    if status.success() {
-        return Some((status, stdout, stderr));
-    }
-    fail_if_ci(&format!(
-        "binary '{bin_path}' exited {status:?} in CI ({stderr}); must never skip silently"
-    ));
-    None
-}
-
-/// Returns `true` if the compiled binary can be executed in the current environment.
-fn can_exec_binary(bin_path: &str) -> bool {
-    probe_help(bin_path).is_some()
+    )
 }
 
 /// Executes a binary with arguments under `CLI_PROBE_TIMEOUT` and captures status, stdout, and stderr.
 fn run_cli(bin: &str, args: &[&str]) -> (ExitStatus, String, String) {
-    try_run_cli(bin, args, CLI_PROBE_TIMEOUT)
-        .unwrap_or_else(|| panic!("failed to spawn binary '{bin}' with args {args:?}"))
+    run_cli_with_timeout(bin, args, CLI_PROBE_TIMEOUT)
+}
+
+/// Probes whether a compiled binary is executable via `--help`, panicking if `--help` fails.
+fn probe_help(bin_path: &str) -> (ExitStatus, String, String) {
+    let (status, stdout, stderr) = run_cli(bin_path, &["--help"]);
+    assert!(
+        status.success(),
+        "binary '{bin_path}' --help exited {status:?}: {stderr}"
+    );
+    (status, stdout, stderr)
 }
 
 #[test]
@@ -113,12 +92,7 @@ fn core_main_binary_executes() {
     // The banner prints static GPIO/hardware pin metadata via `TempSensor::gpio_info()`
     // which does not perform live sysfs I/O, ensuring deterministic execution on host.
     let bin_path = env!("CARGO_BIN_EXE_core");
-    if !can_exec_binary(bin_path) {
-        return;
-    }
-
-    let (status, stdout, _) =
-        try_run_cli(bin_path, &[], CORE_MAIN_TIMEOUT).expect("failed to spawn core main binary");
+    let (status, stdout, _) = run_cli_with_timeout(bin_path, &[], CORE_MAIN_TIMEOUT);
 
     assert!(status.success());
     assert!(stdout.contains("Speaker Core Service is running on Raspberry Pi 3!"));
@@ -129,9 +103,7 @@ fn core_main_binary_executes() {
 #[test]
 fn read_temp_cli_help_displays() {
     let bin_path = env!("CARGO_BIN_EXE_read_temp");
-    let Some((status, stdout, _)) = probe_help(bin_path) else {
-        return;
-    };
+    let (status, stdout, _) = probe_help(bin_path);
     assert!(status.success());
     assert!(stdout.contains("DS18B20 1-Wire Temperature Diagnostic Utility"));
     assert!(stdout.contains("Usage:"));
@@ -180,16 +152,16 @@ fn assert_cli_rejects(bin_path: &str, cases: &[(&[&str], &str)]) {
             stderr.contains(expected_err),
             "expected stderr to contain '{expected_err}' for args {args:?}, got: '{stderr}'"
         );
+        assert!(
+            !stderr.contains("Backtrace") && !stderr.contains("panicked"),
+            "expected backtrace-free user error, got: '{stderr}'"
+        );
     }
 }
 
 #[test]
 fn read_temp_cli_argument_validation() {
     let bin_path = env!("CARGO_BIN_EXE_read_temp");
-    if !can_exec_binary(bin_path) {
-        return;
-    }
-
     assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
     assert_cli_rejects(
         bin_path,
@@ -206,9 +178,7 @@ fn read_temp_cli_argument_validation() {
 #[test]
 fn read_light_cli_help_displays() {
     let bin_path = env!("CARGO_BIN_EXE_read_light");
-    let Some((status, stdout, _)) = probe_help(bin_path) else {
-        return;
-    };
+    let (status, stdout, _) = probe_help(bin_path);
     assert!(status.success());
     assert!(stdout.contains("BH1750 Ambient Light Diagnostic Utility"));
     assert!(stdout.contains("Usage:"));
@@ -221,10 +191,6 @@ fn read_light_cli_help_displays() {
 #[test]
 fn read_light_cli_argument_validation() {
     let bin_path = env!("CARGO_BIN_EXE_read_light");
-    if !can_exec_binary(bin_path) {
-        return;
-    }
-
     assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
     assert_cli_rejects(
         bin_path,

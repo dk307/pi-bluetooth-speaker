@@ -71,8 +71,11 @@ where
     map_join_result(tokio::task::spawn_blocking(f).await, task_context)
 }
 
-#[cfg(test)]
-pub(crate) async fn abort_and_map<E>(task_context: &'static str) -> E
+/// Spawns an asynchronous task, immediately aborts it, and maps the resulting cancellation
+/// into the typed domain error via [`FromJoinError`].
+///
+/// Intended for unit and integration testing of task cancellation handling across drivers.
+pub async fn abort_and_map<E>(task_context: &'static str) -> E
 where
     E: FromJoinError + Send + 'static,
 {
