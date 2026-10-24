@@ -930,7 +930,10 @@ impl LightSensor {
     /// programming errors to the caller.
     pub async fn read_lux_async(&self) -> Result<Illuminance, LightError> {
         let this = self.clone();
-        map_join_result(tokio::task::spawn_blocking(move || this.read_lux()).await)
+        map_join_result(
+            tokio::task::spawn_blocking(move || this.read_lux()).await,
+            "BH1750 illuminance read",
+        )
     }
 
     /// Asynchronously reads extended diagnostics from the sensor.
@@ -943,7 +946,10 @@ impl LightSensor {
     /// programming errors to the caller.
     pub async fn read_diagnostics_async(&self) -> Result<LightDiagnostics, LightError> {
         let this = self.clone();
-        map_join_result(tokio::task::spawn_blocking(move || this.read_diagnostics()).await)
+        map_join_result(
+            tokio::task::spawn_blocking(move || this.read_diagnostics()).await,
+            "BH1750 diagnostics read",
+        )
     }
 }
 
@@ -983,8 +989,10 @@ mod tests {
     fn i2c_address_validates_known_addresses() {
         assert_eq!(I2cAddress::new(0x23).unwrap().as_u8(), 0x23);
         assert_eq!(I2cAddress::new(0x5C).unwrap().as_u8(), 0x5C);
+        assert!(I2cAddress::new(0x00).unwrap_err().is_invalid_address());
         assert!(I2cAddress::new(0x20).unwrap_err().is_invalid_address());
         assert!(I2cAddress::new(0x77).unwrap_err().is_invalid_address());
+        assert!(I2cAddress::new(0x80).unwrap_err().is_invalid_address());
     }
 
     #[test]

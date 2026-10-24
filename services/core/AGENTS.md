@@ -60,7 +60,11 @@ Before designing types, writing modules, implementing error handling, or writing
    * **Tokio Task Join Semantics:**
      * `tokio::task::JoinError` represents either worker panics (`is_panic()`) or task cancellations (`is_cancelled()`).
      * Always propagate panics with `std::panic::resume_unwind(join_err.into_panic())`. Never convert thread crashes into recoverable I/O errors (**M-PANIC-ON-BUG**).
+     * Provide diagnostic context in `map_join_result(res, "task context")` so concurrent cancellations produce identifiable messages (e.g. `"temperature read task was cancelled"`).
      * Do not attach `From<io::Error>` or other unrelated supertraits to `FromJoinError` to serve an unreachable branch; mark dead fallbacks with `unreachable!()`.
+     * In task panic tests, avoid dead code and expression attributes after `panic!()`: reshape the result with `task.await.map(Ok::<_, ErrorType>)`.
+   * **Float Validation & NaN Protection:**
+     * All float domain constructors and CLI interval parsers must check `val.is_finite()` before range comparison, as `NaN` evaluates to `false` for all inequality checks and would otherwise bypass bounds.
    * **Cancellation Domain Semantics:**
      * Map cancelled tasks to domain `Cancelled { message: Box<str> }` variants per **M-BOX-DST**.
      * Document in `is_cancelled()` predicates that cancellations represent expected termination during graceful daemon shutdown and must not be retried or logged as hardware faults by callers or supervisor loops.

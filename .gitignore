@@ -16,6 +16,10 @@ target
 # rustc will dump stack traces when hitting an internal compiler error to PWD
 rustc-ice-*.txt
 
+# Python caches
+__pycache__/
+*.pyc
+
 # AI code review prompt artifact
 review_prompt.txt
 

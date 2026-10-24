@@ -18,7 +18,19 @@ use std::time::{Duration, Instant};
 /// to prevent silent skips from masking test regressions.
 fn can_exec_binary(bin_path: &str) -> bool {
     match Command::new(bin_path).arg("--help").output() {
-        Ok(_) => true,
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "SKIPPED: target binary '{bin_path}' failed --help probe ({:?}): {stderr}",
+                output.status.code()
+            );
+            assert!(
+                std::env::var("CI").is_err() || std::env::var("CROSS_COMPILE").is_ok(),
+                "CLI tests unexpectedly failed to execute binary in CI environment: {bin_path} ({stderr})"
+            );
+            false
+        }
         Err(e) => {
             eprintln!(
                 "SKIPPED: target binary '{bin_path}' cannot execute on host architecture: {e}"
@@ -136,6 +148,10 @@ fn read_temp_cli_argument_validation() {
             &["--interval", "1e400"],
             "interval must be a finite value greater than 0",
         ),
+        (
+            &["--interval", "nan"],
+            "interval must be a finite value greater than 0",
+        ),
         (&["--device"], "missing value for --device"),
         (
             &["--device", "invalid-device-id"],
@@ -201,11 +217,17 @@ fn read_light_cli_argument_validation() {
             &["--interval", "1e400"],
             "interval must be a finite value greater than 0",
         ),
+        (
+            &["--interval", "nan"],
+            "interval must be a finite value greater than 0",
+        ),
         (&["--mode"], "missing value for --mode"),
         (&["--mode", "ultra-mode"], "invalid mode 'ultra-mode'"),
         (&["--address"], "missing value for --address"),
         (&["--address", "not-hex"], "invalid hex address"),
+        (&["--address", "0x00"], "invalid BH1750 I2C address"),
         (&["--address", "0x77"], "invalid BH1750 I2C address"),
+        (&["--address", "0x80"], "invalid BH1750 I2C address"),
     ];
 
     for (args, expected_err) in cases {

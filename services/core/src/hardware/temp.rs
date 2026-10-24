@@ -1002,7 +1002,10 @@ impl TempSensor {
     /// programming errors to the caller.
     pub async fn discover_sensors_async(&self) -> Result<Vec<SensorId>, TempError> {
         let this = self.clone();
-        map_join_result(tokio::task::spawn_blocking(move || this.discover_sensors()).await)
+        map_join_result(
+            tokio::task::spawn_blocking(move || this.discover_sensors()).await,
+            "1-Wire sensor discovery",
+        )
     }
 
     /// Asynchronously reads a specific DS18B20 sensor on the blocking threadpool.
@@ -1019,7 +1022,10 @@ impl TempSensor {
     ) -> Result<SensorReading, TempError> {
         let this = self.clone();
         let id = sensor_id.clone();
-        map_join_result(tokio::task::spawn_blocking(move || this.read_sensor(&id)).await)
+        map_join_result(
+            tokio::task::spawn_blocking(move || this.read_sensor(&id)).await,
+            "1-Wire sensor read",
+        )
     }
 
     /// Asynchronously reads diagnostics from a DS18B20 sensor on the blocking threadpool.
@@ -1036,7 +1042,10 @@ impl TempSensor {
     ) -> Result<SensorDiagnostics, TempError> {
         let this = self.clone();
         let id = sensor_id.clone();
-        map_join_result(tokio::task::spawn_blocking(move || this.read_diagnostics(&id)).await)
+        map_join_result(
+            tokio::task::spawn_blocking(move || this.read_diagnostics(&id)).await,
+            "1-Wire diagnostics read",
+        )
     }
 
     /// Asynchronously discovers and reads all DS18B20 sensors on the blocking threadpool.
@@ -1049,7 +1058,10 @@ impl TempSensor {
     /// programming errors to the caller.
     pub async fn read_all_async(&self) -> Result<Vec<SensorReading>, TempError> {
         let this = self.clone();
-        map_join_result(tokio::task::spawn_blocking(move || this.read_all()).await)
+        map_join_result(
+            tokio::task::spawn_blocking(move || this.read_all()).await,
+            "1-Wire read-all sensors",
+        )
     }
 
     /// Asynchronously reads the primary DS18B20 sensor temperature on the blocking threadpool.
@@ -1062,7 +1074,10 @@ impl TempSensor {
     /// programming errors to the caller.
     pub async fn read_primary_temperature_async(&self) -> Result<Temperature, TempError> {
         let this = self.clone();
-        map_join_result(tokio::task::spawn_blocking(move || this.read_primary_temperature()).await)
+        map_join_result(
+            tokio::task::spawn_blocking(move || this.read_primary_temperature()).await,
+            "1-Wire primary temperature read",
+        )
     }
 }
 
@@ -1323,6 +1338,16 @@ a7 01 4b 46 7f ff 0c 10 5c
         );
         assert!(
             Temperature::from_celsius(f32::INFINITY)
+                .unwrap_err()
+                .is_out_of_range()
+        );
+        assert!(
+            Temperature::from_celsius(f32::NEG_INFINITY)
+                .unwrap_err()
+                .is_out_of_range()
+        );
+        assert!(
+            Temperature::from_celsius(f32::NAN)
                 .unwrap_err()
                 .is_out_of_range()
         );

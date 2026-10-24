@@ -13,12 +13,19 @@ use std::panic;
 /// Hardware drivers and runtime components implementing this trait allow [`map_join_result`]
 /// to convert asynchronous task cancellation events into strongly-typed domain errors while
 /// preserving worker panics.
+///
+/// # Cancellation Contract
+///
+/// Task cancellations represent expected termination events during graceful daemon shutdown
+/// and service stopping. Implementations must construct strongly-typed domain cancellation
+/// errors that callers and supervisor loops can identify via query predicates (e.g., `is_cancelled()`)
+/// to prevent treating normal shutdown as hardware or bus malfunctions.
 pub trait FromJoinError {
-    /// Constructs a domain error representing an aborted or cancelled task.
+    /// Constructs a domain error representing an aborted or cancelled task with descriptive context.
     fn from_cancelled(message: impl Into<Box<str>>) -> Self;
 }
 
-/// Maps the outcome of an asynchronous blocking task (`tokio::task::JoinError`).
+/// Maps the outcome of an asynchronous blocking task (`tokio::task::JoinError`) with diagnostic task context.
 ///
 /// # Panics
 ///
@@ -31,15 +38,16 @@ pub trait FromJoinError {
 /// cancelled by the Tokio runtime.
 pub fn map_join_result<T, E: FromJoinError>(
     res: Result<Result<T, E>, tokio::task::JoinError>,
+    task_context: &str,
 ) -> Result<T, E> {
     match res {
         Ok(result) => result,
         Err(join_err) if join_err.is_panic() => panic::resume_unwind(join_err.into_panic()),
-        Err(join_err) if join_err.is_cancelled() => {
-            Err(E::from_cancelled("asynchronous task was cancelled"))
-        }
+        Err(join_err) if join_err.is_cancelled() => Err(E::from_cancelled(format!(
+            "{task_context} task was cancelled"
+        ))),
         Err(join_err) => {
-            // In Tokio, JoinError is either panic or cancellation.
+            // In Tokio, JoinError is guaranteed to be either panic or cancellation.
             unreachable!("Tokio JoinError is guaranteed to be panic or cancelled: {join_err}");
         }
     }
@@ -48,7 +56,6 @@ pub fn map_join_result<T, E: FromJoinError>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io;
 
     #[derive(Debug, PartialEq, Eq)]
     struct DummyError(Box<str>);
@@ -59,27 +66,26 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct TestIoError(io::Error);
+    #[derive(Debug, PartialEq, Eq)]
+    enum TestDriverError {
+        Cancelled(Box<str>),
+    }
 
-    impl FromJoinError for TestIoError {
+    impl FromJoinError for TestDriverError {
         fn from_cancelled(message: impl Into<Box<str>>) -> Self {
-            Self(io::Error::new(
-                io::ErrorKind::Interrupted,
-                message.into().to_string(),
-            ))
+            Self::Cancelled(message.into())
         }
     }
 
     #[test]
     fn map_join_result_ok_and_err() {
         let ok_join: Result<Result<u32, DummyError>, tokio::task::JoinError> = Ok(Ok(42));
-        assert_eq!(map_join_result(ok_join).unwrap(), 42);
+        assert_eq!(map_join_result(ok_join, "dummy computation").unwrap(), 42);
 
         let err_join: Result<Result<u32, DummyError>, tokio::task::JoinError> =
             Ok(Err(DummyError("inner failure".into())));
         assert_eq!(
-            map_join_result(err_join).unwrap_err(),
+            map_join_result(err_join, "dummy computation").unwrap_err(),
             DummyError("inner failure".into())
         );
     }
@@ -95,69 +101,56 @@ mod tests {
         let join_res = task.await;
         assert!(join_res.as_ref().unwrap_err().is_cancelled());
 
-        let err = map_join_result(join_res).unwrap_err();
-        assert_eq!(err, DummyError("asynchronous task was cancelled".into()));
+        let err = map_join_result(join_res, "temperature polling").unwrap_err();
+        assert_eq!(
+            err,
+            DummyError("temperature polling task was cancelled".into())
+        );
     }
 
     #[tokio::test]
-    async fn map_join_result_propagates_panic() {
-        let task = tokio::spawn(async {
-            panic!("fatal worker crash in blocking pool");
-            #[expect(
-                unreachable_code,
-                reason = "code after panic is needed to satisfy return type"
-            )]
-            Ok::<u32, DummyError>(1)
-        });
+    async fn map_join_result_propagates_panic_payloads() {
+        // Table-driven verification of panic unwinding without unreachable post-panic code
+        let cases = [
+            (
+                "fatal static worker crash",
+                tokio::spawn(async {
+                    panic!("fatal static worker crash");
+                }),
+            ),
+            (
+                "formatted worker crash",
+                tokio::spawn(async {
+                    panic!("{}", "formatted worker crash");
+                }),
+            ),
+        ];
 
-        let join_res = task.await;
-        assert!(join_res.as_ref().unwrap_err().is_panic());
+        for (expected_substr, task) in cases {
+            let join_res: Result<Result<u32, DummyError>, _> = task.await.map(Ok::<_, DummyError>);
+            assert!(join_res.as_ref().unwrap_err().is_panic());
 
-        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = map_join_result(join_res);
-        }));
+            let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = map_join_result(join_res, "crash task");
+            }));
 
-        assert!(panic_result.is_err());
-        let panic_payload = panic_result.unwrap_err();
-        let msg = panic_payload
-            .downcast_ref::<&'static str>()
-            .copied()
-            .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or_default();
-        assert!(msg.contains("fatal worker crash"));
-    }
-
-    #[tokio::test]
-    async fn map_join_result_propagates_panic_string() {
-        let task = tokio::spawn(async {
-            panic!("{}", "formatted crash message");
-            #[expect(
-                unreachable_code,
-                reason = "code after panic is needed to satisfy return type"
-            )]
-            Ok::<u32, DummyError>(1)
-        });
-
-        let join_res = task.await;
-        assert!(join_res.as_ref().unwrap_err().is_panic());
-
-        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = map_join_result(join_res);
-        }));
-
-        assert!(panic_result.is_err());
-        let panic_payload = panic_result.unwrap_err();
-        let msg = panic_payload
-            .downcast_ref::<&'static str>()
-            .copied()
-            .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or_default();
-        assert!(msg.contains("formatted crash message"));
+            assert!(panic_result.is_err());
+            let panic_payload = panic_result.unwrap_err();
+            let msg = panic_payload
+                .downcast_ref::<&'static str>()
+                .copied()
+                .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or_default();
+            assert!(
+                msg.contains(expected_substr),
+                "expected panic message to contain '{expected_substr}', got '{msg}'"
+            );
+        }
     }
 
     #[test]
-    fn test_io_error_cancellation_construction() {
-        let err = TestIoError::from_cancelled("aborted");
-        assert_eq!(err.0.kind(), io::ErrorKind::Interrupted);
+    fn test_driver_error_cancellation_construction() {
+        let err = TestDriverError::from_cancelled("sensor bus abort");
+        assert_eq!(err, TestDriverError::Cancelled("sensor bus abort".into()));
     }
 }
