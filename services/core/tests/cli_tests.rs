@@ -14,9 +14,8 @@ use std::time::{Duration, Instant};
 
 /// Probes whether a compiled binary is executable in the current environment.
 ///
-/// In CI environments without cross-compilation emulation, failures panic loudly
-/// to prevent silent skips from masking test regressions. `CROSS_COMPILE` may only
-/// be set on non-native targets running without kernel `binfmt_misc` emulation.
+/// In CI environments, any execution failure panics loudly to prevent silent skips
+/// from masking test regressions or binfmt misconfigurations.
 fn can_exec_binary(bin_path: &str) -> bool {
     match Command::new(bin_path).arg("--help").output() {
         Ok(output) if output.status.success() => true,
@@ -27,7 +26,7 @@ fn can_exec_binary(bin_path: &str) -> bool {
                 output.status.code()
             );
             assert!(
-                std::env::var("CI").is_err() || std::env::var("CROSS_COMPILE").is_ok(),
+                std::env::var("CI").is_err(),
                 "CLI tests unexpectedly failed to execute binary in CI environment: {bin_path} ({stderr})"
             );
             false
@@ -37,7 +36,7 @@ fn can_exec_binary(bin_path: &str) -> bool {
                 "SKIPPED: target binary '{bin_path}' cannot execute on host architecture: {e}"
             );
             assert!(
-                std::env::var("CI").is_err() || std::env::var("CROSS_COMPILE").is_ok(),
+                std::env::var("CI").is_err(),
                 "CLI tests unexpectedly failed to execute binary in CI environment: {bin_path} ({e})"
             );
             false
@@ -90,7 +89,7 @@ fn core_main_binary_executes() {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!("core binary timed out after 5s");
+                panic!("core binary timed out after 30s");
             }
             Err(e) => panic!("failed to wait for core binary: {e}"),
         }

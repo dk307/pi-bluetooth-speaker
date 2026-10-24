@@ -18,9 +18,6 @@ use speaker_core::hardware::{
 /// Default polling interval between light measurements.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(300);
 
-/// Margin added to the typical integration time to guarantee full measurement conversion.
-const MEASUREMENT_SETTLE_MARGIN: Duration = Duration::from_millis(60);
-
 /// Formats UTC wall-clock time as `HH:MM:SS`.
 fn format_timestamp() -> String {
     let total_secs = SystemTime::now()
@@ -107,7 +104,8 @@ fn parse_hex_address(s: &str) -> Result<I2cAddress, String> {
         .unwrap_or(s);
     let addr =
         u8::from_str_radix(clean, 16).map_err(|e| format!("invalid hex address '{s}': {e}"))?;
-    I2cAddress::new(addr).map_err(|e| e.to_string())
+    I2cAddress::new(addr)
+        .map_err(|_err| format!("invalid BH1750 I2C address '{s}' (expected 0x23 or 0x5C)"))
 }
 
 fn parse_cli_args_from<I>(args: I) -> Result<Option<CliOptions>, String>
@@ -328,6 +326,7 @@ fn handle_light_iteration(
                             "timestamp": timestamp,
                             "i2c_bus": sensor.i2c_bus(),
                             "i2c_address": sensor.i2c_address().to_string(),
+                            "mode": opts.mode.to_string(),
                             "error": err.to_string(),
                         })
                     );
@@ -349,13 +348,6 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
         }
         return ExitCode::FAILURE;
     }
-
-    // Allow sensor integration time to produce first valid measurement for the chosen mode
-    thread::sleep(
-        opts.mode
-            .typical_measurement_time()
-            .saturating_add(MEASUREMENT_SETTLE_MARGIN),
-    );
 
     if opts.format == OutputFormat::Human {
         print_header(sensor);
@@ -483,8 +475,13 @@ mod tests {
         assert_eq!(parse_hex_address("0x23").unwrap().as_u8(), 0x23);
         assert_eq!(parse_hex_address("0X5C").unwrap().as_u8(), 0x5C);
         assert_eq!(parse_hex_address("23").unwrap().as_u8(), 0x23);
-        let _ = parse_hex_address("0x77").unwrap_err();
-        let _ = parse_hex_address("not-hex").unwrap_err();
+        let err = parse_hex_address("0x77").unwrap_err();
+        assert_eq!(
+            err,
+            "invalid BH1750 I2C address '0x77' (expected 0x23 or 0x5C)"
+        );
+        let err_not_hex = parse_hex_address("not-hex").unwrap_err();
+        assert!(err_not_hex.contains("invalid hex address"));
     }
 
     #[test]

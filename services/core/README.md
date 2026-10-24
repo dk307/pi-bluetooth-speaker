@@ -28,8 +28,9 @@ services/core/
 ├── AGENTS.md           # Agent instructions & guidelines
 ├── build.rs            # Slint ahead-of-time (AOT) UI compiler
 ├── src/
-│   ├── lib.rs          # Core library root (hardware drivers, mocks, domain types)
+│   ├── lib.rs          # Core library root (hardware drivers, mocks, domain types, task runtime)
 │   ├── main.rs         # Core daemon entrypoint, Tokio runtime, and event dispatch
+│   ├── runtime.rs      # Asynchronous task join helpers & panic propagation
 │   ├── bin/
 │   │   ├── read_light.rs   # BH1750 I2C ambient light diagnostic utility
 │   │   └── read_temp.rs    # DS18B20 1-Wire temperature diagnostic utility

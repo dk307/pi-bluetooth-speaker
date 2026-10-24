@@ -21,7 +21,7 @@ use std::backtrace::{Backtrace, BacktraceStatus};
 use std::fmt::{self, Display, Formatter};
 use std::io;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rppal::i2c::I2c;
 
@@ -355,7 +355,7 @@ pub struct I2cHardwareInfo {
     /// I2C slave device address.
     pub address: I2cAddress,
     /// Kernel device path.
-    pub device_path: &'static str,
+    pub device_path: Box<str>,
     /// SDA data line GPIO descriptor.
     pub sda_pin: GpioPinInfo,
     /// SCL clock line GPIO descriptor.
@@ -381,10 +381,7 @@ impl I2cHardwareInfo {
         const SCL_BCM: BcmPin = BcmPin::new(3);
         const SCL_PHYS: PhysicalPin = PhysicalPin::new(5);
 
-        let device_path = match bus {
-            1 => "/dev/i2c-1",
-            _ => "/dev/i2c-dev",
-        };
+        let device_path = format!("/dev/i2c-{bus}").into_boxed_str();
 
         Self {
             bus,
@@ -737,6 +734,7 @@ enum Backend {
         address: I2cAddress,
         mode: Mutex<MeasurementMode>,
         op_lock: Mutex<()>,
+        last_transition: Mutex<Instant>,
     },
     Mock(LightSensorMock),
 }
@@ -774,14 +772,12 @@ impl LightSensor {
     /// # Errors
     /// Returns [`LightError`] if the I2C bus cannot be opened.
     pub fn with_bus_and_address(bus: u8, address: I2cAddress) -> Result<Self, LightError> {
-        let mut i2c = I2c::with_bus(bus).map_err(LightError::from)?;
-        i2c.set_slave_address(address.as_u16())
-            .map_err(LightError::from)?;
+        let mut i2c = I2c::with_bus(bus)?;
+        i2c.set_slave_address(address.as_u16())?;
 
         // Power on sensor and enter continuous high-res mode
-        i2c.write(&[CMD_POWER_ON]).map_err(LightError::from)?;
-        i2c.write(&[CMD_CONTINUOUS_H_RES])
-            .map_err(LightError::from)?;
+        i2c.write(&[CMD_POWER_ON])?;
+        i2c.write(&[CMD_CONTINUOUS_H_RES])?;
 
         Ok(Self {
             inner: Arc::new(Backend::Hardware {
@@ -790,6 +786,7 @@ impl LightSensor {
                 address,
                 mode: Mutex::new(MeasurementMode::ContinuousHighRes),
                 op_lock: Mutex::new(()),
+                last_transition: Mutex::new(Instant::now()),
             }),
         })
     }
@@ -843,7 +840,7 @@ impl LightSensor {
             Backend::Hardware { i2c, op_lock, .. } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
-                guard.write(&[CMD_POWER_DOWN]).map_err(LightError::from)?;
+                guard.write(&[CMD_POWER_DOWN])?;
                 Ok(())
             }
             Backend::Mock(mock) => mock.power_down(),
@@ -859,11 +856,18 @@ impl LightSensor {
     /// Panics if an internal mutex lock is poisoned.
     pub fn reset(&self) -> Result<(), LightError> {
         match self.inner.as_ref() {
-            Backend::Hardware { i2c, op_lock, .. } => {
+            Backend::Hardware {
+                i2c,
+                op_lock,
+                last_transition,
+                ..
+            } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
-                guard.write(&[CMD_POWER_ON]).map_err(LightError::from)?;
-                guard.write(&[CMD_RESET]).map_err(LightError::from)?;
+                guard.write(&[CMD_POWER_ON])?;
+                guard.write(&[CMD_RESET])?;
+                let mut trans_guard = last_transition.lock().expect("transition lock poisoned");
+                *trans_guard = Instant::now();
                 Ok(())
             }
             Backend::Mock(mock) => mock.reset(),
@@ -880,16 +884,20 @@ impl LightSensor {
     pub fn set_mode(&self, new_mode: MeasurementMode) -> Result<(), LightError> {
         match self.inner.as_ref() {
             Backend::Hardware {
-                i2c, mode, op_lock, ..
+                i2c,
+                mode,
+                op_lock,
+                last_transition,
+                ..
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
-                guard.write(&[CMD_POWER_ON]).map_err(LightError::from)?;
-                guard
-                    .write(&[new_mode.opcode()])
-                    .map_err(LightError::from)?;
+                guard.write(&[CMD_POWER_ON])?;
+                guard.write(&[new_mode.opcode()])?;
                 let mut cur_mode = mode.lock().expect("mode lock poisoned");
                 *cur_mode = new_mode;
+                let mut trans_guard = last_transition.lock().expect("transition lock poisoned");
+                *trans_guard = Instant::now();
                 Ok(())
             }
             Backend::Mock(mock) => mock.set_mode(new_mode),
@@ -899,23 +907,33 @@ impl LightSensor {
     fn read_raw_word(&self) -> Result<(u16, MeasurementMode), LightError> {
         match self.inner.as_ref() {
             Backend::Hardware {
-                i2c, mode, op_lock, ..
+                i2c,
+                mode,
+                op_lock,
+                last_transition,
+                ..
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
                 let cur_mode = *mode.lock().expect("mode lock poisoned");
-                if !cur_mode.is_continuous() {
+                if cur_mode.is_continuous() {
+                    let elapsed = last_transition
+                        .lock()
+                        .expect("transition lock poisoned")
+                        .elapsed();
+                    if let Some(remaining) = cur_mode.max_measurement_time().checked_sub(elapsed) {
+                        std::thread::sleep(remaining);
+                    }
+                } else {
                     // Send one-shot trigger opcode, then release the mutex during conversion sleep
                     {
                         let mut guard = i2c.lock().expect("I2C lock poisoned");
-                        guard
-                            .write(&[cur_mode.opcode()])
-                            .map_err(LightError::from)?;
+                        guard.write(&[cur_mode.opcode()])?;
                     };
                     std::thread::sleep(cur_mode.max_measurement_time());
                 }
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
                 let mut buf = [0u8; 2];
-                guard.read(&mut buf).map_err(LightError::from)?;
+                guard.read(&mut buf)?;
                 let raw = (u16::from(buf[0]) << 8) | u16::from(buf[1]);
                 Ok((raw, cur_mode))
             }
@@ -1242,15 +1260,16 @@ mod tests {
         let hw = sensor.hardware_info();
         assert_eq!(hw.bus, 1);
         assert_eq!(hw.address.as_u8(), 0x23);
-        assert_eq!(hw.device_path, "/dev/i2c-1");
+        assert_eq!(hw.device_path.as_ref(), "/dev/i2c-1");
         assert_eq!(hw.vcc_pin, "3.3V Power (Physical Pin 1)");
         assert_eq!(hw.gnd_pin, "Ground (Physical Pin 9)");
         assert_eq!(hw.sda_pin.signal_name, "I2C-1 Data (SDA)");
         assert_eq!(hw.scl_pin.signal_name, "I2C-1 Clock (SCL)");
 
-        let hw_bus2 = I2cHardwareInfo::rpi3_with_bus_and_address(2, I2cAddress::alternate_address());
+        let hw_bus2 =
+            I2cHardwareInfo::rpi3_with_bus_and_address(2, I2cAddress::alternate_address());
         assert_eq!(hw_bus2.bus, 2);
-        assert_eq!(hw_bus2.device_path, "/dev/i2c-dev");
+        assert_eq!(hw_bus2.device_path.as_ref(), "/dev/i2c-2");
         assert_eq!(hw_bus2.address.as_u8(), 0x5C);
     }
 

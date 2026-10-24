@@ -63,4 +63,9 @@ To eliminate repetitive code review churn across sessions, AI agents working in 
   * **Layered Bus Locking on Shared Clones:** Peripheral drivers supporting concurrent clones must serialize all bus transactions (including `power_down` and `reset`) behind transaction mutexes (`op_lock`) to prevent bus interleaving during multi-step measurement conversions.
   * **Fail-Loud CI Action Scripting:** CI scripts injecting runtime shims or patching actions must verify that patches were successfully applied and exit non-zero immediately on missing targets.
   * **Compile-Time Hardware Pin Initializers:** Use `const` initializers (`BcmPin::new(...)`, `PhysicalPin::new(...)`) for fixed platform pinouts to eliminate runtime panic paths from production metadata structures.
+  * **Hardware Settle-Time Contract & Transition Tracking:** Hardware sensor drivers must track mode transitions (`last_transition: Mutex<Instant>`) and guarantee settle/integration times before returning conversion results, rather than relying on application or CLI layers to guess or sleep.
+  * **Datasheet Conversion Time Bounds:** Always use the datasheet maximum conversion/integration time rather than typical integration times when waiting on one-shot or continuous conversions to prevent races against slower silicon.
+  * **Clean Error Propagation with `?`:** When domain error types implement `From<ForeignError>`, always leverage the `?` operator directly instead of verbose `.map_err(DomainError::from)`.
+  * **Soften User-Facing Input Errors:** Differentiate programmer backtraces from end-user CLI argument validation errors; input rejections should return clean, concise messages without stack backtraces.
+  * **Dynamic Bus Device Paths via Box<str>:** Use heap-allocated `Box<str>` for dynamic system paths (such as `/dev/i2c-{bus}`) rather than rigid `match` arms returning `&'static str`.
 

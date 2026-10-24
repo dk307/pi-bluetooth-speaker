@@ -17,7 +17,7 @@ from pathlib import Path
 
 # Prompt file output path at repo root
 PROMPT_OUTPUT_FILENAME = "review_prompt.txt"
-FENCE_RE = re.compile(r"^\s*(```|~~~)")
+FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 
 
 def load_file(path: Path) -> str:
@@ -40,7 +40,7 @@ def split_top_level_sections(md: str) -> list[str]:
             fence_chars = m.group(1)
             if current_fence is None:
                 current_fence = fence_chars
-            elif current_fence == fence_chars:
+            elif fence_chars[0] == current_fence[0] and len(fence_chars) >= len(current_fence):
                 current_fence = None
             current_section.append(line)
             continue
@@ -72,7 +72,7 @@ def strip_decorations_outside_fences(md: str) -> str:
             marker = m.group(1)
             if current_fence is None:
                 current_fence = marker
-            elif current_fence == marker:
+            elif marker[0] == current_fence[0] and len(marker) >= len(current_fence):
                 current_fence = None
             out.append(line)
         elif current_fence is not None:

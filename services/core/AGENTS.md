@@ -83,6 +83,17 @@ Before designing types, writing modules, implementing error handling, or writing
      * Any hardware driver allowing cloneable handles must acquire transaction serialization locks (`op_lock`) for all bus state mutations (`power_down`, `reset`, `set_mode`, `read_raw_word`) to prevent command collisions across concurrent tasks.
    * **Compile-Time Pin Initializers:**
      * Use `const` initializers (`BcmPin::new(2)`, `PhysicalPin::new(3)`) for static hardware pin mappings rather than runtime fallible calls (`from_u8(...).expect(...)`).
+   * **Hardware Settle-Time Contract & Transition Tracking:**
+     * Hardware sensor drivers must track mode transitions and guarantee settle/integration times before returning conversion results, rather than relying on application or CLI layers to guess or sleep.
+     * When transitioning sensor state (such as continuous mode start or sensor reset), track `last_transition: Mutex<Instant>` under the bus transaction lock (`op_lock`) and delay in `read_raw_word` if `elapsed < max_measurement_time()`.
+   * **Datasheet Conversion Time Bounds:**
+     * Always use the datasheet maximum conversion/integration time (e.g. 180 ms for BH1750 H-Res, 24 ms for Low-Res) rather than typical integration times when waiting on one-shot or continuous initial conversions to prevent races against slower silicon.
+   * **Clean Error Propagation with `?`:**
+     * When canonical domain error types implement `From<ForeignError>` (e.g., `From<rppal::i2c::Error> for LightError`), always leverage the `?` operator directly instead of writing verbose `.map_err(DomainError::from)`.
+   * **Soften User-Facing Input Errors:**
+     * Differentiate programmer backtraces from end-user CLI argument validation errors. User-facing CLI input rejections should return clean, concise messages without stack backtraces.
+   * **Dynamic Bus Device Paths via Box<str>:**
+     * Use heap-allocated `Box<str>` for dynamic system paths (such as `/dev/i2c-{bus}`) rather than rigid `match` arms returning `&'static str`.
 
 ---
 
