@@ -15,9 +15,8 @@ import os
 import re
 from pathlib import Path
 
-# Linux kernel MAX_ARG_STRLEN limit is 128 KB (131,072 bytes).
-# We enforce a safe upper threshold of 120 KB (122,880 bytes).
-MAX_PROMPT_BYTES = 122880
+# Prompt file output path at repo root
+PROMPT_OUTPUT_FILENAME = "review_prompt.txt"
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
 
@@ -127,12 +126,6 @@ Perform a rigorous, constructive, and actionable engineering review adhering str
         f"Generated review prompt size: {byte_len} bytes ({byte_len / 1024:.2f} KB) across {len(kept_sections)} guideline sections"
     )
 
-    if byte_len > MAX_PROMPT_BYTES:
-        raise ValueError(
-            f"Review prompt size ({byte_len} bytes) exceeds maximum allowed limit "
-            f"({MAX_PROMPT_BYTES} bytes) to satisfy Linux MAX_ARG_STRLEN."
-        )
-
     return prompt
 
 
@@ -143,12 +136,16 @@ def main() -> None:
 
     prompt = build_review_prompt(repo_root)
 
+    # Save to external file at repo root so action can read it directly without environment limits
+    prompt_file = repo_root / PROMPT_OUTPUT_FILENAME
+    prompt_file.write_text(prompt, encoding="utf-8")
+    print(f"Successfully saved full review prompt to file: {prompt_file}")
+
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
-        delimiter = f"PR_REVIEW_PROMPT_EOF_{os.urandom(8).hex()}"
         with open(github_output, "a", encoding="utf-8") as out:
-            out.write(f"prompt<<{delimiter}\n{prompt}\n{delimiter}\n")
-        print("Successfully exported 'prompt' to GITHUB_OUTPUT.")
+            out.write(f"prompt_file={prompt_file.resolve()}\n")
+        print("Successfully exported 'prompt_file' to GITHUB_OUTPUT.")
     else:
         print("GITHUB_OUTPUT environment variable not set (running locally).")
 
