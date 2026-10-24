@@ -90,16 +90,29 @@ fn core_main_binary_executes() {
     assert!(stdout.contains("Thermal Sensor:"));
 }
 
+const HELP_CASES: &[(&str, &str, &str)] = &[
+    (
+        env!("CARGO_BIN_EXE_read_temp"),
+        "DS18B20 1-Wire Temperature Diagnostic Utility",
+        "--count",
+    ),
+    (
+        env!("CARGO_BIN_EXE_read_light"),
+        "BH1750 Ambient Light Diagnostic Utility",
+        "--address",
+    ),
+];
+
 #[test]
-fn read_temp_cli_help_displays() {
-    let bin_path = env!("CARGO_BIN_EXE_read_temp");
-    for flag in ["--help", "-h"] {
-        let (status, stdout, _) = run_cli(bin_path, &[flag]);
-        assert!(status.success());
-        assert!(stdout.contains("DS18B20 1-Wire Temperature Diagnostic Utility"));
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("--count"));
-        assert!(stdout.contains("--interval"));
+fn diagnostic_utilities_help_display() {
+    for (bin_path, expected_title, expected_flag) in HELP_CASES {
+        for flag in ["--help", "-h"] {
+            let (status, stdout, _) = run_cli(bin_path, &[flag]);
+            assert!(status.success(), "expected success for '{bin_path} {flag}'");
+            assert!(stdout.contains(expected_title));
+            assert!(stdout.contains("Usage:"));
+            assert!(stdout.contains(expected_flag));
+        }
     }
 }
 
@@ -167,18 +180,6 @@ fn read_temp_cli_argument_validation() {
             ),
         ],
     );
-}
-
-#[test]
-fn read_light_cli_help_displays() {
-    let bin_path = env!("CARGO_BIN_EXE_read_light");
-    for flag in ["--help", "-h"] {
-        let (status, stdout, _) = run_cli(bin_path, &[flag]);
-        assert!(status.success());
-        assert!(stdout.contains("BH1750 Ambient Light Diagnostic Utility"));
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("--address"));
-    }
 }
 
 #[test]

@@ -4,7 +4,9 @@
 Requires Python >= 3.10.
 """
 
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 import os
 import subprocess
 import sys
@@ -16,6 +18,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import generate_review_prompt as grp  # noqa: E402
 import patch_diffguard as pdg  # noqa: E402
+
+
+@contextmanager
+def prompt_file_artifact() -> Iterator[Path]:
+    repo_root = Path(__file__).resolve().parents[2]
+    prompt_path = repo_root / grp.PROMPT_OUTPUT_FILENAME
+    prompt_path.unlink(missing_ok=True)
+    try:
+        yield prompt_path
+    finally:
+        prompt_path.unlink(missing_ok=True)
 
 
 class TestGenerateReviewPrompt(unittest.TestCase):
@@ -91,10 +104,7 @@ class TestGenerateReviewPrompt(unittest.TestCase):
                 grp.build_review_prompt(repo_root)
 
     def test_generate_review_prompt_main_github_output(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
-        prompt_path = repo_root / grp.PROMPT_OUTPUT_FILENAME
-        prompt_path.unlink(missing_ok=True)
-        try:
+        with prompt_file_artifact() as prompt_path:
             with tempfile.TemporaryDirectory() as tmp:
                 output_file = Path(tmp) / "github_output.txt"
                 with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output_file)}):
@@ -103,22 +113,16 @@ class TestGenerateReviewPrompt(unittest.TestCase):
                     content = output_file.read_text(encoding="utf-8")
                     self.assertIn("prompt_file=", content)
                     out_path = Path(content.strip().split("=", 1)[1])
+                    self.assertEqual(out_path, prompt_path)
                     self.assertTrue(out_path.is_file())
                     self.assertGreater(out_path.stat().st_size, 0)
-        finally:
-            prompt_path.unlink(missing_ok=True)
 
     def test_generate_review_prompt_main_without_github_output(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
-        prompt_path = repo_root / grp.PROMPT_OUTPUT_FILENAME
-        prompt_path.unlink(missing_ok=True)
-        try:
+        with prompt_file_artifact() as prompt_path:
             with patch.dict(os.environ, {}, clear=True):
                 grp.main()
                 self.assertTrue(prompt_path.is_file())
                 self.assertGreater(prompt_path.stat().st_size, 0)
-        finally:
-            prompt_path.unlink(missing_ok=True)
 
 
 class TestPatchDiffguard(unittest.TestCase):

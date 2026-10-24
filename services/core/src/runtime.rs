@@ -111,6 +111,18 @@ mod tests {
         }
     }
 
+    type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
+
+    struct PanicHookGuard(Option<PanicHook>);
+
+    impl Drop for PanicHookGuard {
+        fn drop(&mut self) {
+            if let Some(h) = self.0.take() {
+                std::panic::set_hook(h);
+            }
+        }
+    }
+
     #[test]
     fn map_join_result_ok_and_err() {
         let ok_join: Result<Result<u32, DummyError>, tokio::task::JoinError> = Ok(Ok(42));
@@ -135,6 +147,9 @@ mod tests {
 
     #[tokio::test]
     async fn map_join_result_propagates_panic_payloads() {
+        let _hook_guard = PanicHookGuard(Some(std::panic::take_hook()));
+        std::panic::set_hook(Box::new(|_| {}));
+
         // Table-driven verification of panic unwinding without unreachable post-panic code
         let cases = [
             (
@@ -151,9 +166,6 @@ mod tests {
             ),
         ];
 
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-
         for (expected_substr, task) in cases {
             let join_res: Result<Result<(), DummyError>, _> = task.await.map(Ok::<(), DummyError>);
             assert!(join_res.as_ref().unwrap_err().is_panic());
@@ -164,20 +176,17 @@ mod tests {
 
             assert!(panic_result.is_err());
             let panic_payload = panic_result.unwrap_err();
-            let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
-                (*s).to_string()
-            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                panic!("unexpected panic payload type");
-            };
+            let msg = panic_payload
+                .downcast_ref::<&'static str>()
+                .copied()
+                .map(str::to_owned)
+                .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| panic!("unexpected panic payload type"));
             assert!(
                 msg.contains(expected_substr),
                 "expected panic message to contain '{expected_substr}', got '{msg}'"
             );
         }
-
-        std::panic::set_hook(prev_hook);
     }
 
     #[test]

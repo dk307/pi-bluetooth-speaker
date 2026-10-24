@@ -293,10 +293,7 @@ pub struct I2cHardwareInfo {
 }
 
 /// Validates that `bus` corresponds to the Raspberry Pi 3 BSC1 controller (I2C-1).
-///
-/// # Errors
-/// Returns [`LightError`] if `bus` is not [`BH1750_DEFAULT_I2C_BUS`] (`1`).
-pub fn validate_rpi3_bus(bus: u8) -> Result<(), LightError> {
+pub(crate) fn validate_rpi3_bus(bus: u8) -> Result<(), LightError> {
     if bus != BH1750_DEFAULT_I2C_BUS {
         return Err(LightError::i2c(format!(
             "unsupported I2C bus {bus}: hardware driver models Raspberry Pi 3 BSC1 (i2c-{BH1750_DEFAULT_I2C_BUS}) only"
@@ -312,7 +309,7 @@ impl I2cHardwareInfo {
         Self::rpi3_with_bus_and_address(BH1750_DEFAULT_I2C_BUS, address)
     }
 
-    /// Returns the Raspberry Pi 3 pinout for the specified I2C bus and address, or an error if unsupported.
+    /// Returns Raspberry Pi 3 I2C pinout metadata for `bus` and `address`.
     ///
     /// # Errors
     /// Returns [`LightError`] if `bus` is not [`BH1750_DEFAULT_I2C_BUS`] (`1`).
@@ -358,7 +355,11 @@ impl I2cHardwareInfo {
     /// metadata corresponds strictly to Broadcom BSC1 controller pins (SDA BCM 2 / SCL BCM 3).
     #[must_use]
     pub fn rpi3_with_bus_and_address(bus: u8, address: I2cAddress) -> Self {
-        Self::try_rpi3_with_bus_and_address(bus, address).expect("unsupported I2C bus")
+        Self::try_rpi3_with_bus_and_address(bus, address).unwrap_or_else(|e| {
+            panic!(
+                "GPIO metadata models Raspberry Pi 3 BSC1 (i2c-{BH1750_DEFAULT_I2C_BUS}) only, got bus {bus}: {e}"
+            )
+        })
     }
 }
 
@@ -1200,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unsupported I2C bus")]
+    #[should_panic(expected = "GPIO metadata models Raspberry Pi 3 BSC1")]
     fn rpi3_hardware_info_panics_on_non_default_bus() {
         let _ = I2cHardwareInfo::rpi3_with_bus_and_address(2, I2cAddress::default());
     }
