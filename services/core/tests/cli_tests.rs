@@ -76,16 +76,6 @@ fn run_cli(bin: &str, args: &[&str]) -> (ExitStatus, String, String) {
     run_cli_with_timeout(bin, args, CLI_PROBE_TIMEOUT)
 }
 
-/// Probes whether a compiled binary is executable via `--help`, panicking if `--help` fails.
-fn probe_help(bin_path: &str) -> (ExitStatus, String, String) {
-    let (status, stdout, stderr) = run_cli(bin_path, &["--help"]);
-    assert!(
-        status.success(),
-        "binary '{bin_path}' --help exited {status:?}: {stderr}"
-    );
-    (status, stdout, stderr)
-}
-
 #[test]
 fn core_main_binary_executes() {
     // Note: core binary currently executes an initial diagnostic banner and exits.
@@ -103,15 +93,14 @@ fn core_main_binary_executes() {
 #[test]
 fn read_temp_cli_help_displays() {
     let bin_path = env!("CARGO_BIN_EXE_read_temp");
-    let (status, stdout, _) = probe_help(bin_path);
-    assert!(status.success());
-    assert!(stdout.contains("DS18B20 1-Wire Temperature Diagnostic Utility"));
-    assert!(stdout.contains("Usage:"));
-    assert!(stdout.contains("--count"));
-    assert!(stdout.contains("--interval"));
-
-    let (short_status, _, _) = run_cli(bin_path, &["-h"]);
-    assert!(short_status.success());
+    for flag in ["--help", "-h"] {
+        let (status, stdout, _) = run_cli(bin_path, &[flag]);
+        assert!(status.success());
+        assert!(stdout.contains("DS18B20 1-Wire Temperature Diagnostic Utility"));
+        assert!(stdout.contains("Usage:"));
+        assert!(stdout.contains("--count"));
+        assert!(stdout.contains("--interval"));
+    }
 }
 
 /// Shared invalid CLI flag cases common to all `read_*` diagnostic utilities.
@@ -119,6 +108,7 @@ const COMMON_INVALID_ARGS: &[(&[&str], &str)] = &[
     (&["--invalid-flag"], "unknown option '--invalid-flag'"),
     (&["--count"], "missing value for --count"),
     (&["--count", "not-a-number"], "invalid count 'not-a-number'"),
+    (&["--count", "-1"], "invalid count '-1'"),
     (&["--count", "0"], "--count must be at least 1"),
     (
         &["--count", "9999999999999999999999999999999999999999"],
@@ -132,6 +122,10 @@ const COMMON_INVALID_ARGS: &[(&[&str], &str)] = &[
     (&["--interval", "invalid"], "invalid interval 'invalid'"),
     (
         &["--interval", "-1.0"],
+        "interval must be a finite value greater than 0",
+    ),
+    (
+        &["--interval", "1e-400"],
         "interval must be a finite value greater than 0",
     ),
     (
@@ -178,14 +172,13 @@ fn read_temp_cli_argument_validation() {
 #[test]
 fn read_light_cli_help_displays() {
     let bin_path = env!("CARGO_BIN_EXE_read_light");
-    let (status, stdout, _) = probe_help(bin_path);
-    assert!(status.success());
-    assert!(stdout.contains("BH1750 Ambient Light Diagnostic Utility"));
-    assert!(stdout.contains("Usage:"));
-    assert!(stdout.contains("--address"));
-
-    let (short_status, _, _) = run_cli(bin_path, &["-h"]);
-    assert!(short_status.success());
+    for flag in ["--help", "-h"] {
+        let (status, stdout, _) = run_cli(bin_path, &[flag]);
+        assert!(status.success());
+        assert!(stdout.contains("BH1750 Ambient Light Diagnostic Utility"));
+        assert!(stdout.contains("Usage:"));
+        assert!(stdout.contains("--address"));
+    }
 }
 
 #[test]

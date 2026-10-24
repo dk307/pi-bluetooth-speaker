@@ -324,6 +324,16 @@ impl NumericStats {
         (self.successful_reads > 0).then(|| self.sum / self.successful_reads as f64)
     }
 
+    /// Returns the arithmetic mean of all successful samples as `f32`, if any read succeeded.
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "sensor sample domain is f32; average fits in f32"
+    )]
+    pub fn average_f32(&self) -> Option<f32> {
+        self.average().map(|avg| avg as f32)
+    }
+
     /// Returns the session error percentage `(errors() / total_reads) * 100.0`, or `0.0` if `total_reads == 0`.
     #[must_use]
     pub fn error_rate_percent(&self) -> f32 {
@@ -341,6 +351,40 @@ impl NumericStats {
             0.0
         } else {
             (count as f32 / self.total_reads as f32) * 100.0
+        }
+    }
+}
+
+/// Secondary unit converter function and unit label (e.g. `(foot_candles, "fc")`).
+pub type SecondaryUnit = (fn(f32) -> f32, &'static str);
+
+/// Prints min, max, and average bounds for a numeric sample set.
+///
+/// If a secondary conversion function and unit are provided, prints secondary values in parentheses.
+pub fn print_min_max_avg(
+    stats: &NumericStats,
+    label: &str,
+    unit: &str,
+    to_secondary: Option<SecondaryUnit>,
+) {
+    if let (Some(min), Some(max), Some(avg)) = (stats.min(), stats.max(), stats.average_f32()) {
+        if let Some((conv, sec_unit)) = to_secondary {
+            println!(
+                "{label} Min : {min:.2} {unit} ({:.2} {sec_unit})",
+                conv(min)
+            );
+            println!(
+                "{label} Max : {max:.2} {unit} ({:.2} {sec_unit})",
+                conv(max)
+            );
+            println!(
+                "{label} Avg : {avg:.2} {unit} ({:.2} {sec_unit})",
+                conv(avg)
+            );
+        } else {
+            println!("{label} Min : {min:.2} {unit}");
+            println!("{label} Max : {max:.2} {unit}");
+            println!("{label} Avg : {avg:.2} {unit}");
         }
     }
 }
@@ -492,8 +536,15 @@ mod tests {
         assert_eq!(stats.min(), Some(10.0));
         assert_eq!(stats.max(), Some(30.0));
         assert!((stats.average().unwrap() - 20.0).abs() < 1e-6);
+        assert!((stats.average_f32().unwrap() - 20.0).abs() < 1e-6);
         assert!((stats.error_rate_percent() - (100.0 / 3.0)).abs() < 1e-4);
         assert!((stats.fraction_of_reads_percent(1) - (100.0 / 3.0)).abs() < 1e-4);
+
+        print_min_max_avg(&stats, "Test", "lx", Some((foot_candles, "fc")));
+        print_min_max_avg(&stats, "Test", "°C", None);
+        let empty_stats = NumericStats::default();
+        assert_eq!(empty_stats.average_f32(), None);
+        print_min_max_avg(&empty_stats, "Test", "lx", None);
 
         assert!((fahrenheit(0.0) - 32.0).abs() < 1e-5);
         assert!((fahrenheit(100.0) - 212.0).abs() < 1e-4);

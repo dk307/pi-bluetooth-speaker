@@ -151,6 +151,9 @@ mod tests {
             ),
         ];
 
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
         for (expected_substr, task) in cases {
             let join_res: Result<Result<(), DummyError>, _> = task.await.map(Ok::<(), DummyError>);
             assert!(join_res.as_ref().unwrap_err().is_panic());
@@ -161,16 +164,20 @@ mod tests {
 
             assert!(panic_result.is_err());
             let panic_payload = panic_result.unwrap_err();
-            let msg = panic_payload
-                .downcast_ref::<&'static str>()
-                .copied()
-                .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or_default();
+            let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                panic!("unexpected panic payload type");
+            };
             assert!(
                 msg.contains(expected_substr),
                 "expected panic message to contain '{expected_substr}', got '{msg}'"
             );
         }
+
+        std::panic::set_hook(prev_hook);
     }
 
     #[test]

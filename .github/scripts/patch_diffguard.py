@@ -6,6 +6,13 @@ Requires Python >= 3.10.
 Bypasses the Linux MAX_ARG_STRLEN (128 KB) environment variable limit by patching
 DiffGuard's runner bundle (dist/index.js) to read custom_prompt directly from disk
 when custom_prompt points to an existing file path.
+
+Runner Lifecycle Invariant:
+The GitHub Actions runner pre-downloads and extracts all actions declared via `uses:`
+(including jonit-dev/diffguard@88f63615c769f8db6031973503c2c40a9a3f4feb) into the runner
+workspace (`../_actions/` or `_work/_actions/`) during the job initialization phase
+("Set up job"), guaranteeing the action bundle is already present on disk before this
+patching step runs.
 """
 
 import glob

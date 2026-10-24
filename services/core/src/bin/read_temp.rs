@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use speaker_core::diag::{
     CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads, fahrenheit,
-    format_timestamp, next_arg_value, parse_args_with_common, resolve_cli_opts, run_poll_loop,
-    should_print_summary,
+    format_timestamp, next_arg_value, parse_args_with_common, print_min_max_avg, resolve_cli_opts,
+    run_poll_loop, should_print_summary,
 };
 use speaker_core::hardware::{
     SensorDiagnostics, SensorId, SocThermal, TempError, TempSensor, Temperature,
@@ -165,11 +165,7 @@ fn print_session_summary(stats: &Statistics) {
             s.fraction_of_reads_percent(stats.other_errors)
         );
     }
-    if let (Some(min_c), Some(max_c), Some(avg)) = (s.min(), s.max(), s.average()) {
-        println!("Chassis Min : {min_c:.2}°C ({:.2}°F)", fahrenheit(min_c));
-        println!("Chassis Max : {max_c:.2}°C ({:.2}°F)", fahrenheit(max_c));
-        println!("Chassis Avg : {avg:.2}°C");
-    }
+    print_min_max_avg(s, "Chassis", "°C", Some((fahrenheit, "°F")));
 }
 
 fn output_json_reading(
