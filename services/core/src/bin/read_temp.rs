@@ -11,38 +11,28 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use speaker_core::diag::{
-    NumericStats, OutputFormat, env_args, exit_code_for_reads, fahrenheit, format_timestamp,
-    next_arg_value, parse_count_arg, parse_interval_arg, resolve_cli_opts, should_print_summary,
+    CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads, fahrenheit,
+    format_timestamp, next_arg_value, resolve_cli_opts, should_print_summary,
 };
 use speaker_core::hardware::{
     SensorDiagnostics, SensorId, SocThermal, TempError, TempSensor, Temperature,
 };
 
-/// Flags controlling optional diagnostic telemetry fields.
-#[derive(Debug, Clone, Copy, Default)]
-struct DiagnosticFlags {
-    verbose: bool,
-    include_soc: bool,
-    show_raw: bool,
-}
-
 /// Command-line configuration parameters.
 #[derive(Debug, Clone)]
 struct CliOptions {
-    max_count: Option<usize>,
-    interval: Duration,
-    format: OutputFormat,
-    flags: DiagnosticFlags,
+    common: CommonCliOptions,
+    include_soc: bool,
+    show_raw: bool,
     target_sensor: Option<SensorId>,
 }
 
 impl Default for CliOptions {
     fn default() -> Self {
         Self {
-            max_count: None,
-            interval: Duration::from_secs(1),
-            format: OutputFormat::Human,
-            flags: DiagnosticFlags::default(),
+            common: CommonCliOptions::with_default_interval(Duration::from_secs(1)),
+            include_soc: false,
+            show_raw: false,
             target_sensor: None,
         }
     }
@@ -82,15 +72,14 @@ where
     let mut opts = CliOptions::default();
 
     while let Some(arg) = args.next() {
+        match opts.common.parse_common_flag(&arg, &mut args)? {
+            None => return Ok(None),
+            Some(true) => continue,
+            Some(false) => {}
+        }
         match arg.as_str() {
-            "-h" | "--help" => return Ok(None),
-            "-1" | "--once" => opts.max_count = Some(1),
-            "-v" | "--verbose" => opts.flags.verbose = true,
-            "-s" | "--soc" => opts.flags.include_soc = true,
-            "-r" | "--raw" => opts.flags.show_raw = true,
-            "-j" | "--json" => opts.format = OutputFormat::Json,
-            "-n" | "--count" => opts.max_count = Some(parse_count_arg(args.next())?),
-            "-i" | "--interval" => opts.interval = parse_interval_arg(args.next())?,
+            "-s" | "--soc" => opts.include_soc = true,
+            "-r" | "--raw" => opts.show_raw = true,
             "-d" | "--device" => {
                 let val = next_arg_value(&mut args, "--device")?;
                 opts.target_sensor = Some(SensorId::parse_str(&val)?);
@@ -208,13 +197,13 @@ fn output_json_reading(
     );
 }
 
-fn output_json_error(timestamp: &str, sensor_id: Option<&SensorId>, err: impl std::fmt::Display) {
+fn output_json_error(timestamp: &str, sensor_id: Option<&SensorId>, err_msg: &str) {
     println!(
         "{}",
         serde_json::json!({
             "timestamp": timestamp,
             "sensor_id": sensor_id.map(SensorId::as_str),
-            "error": err.to_string(),
+            "error": err_msg,
         })
     );
 }
@@ -231,7 +220,7 @@ fn handle_sensor_iteration(
         match sensor.read_sensor(dev) {
             Ok(reading) => {
                 stats.record_success(reading.temperature);
-                match opts.format {
+                match opts.common.format {
                     OutputFormat::Json => {
                         output_json_reading(timestamp, dev, reading.temperature, soc);
                     }
@@ -246,7 +235,7 @@ fn handle_sensor_iteration(
                         });
                         println!("[{timestamp}] {reading}{soc_info}");
 
-                        if opts.flags.show_raw {
+                        if opts.show_raw {
                             if let Ok(SensorDiagnostics { raw_payload, .. }) =
                                 sensor.read_diagnostics(dev)
                             {
@@ -261,9 +250,9 @@ fn handle_sensor_iteration(
             }
             Err(err) => {
                 stats.record_error(&err);
-                match opts.format {
+                match opts.common.format {
                     OutputFormat::Json => {
-                        output_json_error(timestamp, Some(dev), &err);
+                        output_json_error(timestamp, Some(dev), &err.summary());
                     }
                     OutputFormat::Human => {
                         eprintln!("[{timestamp}] [{dev}] Read error: {err}");
@@ -278,7 +267,7 @@ fn select_target_devices(
     sensor: &TempSensor,
     target: Option<&SensorId>,
 ) -> Result<Vec<SensorId>, String> {
-    let devices = sensor.discover_sensors().map_err(|e| e.to_string())?;
+    let devices = sensor.discover_sensors().map_err(|e| e.summary())?;
     if let Some(target) = target {
         if devices.contains(target) {
             Ok(vec![target.clone()])
@@ -293,14 +282,14 @@ fn select_target_devices(
 }
 
 fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
-    if opts.format == OutputFormat::Human {
+    if opts.common.format == OutputFormat::Human {
         print_header(sensor);
     }
 
     let target_devices = match select_target_devices(sensor, opts.target_sensor.as_ref()) {
         Ok(devs) => devs,
         Err(err) => {
-            if opts.format == OutputFormat::Json {
+            if opts.common.format == OutputFormat::Json {
                 output_json_error(&format_timestamp(), opts.target_sensor.as_ref(), &err);
             } else {
                 eprintln!("Error: {err}");
@@ -309,15 +298,15 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
         }
     };
 
-    if opts.format == OutputFormat::Human {
+    if opts.common.format == OutputFormat::Human {
         println!("Discovered {} sensor(s):", target_devices.len());
         for dev in &target_devices {
             println!("  • {dev}");
         }
-        if opts.flags.verbose {
+        if opts.common.verbose {
             print_diagnostic_registers(sensor, &target_devices);
         }
-        if opts.max_count.is_none() {
+        if opts.common.max_count.is_none() {
             println!("\nPress Ctrl+C to stop.\n");
         } else {
             println!();
@@ -330,7 +319,7 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
     loop {
         let loop_start = Instant::now();
         let timestamp = format_timestamp();
-        let soc = if opts.flags.include_soc {
+        let soc = if opts.include_soc {
             SocThermal::read().ok()
         } else {
             None
@@ -339,19 +328,23 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
         handle_sensor_iteration(sensor, &target_devices, opts, &timestamp, soc, &mut stats);
 
         iteration += 1;
-        if let Some(limit) = opts.max_count {
+        if let Some(limit) = opts.common.max_count {
             if iteration >= limit {
                 break;
             }
         }
 
         let elapsed = loop_start.elapsed();
-        if let Some(remaining) = opts.interval.checked_sub(elapsed) {
+        if let Some(remaining) = opts.common.interval.checked_sub(elapsed) {
             thread::sleep(remaining);
         }
     }
 
-    if should_print_summary(opts.format, opts.max_count, stats.samples.total_reads()) {
+    if should_print_summary(
+        opts.common.format,
+        opts.common.max_count,
+        stats.samples.total_reads(),
+    ) {
         print_session_summary(&stats);
     }
 
@@ -426,15 +419,15 @@ mod tests {
         let soc = SocThermal::read_from_path(&soc_file).ok();
 
         let opts_human = CliOptions {
-            max_count: Some(1),
-            interval: Duration::from_millis(10),
-            format: OutputFormat::Human,
-            flags: DiagnosticFlags {
+            common: CommonCliOptions {
+                max_count: Some(1),
+                interval: Duration::from_millis(10),
+                format: OutputFormat::Human,
                 verbose: true,
-                include_soc: true,
-                show_raw: true,
             },
-            target_sensor: None,
+            include_soc: true,
+            show_raw: true,
+            ..CliOptions::default()
         };
 
         let mut stats = Statistics::default();
@@ -450,7 +443,10 @@ mod tests {
 
         // JSON format with SoC
         let opts_json = CliOptions {
-            format: OutputFormat::Json,
+            common: CommonCliOptions {
+                format: OutputFormat::Json,
+                ..opts_human.common
+            },
             ..opts_human.clone()
         };
         handle_sensor_iteration(
@@ -492,41 +488,42 @@ mod tests {
 
         // Test run_app in human mode with iterations
         let opts_run = CliOptions {
-            max_count: Some(2),
-            interval: Duration::from_millis(1),
-            format: OutputFormat::Human,
-            flags: DiagnosticFlags {
+            common: CommonCliOptions {
+                max_count: Some(2),
+                interval: Duration::from_millis(1),
+                format: OutputFormat::Human,
                 verbose: true,
-                include_soc: false,
-                show_raw: false,
             },
-            target_sensor: None,
+            ..CliOptions::default()
         };
         assert_eq!(run_app(&sensor, &opts_run), ExitCode::SUCCESS);
 
         // Test run_app in JSON mode
         let opts_run_json = CliOptions {
-            max_count: Some(1),
-            interval: Duration::from_millis(1),
-            format: OutputFormat::Json,
-            flags: DiagnosticFlags::default(),
+            common: CommonCliOptions {
+                max_count: Some(1),
+                interval: Duration::from_millis(1),
+                format: OutputFormat::Json,
+                verbose: false,
+            },
             target_sensor: Some(id),
+            ..CliOptions::default()
         };
         assert_eq!(run_app(&sensor, &opts_run_json), ExitCode::SUCCESS);
 
         // Test run_app error when sensor not found
         let bad_sensor_id = SensorId::parse("28-000000000999").unwrap();
         let opts_fail = CliOptions {
-            max_count: Some(1),
-            interval: Duration::from_millis(1),
-            format: OutputFormat::Human,
-            flags: DiagnosticFlags::default(),
+            common: CommonCliOptions {
+                max_count: Some(1),
+                ..opts_run.common
+            },
             target_sensor: Some(bad_sensor_id.clone()),
+            ..CliOptions::default()
         };
         assert_eq!(run_app(&sensor, &opts_fail), ExitCode::FAILURE);
 
         let opts_fail_json = CliOptions {
-            format: OutputFormat::Json,
             target_sensor: Some(bad_sensor_id),
             ..opts_run_json
         };
@@ -562,11 +559,11 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(opts.max_count, Some(3));
-        assert!(opts.flags.verbose);
-        assert!(opts.flags.include_soc);
-        assert!(opts.flags.show_raw);
-        assert_eq!(opts.format, OutputFormat::Json);
+        assert_eq!(opts.common.max_count, Some(3));
+        assert!(opts.common.verbose);
+        assert!(opts.include_soc);
+        assert!(opts.show_raw);
+        assert_eq!(opts.common.format, OutputFormat::Json);
         assert_eq!(
             opts.target_sensor,
             Some(SensorId::parse("28-000000000001").unwrap())

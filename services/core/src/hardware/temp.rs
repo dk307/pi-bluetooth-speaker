@@ -163,6 +163,11 @@ impl Display for Temperature {
 pub struct SensorId(Box<str>);
 
 impl SensorId {
+    fn is_valid_id(raw: &str) -> bool {
+        raw.strip_prefix(DS18B20_FAMILY_PREFIX)
+            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit()))
+    }
+
     /// Parses a DS18B20 sensor ID from user-supplied CLI input without capturing a backtrace.
     ///
     /// # Errors
@@ -170,10 +175,7 @@ impl SensorId {
     /// followed by non-empty ASCII hexadecimal digits.
     pub fn parse_str(id: &str) -> Result<Self, String> {
         let raw = id.trim();
-        let valid = raw
-            .strip_prefix(DS18B20_FAMILY_PREFIX)
-            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit()));
-        if !valid {
+        if !Self::is_valid_id(raw) {
             return Err(format!(
                 "invalid DS18B20 sensor ID '{raw}': expected '28-<hex>' family prefix"
             ));
@@ -188,8 +190,12 @@ impl SensorId {
     /// not begin with `"28-"` or has an empty or non-hexadecimal serial suffix.
     pub fn parse(id: impl AsRef<str>) -> Result<Self, TempError> {
         let raw = id.as_ref().trim();
-        Self::parse_str(raw)
-            .map_err(|_err| TempError::new(ErrorKind::InvalidSensorId { value: raw.into() }))
+        if !Self::is_valid_id(raw) {
+            return Err(TempError::new(ErrorKind::InvalidSensorId {
+                value: raw.into(),
+            }));
+        }
+        Ok(Self(raw.into()))
     }
 
     /// Returns the sensor identifier as a string slice.
@@ -473,48 +479,55 @@ impl TempError {
     pub const fn backtrace(&self) -> &Backtrace {
         &self.backtrace
     }
+
+    /// Returns a single-line error description without any captured backtrace.
+    ///
+    /// Safe for embedding inside machine-oriented `NDJSON` telemetry streams where
+    /// multi-line stack traces when `RUST_BACKTRACE=1` would bloat or corrupt line records.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        struct Summary<'a>(&'a TempError);
+        impl Display for Summary<'_> {
+            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+                self.0.fmt_kind(f)
+            }
+        }
+        Summary(self).to_string()
+    }
+
+    fn fmt_kind(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match &self.kind {
+            ErrorKind::NoSensorsDetected { base_path } => write!(
+                f,
+                "no DS18B20 sensors (28-*) detected under {}",
+                base_path.display()
+            ),
+            ErrorKind::CrcMismatch {
+                sensor_id: Some(id),
+            } => write!(f, "1-Wire CRC check failed for sensor {id}"),
+            ErrorKind::CrcMismatch { sensor_id: None } => {
+                write!(f, "1-Wire CRC check failed (line 1 did not end with YES)")
+            }
+            ErrorKind::ParseError { detail } => {
+                write!(f, "failed to parse w1_slave temperature payload: {detail}")
+            }
+            ErrorKind::OutOfRange { millidegrees_c } => write!(
+                f,
+                "temperature {millidegrees_c} m°C is outside DS18B20 range ({MIN_MILLIDEGREES_C}..={MAX_MILLIDEGREES_C} m°C)"
+            ),
+            ErrorKind::InvalidSensorId { value } => write!(
+                f,
+                "invalid DS18B20 sensor ID '{value}': expected '28-<hex>' format"
+            ),
+            ErrorKind::Io(err) => write!(f, "1-Wire sysfs I/O error: {err}"),
+            ErrorKind::Cancelled { message } => write!(f, "task cancelled: {message}"),
+        }
+    }
 }
 
 impl Display for TempError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match &self.kind {
-            ErrorKind::NoSensorsDetected { base_path } => {
-                write!(
-                    f,
-                    "no DS18B20 sensors (28-*) detected under {}",
-                    base_path.display()
-                )?;
-            }
-            ErrorKind::CrcMismatch {
-                sensor_id: Some(id),
-            } => {
-                write!(f, "1-Wire CRC check failed for sensor {id}")?;
-            }
-            ErrorKind::CrcMismatch { sensor_id: None } => {
-                write!(f, "1-Wire CRC check failed (line 1 did not end with YES)")?;
-            }
-            ErrorKind::ParseError { detail } => {
-                write!(f, "failed to parse w1_slave temperature payload: {detail}")?;
-            }
-            ErrorKind::OutOfRange { millidegrees_c } => {
-                write!(
-                    f,
-                    "temperature {millidegrees_c} m°C is outside DS18B20 range ({MIN_MILLIDEGREES_C}..={MAX_MILLIDEGREES_C} m°C)"
-                )?;
-            }
-            ErrorKind::InvalidSensorId { value } => {
-                write!(
-                    f,
-                    "invalid DS18B20 sensor ID '{value}': expected '28-<hex>' format"
-                )?;
-            }
-            ErrorKind::Io(err) => {
-                write!(f, "1-Wire sysfs I/O error: {err}")?;
-            }
-            ErrorKind::Cancelled { message } => {
-                write!(f, "task cancelled: {message}")?;
-            }
-        }
+        self.fmt_kind(f)?;
         if self.backtrace.status() == BacktraceStatus::Captured {
             write!(f, "\nBacktrace:\n{}", self.backtrace)?;
         }
@@ -834,6 +847,10 @@ pub struct TempSensor {
 
 impl TempSensor {
     /// Creates a `TempSensor` backed by the standard Linux 1-Wire sysfs path (`/sys/bus/w1/devices`).
+    ///
+    /// Construction is pure in-memory metadata initialization and performs no filesystem
+    /// syscalls; all sysfs directory and device reads are deferred lazily to [`discover_sensors`](Self::discover_sensors)
+    /// and [`read_sensor`](Self::read_sensor).
     #[must_use]
     #[expect(
         clippy::new_without_default,
@@ -846,7 +863,8 @@ impl TempSensor {
     /// Creates a `TempSensor` reading from a custom sysfs directory path.
     ///
     /// Useful for testing file discovery and `w1_slave` parsing against a
-    /// synthetic directory tree on any operating system.
+    /// synthetic directory tree on any operating system. Performs no filesystem I/O
+    /// at construction time.
     #[must_use]
     pub fn with_sysfs_path(base_path: impl AsRef<Path>) -> Self {
         Self {
@@ -1541,6 +1559,26 @@ a7 01 4b 46 7f ff 0c 10 5c
                 .contains("task cancelled: worker cancelled")
         );
         assert!(cancel_err.source().is_none());
+
+        // Machine-oriented single-line summary omits captured backtrace
+        for err in [
+            &no_sensors,
+            &crc_with_id,
+            &crc_no_id,
+            &parse_err,
+            &range_err,
+            &invalid_sensor_err,
+            &temp_io_err,
+            &cancel_err,
+        ] {
+            let s = err.summary();
+            assert!(!s.contains('\n'), "summary contained newline: {s}");
+            assert!(
+                !s.contains("Backtrace:"),
+                "summary contained backtrace: {s}"
+            );
+            assert!(err.to_string().starts_with(&s));
+        }
     }
 
     #[tokio::test]
@@ -1590,11 +1628,17 @@ a7 01 4b 46 7f ff 0c 10 5c
 
     #[test]
     fn temp_sensor_sysfs_path_defaults_and_errors() {
-        // Hardware sysfs path default
+        // Hermeticity invariant: TempSensor::new() and with_sysfs_path() perform zero
+        // filesystem syscalls at construction time, succeeding even when the path does not exist.
         let default_sensor = TempSensor::new();
         assert_eq!(
             default_sensor.sysfs_base_path(),
             Path::new(DS18B20_SYSFS_BASE_PATH)
+        );
+        let nonexistent = TempSensor::with_sysfs_path("/nonexistent/hermetic/w1/path");
+        assert_eq!(
+            nonexistent.sysfs_base_path(),
+            Path::new("/nonexistent/hermetic/w1/path")
         );
 
         // Test sysfs path that is a file (triggers Err(NotADirectory) in discover_sysfs_sensors)

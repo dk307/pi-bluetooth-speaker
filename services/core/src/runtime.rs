@@ -74,7 +74,7 @@ where
 #[cfg(test)]
 pub(crate) async fn abort_and_map<E>(task_context: &'static str) -> E
 where
-    E: FromJoinError + std::fmt::Debug + Send + 'static,
+    E: FromJoinError + Send + 'static,
 {
     let task = tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;

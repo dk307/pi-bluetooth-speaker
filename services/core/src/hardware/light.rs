@@ -41,9 +41,6 @@ pub const BH1750_ALT_I2C_ADDR: u8 = 0x5C;
 /// Default I2C bus device on Raspberry Pi 3.
 pub const BH1750_DEFAULT_I2C_BUS: u8 = 1;
 
-/// Foot-candles per lux conversion multiplier (1 lx ≈ 0.092903 fc).
-pub const LUX_TO_FOOT_CANDLES: f32 = 0.092_903;
-
 /// BH1750 opcode: Power Down.
 pub(crate) const CMD_POWER_DOWN: u8 = 0x00;
 
@@ -217,25 +214,31 @@ impl I2cAddress {
 
     /// Parses a hexadecimal string (`0x23`, `0X5C`, `23`) into a validated [`I2cAddress`].
     ///
-    /// Rejects leading `+` or `-` signs as non-standard in hardware address specifications,
-    /// returning a soft user-facing error message without capturing a stack backtrace.
+    /// Rejects `+` or `-` signs (both before and after the optional `0x`/`0X` prefix) as
+    /// non-standard in hardware address specifications, returning a soft user-facing error
+    /// message without capturing a stack backtrace.
     ///
     /// # Errors
     /// Returns a descriptive user-facing error message if `s` is signed, non-hexadecimal,
     /// or does not match a valid BH1750 slave address (`0x23` or `0x5C`).
     pub fn parse_hex(s: &str) -> Result<Self, String> {
         let clean = s.trim();
-        if clean.starts_with(['+', '-']) {
+        let digits = clean
+            .strip_prefix("0x")
+            .or_else(|| clean.strip_prefix("0X"))
+            .unwrap_or(clean);
+        if clean.starts_with(['+', '-']) || digits.starts_with(['+', '-']) {
             return Err(format!(
                 "invalid hex address '{s}': sign characters are not allowed"
             ));
         }
-        let clean = clean
-            .strip_prefix("0x")
-            .or_else(|| clean.strip_prefix("0X"))
-            .unwrap_or(clean);
-        let addr =
-            u8::from_str_radix(clean, 16).map_err(|e| format!("invalid hex address '{s}': {e}"))?;
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!(
+                "invalid hex address '{s}': expected hexadecimal digits"
+            ));
+        }
+        let addr = u8::from_str_radix(digits, 16)
+            .map_err(|e| format!("invalid hex address '{s}': {e}"))?;
         if Self::is_valid(addr) {
             Ok(Self(addr))
         } else {
@@ -374,8 +377,6 @@ impl Display for Illuminance {
 pub struct LightDiagnostics {
     /// Measured illuminance.
     pub illuminance: Illuminance,
-    /// Measured illuminance in foot-candles.
-    pub foot_candles: f32,
     /// Active measurement mode.
     pub mode: MeasurementMode,
     /// Raw 16-bit ADC scratchpad value read over I2C.
@@ -396,7 +397,8 @@ impl Display for LightDiagnostics {
         writeln!(
             f,
             "  • Illuminance    : {} ({:.2} fc)",
-            self.illuminance, self.foot_candles
+            self.illuminance,
+            self.illuminance.foot_candles()
         )?;
         writeln!(f, "  • Operating Mode : {}", self.mode)?;
         writeln!(
@@ -604,10 +606,23 @@ impl LightError {
     pub const fn backtrace(&self) -> &Backtrace {
         &self.backtrace
     }
-}
 
-impl Display for LightError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    /// Returns a single-line error description without any captured backtrace.
+    ///
+    /// Safe for embedding inside machine-oriented `NDJSON` telemetry streams where
+    /// multi-line stack traces when `RUST_BACKTRACE=1` would bloat or corrupt line records.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        struct Summary<'a>(&'a LightError);
+        impl Display for Summary<'_> {
+            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+                self.0.fmt_kind(f)
+            }
+        }
+        Summary(self).to_string()
+    }
+
+    fn fmt_kind(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
             LightErrorKind::I2c(I2cDetail::Message(msg)) => write!(f, "I2C bus error: {msg}"),
             LightErrorKind::I2c(I2cDetail::Source(err)) => write!(f, "I2C bus error: {err}"),
@@ -627,7 +642,13 @@ impl Display for LightError {
                 write!(f, "invalid illuminance: {message}")
             }
             LightErrorKind::MockFault { message } => write!(f, "injected mock fault: {message}"),
-        }?;
+        }
+    }
+}
+
+impl Display for LightError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.fmt_kind(f)?;
         if self.backtrace.status() == BacktraceStatus::Captured {
             write!(f, "\nBacktrace:\n{}", self.backtrace)?;
         }
@@ -828,6 +849,52 @@ struct HwState {
     last_transition: Instant,
 }
 
+impl HwState {
+    const fn new(now: Instant) -> Self {
+        Self {
+            mode: MeasurementMode::ContinuousHighRes,
+            powered: true,
+            last_transition: now,
+        }
+    }
+
+    fn record_power_down(&mut self) {
+        self.powered = false;
+    }
+
+    fn record_wake_or_reset(&mut self, now: Instant) {
+        self.powered = true;
+        self.last_transition = now;
+    }
+
+    fn record_mode_change(&mut self, new_mode: MeasurementMode, now: Instant) {
+        self.mode = new_mode;
+        self.powered = true;
+        self.last_transition = now;
+    }
+
+    /// Evaluates whether the sensor is powered and computes any remaining settle/conversion sleep.
+    fn prepare_read(
+        &self,
+        now: Instant,
+    ) -> Result<(MeasurementMode, Option<Duration>), LightError> {
+        if !self.powered {
+            return Err(LightError::powered_down());
+        }
+        let sleep_dur = if self.mode.is_continuous() {
+            let elapsed = now.saturating_duration_since(self.last_transition);
+            self.mode.max_measurement_time().checked_sub(elapsed)
+        } else {
+            Some(self.mode.max_measurement_time())
+        };
+        Ok((self.mode, sleep_dur))
+    }
+}
+
+const fn decode_raw_be(buf: [u8; 2]) -> u16 {
+    u16::from_be_bytes(buf)
+}
+
 /// Internal I2C / mock backend dispatch for [`LightSensor`].
 ///
 /// Coverage note: `Backend::Hardware` interacts directly with the Linux kernel I2C device
@@ -895,11 +962,7 @@ impl LightSensor {
                 i2c: Mutex::new(i2c),
                 bus,
                 address,
-                state: Mutex::new(HwState {
-                    mode: MeasurementMode::ContinuousHighRes,
-                    powered: true,
-                    last_transition: Instant::now(),
-                }),
+                state: Mutex::new(HwState::new(Instant::now())),
                 op_lock: Mutex::new(()),
             }),
         })
@@ -961,7 +1024,10 @@ impl LightSensor {
                 i2c.lock()
                     .expect("I2C lock poisoned")
                     .write(&[CMD_POWER_DOWN])?;
-                state.lock().expect("state lock poisoned").powered = false;
+                state
+                    .lock()
+                    .expect("state lock poisoned")
+                    .record_power_down();
                 Ok(())
             }
             Backend::Mock(mock) => mock.power_down(),
@@ -995,9 +1061,10 @@ impl LightSensor {
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
                 Self::write_wake_opcode(i2c, CMD_RESET)?;
-                let mut hw = state.lock().expect("state lock poisoned");
-                hw.powered = true;
-                hw.last_transition = Instant::now();
+                state
+                    .lock()
+                    .expect("state lock poisoned")
+                    .record_wake_or_reset(Instant::now());
                 Ok(())
             }
             Backend::Mock(mock) => mock.reset(),
@@ -1021,10 +1088,10 @@ impl LightSensor {
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
                 Self::write_wake_opcode(i2c, new_mode.opcode())?;
-                let mut hw = state.lock().expect("state lock poisoned");
-                hw.mode = new_mode;
-                hw.powered = true;
-                hw.last_transition = Instant::now();
+                state
+                    .lock()
+                    .expect("state lock poisoned")
+                    .record_mode_change(new_mode, Instant::now());
                 Ok(())
             }
             Backend::Mock(mock) => mock.set_mode(new_mode),
@@ -1040,27 +1107,20 @@ impl LightSensor {
                 ..
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
-                let (cur_mode, elapsed) = {
-                    let hw = state.lock().expect("state lock poisoned");
-                    if !hw.powered {
-                        return Err(LightError::powered_down());
-                    }
-                    (hw.mode, hw.last_transition.elapsed())
-                };
-                if cur_mode.is_continuous() {
-                    if let Some(remaining) = cur_mode.max_measurement_time().checked_sub(elapsed) {
-                        std::thread::sleep(remaining);
-                    }
-                } else {
-                    // Power on and send one-shot trigger opcode, then sleep outside the I2C mutex
+                let (cur_mode, sleep_dur) = state
+                    .lock()
+                    .expect("state lock poisoned")
+                    .prepare_read(Instant::now())?;
+                if !cur_mode.is_continuous() {
                     Self::write_wake_opcode(i2c, cur_mode.opcode())?;
-                    std::thread::sleep(cur_mode.max_measurement_time());
+                }
+                if let Some(dur) = sleep_dur {
+                    std::thread::sleep(dur);
                 }
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
                 let mut buf = [0u8; 2];
                 guard.read(&mut buf)?;
-                let raw = (u16::from(buf[0]) << 8) | u16::from(buf[1]);
-                Ok((raw, cur_mode))
+                Ok((decode_raw_be(buf), cur_mode))
             }
             Backend::Mock(mock) => mock.read_raw(),
         }
@@ -1068,12 +1128,18 @@ impl LightSensor {
 
     /// Reads the current ambient illuminance from the sensor.
     ///
-    /// # Power State
+    /// # Power State & Settle Semantics
     /// If [`power_down()`](Self::power_down) was previously invoked, conversions
     /// cease and this method returns an error with [`LightError::is_powered_down()`]
     /// until the sensor is re-awakened via [`set_mode()`](Self::set_mode) or
-    /// [`reset()`](Self::reset). In `OneShot*` modes (while not explicitly powered down),
-    /// each call automatically issues `CMD_POWER_ON` and the one-shot trigger opcode
+    /// [`reset()`](Self::reset).
+    ///
+    /// In continuous modes (`Continuous*`), the first read after construction, [`set_mode()`](Self::set_mode),
+    /// or [`reset()`](Self::reset) waits until the initial [`max_measurement_time()`](MeasurementMode::max_measurement_time)
+    /// settle window has elapsed; subsequent reads return the most recently completed conversion
+    /// latched in the BH1750 data register without blocking per read. In `OneShot*` modes (while
+    /// not explicitly powered down), each call automatically issues `CMD_POWER_ON` and the one-shot
+    /// trigger opcode and waits the full [`max_measurement_time()`](MeasurementMode::max_measurement_time)
     /// before reading the converted word.
     ///
     /// # Errors
@@ -1098,7 +1164,6 @@ impl LightSensor {
         let illuminance = Illuminance::from_raw_and_mode(raw_word, mode);
         Ok(LightDiagnostics {
             illuminance,
-            foot_candles: illuminance.foot_candles(),
             mode,
             raw_word,
             address: self.i2c_address(),
@@ -1196,21 +1261,22 @@ mod tests {
         assert_eq!(I2cAddress::parse_hex("0x23").unwrap().as_u8(), 0x23);
         assert_eq!(I2cAddress::parse_hex(" 0X5C ").unwrap().as_u8(), 0x5C);
         assert_eq!(I2cAddress::parse_hex("23").unwrap().as_u8(), 0x23);
-        assert!(
-            I2cAddress::parse_hex("+0x23")
-                .unwrap_err()
-                .contains("sign characters are not allowed")
-        );
-        assert!(
-            I2cAddress::parse_hex("-0x23")
-                .unwrap_err()
-                .contains("sign characters are not allowed")
-        );
-        assert!(
-            I2cAddress::parse_hex("not-hex")
-                .unwrap_err()
-                .contains("invalid hex address")
-        );
+        for signed in ["+0x23", "-0x23", "0x+23", "0x-23", "0X+5C", "+23", "-23"] {
+            assert!(
+                I2cAddress::parse_hex(signed)
+                    .unwrap_err()
+                    .contains("sign characters are not allowed"),
+                "failed to reject signed input {signed}"
+            );
+        }
+        for invalid in ["", "0x", "0X", "not-hex", "0xzz"] {
+            assert!(
+                I2cAddress::parse_hex(invalid)
+                    .unwrap_err()
+                    .contains("invalid hex address"),
+                "failed to reject invalid hex {invalid}"
+            );
+        }
         assert_eq!(
             I2cAddress::parse_hex("0x77").unwrap_err(),
             "invalid BH1750 I2C address '0x77' (expected 0x23 or 0x5C)"
@@ -1523,6 +1589,69 @@ mod tests {
         assert!(from_rppal.is_i2c());
         assert!(from_rppal.source().is_some());
         assert!(from_rppal.to_string().contains("timed out"));
+
+        // Machine-oriented single-line summary omits captured backtrace
+        for err in [
+            &i2c_err,
+            &addr_err,
+            &fault_err,
+            &illum_err,
+            &cancel_err,
+            &pwr_err,
+            &from_io,
+            &from_rppal,
+        ] {
+            let s = err.summary();
+            assert!(!s.contains('\n'), "summary contained newline: {s}");
+            assert!(
+                !s.contains("Backtrace:"),
+                "summary contained backtrace: {s}"
+            );
+            assert!(err.to_string().starts_with(&s));
+        }
+    }
+
+    #[test]
+    fn hw_state_settle_math_and_transitions() {
+        let t0 = Instant::now();
+        let mut hw = HwState::new(t0);
+        assert_eq!(decode_raw_be([0x01, 0x2C]), 300);
+
+        // Immediately after transition in ContinuousHighRes (180 ms max), full settle sleep required
+        let (mode, sleep0) = hw.prepare_read(t0).unwrap();
+        assert_eq!(mode, MeasurementMode::ContinuousHighRes);
+        assert_eq!(sleep0, Some(Duration::from_millis(180)));
+
+        // After 100 ms elapsed, 80 ms remaining
+        let (_, sleep_partial) = hw.prepare_read(t0 + Duration::from_millis(100)).unwrap();
+        assert_eq!(sleep_partial, Some(Duration::from_millis(80)));
+
+        // After 200 ms elapsed (>= 180 ms), no sleep required
+        let (_, sleep_settled) = hw.prepare_read(t0 + Duration::from_millis(200)).unwrap();
+        assert_eq!(sleep_settled, None);
+
+        // Power down rejects reads until wake/reset or mode change
+        hw.record_power_down();
+        assert!(
+            hw.prepare_read(t0 + Duration::from_millis(300))
+                .unwrap_err()
+                .is_powered_down()
+        );
+
+        // Reset awakens sensor and resets transition timestamp
+        let t1 = t0 + Duration::from_millis(500);
+        hw.record_wake_or_reset(t1);
+        assert_eq!(
+            hw.prepare_read(t1).unwrap().1,
+            Some(Duration::from_millis(180))
+        );
+
+        // One-shot mode always requires full max_measurement_time regardless of elapsed time
+        let t2 = t1 + Duration::from_secs(5);
+        hw.record_mode_change(MeasurementMode::OneShotLowRes, t1);
+        let (os_mode, os_sleep) = hw.prepare_read(t2).unwrap();
+        assert_eq!(os_mode, MeasurementMode::OneShotLowRes);
+        assert_eq!(os_sleep, Some(Duration::from_millis(24)));
     }
 
     #[test]

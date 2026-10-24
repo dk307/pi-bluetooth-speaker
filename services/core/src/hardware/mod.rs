@@ -22,8 +22,8 @@ pub(crate) mod temp;
 #[doc(inline)]
 pub use light::{
     BH1750_ACCURACY_FACTOR, BH1750_ALT_I2C_ADDR, BH1750_DEFAULT_I2C_ADDR, BH1750_DEFAULT_I2C_BUS,
-    I2cAddress, I2cHardwareInfo, Illuminance, LUX_TO_FOOT_CANDLES, LightDiagnostics, LightError,
-    LightSensor, LightSensorMock, MeasurementMode,
+    I2cAddress, I2cHardwareInfo, Illuminance, LightDiagnostics, LightError, LightSensor,
+    LightSensorMock, MeasurementMode,
 };
 
 #[doc(inline)]

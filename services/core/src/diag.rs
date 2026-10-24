@@ -13,6 +13,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static TEMP_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// Foot-candles per lux conversion multiplier (1 lx ≈ 0.092903 fc).
+pub const LUX_TO_FOOT_CANDLES: f32 = 0.092_903;
+
 /// Output formatting mode for CLI diagnostic utilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
@@ -21,6 +24,57 @@ pub enum OutputFormat {
     Human,
     /// Newline-delimited JSON (`NDJSON`) telemetry stream.
     Json,
+}
+
+/// Common CLI polling and formatting options shared across `read_*` diagnostic utilities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommonCliOptions {
+    /// Maximum number of polling iterations (`None` for continuous polling).
+    pub max_count: Option<usize>,
+    /// Delay between polling iterations.
+    pub interval: Duration,
+    /// Output formatting mode (human console vs NDJSON stream).
+    pub format: OutputFormat,
+    /// Whether extended hardware register diagnostics are enabled.
+    pub verbose: bool,
+}
+
+impl CommonCliOptions {
+    /// Creates common CLI options with the specified default polling interval.
+    #[must_use]
+    pub const fn with_default_interval(interval: Duration) -> Self {
+        Self {
+            max_count: None,
+            interval,
+            format: OutputFormat::Human,
+            verbose: false,
+        }
+    }
+
+    /// Attempts to parse a shared CLI flag (`-h`/`--help`, `-1`/`--once`, `-v`/`--verbose`,
+    /// `-j`/`--json`, `-n`/`--count`, `-i`/`--interval`).
+    ///
+    /// # Errors
+    /// Returns a descriptive user-facing error string if a recognized flag is missing its
+    /// value or fails validation. Returns `Ok(None)` when `-h` or `--help` is requested,
+    /// `Ok(Some(true))` when `arg` was consumed, or `Ok(Some(false))` when `arg` is a
+    /// binary-specific flag.
+    pub fn parse_common_flag(
+        &mut self,
+        arg: &str,
+        args: &mut impl Iterator<Item = String>,
+    ) -> Result<Option<bool>, String> {
+        match arg {
+            "-h" | "--help" => return Ok(None),
+            "-1" | "--once" => self.max_count = Some(1),
+            "-v" | "--verbose" => self.verbose = true,
+            "-j" | "--json" => self.format = OutputFormat::Json,
+            "-n" | "--count" => self.max_count = Some(parse_count_arg(args.next())?),
+            "-i" | "--interval" => self.interval = parse_interval_arg(args.next())?,
+            _ => return Ok(Some(false)),
+        }
+        Ok(Some(true))
+    }
 }
 
 /// Formats the current UTC wall-clock time as `HH:MM:SS`.
@@ -60,7 +114,7 @@ pub const fn fahrenheit(celsius: f32) -> f32 {
 /// Converts illuminance in lux (`f32`) to foot-candles (`lx * LUX_TO_FOOT_CANDLES`).
 #[must_use]
 pub const fn foot_candles(lux: f32) -> f32 {
-    lux * crate::hardware::LUX_TO_FOOT_CANDLES
+    lux * LUX_TO_FOOT_CANDLES
 }
 
 /// Rounds a `f32` measurement to 2 decimal places as `f64` for JSON telemetry serialization.
@@ -391,6 +445,32 @@ mod tests {
         assert_eq!(
             resolve_cli_opts::<i32>(Err("bad arg".into()), "bin", noop_usage).unwrap_err(),
             ExitCode::FAILURE
+        );
+
+        let mut common = CommonCliOptions::with_default_interval(Duration::from_secs(1));
+        let mut empty = std::iter::empty::<String>();
+        assert_eq!(
+            common.parse_common_flag("--help", &mut empty).unwrap(),
+            None
+        );
+        assert_eq!(
+            common.parse_common_flag("--once", &mut empty).unwrap(),
+            Some(true)
+        );
+        assert_eq!(common.max_count, Some(1));
+        assert_eq!(
+            common.parse_common_flag("--verbose", &mut empty).unwrap(),
+            Some(true)
+        );
+        assert!(common.verbose);
+        assert_eq!(
+            common.parse_common_flag("--json", &mut empty).unwrap(),
+            Some(true)
+        );
+        assert_eq!(common.format, OutputFormat::Json);
+        assert_eq!(
+            common.parse_common_flag("--custom", &mut empty).unwrap(),
+            Some(false)
         );
     }
 
