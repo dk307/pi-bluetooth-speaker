@@ -10,7 +10,7 @@
 //! methods ([`TempSensor::read_all_async`], [`TempSensor::read_primary_temperature_async`]),
 //! which offload blocking sysfs file I/O to [`tokio::task::spawn_blocking`].
 
-use std::backtrace::{Backtrace, BacktraceStatus};
+use std::backtrace::Backtrace;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
@@ -39,6 +39,9 @@ pub const SOC_THERMAL_SYSFS_PATH: &str = "/sys/devices/virtual/thermal/thermal_z
 
 /// Mandatory 1-Wire family prefix for Dallas DS18B20 digital thermometers (`0x28`).
 const DS18B20_FAMILY_PREFIX: &str = "28-";
+
+/// Standard format description for DS18B20 sensor identifiers.
+pub const SENSOR_ID_FORMAT_HELP: &str = "expected '28-<hex>' format";
 
 /// Minimum operating temperature supported by the DS18B20 hardware (`-55.0 °C` in millidegrees).
 const MIN_MILLIDEGREES_C: i32 = -55_000;
@@ -177,7 +180,7 @@ impl SensorId {
         let raw = id.trim();
         if !Self::is_valid_id(raw) {
             return Err(format!(
-                "invalid DS18B20 sensor ID '{raw}': expected '28-<hex>' family prefix"
+                "invalid DS18B20 sensor ID '{raw}': {SENSOR_ID_FORMAT_HELP}"
             ));
         }
         Ok(Self(raw.into()))
@@ -480,21 +483,6 @@ impl TempError {
         &self.backtrace
     }
 
-    /// Returns a single-line error description without any captured backtrace.
-    ///
-    /// Safe for embedding inside machine-oriented `NDJSON` telemetry streams where
-    /// multi-line stack traces when `RUST_BACKTRACE=1` would bloat or corrupt line records.
-    #[must_use]
-    pub fn summary(&self) -> String {
-        struct Summary<'a>(&'a TempError);
-        impl Display for Summary<'_> {
-            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                self.0.fmt_kind(f)
-            }
-        }
-        Summary(self).to_string()
-    }
-
     fn fmt_kind(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
             ErrorKind::NoSensorsDetected { base_path } => write!(
@@ -517,7 +505,7 @@ impl TempError {
             ),
             ErrorKind::InvalidSensorId { value } => write!(
                 f,
-                "invalid DS18B20 sensor ID '{value}': expected '28-<hex>' format"
+                "invalid DS18B20 sensor ID '{value}': {SENSOR_ID_FORMAT_HELP}"
             ),
             ErrorKind::Io(err) => write!(f, "1-Wire sysfs I/O error: {err}"),
             ErrorKind::Cancelled { message } => write!(f, "task cancelled: {message}"),
@@ -525,15 +513,7 @@ impl TempError {
     }
 }
 
-impl Display for TempError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_kind(f)?;
-        if self.backtrace.status() == BacktraceStatus::Captured {
-            write!(f, "\nBacktrace:\n{}", self.backtrace)?;
-        }
-        Ok(())
-    }
-}
+super::impl_canonical_error_display!(TempError);
 
 impl std::error::Error for TempError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
@@ -1551,7 +1531,7 @@ a7 01 4b 46 7f ff 0c 10 5c
         assert!(!cancel_err.is_no_sensors());
         assert!(matches!(
             cancel_err.backtrace().status(),
-            BacktraceStatus::Captured | BacktraceStatus::Disabled
+            std::backtrace::BacktraceStatus::Captured | std::backtrace::BacktraceStatus::Disabled
         ));
         assert!(
             cancel_err

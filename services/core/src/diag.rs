@@ -6,6 +6,7 @@
 
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -39,6 +40,12 @@ pub struct CommonCliOptions {
     pub verbose: bool,
 }
 
+impl Default for CommonCliOptions {
+    fn default() -> Self {
+        Self::with_default_interval(Duration::from_secs(1))
+    }
+}
+
 impl CommonCliOptions {
     /// Creates common CLI options with the specified default polling interval.
     #[must_use]
@@ -59,10 +66,10 @@ impl CommonCliOptions {
     /// value or fails validation. Returns `Ok(None)` when `-h` or `--help` is requested,
     /// `Ok(Some(true))` when `arg` was consumed, or `Ok(Some(false))` when `arg` is a
     /// binary-specific flag.
-    pub fn parse_common_flag(
+    pub fn parse_common_flag<I: Iterator<Item = String> + ?Sized>(
         &mut self,
         arg: &str,
-        args: &mut impl Iterator<Item = String>,
+        args: &mut I,
     ) -> Result<Option<bool>, String> {
         match arg {
             "-h" | "--help" => return Ok(None),
@@ -75,6 +82,36 @@ impl CommonCliOptions {
         }
         Ok(Some(true))
     }
+}
+
+/// Parses command-line arguments using shared common flags (`-h`, `-1`, `-v`, `-j`, `-n`, `-i`)
+/// and a domain-specific custom flag parser callback.
+///
+/// # Errors
+/// Returns `Err(msg)` if any common or custom flag validation fails, or if an unknown option is provided.
+/// Returns `Ok(None)` if `-h` or `--help` was requested.
+pub fn parse_args_with_common<O, I, F>(
+    mut opts: O,
+    args: I,
+    mut get_common: impl FnMut(&mut O) -> &mut CommonCliOptions,
+    mut parse_custom: F,
+) -> Result<Option<O>, String>
+where
+    I: IntoIterator<Item = String>,
+    F: FnMut(&mut O, &str, &mut I::IntoIter) -> Result<bool, String>,
+{
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match get_common(&mut opts).parse_common_flag(&arg, &mut iter)? {
+            None => return Ok(None),
+            Some(true) => continue,
+            Some(false) => {}
+        }
+        if !parse_custom(&mut opts, &arg, &mut iter)? {
+            return Err(format!("unknown option '{arg}', use --help for usage"));
+        }
+    }
+    Ok(Some(opts))
 }
 
 /// Formats the current UTC wall-clock time as `HH:MM:SS`.
@@ -150,8 +187,8 @@ pub fn resolve_cli_opts<T>(
 ///
 /// # Errors
 /// Returns a descriptive user-facing error string if `args` yields `None`.
-pub fn next_arg_value(
-    args: &mut impl Iterator<Item = String>,
+pub fn next_arg_value<I: Iterator<Item = String> + ?Sized>(
+    args: &mut I,
     flag: &str,
 ) -> Result<String, String> {
     args.next()
@@ -287,17 +324,23 @@ impl NumericStats {
         (self.successful_reads > 0).then(|| self.sum / self.successful_reads as f64)
     }
 
-    /// Returns the percentage `(error_count / total_reads) * 100.0`, or `0.0` if `total_reads == 0`.
+    /// Returns the session error percentage `(errors() / total_reads) * 100.0`, or `0.0` if `total_reads == 0`.
+    #[must_use]
+    pub fn error_rate_percent(&self) -> f32 {
+        self.fraction_of_reads_percent(self.errors())
+    }
+
+    /// Returns the fraction `(count / total_reads) * 100.0`, or `0.0` if `total_reads == 0`.
     #[must_use]
     #[expect(
         clippy::cast_precision_loss,
         reason = "read counts are small; f32 precision is exact for percentages"
     )]
-    pub fn error_rate_percent(&self, error_count: usize) -> f32 {
+    pub fn fraction_of_reads_percent(&self, count: usize) -> f32 {
         if self.total_reads == 0 {
             0.0
         } else {
-            (error_count as f32 / self.total_reads as f32) * 100.0
+            (count as f32 / self.total_reads as f32) * 100.0
         }
     }
 }
@@ -314,18 +357,26 @@ pub struct ScopedTempDir {
 }
 
 impl ScopedTempDir {
+    /// Attempts to create a new uniquely-named temporary directory under [`env::temp_dir()`].
+    ///
+    /// # Errors
+    /// Returns [`io::Error`] if the temporary directory cannot be created on the host filesystem.
+    pub fn try_new(prefix: &str) -> io::Result<Self> {
+        let id = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let path = env::temp_dir().join(format!("{prefix}_{pid}_{id}"));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path)?;
+        Ok(Self { path })
+    }
+
     /// Creates a new uniquely-named temporary directory under [`env::temp_dir()`].
     ///
     /// # Panics
     /// Panics if the temporary directory cannot be created on the host filesystem.
     #[must_use]
     pub fn new(prefix: &str) -> Self {
-        let id = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let path = env::temp_dir().join(format!("{prefix}_{pid}_{id}"));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).expect("failed to create temporary test directory");
-        Self { path }
+        Self::try_new(prefix).expect("failed to create temporary test directory")
     }
 
     /// Returns the filesystem path to the temporary directory.
@@ -401,7 +452,7 @@ mod tests {
         let _ = env_args().count();
 
         let dir_path = {
-            let temp = ScopedTempDir::new("diag_scoped_test");
+            let temp = ScopedTempDir::try_new("diag_scoped_test").unwrap();
             assert!(temp.path().is_dir());
             temp.path().to_path_buf()
         };
@@ -409,7 +460,8 @@ mod tests {
 
         let mut stats = NumericStats::default();
         assert_eq!(stats.total_reads(), 0);
-        assert_eq!(stats.error_rate_percent(0), 0.0);
+        assert_eq!(stats.error_rate_percent(), 0.0);
+        assert_eq!(stats.fraction_of_reads_percent(0), 0.0);
         assert!(stats.average().is_none());
         stats.record_success(10.0);
         stats.record_success(30.0);
@@ -420,7 +472,8 @@ mod tests {
         assert_eq!(stats.min(), Some(10.0));
         assert_eq!(stats.max(), Some(30.0));
         assert!((stats.average().unwrap() - 20.0).abs() < 1e-6);
-        assert!((stats.error_rate_percent(1) - (100.0 / 3.0)).abs() < 1e-4);
+        assert!((stats.error_rate_percent() - (100.0 / 3.0)).abs() < 1e-4);
+        assert!((stats.fraction_of_reads_percent(1) - (100.0 / 3.0)).abs() < 1e-4);
 
         assert!((fahrenheit(0.0) - 32.0).abs() < 1e-5);
         assert!((fahrenheit(100.0) - 212.0).abs() < 1e-4);
@@ -472,6 +525,50 @@ mod tests {
             common.parse_common_flag("--custom", &mut empty).unwrap(),
             Some(false)
         );
+    }
+
+    #[test]
+    fn parse_args_with_common_helper_tests() {
+        #[derive(Default, PartialEq, Debug)]
+        struct TestOpts {
+            common: CommonCliOptions,
+            flag: bool,
+        }
+
+        let parsed = parse_args_with_common(
+            TestOpts::default(),
+            ["--once".into(), "--flag".into()],
+            |o| &mut o.common,
+            |opts, arg, _args| match arg {
+                "--flag" => {
+                    opts.flag = true;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed.common.max_count, Some(1));
+        assert!(parsed.flag);
+
+        let err = parse_args_with_common(
+            TestOpts::default(),
+            ["--unknown".into()],
+            |o| &mut o.common,
+            |_opts, _arg, _args| Ok(false),
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown option '--unknown'"));
+
+        let help = parse_args_with_common(
+            TestOpts::default(),
+            ["--help".into()],
+            |o| &mut o.common,
+            |_opts, _arg, _args| Ok(false),
+        )
+        .unwrap();
+        assert!(help.is_none());
     }
 
     #[test]

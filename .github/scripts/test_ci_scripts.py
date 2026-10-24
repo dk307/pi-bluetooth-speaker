@@ -5,6 +5,7 @@ Requires Python >= 3.10.
 """
 
 from pathlib import Path
+import os
 import subprocess
 import sys
 import tempfile
@@ -83,6 +84,27 @@ class TestGenerateReviewPrompt(unittest.TestCase):
         with patch.object(grp, "MAX_PROMPT_BYTES", 100):
             with self.assertRaises(SystemExit):
                 grp.build_review_prompt(repo_root)
+
+    def test_generate_review_prompt_main_github_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_file = Path(tmp) / "github_output.txt"
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output_file)}):
+                grp.main()
+                self.assertTrue(output_file.exists())
+                content = output_file.read_text(encoding="utf-8")
+                self.assertIn("prompt_file=", content)
+                prompt_path = Path(content.strip().split("=", 1)[1])
+                self.assertTrue(prompt_path.is_file())
+                self.assertGreater(prompt_path.stat().st_size, 0)
+                prompt_path.unlink(missing_ok=True)
+
+    def test_generate_review_prompt_main_without_github_output(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            grp.main()
+            repo_root = Path(__file__).resolve().parents[2]
+            prompt_path = repo_root / grp.PROMPT_OUTPUT_FILENAME
+            self.assertTrue(prompt_path.is_file())
+            prompt_path.unlink(missing_ok=True)
 
 
 class TestPatchDiffguard(unittest.TestCase):

@@ -17,9 +17,8 @@
 //! - Companion [`LightSensorMock`] enables deterministic testing without physical hardware.
 //! - Strongly typed domain models [`Illuminance`], [`I2cAddress`], and [`MeasurementMode`].
 
-use std::backtrace::{Backtrace, BacktraceStatus};
+use std::backtrace::Backtrace;
 use std::fmt::{self, Display, Formatter};
-use std::io;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -294,8 +293,11 @@ impl Illuminance {
     ///
     /// Bounds the full datasheet range including extended-`MTreg` sensitivity configurations;
     /// this driver pins the default `MTreg = 69`, so raw-derived readings peak at
-    /// `65535 / 1.2 ≈ 54,612.5 lx`.
+    /// [`Self::MAX_LUX_DEFAULT_MTREG`] (`65535 / 1.2 ≈ 54,612.5 lx`).
     pub const MAX_LUX: f32 = 120_000.0;
+
+    /// Maximum illuminance reading representable with the default `MTreg = 69` configuration (~54,612.5 lux).
+    pub const MAX_LUX_DEFAULT_MTREG: f32 = 54_612.5;
 
     /// Creates an [`Illuminance`] from a raw float in lux.
     ///
@@ -429,9 +431,9 @@ pub struct I2cHardwareInfo {
     /// SCL clock line GPIO descriptor.
     pub scl_pin: GpioPinInfo,
     /// Hardware VCC pin location on 40-pin header.
-    pub vcc_pin: &'static str,
+    pub vcc_pin: PhysicalPin,
     /// Hardware GND pin location on 40-pin header.
-    pub gnd_pin: &'static str,
+    pub gnd_pin: PhysicalPin,
 }
 
 impl I2cHardwareInfo {
@@ -452,6 +454,8 @@ impl I2cHardwareInfo {
         const SDA_PHYS: PhysicalPin = PhysicalPin::new(3);
         const SCL_BCM: BcmPin = BcmPin::new(3);
         const SCL_PHYS: PhysicalPin = PhysicalPin::new(5);
+        const VCC_PHYS: PhysicalPin = PhysicalPin::new(1);
+        const GND_PHYS: PhysicalPin = PhysicalPin::new(9);
 
         assert!(
             bus == BH1750_DEFAULT_I2C_BUS,
@@ -478,8 +482,8 @@ impl I2cHardwareInfo {
                 bus_protocol: "I2C (i2c-dev / Broadcom BSC1)",
                 electrical_config: "Internal 1.8k pull-up to 3.3V",
             },
-            vcc_pin: "3.3V Power (Physical Pin 1)",
-            gnd_pin: "Ground (Physical Pin 9)",
+            vcc_pin: VCC_PHYS,
+            gnd_pin: GND_PHYS,
         }
     }
 }
@@ -495,7 +499,6 @@ pub(crate) enum I2cDetail {
 #[derive(Debug)]
 pub(crate) enum LightErrorKind {
     I2c(I2cDetail),
-    Io { source: io::Error },
     PowerDown,
     Cancelled { message: Box<str> },
     InvalidAddress { address: u8 },
@@ -524,10 +527,6 @@ impl LightError {
 
     pub(crate) fn from_i2c_err(err: rppal::i2c::Error) -> Self {
         Self::new(LightErrorKind::I2c(I2cDetail::Source(err)))
-    }
-
-    pub(crate) fn from_io_err(source: io::Error) -> Self {
-        Self::new(LightErrorKind::Io { source })
     }
 
     pub(crate) fn powered_down() -> Self {
@@ -560,12 +559,6 @@ impl LightError {
     #[must_use]
     pub const fn is_i2c(&self) -> bool {
         matches!(self.kind, LightErrorKind::I2c(_))
-    }
-
-    /// Returns `true` if this error was caused by a generic I/O error.
-    #[must_use]
-    pub const fn is_io(&self) -> bool {
-        matches!(self.kind, LightErrorKind::Io { .. })
     }
 
     /// Returns `true` if this error occurred because the sensor is currently powered down.
@@ -607,26 +600,10 @@ impl LightError {
         &self.backtrace
     }
 
-    /// Returns a single-line error description without any captured backtrace.
-    ///
-    /// Safe for embedding inside machine-oriented `NDJSON` telemetry streams where
-    /// multi-line stack traces when `RUST_BACKTRACE=1` would bloat or corrupt line records.
-    #[must_use]
-    pub fn summary(&self) -> String {
-        struct Summary<'a>(&'a LightError);
-        impl Display for Summary<'_> {
-            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                self.0.fmt_kind(f)
-            }
-        }
-        Summary(self).to_string()
-    }
-
     fn fmt_kind(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
             LightErrorKind::I2c(I2cDetail::Message(msg)) => write!(f, "I2C bus error: {msg}"),
             LightErrorKind::I2c(I2cDetail::Source(err)) => write!(f, "I2C bus error: {err}"),
-            LightErrorKind::Io { source } => write!(f, "I/O error: {source}"),
             LightErrorKind::PowerDown => write!(
                 f,
                 "sensor is powered down; call set_mode() or reset() before reading"
@@ -646,29 +623,14 @@ impl LightError {
     }
 }
 
-impl Display for LightError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_kind(f)?;
-        if self.backtrace.status() == BacktraceStatus::Captured {
-            write!(f, "\nBacktrace:\n{}", self.backtrace)?;
-        }
-        Ok(())
-    }
-}
+super::impl_canonical_error_display!(LightError);
 
 impl std::error::Error for LightError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.kind {
             LightErrorKind::I2c(I2cDetail::Source(err)) => Some(err),
-            LightErrorKind::Io { source } => Some(source),
             _ => None,
         }
-    }
-}
-
-impl From<io::Error> for LightError {
-    fn from(err: io::Error) -> Self {
-        Self::from_io_err(err)
     }
 }
 
@@ -821,8 +783,8 @@ impl LightSensorMock {
 
     /// Resets the mock measurement register.
     ///
-    /// Note: unlike physical hardware in continuous mode (which immediately starts a
-    /// new conversion after `CMD_RESET`), the mock zeroes the simulated reading
+    /// Note: unlike physical hardware in continuous mode (which automatically re-arms
+    /// continuous conversion after `CMD_RESET`), the mock zeroes the simulated reading
     /// until the next [`set_lux()`](Self::set_lux) or [`set_raw_word()`](Self::set_raw_word) call
     /// so tests can deterministically verify that a reset occurred.
     fn reset(&self) -> Result<(), LightError> {
@@ -862,9 +824,11 @@ impl HwState {
         self.powered = false;
     }
 
-    fn record_wake_or_reset(&mut self, now: Instant) {
+    /// Records power-on / reset and returns the continuous mode opcode to re-arm conversions, if any.
+    fn record_wake_or_reset(&mut self, now: Instant) -> Option<u8> {
         self.powered = true;
         self.last_transition = now;
+        self.mode.is_continuous().then_some(self.mode.opcode())
     }
 
     fn record_mode_change(&mut self, new_mode: MeasurementMode, now: Instant) {
@@ -873,26 +837,29 @@ impl HwState {
         self.last_transition = now;
     }
 
-    /// Evaluates whether the sensor is powered and computes any remaining settle/conversion sleep.
+    /// Evaluates whether the sensor is powered and returns `(mode, settle_dur, trigger_opcode)`.
+    ///
+    /// For continuous modes, `trigger_opcode` is `None` (already converting) and `settle_dur` is
+    /// the remaining elapsed duration from mode transition. For one-shot modes, `trigger_opcode`
+    /// is `Some(mode.opcode())` and `settle_dur` is the full `max_measurement_time()`.
     fn prepare_read(
         &self,
         now: Instant,
-    ) -> Result<(MeasurementMode, Option<Duration>), LightError> {
+    ) -> Result<(MeasurementMode, Option<Duration>, Option<u8>), LightError> {
         if !self.powered {
             return Err(LightError::powered_down());
         }
-        let sleep_dur = if self.mode.is_continuous() {
+        let (sleep_dur, trigger_opcode) = if self.mode.is_continuous() {
             let elapsed = now.saturating_duration_since(self.last_transition);
-            self.mode.max_measurement_time().checked_sub(elapsed)
+            (self.mode.max_measurement_time().checked_sub(elapsed), None)
         } else {
-            Some(self.mode.max_measurement_time())
+            (
+                Some(self.mode.max_measurement_time()),
+                Some(self.mode.opcode()),
+            )
         };
-        Ok((self.mode, sleep_dur))
+        Ok((self.mode, sleep_dur, trigger_opcode))
     }
-}
-
-const fn decode_raw_be(buf: [u8; 2]) -> u16 {
-    u16::from_be_bytes(buf)
 }
 
 /// Internal I2C / mock backend dispatch for [`LightSensor`].
@@ -1002,6 +969,26 @@ impl LightSensor {
         I2cHardwareInfo::rpi3_with_bus_and_address(self.i2c_bus(), self.i2c_address())
     }
 
+    fn with_hw_transaction<R>(
+        &self,
+        f: impl FnOnce(&mut I2c, &mut HwState) -> Result<R, LightError>,
+    ) -> Result<R, LightError> {
+        match self.inner.as_ref() {
+            Backend::Hardware {
+                i2c,
+                state,
+                op_lock,
+                ..
+            } => {
+                let _op_guard = op_lock.lock().expect("op lock poisoned");
+                let mut i2c_guard = i2c.lock().expect("I2C lock poisoned");
+                let mut state_guard = state.lock().expect("state lock poisoned");
+                f(&mut i2c_guard, &mut state_guard)
+            }
+            Backend::Mock(_) => unreachable!("with_hw_transaction invoked on mock backend"),
+        }
+    }
+
     /// Powers down the sensor to enter sleep mode.
     ///
     /// In sleep mode, current consumption drops to <1 µA. Conversions cease until
@@ -1014,35 +1001,19 @@ impl LightSensor {
     /// Panics if an internal mutex lock is poisoned.
     pub fn power_down(&self) -> Result<(), LightError> {
         match self.inner.as_ref() {
-            Backend::Hardware {
-                i2c,
-                state,
-                op_lock,
-                ..
-            } => {
-                let _op_guard = op_lock.lock().expect("op lock poisoned");
-                i2c.lock()
-                    .expect("I2C lock poisoned")
-                    .write(&[CMD_POWER_DOWN])?;
-                state
-                    .lock()
-                    .expect("state lock poisoned")
-                    .record_power_down();
+            Backend::Hardware { .. } => self.with_hw_transaction(|i2c, state| {
+                i2c.write(&[CMD_POWER_DOWN])?;
+                state.record_power_down();
                 Ok(())
-            }
+            }),
             Backend::Mock(mock) => mock.power_down(),
         }
     }
 
-    fn write_wake_opcode(i2c: &Mutex<I2c>, opcode: u8) -> Result<(), LightError> {
-        let mut guard = i2c.lock().expect("I2C lock poisoned");
-        guard.write(&[CMD_POWER_ON])?;
-        guard.write(&[opcode])?;
-        Ok(())
-    }
-
     /// Resets the sensor measurement data register and awakens the sensor if powered down.
     ///
+    /// In continuous modes, re-arms continuous measurement per the BH1750 datasheet
+    /// so subsequent reads receive freshly converted values instead of lingering at 0 lx.
     /// In mock mode, `reset()` zeroes the simulated illuminance and raw register word
     /// until the next [`LightSensorMock::set_lux()`] or [`LightSensorMock::set_raw_word()`] call.
     ///
@@ -1053,20 +1024,14 @@ impl LightSensor {
     /// Panics if an internal mutex lock is poisoned.
     pub fn reset(&self) -> Result<(), LightError> {
         match self.inner.as_ref() {
-            Backend::Hardware {
-                i2c,
-                state,
-                op_lock,
-                ..
-            } => {
-                let _op_guard = op_lock.lock().expect("op lock poisoned");
-                Self::write_wake_opcode(i2c, CMD_RESET)?;
-                state
-                    .lock()
-                    .expect("state lock poisoned")
-                    .record_wake_or_reset(Instant::now());
+            Backend::Hardware { .. } => self.with_hw_transaction(|i2c, state| {
+                i2c.write(&[CMD_POWER_ON])?;
+                i2c.write(&[CMD_RESET])?;
+                if let Some(opcode) = state.record_wake_or_reset(Instant::now()) {
+                    i2c.write(&[opcode])?;
+                }
                 Ok(())
-            }
+            }),
             Backend::Mock(mock) => mock.reset(),
         }
     }
@@ -1080,20 +1045,12 @@ impl LightSensor {
     /// Panics if an internal mutex lock is poisoned.
     pub fn set_mode(&self, new_mode: MeasurementMode) -> Result<(), LightError> {
         match self.inner.as_ref() {
-            Backend::Hardware {
-                i2c,
-                state,
-                op_lock,
-                ..
-            } => {
-                let _op_guard = op_lock.lock().expect("op lock poisoned");
-                Self::write_wake_opcode(i2c, new_mode.opcode())?;
-                state
-                    .lock()
-                    .expect("state lock poisoned")
-                    .record_mode_change(new_mode, Instant::now());
+            Backend::Hardware { .. } => self.with_hw_transaction(|i2c, state| {
+                i2c.write(&[CMD_POWER_ON])?;
+                i2c.write(&[new_mode.opcode()])?;
+                state.record_mode_change(new_mode, Instant::now());
                 Ok(())
-            }
+            }),
             Backend::Mock(mock) => mock.set_mode(new_mode),
         }
     }
@@ -1107,12 +1064,14 @@ impl LightSensor {
                 ..
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
-                let (cur_mode, sleep_dur) = state
+                let (cur_mode, sleep_dur, trigger_opcode) = state
                     .lock()
                     .expect("state lock poisoned")
                     .prepare_read(Instant::now())?;
-                if !cur_mode.is_continuous() {
-                    Self::write_wake_opcode(i2c, cur_mode.opcode())?;
+                if let Some(opcode) = trigger_opcode {
+                    let mut guard = i2c.lock().expect("I2C lock poisoned");
+                    guard.write(&[CMD_POWER_ON])?;
+                    guard.write(&[opcode])?;
                 }
                 if let Some(dur) = sleep_dur {
                     std::thread::sleep(dur);
@@ -1120,7 +1079,7 @@ impl LightSensor {
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
                 let mut buf = [0u8; 2];
                 guard.read(&mut buf)?;
-                Ok((decode_raw_be(buf), cur_mode))
+                Ok((u16::from_be_bytes(buf), cur_mode))
             }
             Backend::Mock(mock) => mock.read_raw(),
         }
@@ -1497,8 +1456,8 @@ mod tests {
         assert_eq!(hw.bus, 1);
         assert_eq!(hw.address.as_u8(), 0x23);
         assert_eq!(hw.device_path.as_ref(), "/dev/i2c-1");
-        assert_eq!(hw.vcc_pin, "3.3V Power (Physical Pin 1)");
-        assert_eq!(hw.gnd_pin, "Ground (Physical Pin 9)");
+        assert_eq!(hw.vcc_pin, PhysicalPin::new(1));
+        assert_eq!(hw.gnd_pin, PhysicalPin::new(9));
         assert_eq!(hw.sda_pin.signal_name, "I2C-1 Data (SDA)");
         assert_eq!(hw.scl_pin.signal_name, "I2C-1 Clock (SCL)");
 
@@ -1551,11 +1510,10 @@ mod tests {
         let cancel_err = LightError::cancelled("operation aborted");
         assert!(cancel_err.is_cancelled());
         assert!(!cancel_err.is_i2c());
-        assert!(!cancel_err.is_io());
         assert!(!cancel_err.is_powered_down());
         assert!(matches!(
             cancel_err.backtrace().status(),
-            BacktraceStatus::Captured | BacktraceStatus::Disabled
+            std::backtrace::BacktraceStatus::Captured | std::backtrace::BacktraceStatus::Disabled
         ));
         assert!(
             cancel_err
@@ -1577,14 +1535,10 @@ mod tests {
         assert!(cancel_err.source().is_none());
 
         // From conversions and error cause preservation
-        let io_err = io::Error::new(io::ErrorKind::NotFound, "device missing");
-        let from_io = LightError::from(io_err);
-        assert!(from_io.is_io());
-        assert!(!from_io.is_i2c());
-        assert!(from_io.source().is_some());
-        assert!(from_io.to_string().contains("I/O error: device missing"));
-
-        let rppal_err = rppal::i2c::Error::Io(io::Error::new(io::ErrorKind::TimedOut, "timed out"));
+        let rppal_err = rppal::i2c::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out",
+        ));
         let from_rppal = LightError::from(rppal_err);
         assert!(from_rppal.is_i2c());
         assert!(from_rppal.source().is_some());
@@ -1598,7 +1552,6 @@ mod tests {
             &illum_err,
             &cancel_err,
             &pwr_err,
-            &from_io,
             &from_rppal,
         ] {
             let s = err.summary();
@@ -1615,20 +1568,24 @@ mod tests {
     fn hw_state_settle_math_and_transitions() {
         let t0 = Instant::now();
         let mut hw = HwState::new(t0);
-        assert_eq!(decode_raw_be([0x01, 0x2C]), 300);
 
-        // Immediately after transition in ContinuousHighRes (180 ms max), full settle sleep required
-        let (mode, sleep0) = hw.prepare_read(t0).unwrap();
+        // Immediately after transition in ContinuousHighRes (180 ms max), full settle sleep required, no trigger opcode
+        let (mode, sleep0, trigger0) = hw.prepare_read(t0).unwrap();
         assert_eq!(mode, MeasurementMode::ContinuousHighRes);
         assert_eq!(sleep0, Some(Duration::from_millis(180)));
+        assert_eq!(trigger0, None);
 
         // After 100 ms elapsed, 80 ms remaining
-        let (_, sleep_partial) = hw.prepare_read(t0 + Duration::from_millis(100)).unwrap();
+        let (_, sleep_partial, trigger_p) =
+            hw.prepare_read(t0 + Duration::from_millis(100)).unwrap();
         assert_eq!(sleep_partial, Some(Duration::from_millis(80)));
+        assert_eq!(trigger_p, None);
 
         // After 200 ms elapsed (>= 180 ms), no sleep required
-        let (_, sleep_settled) = hw.prepare_read(t0 + Duration::from_millis(200)).unwrap();
+        let (_, sleep_settled, trigger_s) =
+            hw.prepare_read(t0 + Duration::from_millis(200)).unwrap();
         assert_eq!(sleep_settled, None);
+        assert_eq!(trigger_s, None);
 
         // Power down rejects reads until wake/reset or mode change
         hw.record_power_down();
@@ -1638,20 +1595,24 @@ mod tests {
                 .is_powered_down()
         );
 
-        // Reset awakens sensor and resets transition timestamp
+        // Reset awakens sensor, resets transition timestamp, and returns continuous mode opcode for re-arm (C1)
         let t1 = t0 + Duration::from_millis(500);
-        hw.record_wake_or_reset(t1);
-        assert_eq!(
-            hw.prepare_read(t1).unwrap().1,
-            Some(Duration::from_millis(180))
-        );
+        let rearm_opcode = hw.record_wake_or_reset(t1);
+        assert_eq!(rearm_opcode, Some(CMD_CONTINUOUS_H_RES));
+        let (_, r_sleep, r_trig) = hw.prepare_read(t1).unwrap();
+        assert_eq!(r_sleep, Some(Duration::from_millis(180)));
+        assert_eq!(r_trig, None);
 
-        // One-shot mode always requires full max_measurement_time regardless of elapsed time
+        // One-shot mode always requires full max_measurement_time and returns trigger opcode
         let t2 = t1 + Duration::from_secs(5);
         hw.record_mode_change(MeasurementMode::OneShotLowRes, t1);
-        let (os_mode, os_sleep) = hw.prepare_read(t2).unwrap();
+        let (os_mode, os_sleep, os_trigger) = hw.prepare_read(t2).unwrap();
         assert_eq!(os_mode, MeasurementMode::OneShotLowRes);
         assert_eq!(os_sleep, Some(Duration::from_millis(24)));
+        assert_eq!(os_trigger, Some(CMD_ONETIME_L_RES));
+
+        // Reset in one-shot mode returns None for rearm
+        assert_eq!(hw.record_wake_or_reset(t2), None);
     }
 
     #[test]

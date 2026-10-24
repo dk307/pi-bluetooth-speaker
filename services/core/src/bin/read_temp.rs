@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use speaker_core::diag::{
     CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads, fahrenheit,
-    format_timestamp, next_arg_value, resolve_cli_opts, should_print_summary,
+    format_timestamp, next_arg_value, parse_args_with_common, resolve_cli_opts,
+    should_print_summary,
 };
 use speaker_core::hardware::{
     SensorDiagnostics, SensorId, SocThermal, TempError, TempSensor, Temperature,
@@ -68,27 +69,27 @@ fn parse_cli_args_from<I>(args: I) -> Result<Option<CliOptions>, String>
 where
     I: IntoIterator<Item = String>,
 {
-    let mut args = args.into_iter();
-    let mut opts = CliOptions::default();
-
-    while let Some(arg) = args.next() {
-        match opts.common.parse_common_flag(&arg, &mut args)? {
-            None => return Ok(None),
-            Some(true) => continue,
-            Some(false) => {}
-        }
-        match arg.as_str() {
-            "-s" | "--soc" => opts.include_soc = true,
-            "-r" | "--raw" => opts.show_raw = true,
-            "-d" | "--device" => {
-                let val = next_arg_value(&mut args, "--device")?;
-                opts.target_sensor = Some(SensorId::parse_str(&val)?);
+    parse_args_with_common(
+        CliOptions::default(),
+        args,
+        |o| &mut o.common,
+        |opts, arg, args| match arg {
+            "-s" | "--soc" => {
+                opts.include_soc = true;
+                Ok(true)
             }
-            unknown => return Err(format!("unknown option '{unknown}', use --help for usage")),
-        }
-    }
-
-    Ok(Some(opts))
+            "-r" | "--raw" => {
+                opts.show_raw = true;
+                Ok(true)
+            }
+            "-d" | "--device" => {
+                let val = next_arg_value(args, "--device")?;
+                opts.target_sensor = Some(SensorId::parse_str(&val)?);
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+    )
 }
 
 fn parse_cli_args() -> Result<Option<CliOptions>, String> {
@@ -156,13 +157,13 @@ fn print_session_summary(stats: &Statistics) {
     println!(
         "CRC errors  : {} ({:.2}% error rate)",
         stats.crc_errors,
-        s.error_rate_percent(stats.crc_errors)
+        s.fraction_of_reads_percent(stats.crc_errors)
     );
     if stats.other_errors > 0 {
         println!(
             "Other errors: {} ({:.2}% error rate)",
             stats.other_errors,
-            s.error_rate_percent(stats.other_errors)
+            s.fraction_of_reads_percent(stats.other_errors)
         );
     }
     if let (Some(min_c), Some(max_c), Some(avg)) = (s.min(), s.max(), s.average()) {
@@ -314,7 +315,6 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
     }
 
     let mut stats = Statistics::default();
-    let mut iteration = 0usize;
 
     loop {
         let loop_start = Instant::now();
@@ -327,9 +327,8 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
 
         handle_sensor_iteration(sensor, &target_devices, opts, &timestamp, soc, &mut stats);
 
-        iteration += 1;
         if let Some(limit) = opts.common.max_count {
-            if iteration >= limit {
+            if stats.samples.total_reads() >= limit {
                 break;
             }
         }

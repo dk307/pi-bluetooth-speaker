@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use speaker_core::diag::{
     CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads, foot_candles,
-    format_timestamp, next_arg_value, resolve_cli_opts, round_2dp, should_print_summary,
+    format_timestamp, next_arg_value, parse_args_with_common, resolve_cli_opts, round_2dp,
+    should_print_summary,
 };
 use speaker_core::hardware::{
     BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance, LightError, LightSensor, MeasurementMode,
@@ -61,31 +62,26 @@ fn print_usage(bin_name: &str) {
     println!("  -h, --help               Display this help text");
 }
 
-const CONTINUOUS_MODES: [MeasurementMode; 3] = [
-    MeasurementMode::ContinuousHighRes,
-    MeasurementMode::ContinuousHighRes2,
-    MeasurementMode::ContinuousLowRes,
-];
-
-const MODE_SHORT_ALIASES: &[(&str, MeasurementMode)] = &[
+const MODE_LOOKUP: &[(&str, MeasurementMode)] = &[
+    ("high-res", MeasurementMode::ContinuousHighRes),
+    ("highres", MeasurementMode::ContinuousHighRes),
     ("h-res", MeasurementMode::ContinuousHighRes),
     ("h1", MeasurementMode::ContinuousHighRes),
+    ("high-res2", MeasurementMode::ContinuousHighRes2),
+    ("highres2", MeasurementMode::ContinuousHighRes2),
     ("h-res2", MeasurementMode::ContinuousHighRes2),
     ("h2", MeasurementMode::ContinuousHighRes2),
+    ("low-res", MeasurementMode::ContinuousLowRes),
+    ("lowres", MeasurementMode::ContinuousLowRes),
     ("l-res", MeasurementMode::ContinuousLowRes),
     ("low", MeasurementMode::ContinuousLowRes),
 ];
 
 fn parse_mode(s: &str) -> Result<MeasurementMode, String> {
     let lower = s.to_ascii_lowercase();
-    CONTINUOUS_MODES
-        .into_iter()
-        .find(|m| m.slug() == lower || m.slug().replace('-', "") == lower)
-        .or_else(|| {
-            MODE_SHORT_ALIASES
-                .iter()
-                .find_map(|(alias, mode)| (*alias == lower).then_some(*mode))
-        })
+    MODE_LOOKUP
+        .iter()
+        .find_map(|(key, mode)| (*key == lower).then_some(*mode))
         .ok_or_else(|| format!("invalid mode '{lower}'. Supported: high-res, high-res2, low-res"))
 }
 
@@ -93,25 +89,22 @@ fn parse_cli_args_from<I>(args: I) -> Result<Option<CliOptions>, String>
 where
     I: IntoIterator<Item = String>,
 {
-    let mut args = args.into_iter();
-    let mut opts = CliOptions::default();
-
-    while let Some(arg) = args.next() {
-        match opts.common.parse_common_flag(&arg, &mut args)? {
-            None => return Ok(None),
-            Some(true) => continue,
-            Some(false) => {}
-        }
-        match arg.as_str() {
-            "-m" | "--mode" => opts.mode = parse_mode(&next_arg_value(&mut args, "--mode")?)?,
-            "-a" | "--address" => {
-                opts.address = I2cAddress::parse_hex(&next_arg_value(&mut args, "--address")?)?;
+    parse_args_with_common(
+        CliOptions::default(),
+        args,
+        |o| &mut o.common,
+        |opts, arg, args| match arg {
+            "-m" | "--mode" => {
+                opts.mode = parse_mode(&next_arg_value(args, "--mode")?)?;
+                Ok(true)
             }
-            unknown => return Err(format!("unknown option '{unknown}', use --help for usage")),
-        }
-    }
-
-    Ok(Some(opts))
+            "-a" | "--address" => {
+                opts.address = I2cAddress::parse_hex(&next_arg_value(args, "--address")?)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+    )
 }
 
 fn parse_cli_args() -> Result<Option<CliOptions>, String> {
@@ -135,7 +128,10 @@ fn print_header(sensor: &LightSensor) {
         "  • SCL Line     : {} ({})",
         hw.scl_pin.bcm_pin, hw.scl_pin.physical_pin
     );
-    println!("  • Power / GND  : {} | {}", hw.vcc_pin, hw.gnd_pin);
+    println!(
+        "  • Power / GND  : 3.3V ({}) | GND ({})",
+        hw.vcc_pin, hw.gnd_pin
+    );
     println!("--------------------------------------------------");
 }
 
@@ -156,7 +152,7 @@ fn print_session_summary(stats: &NumericStats) {
         let errors = stats.errors();
         println!(
             "Read errors : {errors} ({:.2}% error rate)",
-            stats.error_rate_percent(errors)
+            stats.error_rate_percent()
         );
     }
     #[expect(

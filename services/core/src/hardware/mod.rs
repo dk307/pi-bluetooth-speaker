@@ -16,6 +16,38 @@
 use std::backtrace::{Backtrace, BacktraceStatus};
 use std::fmt::{self, Display, Formatter};
 
+macro_rules! impl_canonical_error_display {
+    ($err:ident) => {
+        impl $err {
+            /// Returns a single-line error description without any captured backtrace.
+            ///
+            /// Safe for embedding inside machine-oriented `NDJSON` telemetry streams where
+            /// multi-line stack traces when `RUST_BACKTRACE=1` would bloat or corrupt line records.
+            #[must_use]
+            pub fn summary(&self) -> String {
+                struct Summary<'a>(&'a $err);
+                impl std::fmt::Display for Summary<'_> {
+                    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        self.0.fmt_kind(f)
+                    }
+                }
+                Summary(self).to_string()
+            }
+        }
+
+        impl std::fmt::Display for $err {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.fmt_kind(f)?;
+                if self.backtrace.status() == std::backtrace::BacktraceStatus::Captured {
+                    write!(f, "\nBacktrace:\n{}", self.backtrace)?;
+                }
+                Ok(())
+            }
+        }
+    };
+}
+pub(crate) use impl_canonical_error_display;
+
 pub(crate) mod light;
 pub(crate) mod temp;
 
