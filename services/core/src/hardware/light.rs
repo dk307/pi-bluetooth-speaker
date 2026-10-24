@@ -813,10 +813,16 @@ impl LightSensor {
         match self.inner.as_ref() {
             Backend::Hardware { i2c, mode, .. } => {
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
+                let cur_mode = *mode.lock().expect("mode lock poisoned");
+                if !cur_mode.is_continuous() {
+                    guard
+                        .write(&[cur_mode.opcode()])
+                        .map_err(LightError::from)?;
+                    std::thread::sleep(cur_mode.typical_measurement_time());
+                }
                 let mut buf = [0u8; 2];
                 guard.read(&mut buf).map_err(LightError::from)?;
                 let raw = (u16::from(buf[0]) << 8) | u16::from(buf[1]);
-                let cur_mode = *mode.lock().expect("mode lock poisoned");
                 Ok(Illuminance::from_raw_and_mode(raw, cur_mode))
             }
             Backend::Mock(mock) => {
@@ -842,10 +848,16 @@ impl LightSensor {
                 mode,
             } => {
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
+                let cur_mode = *mode.lock().expect("mode lock poisoned");
+                if !cur_mode.is_continuous() {
+                    guard
+                        .write(&[cur_mode.opcode()])
+                        .map_err(LightError::from)?;
+                    std::thread::sleep(cur_mode.typical_measurement_time());
+                }
                 let mut buf = [0u8; 2];
                 guard.read(&mut buf).map_err(LightError::from)?;
                 let raw_word = (u16::from(buf[0]) << 8) | u16::from(buf[1]);
-                let cur_mode = *mode.lock().expect("mode lock poisoned");
                 let illuminance = Illuminance::from_raw_and_mode(raw_word, cur_mode);
                 Ok(LightDiagnostics {
                     illuminance,
@@ -864,8 +876,8 @@ impl LightSensor {
                     foot_candles: illuminance.foot_candles(),
                     mode: cur_mode,
                     raw_word,
-                    address: I2cAddress::default(),
-                    bus: BH1750_DEFAULT_I2C_BUS,
+                    address: self.i2c_address(),
+                    bus: self.i2c_bus(),
                 })
             }
         }
@@ -877,9 +889,7 @@ impl LightSensor {
     /// Returns [`LightError`] if reading fails.
     pub async fn read_lux_async(&self) -> Result<Illuminance, LightError> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.read_lux())
-            .await
-            .map_err(|join_err| LightError::from(io::Error::other(join_err)))?
+        map_join_result(tokio::task::spawn_blocking(move || this.read_lux()).await)
     }
 
     /// Asynchronously reads extended diagnostics from the sensor.
@@ -888,9 +898,17 @@ impl LightSensor {
     /// Returns [`LightError`] if reading fails.
     pub async fn read_diagnostics_async(&self) -> Result<LightDiagnostics, LightError> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.read_diagnostics())
-            .await
-            .map_err(|join_err| LightError::from(io::Error::other(join_err)))?
+        map_join_result(tokio::task::spawn_blocking(move || this.read_diagnostics()).await)
+    }
+}
+
+fn map_join_result<T>(
+    res: Result<Result<T, LightError>, tokio::task::JoinError>,
+) -> Result<T, LightError> {
+    match res {
+        Ok(result) => result,
+        Err(join_err) if join_err.is_panic() => std::panic::resume_unwind(join_err.into_panic()),
+        Err(join_err) => Err(LightError::from(io::Error::other(join_err))),
     }
 }
 

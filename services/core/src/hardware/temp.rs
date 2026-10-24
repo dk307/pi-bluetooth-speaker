@@ -971,9 +971,7 @@ impl TempSensor {
     /// Returns [`TempError`] if no sensors are found or if sysfs I/O fails.
     pub async fn discover_sensors_async(&self) -> Result<Vec<SensorId>, TempError> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.discover_sensors())
-            .await
-            .map_err(|join_err| TempError::from(io::Error::other(join_err)))?
+        map_join_result(tokio::task::spawn_blocking(move || this.discover_sensors()).await)
     }
 
     /// Asynchronously reads a specific DS18B20 sensor on the blocking threadpool.
@@ -986,9 +984,7 @@ impl TempSensor {
     ) -> Result<SensorReading, TempError> {
         let this = self.clone();
         let id = sensor_id.clone();
-        tokio::task::spawn_blocking(move || this.read_sensor(&id))
-            .await
-            .map_err(|join_err| TempError::from(io::Error::other(join_err)))?
+        map_join_result(tokio::task::spawn_blocking(move || this.read_sensor(&id)).await)
     }
 
     /// Asynchronously reads diagnostics from a DS18B20 sensor on the blocking threadpool.
@@ -1001,9 +997,7 @@ impl TempSensor {
     ) -> Result<SensorDiagnostics, TempError> {
         let this = self.clone();
         let id = sensor_id.clone();
-        tokio::task::spawn_blocking(move || this.read_diagnostics(&id))
-            .await
-            .map_err(|join_err| TempError::from(io::Error::other(join_err)))?
+        map_join_result(tokio::task::spawn_blocking(move || this.read_diagnostics(&id)).await)
     }
 
     /// Asynchronously discovers and reads all DS18B20 sensors on the blocking threadpool.
@@ -1012,9 +1006,7 @@ impl TempSensor {
     /// Returns [`TempError`] if no sensors are discovered or if any sensor read fails.
     pub async fn read_all_async(&self) -> Result<Vec<SensorReading>, TempError> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.read_all())
-            .await
-            .map_err(|join_err| TempError::from(io::Error::other(join_err)))?
+        map_join_result(tokio::task::spawn_blocking(move || this.read_all()).await)
     }
 
     /// Asynchronously reads the primary DS18B20 sensor temperature on the blocking threadpool.
@@ -1023,9 +1015,17 @@ impl TempSensor {
     /// Returns [`TempError`] if no sensors are present or if the sensor read fails.
     pub async fn read_primary_temperature_async(&self) -> Result<Temperature, TempError> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.read_primary_temperature())
-            .await
-            .map_err(|join_err| TempError::from(io::Error::other(join_err)))?
+        map_join_result(tokio::task::spawn_blocking(move || this.read_primary_temperature()).await)
+    }
+}
+
+fn map_join_result<T>(
+    res: Result<Result<T, TempError>, tokio::task::JoinError>,
+) -> Result<T, TempError> {
+    match res {
+        Ok(result) => result,
+        Err(join_err) if join_err.is_panic() => std::panic::resume_unwind(join_err.into_panic()),
+        Err(join_err) => Err(TempError::from(io::Error::other(join_err))),
     }
 }
 
@@ -1447,8 +1447,14 @@ a7 01 4b 46 7f ff 0c 10 5c
         let all = sensor.read_all_async().await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].sensor_id, id);
+    }
 
-        // Test mock set_diagnostics and clear_sensors
+    #[test]
+    fn temp_sensor_mock_diagnostics_and_clear() {
+        let (sensor, mock) = TempSensor::new_mocked();
+        let id = SensorId::parse("28-000000000042").unwrap();
+        mock.set_temperature(id.clone(), Temperature::from_celsius(20.0).unwrap());
+
         mock.set_diagnostics(
             id.clone(),
             Some(10),
@@ -1469,10 +1475,10 @@ a7 01 4b 46 7f ff 0c 10 5c
         // Test clear_sensors
         mock.clear_sensors();
         assert!(sensor.discover_sensors().unwrap_err().is_no_sensors());
+    }
 
-        // Test SocThermal default read
-        let _ = SocThermal::read();
-
+    #[test]
+    fn temp_sensor_sysfs_path_defaults_and_errors() {
         // Hardware sysfs path default
         let default_sensor = TempSensor::new();
         assert_eq!(

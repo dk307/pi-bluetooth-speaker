@@ -5,6 +5,8 @@ use std::process::Command;
 
 #[test]
 fn core_main_binary_executes() {
+    // Note: core binary currently executes an initial diagnostic banner and exits.
+    // When converted to a long-running daemon, this will invoke `--self-test` or `--version`.
     let bin_path = env!("CARGO_BIN_EXE_core");
     let output = Command::new(bin_path)
         .output()
@@ -105,18 +107,20 @@ fn read_temp_cli_help_and_flags() {
         .args(["--once", "--verbose", "--soc", "--raw"])
         .output()
         .expect("failed to run read_temp");
-    if !Path::new("/sys/bus/w1/devices").exists() {
+    if Path::new("/sys/bus/w1/devices").exists() {
+        assert!(once_run.status.success());
+    } else {
         assert!(!once_run.status.success());
         let stderr = String::from_utf8_lossy(&once_run.stderr);
         assert!(stderr.contains("Error:"));
     }
 
-    // JSON mode graceful failure
+    // JSON mode graceful failure on non-existent sensor
     let json_run = Command::new(bin_path)
         .args(["--once", "--json", "--device", "28-000000000001"])
         .output()
         .expect("failed to run read_temp");
-    if !Path::new("/sys/bus/w1/devices").exists() {
+    if !Path::new("/sys/bus/w1/devices/28-000000000001").exists() {
         assert!(!json_run.status.success());
     }
 }
@@ -192,6 +196,11 @@ fn read_light_cli_help_and_flags() {
         .output()
         .expect("failed to run read_light");
     assert!(!invalid_interval.status.success());
+}
+
+#[test]
+fn read_light_cli_modes_and_address_options() {
+    let bin_path = env!("CARGO_BIN_EXE_read_light");
 
     // Mode parsing & errors
     let missing_mode = Command::new(bin_path)
@@ -231,8 +240,10 @@ fn read_light_cli_help_and_flags() {
             .args(["--once", "--mode", mode, "--address", "0x23"])
             .output()
             .expect("failed to run read_light");
-        // Hardware initialization fails on host without /dev/i2c-1, but arguments parse correctly
-        if !Path::new("/dev/i2c-1").exists() {
+        if Path::new("/dev/i2c-1").exists() {
+            // On physical Pi 3 with I2C-1, command attempts live initialization
+            let _ = run.status;
+        } else {
             assert!(!run.status.success());
             let stderr = String::from_utf8_lossy(&run.stderr);
             assert!(stderr.contains("Failed to initialize BH1750 light sensor"));
@@ -244,7 +255,9 @@ fn read_light_cli_help_and_flags() {
         .args(["--once", "--verbose", "--json", "--address", "0x5C"])
         .output()
         .expect("failed to run read_light");
-    if !Path::new("/dev/i2c-1").exists() {
+    if Path::new("/dev/i2c-1").exists() {
+        let _ = run_json.status;
+    } else {
         assert!(!run_json.status.success());
     }
 }

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use speaker_core::hardware::{I2cAddress, LightSensor, MeasurementMode};
+use speaker_core::hardware::{I2cAddress, LUX_TO_FOOT_CANDLES, LightSensor, MeasurementMode};
 
 #[test]
 fn address_validation_and_hardware_metadata() {
@@ -27,8 +27,8 @@ async fn shared_clones_and_async_polling_observe_mock_updates() {
     let initial = sensor.read_lux_async().await.unwrap();
     assert!((initial.lux() - 100.0).abs() < 1e-3);
 
-    // Update in mock controller
-    mock.set_lux(1250.5);
+    // Update in mock controller (exact multiple of 1.2 resolution divisor)
+    mock.set_lux(1200.0);
 
     // Observe update in separate async task
     let handle = tokio::spawn(async move {
@@ -37,8 +37,8 @@ async fn shared_clones_and_async_polling_observe_mock_updates() {
     });
 
     let observed = handle.await.unwrap().unwrap();
-    assert!((observed.lux() - 1250.5).abs() < 1.0);
-    assert!((observed.foot_candles() - (1250.5 * 0.092_903)).abs() < 0.5);
+    assert!((observed.lux() - 1200.0).abs() < 1e-3);
+    assert!((observed.foot_candles() - (1200.0 * LUX_TO_FOOT_CANDLES)).abs() < 1e-4);
 }
 
 #[test]
