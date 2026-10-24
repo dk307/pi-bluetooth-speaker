@@ -297,7 +297,7 @@ pub struct SensorDiagnostics {
     pub resolution_bits: Option<u8>,
     /// Power supply mode (external or parasite).
     pub power_mode: Option<PowerSupplyMode>,
-    /// ADC conversion duration in milliseconds (typically 750 ms for 12-bit).
+    /// Measurement conversion duration in milliseconds (typically 750 ms for 12-bit).
     pub conversion_time_ms: Option<u32>,
     /// Temperature alarm threshold registers (Low, High) in integer degrees Celsius.
     pub alarms: Option<(i8, i8)>,
@@ -317,7 +317,7 @@ impl Display for SensorDiagnostics {
                 12 => "0.0625°C",
                 _ => "variable",
             };
-            writeln!(f, "  • ADC Resolution : {res}-bit ({prec} precision)")?;
+            writeln!(f, "  • Resolution     : {res}-bit ({prec} precision)")?;
         }
         if let Some(pwr) = self.power_mode {
             writeln!(f, "  • Power Mode     : {pwr}")?;
@@ -1462,7 +1462,7 @@ a7 01 4b 46 7f ff 0c 10 5c
         };
         let min_text = minimal_diag.to_string();
         assert_ne!(min_text, "");
-        assert!(!min_text.contains("ADC Resolution"));
+        assert!(!min_text.contains("Resolution     :"));
     }
 
     #[test]

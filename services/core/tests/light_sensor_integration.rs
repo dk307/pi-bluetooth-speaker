@@ -97,3 +97,11 @@ async fn concurrent_sensor_clones_power_and_mode_operations() {
     h1.await.unwrap();
     h2.await.unwrap();
 }
+
+#[tokio::test]
+async fn runtime_task_cancellation_mapping() {
+    let err: speaker_core::hardware::LightError =
+        speaker_core::runtime::abort_and_map("ambient light integration task").await;
+    assert!(err.is_cancelled());
+    assert!(err.summary().contains("ambient light integration task"));
+}

@@ -146,3 +146,11 @@ fn sysfs_backend_reads_full_diagnostics_and_various_power_modes() {
     let diag3 = sensor.read_diagnostics(&id3).unwrap();
     assert_eq!(diag3.power_mode, Some(PowerSupplyMode::Unknown(99)));
 }
+
+#[tokio::test]
+async fn runtime_task_cancellation_mapping() {
+    let err: speaker_core::hardware::TempError =
+        speaker_core::runtime::abort_and_map("temperature integration task").await;
+    assert!(err.is_cancelled());
+    assert!(err.summary().contains("temperature integration task"));
+}

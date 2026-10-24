@@ -122,6 +122,8 @@ To prevent multi-iteration PR review churn and excessive token/CI consumption, A
   * **Unconditional Failure on CLI Subprocess Probes:** Subprocess integration tests (`tests/cli_tests.rs`) must fail loudly with a panic if `--help` or basic binary execution fails, rather than silently skipping on non-CI hosts (`can_exec_binary`). Host-built test binaries are guaranteed runnable on the test machine.
   * **Unconditional Test Utility Visibility (`M-TEST-UTIL`):** Testing helpers that construct or map runtime task states (such as `abort_and_map`) must be exported unconditionally (`pub`) from library crates rather than gated behind `#[cfg(test)]`, ensuring integration test suites can utilize them.
   * **Assert Clean, Backtrace-Free CLI Rejections:** Table-driven CLI argument validation tests must assert not only the expected rejection substring but also explicitly verify `!stderr.contains("Backtrace") && !stderr.contains("panicked")` to enforce the user-facing error contract.
+  * **Accurate Silicon Terminology in Diagnostics:** Diagnostic formatting and telemetry labels must accurately describe the physical silicon (e.g., DS18B20 configured measurement "Resolution", not "ADC Resolution" since the device is a direct-to-digital 1-Wire temperature sensor).
+
 
 ---
 
