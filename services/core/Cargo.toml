@@ -11,6 +11,7 @@ default-run = "core"
 name = "speaker_core"
 path = "src/lib.rs"
 
+# Main daemon binary; matches DietPi /etc/systemd/system/core.service unit definition.
 [[bin]]
 name = "core"
 path = "src/main.rs"
@@ -18,6 +19,10 @@ path = "src/main.rs"
 [[bin]]
 name = "read_temp"
 path = "src/bin/read_temp.rs"
+
+[[bin]]
+name = "read_light"
+path = "src/bin/read_light.rs"
 
 [dependencies]
 # UI Framework (Slint with Linux Framebuffer & KMS/DRM backends)
@@ -37,6 +42,7 @@ serde_json = "=1.0.140"
 
 # Raspberry Pi Hardware Peripherals (GPIO, Hardware PWM, I2C)
 rppal = { version = "=0.22.1", features = ["hal"] }
+bh1750-embedded = "=0.1.0"
 
 # Image Processing (Cover Art Scaling & Procedural Vinyl)
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }

@@ -1,0 +1,60 @@
+name: DiffGuard AI PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: DiffGuard AI Code Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false
+    steps:
+      - name: Verify OpenRouter API Key
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "ERROR: OPENROUTER_API_KEY secret is required for DiffGuard AI code review." >&2
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.x"
+
+      - name: Run CI Script Unit Tests
+        run: python3 -m unittest discover -s .github/scripts -p "test_*.py" -v
+
+      - name: Build custom review prompt from guidelines
+        id: build-prompt
+        run: python3 .github/scripts/generate_review_prompt.py
+
+      # GitHub Actions Runner downloads all referenced `uses:` action bundles into
+      # `/home/runner/work/_actions/jonit-dev/diffguard/<sha>/` during the initial
+      # `Set up job` phase before step 1 executes. This step patches `dist/index.js`
+      # in place and verifies syntax with `node --check` before the action runs.
+      - name: Enable file-based custom_prompt in DiffGuard
+        run: python3 .github/scripts/patch_diffguard.py
+
+      - name: Run DiffGuard AI PR Review
+        uses: jonit-dev/diffguard@88f63615c769f8db6031973503c2c40a9a3f4feb # v1.0.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          open_router_key: ${{ secrets.OPENROUTER_API_KEY }}
+          model_id: "@preset/code-review"
+          max_tokens: "8192"
+          custom_prompt: ${{ steps.build-prompt.outputs.prompt_file }}

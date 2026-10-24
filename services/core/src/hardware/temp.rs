@@ -10,7 +10,7 @@
 //! methods ([`TempSensor::read_all_async`], [`TempSensor::read_primary_temperature_async`]),
 //! which offload blocking sysfs file I/O to [`tokio::task::spawn_blocking`].
 
-use std::backtrace::{Backtrace, BacktraceStatus};
+use std::backtrace::Backtrace;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
@@ -20,6 +20,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use crate::hardware::{BcmPin, GpioPinInfo, PhysicalPin};
+use crate::runtime::{FromJoinError, run_blocking};
 
 /// BCM GPIO pin assigned to the DS18B20 1-Wire data line (`BCM GPIO 26`).
 pub const DS18B20_BCM_GPIO_PIN: BcmPin = BcmPin::new(26);
@@ -38,6 +39,9 @@ pub const SOC_THERMAL_SYSFS_PATH: &str = "/sys/devices/virtual/thermal/thermal_z
 
 /// Mandatory 1-Wire family prefix for Dallas DS18B20 digital thermometers (`0x28`).
 const DS18B20_FAMILY_PREFIX: &str = "28-";
+
+/// Standard format description for DS18B20 sensor identifiers.
+pub(crate) const SENSOR_ID_FORMAT_HELP: &str = "expected '28-<hex>' format";
 
 /// Minimum operating temperature supported by the DS18B20 hardware (`-55.0 °C` in millidegrees).
 const MIN_MILLIDEGREES_C: i32 = -55_000;
@@ -127,7 +131,7 @@ impl Temperature {
     /// Returns the temperature in degrees Fahrenheit (`°F`).
     #[must_use]
     pub fn fahrenheit(self) -> f32 {
-        (self.celsius() * 9.0 / 5.0) + 32.0
+        crate::diag::fahrenheit(self.celsius())
     }
 }
 
@@ -148,7 +152,7 @@ impl Display for Temperature {
 /// Validated 1-Wire DS18B20 device identifier (family code `28-*`).
 ///
 /// Guards the invariant that the sensor ID begins with `"28-"` followed by a
-/// non-empty ASCII alphanumeric serial identifier.
+/// non-empty ASCII hexadecimal serial identifier.
 ///
 /// # Examples
 /// ```
@@ -162,19 +166,34 @@ impl Display for Temperature {
 pub struct SensorId(Box<str>);
 
 impl SensorId {
+    fn is_valid_id(raw: &str) -> bool {
+        raw.strip_prefix(DS18B20_FAMILY_PREFIX)
+            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit()))
+    }
+
+    /// Parses a DS18B20 sensor ID from user-supplied CLI input without capturing a backtrace.
+    ///
+    /// # Errors
+    /// Returns a descriptive user-facing error message if `id` does not begin with `"28-"`
+    /// followed by non-empty ASCII hexadecimal digits.
+    pub fn parse_str(id: &str) -> Result<Self, String> {
+        let raw = id.trim();
+        if !Self::is_valid_id(raw) {
+            return Err(format!(
+                "invalid DS18B20 sensor ID '{raw}': {SENSOR_ID_FORMAT_HELP}"
+            ));
+        }
+        Ok(Self(raw.into()))
+    }
+
     /// Validates and constructs a `SensorId` from a string slice.
     ///
     /// # Errors
     /// Returns [`TempError`] with [`TempError::is_invalid_sensor_id`] if `id` does
-    /// not begin with `"28-"` or has an empty/non-alphanumeric serial suffix.
+    /// not begin with `"28-"` or has an empty or non-hexadecimal serial suffix.
     pub fn parse(id: impl AsRef<str>) -> Result<Self, TempError> {
         let raw = id.as_ref().trim();
-        let Some(suffix) = raw.strip_prefix(DS18B20_FAMILY_PREFIX) else {
-            return Err(TempError::new(ErrorKind::InvalidSensorId {
-                value: raw.into(),
-            }));
-        };
-        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_alphanumeric()) {
+        if !Self::is_valid_id(raw) {
             return Err(TempError::new(ErrorKind::InvalidSensorId {
                 value: raw.into(),
             }));
@@ -278,7 +297,7 @@ pub struct SensorDiagnostics {
     pub resolution_bits: Option<u8>,
     /// Power supply mode (external or parasite).
     pub power_mode: Option<PowerSupplyMode>,
-    /// ADC conversion duration in milliseconds (typically 750 ms for 12-bit).
+    /// Measurement conversion duration in milliseconds (typically 750 ms for 12-bit).
     pub conversion_time_ms: Option<u32>,
     /// Temperature alarm threshold registers (Low, High) in integer degrees Celsius.
     pub alarms: Option<(i8, i8)>,
@@ -298,7 +317,7 @@ impl Display for SensorDiagnostics {
                 12 => "0.0625°C",
                 _ => "variable",
             };
-            writeln!(f, "  • ADC Resolution : {res}-bit ({prec} precision)")?;
+            writeln!(f, "  • Resolution     : {res}-bit ({prec} precision)")?;
         }
         if let Some(pwr) = self.power_mode {
             writeln!(f, "  • Power Mode     : {pwr}")?;
@@ -385,6 +404,8 @@ pub(crate) enum ErrorKind {
     InvalidSensorId { value: Box<str> },
     /// Underlying filesystem or bus I/O failure.
     Io(io::Error),
+    /// Asynchronous task was cancelled or the runtime shut down.
+    Cancelled { message: Box<str> },
 }
 
 /// Error returned by DS18B20 1-Wire temperature sensor operations.
@@ -441,56 +462,58 @@ impl TempError {
         matches!(self.kind, ErrorKind::Io(_))
     }
 
+    /// Returns `true` if this error was caused by task cancellation or runtime shutdown.
+    ///
+    /// Daemon services should inspect this predicate during graceful shutdown to avoid
+    /// treating normal task cancellation or service termination as hardware faults.
+    #[must_use]
+    pub const fn is_cancelled(&self) -> bool {
+        matches!(self.kind, ErrorKind::Cancelled { .. })
+    }
+
+    pub(crate) fn cancelled(message: impl Into<Box<str>>) -> Self {
+        Self::new(ErrorKind::Cancelled {
+            message: message.into(),
+        })
+    }
+
     /// Returns the captured backtrace for this error.
     #[must_use]
     pub const fn backtrace(&self) -> &Backtrace {
         &self.backtrace
     }
-}
 
-impl Display for TempError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt_kind(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            ErrorKind::NoSensorsDetected { base_path } => {
-                write!(
-                    f,
-                    "no DS18B20 sensors (28-*) detected under {}",
-                    base_path.display()
-                )?;
-            }
+            ErrorKind::NoSensorsDetected { base_path } => write!(
+                f,
+                "no DS18B20 sensors (28-*) detected under {}",
+                base_path.display()
+            ),
             ErrorKind::CrcMismatch {
                 sensor_id: Some(id),
-            } => {
-                write!(f, "1-Wire CRC check failed for sensor {id}")?;
-            }
+            } => write!(f, "1-Wire CRC check failed for sensor {id}"),
             ErrorKind::CrcMismatch { sensor_id: None } => {
-                write!(f, "1-Wire CRC check failed (line 1 did not end with YES)")?;
+                write!(f, "1-Wire CRC check failed (line 1 did not end with YES)")
             }
             ErrorKind::ParseError { detail } => {
-                write!(f, "failed to parse w1_slave temperature payload: {detail}")?;
+                write!(f, "failed to parse w1_slave temperature payload: {detail}")
             }
-            ErrorKind::OutOfRange { millidegrees_c } => {
-                write!(
-                    f,
-                    "temperature {millidegrees_c} m°C is outside DS18B20 range ({MIN_MILLIDEGREES_C}..={MAX_MILLIDEGREES_C} m°C)"
-                )?;
-            }
-            ErrorKind::InvalidSensorId { value } => {
-                write!(
-                    f,
-                    "invalid DS18B20 sensor ID '{value}': expected '28-<hex>' format"
-                )?;
-            }
-            ErrorKind::Io(err) => {
-                write!(f, "1-Wire sysfs I/O error: {err}")?;
-            }
+            ErrorKind::OutOfRange { millidegrees_c } => write!(
+                f,
+                "temperature {millidegrees_c} m°C is outside DS18B20 range ({MIN_MILLIDEGREES_C}..={MAX_MILLIDEGREES_C} m°C)"
+            ),
+            ErrorKind::InvalidSensorId { value } => write!(
+                f,
+                "invalid DS18B20 sensor ID '{value}': {SENSOR_ID_FORMAT_HELP}"
+            ),
+            ErrorKind::Io(err) => write!(f, "1-Wire sysfs I/O error: {err}"),
+            ErrorKind::Cancelled { message } => write!(f, "task cancelled: {message}"),
         }
-        if self.backtrace.status() == BacktraceStatus::Captured {
-            write!(f, "\nBacktrace:\n{}", self.backtrace)?;
-        }
-        Ok(())
     }
 }
+
+super::impl_canonical_error_display!(TempError);
 
 impl std::error::Error for TempError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
@@ -504,6 +527,12 @@ impl std::error::Error for TempError {
 impl From<io::Error> for TempError {
     fn from(err: io::Error) -> Self {
         Self::new(ErrorKind::Io(err))
+    }
+}
+
+impl FromJoinError for TempError {
+    fn from_cancelled(message: impl Into<Box<str>>) -> Self {
+        Self::cancelled(message)
     }
 }
 
@@ -798,6 +827,10 @@ pub struct TempSensor {
 
 impl TempSensor {
     /// Creates a `TempSensor` backed by the standard Linux 1-Wire sysfs path (`/sys/bus/w1/devices`).
+    ///
+    /// Construction is pure in-memory metadata initialization and performs no filesystem
+    /// syscalls; all sysfs directory and device reads are deferred lazily to [`discover_sensors`](Self::discover_sensors)
+    /// and [`read_sensor`](Self::read_sensor).
     #[must_use]
     #[expect(
         clippy::new_without_default,
@@ -810,7 +843,8 @@ impl TempSensor {
     /// Creates a `TempSensor` reading from a custom sysfs directory path.
     ///
     /// Useful for testing file discovery and `w1_slave` parsing against a
-    /// synthetic directory tree on any operating system.
+    /// synthetic directory tree on any operating system. Performs no filesystem I/O
+    /// at construction time.
     #[must_use]
     pub fn with_sysfs_path(base_path: impl AsRef<Path>) -> Self {
         Self {
@@ -941,12 +975,10 @@ impl TempSensor {
     /// # Errors
     /// Returns [`TempError`] if no sensors are discovered or if reading a sensor fails.
     pub fn read_all(&self) -> Result<Vec<SensorReading>, TempError> {
-        let ids = self.discover_sensors()?;
-        let mut readings = Vec::with_capacity(ids.len());
-        for id in &ids {
-            readings.push(self.read_sensor(id)?);
-        }
-        Ok(readings)
+        self.discover_sensors()?
+            .iter()
+            .map(|id| self.read_sensor(id))
+            .collect()
     }
 
     /// Reads the temperature of the primary (first discovered) DS18B20 sensor.
@@ -969,63 +1001,79 @@ impl TempSensor {
     ///
     /// # Errors
     /// Returns [`TempError`] if no sensors are found or if sysfs I/O fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics, resuming unwinding to propagate
+    /// programming errors to the caller.
     pub async fn discover_sensors_async(&self) -> Result<Vec<SensorId>, TempError> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.discover_sensors())
-            .await
-            .map_err(|join_err| TempError::from(io::Error::other(join_err)))?
+        run_blocking("1-Wire sensor discovery", move || this.discover_sensors()).await
     }
 
     /// Asynchronously reads a specific DS18B20 sensor on the blocking threadpool.
     ///
     /// # Errors
     /// Returns [`TempError`] if reading or parsing `w1_slave` fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics, resuming unwinding to propagate
+    /// programming errors to the caller.
     pub async fn read_sensor_async(
         &self,
         sensor_id: &SensorId,
     ) -> Result<SensorReading, TempError> {
         let this = self.clone();
         let id = sensor_id.clone();
-        tokio::task::spawn_blocking(move || this.read_sensor(&id))
-            .await
-            .map_err(|join_err| TempError::from(io::Error::other(join_err)))?
+        run_blocking("1-Wire sensor read", move || this.read_sensor(&id)).await
     }
 
     /// Asynchronously reads diagnostics from a DS18B20 sensor on the blocking threadpool.
     ///
     /// # Errors
     /// Returns [`TempError`] if reading diagnostics fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics, resuming unwinding to propagate
+    /// programming errors to the caller.
     pub async fn read_diagnostics_async(
         &self,
         sensor_id: &SensorId,
     ) -> Result<SensorDiagnostics, TempError> {
         let this = self.clone();
         let id = sensor_id.clone();
-        tokio::task::spawn_blocking(move || this.read_diagnostics(&id))
-            .await
-            .map_err(|join_err| TempError::from(io::Error::other(join_err)))?
+        run_blocking("1-Wire diagnostics read", move || {
+            this.read_diagnostics(&id)
+        })
+        .await
     }
 
     /// Asynchronously discovers and reads all DS18B20 sensors on the blocking threadpool.
     ///
     /// # Errors
     /// Returns [`TempError`] if no sensors are discovered or if any sensor read fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics, resuming unwinding to propagate
+    /// programming errors to the caller.
     pub async fn read_all_async(&self) -> Result<Vec<SensorReading>, TempError> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.read_all())
-            .await
-            .map_err(|join_err| TempError::from(io::Error::other(join_err)))?
+        run_blocking("1-Wire read-all sensors", move || this.read_all()).await
     }
 
     /// Asynchronously reads the primary DS18B20 sensor temperature on the blocking threadpool.
     ///
     /// # Errors
     /// Returns [`TempError`] if no sensors are present or if the sensor read fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics, resuming unwinding to propagate
+    /// programming errors to the caller.
     pub async fn read_primary_temperature_async(&self) -> Result<Temperature, TempError> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.read_primary_temperature())
-            .await
-            .map_err(|join_err| TempError::from(io::Error::other(join_err)))?
+        run_blocking("1-Wire primary temperature read", move || {
+            this.read_primary_temperature()
+        })
+        .await
     }
 }
 
@@ -1065,9 +1113,18 @@ fn discover_sysfs_sensors(base_path: &Path) -> Result<Vec<SensorId>, TempError> 
     Ok(sensors)
 }
 
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<TempSensor>();
+    assert_send_sync::<TempSensorMock>();
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diag::ScopedTempDir;
+    use crate::runtime::abort_and_map;
+    use std::error::Error;
 
     #[test]
     fn temperature_conversions_and_bounds() {
@@ -1109,6 +1166,17 @@ mod tests {
                 .unwrap_err()
                 .is_invalid_sensor_id()
         );
+        // Non-hexadecimal characters ('g', 'z') must be rejected per 1-Wire DS18B20 specification
+        assert!(
+            SensorId::parse("28-00000diag001")
+                .unwrap_err()
+                .is_invalid_sensor_id()
+        );
+        assert!(
+            SensorId::parse("28-0000000xyz01")
+                .unwrap_err()
+                .is_invalid_sensor_id()
+        );
     }
 
     #[test]
@@ -1133,6 +1201,27 @@ a7 01 4b 46 7f ff 0c 10 5c
 ";
         let err = parse_w1_slave(missing_t_payload).unwrap_err();
         assert!(err.is_parse_error());
+
+        // Empty payload
+        assert!(parse_w1_slave("").unwrap_err().is_parse_error());
+
+        // Single line with YES but missing second line
+        assert!(
+            parse_w1_slave("a7 01 4b 46 : crc=5c YES\n")
+                .unwrap_err()
+                .is_parse_error()
+        );
+
+        // Missing colon on line 1 without YES: the 1-Wire kernel driver signals hardware
+        // cyclic redundancy check failures with "NO" on line 1; thus payloads lacking "YES"
+        // classify as CRC mismatches.
+        let no_colon = "a7 01 4b 46 7f ff 0c 10 5c crc=5c NO\na7 01 4b 46 7f ff 0c 10 5c t=26437\n";
+        assert!(parse_w1_slave(no_colon).unwrap_err().is_crc_mismatch());
+
+        // Invalid integer in t=
+        let bad_int =
+            "a7 01 4b 46 7f ff 0c 10 5c : crc=5c YES\na7 01 4b 46 7f ff 0c 10 5c t=not_an_int\n";
+        assert!(parse_w1_slave(bad_int).unwrap_err().is_parse_error());
     }
 
     #[test]
@@ -1162,6 +1251,10 @@ a7 01 4b 46 7f ff 0c 10 5c
         assert_eq!(diag.resolution_bits, Some(12));
         assert_eq!(diag.power_mode, Some(PowerSupplyMode::External));
 
+        // Diagnostics for sensor with RawPayload
+        let diag_raw = sensor.read_diagnostics(&id2).unwrap();
+        assert!(diag_raw.raw_payload.contains("ff 07 4b 46"));
+
         // Inject CRC error on id2
         mock.set_raw_w1_slave(id2.clone(), "00 : crc=00 NO\n00 t=31250\n");
         assert!(sensor.read_sensor(&id2).unwrap_err().is_crc_mismatch());
@@ -1182,8 +1275,15 @@ a7 01 4b 46 7f ff 0c 10 5c
 
     #[tokio::test]
     async fn async_methods_read_from_sensor_without_blocking() {
+        fn assert_send<T: Send>(_: T) {}
         let (sensor, mock) = TempSensor::new_mocked();
         let id = SensorId::parse("28-00000abcdef1").unwrap();
+        assert_send(sensor.discover_sensors_async());
+        assert_send(sensor.read_primary_temperature_async());
+        assert_send(sensor.read_all_async());
+        assert_send(sensor.read_sensor_async(&id));
+        assert_send(sensor.read_diagnostics_async(&id));
+
         mock.set_temperature(
             id.clone(),
             Temperature::from_millidegrees_celsius(28_500).unwrap(),
@@ -1202,21 +1302,331 @@ a7 01 4b 46 7f ff 0c 10 5c
         assert_eq!(diag.temperature.millidegrees_celsius(), 28_500);
     }
 
+    #[tokio::test]
+    async fn cancelled_blocking_task_maps_to_temp_error_cancelled() {
+        let err: TempError = abort_and_map("1-Wire sensor read").await;
+        assert!(err.is_cancelled());
+        assert!(!err.is_io());
+        assert!(
+            err.to_string()
+                .contains("1-Wire sensor read task was cancelled")
+        );
+    }
+
     #[test]
     fn soc_thermal_parses_content() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("soc_thermal_test_{}", std::process::id()));
-        let _ = fs::create_dir_all(&temp_dir);
-        let path = temp_dir.join("temp");
+        let temp_dir = ScopedTempDir::new("soc_thermal_test");
+        let path = temp_dir.path().join("temp");
         fs::write(&path, "41856\n").unwrap();
 
         let soc = SocThermal::read_from_path(&path).unwrap();
         assert_eq!(soc.temperature().millidegrees_celsius(), 41_856);
         assert!((soc.temperature().celsius() - 41.856).abs() < 1e-3);
+        assert_eq!(soc.to_string(), "SoC: 41.86°C (107.34°F)");
 
         let chassis = Temperature::from_millidegrees_celsius(24_000).unwrap();
         assert!((soc.delta_from_chassis(chassis) - 17.856).abs() < 1e-2);
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        // Parse error
+        let bad_path = temp_dir.path().join("bad_temp");
+        fs::write(&bad_path, "not-a-number\n").unwrap();
+        let err = SocThermal::read_from_path(&bad_path).unwrap_err();
+        assert!(err.is_parse_error());
+
+        // Missing file
+        let missing_err =
+            SocThermal::read_from_path(temp_dir.path().join("nonexistent")).unwrap_err();
+        assert!(missing_err.is_io());
+    }
+
+    #[test]
+    fn temperature_constructors_and_try_from() {
+        let t = Temperature::new_millidegrees_celsius(25_000);
+        assert_eq!(t.millidegrees_celsius(), 25_000);
+
+        let from_try: Temperature = 30_000.try_into().unwrap();
+        assert_eq!(from_try.millidegrees_celsius(), 30_000);
+
+        let err_try: Result<Temperature, _> = 200_000.try_into();
+        let _ = err_try.unwrap_err();
+
+        assert!(
+            Temperature::from_celsius(-60.0)
+                .unwrap_err()
+                .is_out_of_range()
+        );
+        assert!(
+            Temperature::from_celsius(130.0)
+                .unwrap_err()
+                .is_out_of_range()
+        );
+        assert!(
+            Temperature::from_celsius(f32::INFINITY)
+                .unwrap_err()
+                .is_out_of_range()
+        );
+        assert!(
+            Temperature::from_celsius(f32::NEG_INFINITY)
+                .unwrap_err()
+                .is_out_of_range()
+        );
+        assert!(
+            Temperature::from_celsius(f32::NAN)
+                .unwrap_err()
+                .is_out_of_range()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "temperature millidegrees_c must be within DS18B20 range")]
+    fn temperature_new_panics_on_low_overflow() {
+        let _ = Temperature::new_millidegrees_celsius(-55_001);
+    }
+
+    #[test]
+    #[should_panic(expected = "temperature millidegrees_c must be within DS18B20 range")]
+    fn temperature_new_panics_on_high_overflow() {
+        let _ = Temperature::new_millidegrees_celsius(125_001);
+    }
+
+    #[test]
+    fn sensor_id_traits_and_conversions() {
+        let id_str = "28-01201b7d5396";
+        let id: SensorId = id_str.parse().unwrap();
+        assert_eq!(id.as_ref(), id_str);
+        assert_eq!(id.to_string(), id_str);
+
+        let id_from_str: SensorId = id_str.try_into().unwrap();
+        assert_eq!(id_from_str, id);
+
+        let id_from_string: SensorId = id_str.to_string().try_into().unwrap();
+        assert_eq!(id_from_string, id);
+    }
+
+    #[test]
+    fn sensor_reading_and_diagnostics_display_formatting() {
+        let sensor_id = SensorId::parse("28-01201b7d5396").unwrap();
+        let temperature = Temperature::from_millidegrees_celsius(22_500).unwrap();
+        let reading = SensorReading {
+            sensor_id: sensor_id.clone(),
+            temperature,
+        };
+        let formatted = reading.to_string();
+        assert!(formatted.contains("[28-01201b7d5396]"));
+        assert!(formatted.contains("22.50°C"));
+
+        // PowerSupplyMode Display
+        assert_eq!(
+            PowerSupplyMode::External.to_string(),
+            "External 3.3V (Vdd pin)"
+        );
+        assert_eq!(
+            PowerSupplyMode::Parasite.to_string(),
+            "Parasite power (data line)"
+        );
+        assert_eq!(PowerSupplyMode::Unknown(42).to_string(), "Unknown (42)");
+
+        // Diagnostics with all resolutions
+        for (res, prec) in [
+            (9, "0.5°C"),
+            (10, "0.25°C"),
+            (11, "0.125°C"),
+            (12, "0.0625°C"),
+            (8, "variable"),
+        ] {
+            let diag = SensorDiagnostics {
+                sensor_id: sensor_id.clone(),
+                temperature,
+                resolution_bits: Some(res),
+                power_mode: Some(PowerSupplyMode::External),
+                conversion_time_ms: Some(750),
+                alarms: Some((0, 70)),
+                raw_payload: "raw frame\n".into(),
+            };
+            let text = diag.to_string();
+            assert!(text.contains(prec));
+            assert!(text.contains("External 3.3V"));
+            assert!(text.contains("750 ms"));
+            assert!(text.contains("Low: 0°C | High: 70°C"));
+        }
+
+        // Minimal diagnostics with None fields
+        let minimal_diag = SensorDiagnostics {
+            sensor_id,
+            temperature,
+            resolution_bits: None,
+            power_mode: None,
+            conversion_time_ms: None,
+            alarms: None,
+            raw_payload: "raw\n".into(),
+        };
+        let min_text = minimal_diag.to_string();
+        assert_ne!(min_text, "");
+        assert!(!min_text.contains("Resolution     :"));
+    }
+
+    #[test]
+    fn temp_error_all_variants_predicates_and_display() {
+        let no_sensors = TempError::new(ErrorKind::NoSensorsDetected {
+            base_path: PathBuf::from("/sys/bus/w1/devices"),
+        });
+        assert!(no_sensors.is_no_sensors());
+        assert!(
+            no_sensors
+                .to_string()
+                .contains("no DS18B20 sensors (28-*) detected")
+        );
+        assert!(no_sensors.source().is_none());
+        let _ = no_sensors.backtrace();
+
+        let crc_with_id = TempError::new(ErrorKind::CrcMismatch {
+            sensor_id: Some("28-001".into()),
+        });
+        assert!(crc_with_id.is_crc_mismatch());
+        assert!(
+            crc_with_id
+                .to_string()
+                .contains("1-Wire CRC check failed for sensor 28-001")
+        );
+
+        let crc_no_id = TempError::new(ErrorKind::CrcMismatch { sensor_id: None });
+        assert!(crc_no_id.is_crc_mismatch());
+        assert!(crc_no_id.to_string().contains("1-Wire CRC check failed"));
+
+        let parse_err = TempError::new(ErrorKind::ParseError {
+            detail: "missing t=".into(),
+        });
+        assert!(parse_err.is_parse_error());
+        assert!(parse_err.to_string().contains("failed to parse w1_slave"));
+
+        let range_err = TempError::new(ErrorKind::OutOfRange {
+            millidegrees_c: 150_000,
+        });
+        assert!(range_err.is_out_of_range());
+        assert!(
+            range_err
+                .to_string()
+                .contains("temperature 150000 m°C is outside")
+        );
+
+        let invalid_sensor_err = TempError::new(ErrorKind::InvalidSensorId {
+            value: "bad-id".into(),
+        });
+        assert!(invalid_sensor_err.is_invalid_sensor_id());
+        assert!(
+            invalid_sensor_err
+                .to_string()
+                .contains("invalid DS18B20 sensor ID 'bad-id'")
+        );
+
+        let temp_io_err =
+            TempError::from(io::Error::new(io::ErrorKind::PermissionDenied, "denied"));
+        assert!(temp_io_err.is_io());
+        assert!(temp_io_err.to_string().contains("1-Wire sysfs I/O error"));
+        assert!(temp_io_err.source().is_some());
+
+        let cancel_err = TempError::cancelled("worker cancelled");
+        assert!(cancel_err.is_cancelled());
+        assert!(!cancel_err.is_io());
+        assert!(!cancel_err.is_no_sensors());
+        assert!(matches!(
+            cancel_err.backtrace().status(),
+            std::backtrace::BacktraceStatus::Captured | std::backtrace::BacktraceStatus::Disabled
+        ));
+        assert!(
+            cancel_err
+                .to_string()
+                .contains("task cancelled: worker cancelled")
+        );
+        assert!(cancel_err.source().is_none());
+
+        // Machine-oriented single-line summary omits captured backtrace
+        for err in [
+            &no_sensors,
+            &crc_with_id,
+            &crc_no_id,
+            &parse_err,
+            &range_err,
+            &invalid_sensor_err,
+            &temp_io_err,
+            &cancel_err,
+        ] {
+            let s = err.summary();
+            assert!(!s.contains('\n'), "summary contained newline: {s}");
+            assert!(
+                !s.contains("Backtrace:"),
+                "summary contained backtrace: {s}"
+            );
+            assert!(err.to_string().starts_with(&s));
+        }
+    }
+
+    #[tokio::test]
+    async fn temp_sensor_read_all_async_and_metadata() {
+        let (sensor, mock) = TempSensor::new_mocked();
+        assert_eq!(sensor.sysfs_base_path(), Path::new(DS18B20_SYSFS_BASE_PATH));
+
+        let gpio = sensor.gpio_info();
+        assert_eq!(gpio.bcm_pin.as_u8(), 26);
+        assert_eq!(gpio.physical_pin.as_u8(), 37);
+
+        let id = SensorId::parse("28-000000000042").unwrap();
+        mock.set_temperature(id.clone(), Temperature::from_celsius(20.0).unwrap());
+
+        let all = sensor.read_all_async().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].sensor_id, id);
+    }
+
+    #[test]
+    fn temp_sensor_mock_diagnostics_and_clear() {
+        let (sensor, mock) = TempSensor::new_mocked();
+        let id = SensorId::parse("28-000000000042").unwrap();
+        mock.set_temperature(id.clone(), Temperature::from_celsius(20.0).unwrap());
+
+        mock.set_diagnostics(
+            id.clone(),
+            Some(10),
+            Some(PowerSupplyMode::Parasite),
+            Some(188),
+            Some((-10, 50)),
+        );
+        let diag = sensor.read_diagnostics(&id).unwrap();
+        assert_eq!(diag.resolution_bits, Some(10));
+        assert_eq!(diag.power_mode, Some(PowerSupplyMode::Parasite));
+        assert_eq!(diag.conversion_time_ms, Some(188));
+        assert_eq!(diag.alarms, Some((-10, 50)));
+
+        // Test sensor not found
+        let missing_id = SensorId::parse("28-000000000099").unwrap();
+        let _ = sensor.read_sensor(&missing_id).unwrap_err();
+
+        // Test clear_sensors
+        mock.clear_sensors();
+        assert!(sensor.discover_sensors().unwrap_err().is_no_sensors());
+    }
+
+    #[test]
+    fn temp_sensor_sysfs_path_defaults_and_errors() {
+        // Hermeticity invariant: TempSensor::new() and with_sysfs_path() perform zero
+        // filesystem syscalls at construction time, succeeding even when the path does not exist.
+        let default_sensor = TempSensor::new();
+        assert_eq!(
+            default_sensor.sysfs_base_path(),
+            Path::new(DS18B20_SYSFS_BASE_PATH)
+        );
+        let nonexistent = TempSensor::with_sysfs_path("/nonexistent/hermetic/w1/path");
+        assert_eq!(
+            nonexistent.sysfs_base_path(),
+            Path::new("/nonexistent/hermetic/w1/path")
+        );
+
+        // Test sysfs path that is a file (triggers Err(NotADirectory) in discover_sysfs_sensors)
+        let temp_dir = ScopedTempDir::new("ds18b20_file_test");
+        let temp_file = temp_dir.path().join("not_a_dir");
+        fs::write(&temp_file, "not a directory").unwrap();
+        let file_sensor = TempSensor::with_sysfs_path(&temp_file);
+        let res = file_sensor.discover_sensors();
+        assert!(res.unwrap_err().is_io());
     }
 }
