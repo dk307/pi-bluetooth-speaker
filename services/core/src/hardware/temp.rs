@@ -969,6 +969,10 @@ impl TempSensor {
     ///
     /// # Errors
     /// Returns [`TempError`] if no sensors are found or if sysfs I/O fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics, resuming unwinding via
+    /// [`std::panic::resume_unwind`] under `M-PANIC-IS-STOP`.
     pub async fn discover_sensors_async(&self) -> Result<Vec<SensorId>, TempError> {
         let this = self.clone();
         map_join_result(tokio::task::spawn_blocking(move || this.discover_sensors()).await)
@@ -978,6 +982,10 @@ impl TempSensor {
     ///
     /// # Errors
     /// Returns [`TempError`] if reading or parsing `w1_slave` fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics, resuming unwinding via
+    /// [`std::panic::resume_unwind`] under `M-PANIC-IS-STOP`.
     pub async fn read_sensor_async(
         &self,
         sensor_id: &SensorId,
@@ -991,6 +999,10 @@ impl TempSensor {
     ///
     /// # Errors
     /// Returns [`TempError`] if reading diagnostics fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics, resuming unwinding via
+    /// [`std::panic::resume_unwind`] under `M-PANIC-IS-STOP`.
     pub async fn read_diagnostics_async(
         &self,
         sensor_id: &SensorId,
@@ -1004,6 +1016,10 @@ impl TempSensor {
     ///
     /// # Errors
     /// Returns [`TempError`] if no sensors are discovered or if any sensor read fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics, resuming unwinding via
+    /// [`std::panic::resume_unwind`] under `M-PANIC-IS-STOP`.
     pub async fn read_all_async(&self) -> Result<Vec<SensorReading>, TempError> {
         let this = self.clone();
         map_join_result(tokio::task::spawn_blocking(move || this.read_all()).await)
@@ -1013,6 +1029,10 @@ impl TempSensor {
     ///
     /// # Errors
     /// Returns [`TempError`] if no sensors are present or if the sensor read fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics, resuming unwinding via
+    /// [`std::panic::resume_unwind`] under `M-PANIC-IS-STOP`.
     pub async fn read_primary_temperature_async(&self) -> Result<Temperature, TempError> {
         let this = self.clone();
         map_join_result(tokio::task::spawn_blocking(move || this.read_primary_temperature()).await)

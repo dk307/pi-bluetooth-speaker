@@ -385,6 +385,7 @@ mod tests {
         });
         handle.abort();
         let res = map_join_result(handle.await);
-        let _ = res.unwrap_err();
+        let err = res.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
     }
 }

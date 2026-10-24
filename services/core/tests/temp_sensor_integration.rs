@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use speaker_core::hardware::{
-    DS18B20_BCM_GPIO_PIN, DS18B20_DTOVERLAY, DS18B20_PHYSICAL_PIN, SensorId, TempSensor,
-    Temperature,
+    DS18B20_BCM_GPIO_PIN, DS18B20_DTOVERLAY, DS18B20_PHYSICAL_PIN, PowerSupplyMode, SensorId,
+    TempSensor, Temperature,
 };
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -162,22 +162,13 @@ fn sysfs_backend_reads_full_diagnostics_and_various_power_modes() {
     assert_eq!(diag1.resolution_bits, Some(12));
     assert_eq!(diag1.conversion_time_ms, Some(750));
     assert_eq!(diag1.alarms, Some((0, 75)));
-    assert_eq!(
-        diag1.power_mode,
-        Some(speaker_core::hardware::PowerSupplyMode::External)
-    );
+    assert_eq!(diag1.power_mode, Some(PowerSupplyMode::External));
 
     let id2 = SensorId::parse("28-00000diag002").unwrap();
     let diag2 = sensor.read_diagnostics(&id2).unwrap();
-    assert_eq!(
-        diag2.power_mode,
-        Some(speaker_core::hardware::PowerSupplyMode::Parasite)
-    );
+    assert_eq!(diag2.power_mode, Some(PowerSupplyMode::Parasite));
 
     let id3 = SensorId::parse("28-00000diag003").unwrap();
     let diag3 = sensor.read_diagnostics(&id3).unwrap();
-    assert_eq!(
-        diag3.power_mode,
-        Some(speaker_core::hardware::PowerSupplyMode::Unknown(99))
-    );
+    assert_eq!(diag3.power_mode, Some(PowerSupplyMode::Unknown(99)));
 }

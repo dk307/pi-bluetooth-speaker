@@ -8,10 +8,9 @@
 //! are unit-tested via `run_app` entrypoints using mock backends in `src/bin/read_temp.rs`
 //! and `src/bin/read_light.rs`.
 
-use std::process::Command;
-use std::sync::mpsc;
+use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[test]
 fn core_main_binary_executes() {
@@ -19,23 +18,31 @@ fn core_main_binary_executes() {
     // When converted to a long-running daemon, this will invoke `--self-test` or `--version`.
     let bin_path = env!("CARGO_BIN_EXE_core");
 
-    let child = Command::new(bin_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+    let mut child = Command::new(bin_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn core main binary");
 
-    let (tx, rx) = mpsc::channel();
-    let thread = thread::spawn(move || {
-        let res = child.wait_with_output();
-        let _ = tx.send(res);
-    });
-
-    let output = rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("core binary timed out")
-        .expect("failed to wait for core binary");
-    let _ = thread.join();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let output = loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                break child
+                    .wait_with_output()
+                    .expect("failed to collect output after exit");
+            }
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("core binary timed out after 5s");
+            }
+            Err(e) => panic!("failed to wait for core binary: {e}"),
+        }
+    };
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -134,6 +141,8 @@ fn read_temp_cli_argument_validation() {
         .output()
         .expect("failed to run read_temp");
     assert!(!invalid_device.status.success());
+    let stderr_dev = String::from_utf8_lossy(&invalid_device.stderr);
+    assert!(stderr_dev.contains("invalid DS18B20 sensor ID"));
 }
 
 #[test]
@@ -230,6 +239,8 @@ fn read_light_cli_mode_and_address_validation() {
         .output()
         .expect("failed to run read_light");
     assert!(!invalid_mode.status.success());
+    let stderr_mode = String::from_utf8_lossy(&invalid_mode.stderr);
+    assert!(stderr_mode.contains("invalid mode 'ultra-mode'"));
 
     // Address parsing & errors
     let missing_addr = Command::new(bin_path)
@@ -243,6 +254,8 @@ fn read_light_cli_mode_and_address_validation() {
         .output()
         .expect("failed to run read_light");
     assert!(!invalid_hex.status.success());
+    let stderr_hex = String::from_utf8_lossy(&invalid_hex.stderr);
+    assert!(stderr_hex.contains("invalid hex address"));
 
     // Non-BH1750 address rejected
     let unsupported_addr = Command::new(bin_path)
@@ -250,4 +263,6 @@ fn read_light_cli_mode_and_address_validation() {
         .output()
         .expect("failed to run read_light");
     assert!(!unsupported_addr.status.success());
+    let stderr_addr = String::from_utf8_lossy(&unsupported_addr.stderr);
+    assert!(stderr_addr.contains("invalid BH1750 I2C address"));
 }

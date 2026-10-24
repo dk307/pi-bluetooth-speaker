@@ -883,6 +883,10 @@ impl LightSensor {
     ///
     /// # Errors
     /// Returns [`LightError`] if reading fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics, resuming unwinding via
+    /// [`std::panic::resume_unwind`] under `M-PANIC-IS-STOP`.
     pub async fn read_lux_async(&self) -> Result<Illuminance, LightError> {
         let this = self.clone();
         super::map_join_result(tokio::task::spawn_blocking(move || this.read_lux()).await)
@@ -892,6 +896,10 @@ impl LightSensor {
     ///
     /// # Errors
     /// Returns [`LightError`] if reading fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics, resuming unwinding via
+    /// [`std::panic::resume_unwind`] under `M-PANIC-IS-STOP`.
     pub async fn read_diagnostics_async(&self) -> Result<LightDiagnostics, LightError> {
         let this = self.clone();
         super::map_join_result(tokio::task::spawn_blocking(move || this.read_diagnostics()).await)
