@@ -86,8 +86,11 @@ fn print_usage(bin_name: &str) {
     println!("  {bin_name} --count 5 --json");
 }
 
-fn parse_cli_args() -> Result<Option<CliOptions>, String> {
-    let mut args = env::args().skip(1);
+fn parse_cli_args_from<I>(args: I) -> Result<Option<CliOptions>, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut args = args.into_iter();
     let mut opts = CliOptions::default();
 
     while let Some(arg) = args.next() {
@@ -105,6 +108,9 @@ fn parse_cli_args() -> Result<Option<CliOptions>, String> {
                 let count = val
                     .parse::<usize>()
                     .map_err(|e| format!("invalid count '{val}': {e}"))?;
+                if count == 0 {
+                    return Err("--count must be at least 1".into());
+                }
                 opts.max_count = Some(count);
             }
             "-i" | "--interval" => {
@@ -134,6 +140,10 @@ fn parse_cli_args() -> Result<Option<CliOptions>, String> {
     }
 
     Ok(Some(opts))
+}
+
+fn parse_cli_args() -> Result<Option<CliOptions>, String> {
+    parse_cli_args_from(env::args().skip(1))
 }
 
 /// Running statistical summary.
@@ -602,5 +612,54 @@ mod tests {
             ..opts_run_json
         };
         assert_eq!(run_app(&sensor, &opts_fail_json), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn parse_cli_args_flags_and_validation() {
+        print_usage("read_temp_test");
+
+        // Help
+        assert!(parse_cli_args_from(["--help".into()]).unwrap().is_none());
+        assert!(parse_cli_args_from(["-h".into()]).unwrap().is_none());
+
+        // Zero count
+        let err_zero = parse_cli_args_from(["--count".into(), "0".into()]).unwrap_err();
+        assert!(err_zero.contains("--count must be at least 1"));
+
+        // Valid flags
+        let opts = parse_cli_args_from([
+            "--once".into(),
+            "--verbose".into(),
+            "--soc".into(),
+            "--raw".into(),
+            "--json".into(),
+            "--count".into(),
+            "3".into(),
+            "--interval".into(),
+            "2.5".into(),
+            "--device".into(),
+            "28-000000000001".into(),
+        ])
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(opts.max_count, Some(3));
+        assert!(opts.flags.verbose);
+        assert!(opts.flags.include_soc);
+        assert!(opts.flags.show_raw);
+        assert_eq!(opts.format, OutputFormat::Json);
+        assert_eq!(
+            opts.target_sensor,
+            Some(SensorId::parse("28-000000000001").unwrap())
+        );
+
+        // Errors
+        let _ = parse_cli_args_from(["--count".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--count".into(), "abc".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--interval".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--interval".into(), "0".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--device".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--device".into(), "bad-id".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--unknown".into()]).unwrap_err();
     }
 }

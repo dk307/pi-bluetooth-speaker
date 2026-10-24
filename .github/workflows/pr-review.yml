@@ -21,49 +21,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Build custom review prompt from guidelines
+        id: build-prompt
+        run: python3 .github/scripts/generate_review_prompt.py
+
       - name: Run DiffGuard AI PR Review
-        uses: jonit-dev/diffguard@v1.0.0
+        uses: jonit-dev/diffguard@88f63615c769f8db6031973503c2c40a9a3f4feb # v1.0.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           open_router_key: ${{ secrets.OPENROUTER_API_KEY }}
           model_id: "@preset/code-review"
           max_tokens: "4096"
-          custom_prompt: |
-            You are reviewing pull requests for the Raspberry Pi Bluetooth Speaker & DSP Appliance project.
-            Perform a rigorous, constructive, and actionable engineering review adhering strictly to the guidelines and standards below.
-
-            ### Project Standards & Architecture Checklist:
-            1. Target Hardware & Platform:
-               - Target: Raspberry Pi 3 Model B (Broadcom BCM2837, quad-core ARM Cortex-A53 aarch64, DietPi / Debian 13 Trixie).
-               - Target optimization: -C target-cpu=cortex-a53, -C target-feature=+neon.
-               - Code must not rely on x86-specific intrinsics or unsupported features on aarch64.
-
-            2. Microsoft Pragmatic Rust Guidelines Compliance:
-               - Inherent Mocking (M-MOCKABLE-SYSCALLS, M-DI-HIERARCHY): All hardware drivers (I2C, 1-Wire sysfs, GPIO, PWM) must provide inherent mocking via `new_mocked() -> (Self, MockCtrl)`. Never make raw ad-hoc syscalls without a mockable abstraction.
-               - Multi-Purpose Drivers: Peripheral abstractions must be cheaply cloneable (Arc-backed per M-SERVICES-CLONE), Send + Sync (M-TYPES-SEND), with non-blocking async methods using `tokio::task::spawn_blocking` for slow hardware I/O.
-               - Strong Typing (M-STRONG-TYPES, M-STRONG-TYPES-GUARD): Avoid primitive obsession; use validated domain newtypes guarding invariants at construction time (e.g., BcmPin, PhysicalPin, Temperature, Illuminance, SensorId, I2cAddress).
-               - Canonical Error Handling (M-ERRORS-CANONICAL-STRUCTS, M-FROM-ERROR, M-PANIC-IS-STOP):
-                 * Wrap non-public ErrorKind with Backtrace.
-                 * Provide `is_*()` query predicates.
-                 * NEVER use `.unwrap()` or `.expect()` in fallible runtime paths (M-PANIC-IS-STOP).
-               - Clean Architecture: Modular design separating CLI runtime logic (`run_app(&sensor, &opts) -> ExitCode`) from argument parsing so binaries are testable.
-
-            3. Code Quality, Lints & Formatting:
-               - Clippy Strictness: Zero warnings under `cargo clippy --all-targets -- -D warnings`.
-               - Use `#[expect(..., reason = "...")]` instead of `#[allow(...)]` for intentional lint overrides (M-LINT-OVERRIDE-EXPECT).
-               - Formatting: Must format cleanly with `cargo fmt --check`.
-
-            4. Test Coverage Standard:
-               - Target: >85%-90%+ test coverage across modules, domain types, mock controllers, and diagnostic CLIs.
-               - Check for unit tests, error paths, fault injection tests, and boundary value tests.
-
-            5. Security & Safety:
-               - Safe Rust: Prefer 100% safe Rust (`#![forbid(unsafe_code)]` or `#![deny(unsafe_code)]`).
-               - Physical SSH testing rule: Non-destructive testing; never mutate persistent host services or configurations.
-
-            Review Format:
-            - Brief Summary of changes.
-            - Strengths / Good patterns observed.
-            - Critical Issues (bugs, invariant violations, unhandled errors, panics).
-            - Compliance Findings (Pragmatic Rust, Target Architecture, Code Coverage).
-            - Actionable Recommendations with code snippets where helpful.
+          custom_prompt: ${{ steps.build-prompt.outputs.prompt }}

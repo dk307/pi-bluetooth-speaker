@@ -447,6 +447,12 @@ impl LightError {
         matches!(self.kind, LightErrorKind::InvalidAddress { .. })
     }
 
+    /// Returns `true` if this error was caused by an invalid illuminance calculation or value.
+    #[must_use]
+    pub const fn is_invalid_illuminance(&self) -> bool {
+        matches!(self.kind, LightErrorKind::InvalidIlluminance { .. })
+    }
+
     /// Returns `true` if this error was caused by an injected mock fault.
     #[must_use]
     pub const fn is_mock_fault(&self) -> bool {
@@ -1046,6 +1052,8 @@ mod tests {
         );
 
         let illum_err = LightError::invalid_illuminance("NaN lux");
+        assert!(illum_err.is_invalid_illuminance());
+        assert!(!illum_err.is_i2c());
         assert!(
             illum_err
                 .to_string()
@@ -1099,9 +1107,11 @@ mod tests {
                 .is_mock_fault()
         );
 
-        // Hardware constructor attempts on test machine
-        let _ = LightSensor::new();
-        let _ = LightSensor::with_bus_and_address(1, I2cAddress::default());
+        // Hardware constructor attempts on test machine (skip device 1 if physical I2C bus exists to avoid mutations)
+        if !std::path::Path::new("/dev/i2c-1").exists() {
+            let _ = LightSensor::new();
+            let _ = LightSensor::with_bus_and_address(1, I2cAddress::default());
+        }
         let _ = LightSensor::with_bus_and_address(99, I2cAddress::alternate_address());
     }
 }

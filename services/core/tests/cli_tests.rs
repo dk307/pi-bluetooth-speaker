@@ -1,3 +1,6 @@
+//! Integration and CLI binary tests for core executables and diagnostics.
+
+use std::path::Path;
 use std::process::Command;
 
 #[test]
@@ -51,11 +54,21 @@ fn read_temp_cli_help_and_flags() {
         .expect("failed to run read_temp");
     assert!(!invalid_count.status.success());
 
+    let zero_count = Command::new(bin_path)
+        .args(["--count", "0"])
+        .output()
+        .expect("failed to run read_temp");
+    assert!(!zero_count.status.success());
+    let stderr_count = String::from_utf8_lossy(&zero_count.stderr);
+    assert!(stderr_count.contains("--count must be at least 1"));
+
     let valid_count = Command::new(bin_path)
         .args(["--count", "2", "--interval", "1"])
         .output()
         .expect("failed to run read_temp");
-    assert!(!valid_count.status.success()); // fails on host without hardware, but parses count cleanly
+    if !Path::new("/sys/bus/w1/devices").exists() {
+        assert!(!valid_count.status.success());
+    }
 
     let missing_interval = Command::new(bin_path)
         .arg("--interval")
@@ -92,10 +105,11 @@ fn read_temp_cli_help_and_flags() {
         .args(["--once", "--verbose", "--soc", "--raw"])
         .output()
         .expect("failed to run read_temp");
-    // On dev host without DS18B20 hardware, it gracefully exits with code 1 and prints an error
-    assert!(!once_run.status.success());
-    let stderr = String::from_utf8_lossy(&once_run.stderr);
-    assert!(stderr.contains("Error:"));
+    if !Path::new("/sys/bus/w1/devices").exists() {
+        assert!(!once_run.status.success());
+        let stderr = String::from_utf8_lossy(&once_run.stderr);
+        assert!(stderr.contains("Error:"));
+    }
 
     // JSON mode graceful failure
     let json_run = Command::new(bin_path)
@@ -143,11 +157,21 @@ fn read_light_cli_help_and_flags() {
         .expect("failed to run read_light");
     assert!(!invalid_count.status.success());
 
+    let zero_count = Command::new(bin_path)
+        .args(["--count", "0"])
+        .output()
+        .expect("failed to run read_light");
+    assert!(!zero_count.status.success());
+    let stderr_count = String::from_utf8_lossy(&zero_count.stderr);
+    assert!(stderr_count.contains("--count must be at least 1"));
+
     let valid_count = Command::new(bin_path)
         .args(["--count", "2", "--interval", "1"])
         .output()
         .expect("failed to run read_light");
-    assert!(!valid_count.status.success()); // fails on host without hardware, but parses count cleanly
+    if !Path::new("/dev/i2c-1").exists() {
+        assert!(!valid_count.status.success());
+    }
 
     let missing_interval = Command::new(bin_path)
         .arg("--interval")
@@ -206,9 +230,11 @@ fn read_light_cli_help_and_flags() {
             .output()
             .expect("failed to run read_light");
         // Hardware initialization fails on host without /dev/i2c-1, but arguments parse correctly
-        assert!(!run.status.success());
-        let stderr = String::from_utf8_lossy(&run.stderr);
-        assert!(stderr.contains("Failed to initialize BH1750 light sensor"));
+        if !Path::new("/dev/i2c-1").exists() {
+            assert!(!run.status.success());
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            assert!(stderr.contains("Failed to initialize BH1750 light sensor"));
+        }
     }
 
     // JSON and verbose modes

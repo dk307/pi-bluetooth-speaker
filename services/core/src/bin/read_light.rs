@@ -10,7 +10,9 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use speaker_core::hardware::{I2cAddress, Illuminance, LightSensor, MeasurementMode};
+use speaker_core::hardware::{
+    I2cAddress, Illuminance, LUX_TO_FOOT_CANDLES, LightSensor, MeasurementMode,
+};
 
 /// Default polling interval between light measurements.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(300);
@@ -104,8 +106,11 @@ fn parse_hex_address(s: &str) -> Result<I2cAddress, String> {
     I2cAddress::new(addr).map_err(|e| e.to_string())
 }
 
-fn parse_cli_args() -> Result<Option<CliOptions>, String> {
-    let mut args = env::args().skip(1);
+fn parse_cli_args_from<I>(args: I) -> Result<Option<CliOptions>, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut args = args.into_iter();
     let mut opts = CliOptions::default();
 
     while let Some(arg) = args.next() {
@@ -121,6 +126,9 @@ fn parse_cli_args() -> Result<Option<CliOptions>, String> {
                 let count = val
                     .parse::<usize>()
                     .map_err(|e| format!("invalid count '{val}': {e}"))?;
+                if count == 0 {
+                    return Err("--count must be at least 1".into());
+                }
                 opts.max_count = Some(count);
             }
             "-i" | "--interval" => {
@@ -154,6 +162,10 @@ fn parse_cli_args() -> Result<Option<CliOptions>, String> {
     }
 
     Ok(Some(opts))
+}
+
+fn parse_cli_args() -> Result<Option<CliOptions>, String> {
+    parse_cli_args_from(env::args().skip(1))
 }
 
 /// Running statistical summary for ambient light telemetry.
@@ -230,9 +242,18 @@ fn print_session_summary(stats: &Statistics) {
         );
     }
     if let (Some(min), Some(max), Some(avg)) = (stats.min_lux, stats.max_lux, stats.average_lux()) {
-        println!("Min Light   : {min:7.2} lx ({:6.2} fc)", min * 0.092_903);
-        println!("Max Light   : {max:7.2} lx ({:6.2} fc)", max * 0.092_903);
-        println!("Avg Light   : {avg:7.2} lx ({:6.2} fc)", avg * 0.092_903);
+        println!(
+            "Min Light   : {min:7.2} lx ({:6.2} fc)",
+            min * LUX_TO_FOOT_CANDLES
+        );
+        println!(
+            "Max Light   : {max:7.2} lx ({:6.2} fc)",
+            max * LUX_TO_FOOT_CANDLES
+        );
+        println!(
+            "Avg Light   : {avg:7.2} lx ({:6.2} fc)",
+            avg * f64::from(LUX_TO_FOOT_CANDLES)
+        );
     }
 }
 
@@ -242,12 +263,8 @@ fn output_json_reading(
     illum: Illuminance,
     mode: MeasurementMode,
 ) {
-    let lux_val = format!("{:.2}", illum.lux())
-        .parse::<f64>()
-        .unwrap_or_default();
-    let fc_val = format!("{:.2}", illum.foot_candles())
-        .parse::<f64>()
-        .unwrap_or_default();
+    let lux_val = (f64::from(illum.lux()) * 100.0).round() / 100.0;
+    let fc_val = (f64::from(illum.foot_candles()) * 100.0).round() / 100.0;
 
     let obj = serde_json::json!({
         "timestamp": timestamp,
@@ -538,5 +555,51 @@ mod tests {
             ..opts_fail
         };
         assert_eq!(run_app(&sensor, &opts_fail_json), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn parse_cli_args_flags_and_validation() {
+        print_usage("read_light_test");
+
+        // Help
+        assert!(parse_cli_args_from(["--help".into()]).unwrap().is_none());
+        assert!(parse_cli_args_from(["-h".into()]).unwrap().is_none());
+
+        // Zero count
+        let err_zero = parse_cli_args_from(["--count".into(), "0".into()]).unwrap_err();
+        assert!(err_zero.contains("--count must be at least 1"));
+
+        // Valid flags
+        let opts = parse_cli_args_from([
+            "--once".into(),
+            "--verbose".into(),
+            "--json".into(),
+            "--count".into(),
+            "5".into(),
+            "--interval".into(),
+            "0.5".into(),
+            "--mode".into(),
+            "low-res".into(),
+            "--address".into(),
+            "0x5C".into(),
+        ])
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(opts.max_count, Some(5));
+        assert!(opts.flags.verbose);
+        assert_eq!(opts.format, OutputFormat::Json);
+        assert_eq!(opts.mode, MeasurementMode::ContinuousLowRes);
+        assert_eq!(opts.address, I2cAddress::alternate_address());
+
+        // Errors
+        let _ = parse_cli_args_from(["--count".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--count".into(), "abc".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--interval".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--interval".into(), "0".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--interval".into(), "bad".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--mode".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--address".into()]).unwrap_err();
+        let _ = parse_cli_args_from(["--unknown".into()]).unwrap_err();
     }
 }
