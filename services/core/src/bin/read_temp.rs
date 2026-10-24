@@ -458,6 +458,13 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    struct AutoCleanupDir(std::path::PathBuf);
+    impl Drop for AutoCleanupDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn format_timestamp_returns_valid_time() {
         let ts = format_timestamp();
@@ -515,6 +522,7 @@ mod tests {
 
         let temp_dir =
             std::env::temp_dir().join(format!("read_temp_bin_test_{}", std::process::id()));
+        let _guard = AutoCleanupDir(temp_dir.clone());
         let _ = std::fs::create_dir_all(&temp_dir);
         let soc_file = temp_dir.join("temp");
         std::fs::write(&soc_file, "42000\n").unwrap();
@@ -577,8 +585,6 @@ mod tests {
             &mut stats,
         );
         assert_eq!(stats.other_errors, 2);
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

@@ -56,3 +56,27 @@ fn measurement_mode_switching_and_diagnostics() {
     assert_eq!(diag.raw_word, 240);
     assert!((diag.illuminance.lux() - 100.0).abs() < 1e-2);
 }
+
+#[tokio::test]
+async fn concurrent_sensor_clones_power_and_mode_operations() {
+    let (sensor, _mock) = LightSensor::new_mocked();
+    let s1 = sensor.clone();
+    let s2 = sensor.clone();
+
+    let h1 = tokio::spawn(async move {
+        for _ in 0..10 {
+            s1.set_mode(MeasurementMode::ContinuousLowRes).unwrap();
+            let _ = s1.read_lux_async().await.unwrap();
+        }
+    });
+
+    let h2 = tokio::spawn(async move {
+        for _ in 0..10 {
+            s2.power_down().unwrap();
+            s2.reset().unwrap();
+        }
+    });
+
+    h1.await.unwrap();
+    h2.await.unwrap();
+}

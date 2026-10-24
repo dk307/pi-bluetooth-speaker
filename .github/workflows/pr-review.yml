@@ -53,10 +53,14 @@ jobs:
                   if target in content:
                       with open(p, 'w', encoding='utf-8') as f:
                           f.write(content.replace(target, patch))
-                      print(f'Successfully enabled file-based prompt in {p}')
+                      with open(p, 'r', encoding='utf-8') as f:
+                          patched_content = f.read()
+                      assert 'fs.readFileSync' in patched_content, f'Patch verification failed for {p}'
+                      print(f'Successfully enabled and verified file-based prompt in {p}')
                       found = True
           if not found:
-              print(f'Warning: diffguard bundle not found in search roots: {search_roots}')
+              print(f'ERROR: diffguard bundle not found or target string missing in search roots: {search_roots}', file=sys.stderr)
+              sys.exit(1)
           "
 
       - name: Run DiffGuard AI PR Review

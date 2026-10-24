@@ -79,6 +79,10 @@ Before designing types, writing modules, implementing error handling, or writing
      * When validating sensor hardware IDs (like DS18B20 `28-*`), enforce the precise hardware character set (`is_ascii_hexdigit()`, not `is_ascii_alphanumeric()`) matching the domain error message and 1-Wire hardware spec.
    * **Production Runtime Cancellation Tests:**
      * Ensure production error types (`TempError`, `LightError`) implementing `FromJoinError` have dedicated tests verifying cancelled Tokio tasks mapped through `map_join_result` yield `is_cancelled() == true` with the expected contextual message.
+   * **Layered Bus Locking & Clone Concurrency:**
+     * Any hardware driver allowing cloneable handles must acquire transaction serialization locks (`op_lock`) for all bus state mutations (`power_down`, `reset`, `set_mode`, `read_raw_word`) to prevent command collisions across concurrent tasks.
+   * **Compile-Time Pin Initializers:**
+     * Use `const` initializers (`BcmPin::new(2)`, `PhysicalPin::new(3)`) for static hardware pin mappings rather than runtime fallible calls (`from_u8(...).expect(...)`).
 
 ---
 

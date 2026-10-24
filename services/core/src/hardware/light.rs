@@ -45,31 +45,31 @@ pub const BH1750_DEFAULT_I2C_BUS: u8 = 1;
 pub const LUX_TO_FOOT_CANDLES: f32 = 0.092_903;
 
 /// BH1750 opcode: Power Down.
-pub const CMD_POWER_DOWN: u8 = 0x00;
+pub(crate) const CMD_POWER_DOWN: u8 = 0x00;
 
 /// BH1750 opcode: Power On.
-pub const CMD_POWER_ON: u8 = 0x01;
+pub(crate) const CMD_POWER_ON: u8 = 0x01;
 
 /// BH1750 opcode: Reset Data Register (only valid after Power On).
-pub const CMD_RESET: u8 = 0x07;
+pub(crate) const CMD_RESET: u8 = 0x07;
 
 /// Opcode: Continuous H-Resolution Mode (1 lx resolution, typ. 120 ms).
-pub const CMD_CONTINUOUS_H_RES: u8 = 0x10;
+pub(crate) const CMD_CONTINUOUS_H_RES: u8 = 0x10;
 
 /// Opcode: Continuous H-Resolution Mode 2 (0.5 lx resolution, typ. 120 ms).
-pub const CMD_CONTINUOUS_H_RES2: u8 = 0x11;
+pub(crate) const CMD_CONTINUOUS_H_RES2: u8 = 0x11;
 
 /// Opcode: Continuous Low-Resolution Mode (4 lx resolution, typ. 16 ms).
-pub const CMD_CONTINUOUS_L_RES: u8 = 0x13;
+pub(crate) const CMD_CONTINUOUS_L_RES: u8 = 0x13;
 
 /// Opcode: One-Time H-Resolution Mode (sensor powers down after reading).
-pub const CMD_ONETIME_H_RES: u8 = 0x20;
+pub(crate) const CMD_ONETIME_H_RES: u8 = 0x20;
 
 /// Opcode: One-Time H-Resolution Mode 2 (sensor powers down after reading).
-pub const CMD_ONETIME_H_RES2: u8 = 0x21;
+pub(crate) const CMD_ONETIME_H_RES2: u8 = 0x21;
 
 /// Opcode: One-Time Low-Resolution Mode (sensor powers down after reading).
-pub const CMD_ONETIME_L_RES: u8 = 0x23;
+pub(crate) const CMD_ONETIME_L_RES: u8 = 0x23;
 
 /// Measurement operating mode of the BH1750 digital ambient light sensor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -350,30 +350,27 @@ pub struct I2cHardwareInfo {
 
 impl I2cHardwareInfo {
     /// Returns the standard Raspberry Pi 3 I2C-1 pinout for the BH1750 sensor.
-    ///
-    /// # Panics
-    /// Panics if static header pin constants are outside the 40-pin header bounds.
     #[must_use]
     pub fn rpi3_default(address: I2cAddress) -> Self {
-        let sda_bcm = BcmPin::from_u8(2).expect("valid BCM 2");
-        let sda_phys = PhysicalPin::from_u8(3).expect("valid Pin 3");
-        let scl_bcm = BcmPin::from_u8(3).expect("valid BCM 3");
-        let scl_phys = PhysicalPin::from_u8(5).expect("valid Pin 5");
+        const SDA_BCM: BcmPin = BcmPin::new(2);
+        const SDA_PHYS: PhysicalPin = PhysicalPin::new(3);
+        const SCL_BCM: BcmPin = BcmPin::new(3);
+        const SCL_PHYS: PhysicalPin = PhysicalPin::new(5);
 
         Self {
             bus: BH1750_DEFAULT_I2C_BUS,
             address,
             device_path: "/dev/i2c-1",
             sda_pin: GpioPinInfo {
-                bcm_pin: sda_bcm,
-                physical_pin: sda_phys,
+                bcm_pin: SDA_BCM,
+                physical_pin: SDA_PHYS,
                 signal_name: "I2C-1 Data (SDA)",
                 bus_protocol: "I2C (i2c-dev / Broadcom BSC1)",
                 electrical_config: "Internal 1.8k pull-up to 3.3V",
             },
             scl_pin: GpioPinInfo {
-                bcm_pin: scl_bcm,
-                physical_pin: scl_phys,
+                bcm_pin: SCL_BCM,
+                physical_pin: SCL_PHYS,
                 signal_name: "I2C-1 Clock (SCL)",
                 bus_protocol: "I2C (i2c-dev / Broadcom BSC1)",
                 electrical_config: "Internal 1.8k pull-up to 3.3V",
@@ -801,6 +798,9 @@ impl LightSensor {
 
     /// Powers down the sensor to enter sleep mode.
     ///
+    /// In sleep mode, current consumption drops to <1 µA. Conversions cease until
+    /// the sensor is re-awakened via [`set_mode()`](Self::set_mode) or [`reset()`](Self::reset).
+    ///
     /// # Errors
     /// Returns [`LightError`] if writing the command opcode fails.
     ///
@@ -808,7 +808,8 @@ impl LightSensor {
     /// Panics if an internal mutex lock is poisoned.
     pub fn power_down(&self) -> Result<(), LightError> {
         match self.inner.as_ref() {
-            Backend::Hardware { i2c, .. } => {
+            Backend::Hardware { i2c, op_lock, .. } => {
+                let _op_guard = op_lock.lock().expect("op lock poisoned");
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
                 guard.write(&[CMD_POWER_DOWN]).map_err(LightError::from)?;
                 Ok(())
@@ -826,7 +827,8 @@ impl LightSensor {
     /// Panics if an internal mutex lock is poisoned.
     pub fn reset(&self) -> Result<(), LightError> {
         match self.inner.as_ref() {
-            Backend::Hardware { i2c, .. } => {
+            Backend::Hardware { i2c, op_lock, .. } => {
+                let _op_guard = op_lock.lock().expect("op lock poisoned");
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
                 guard.write(&[CMD_POWER_ON]).map_err(LightError::from)?;
                 guard.write(&[CMD_RESET]).map_err(LightError::from)?;
@@ -889,6 +891,11 @@ impl LightSensor {
     }
 
     /// Reads the current ambient illuminance from the sensor.
+    ///
+    /// # Power State
+    /// If [`power_down()`](Self::power_down) was previously invoked, conversions
+    /// cease until the sensor is re-awakened via [`set_mode()`](Self::set_mode) or
+    /// [`reset()`](Self::reset).
     ///
     /// # Errors
     /// Returns [`LightError`] if I2C bus communication fails or returns invalid data.

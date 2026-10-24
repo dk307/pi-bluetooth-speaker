@@ -362,7 +362,11 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
         if opts.flags.verbose {
             print_diagnostic_registers(sensor);
         }
-        println!("Press Ctrl+C to stop monitoring.\n");
+        if opts.max_count.is_none() {
+            println!("Press Ctrl+C to stop monitoring.\n");
+        } else {
+            println!();
+        }
     }
 
     let mut stats = Statistics::default();
