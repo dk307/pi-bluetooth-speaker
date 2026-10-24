@@ -690,6 +690,7 @@ enum Backend {
         bus: u8,
         address: I2cAddress,
         mode: Mutex<MeasurementMode>,
+        op_lock: Mutex<()>,
     },
     Mock(LightSensorMock),
 }
@@ -742,6 +743,7 @@ impl LightSensor {
                 bus,
                 address,
                 mode: Mutex::new(MeasurementMode::ContinuousHighRes),
+                op_lock: Mutex::new(()),
             }),
         })
     }
@@ -826,7 +828,10 @@ impl LightSensor {
     /// Panics if an internal mutex lock is poisoned.
     pub fn set_mode(&self, new_mode: MeasurementMode) -> Result<(), LightError> {
         match self.inner.as_ref() {
-            Backend::Hardware { i2c, mode, .. } => {
+            Backend::Hardware {
+                i2c, mode, op_lock, ..
+            } => {
+                let _op_guard = op_lock.lock().expect("op lock poisoned");
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
                 guard
                     .write(&[new_mode.opcode()])
@@ -841,7 +846,10 @@ impl LightSensor {
 
     fn read_raw_word(&self) -> Result<(u16, MeasurementMode), LightError> {
         match self.inner.as_ref() {
-            Backend::Hardware { i2c, mode, .. } => {
+            Backend::Hardware {
+                i2c, mode, op_lock, ..
+            } => {
+                let _op_guard = op_lock.lock().expect("op lock poisoned");
                 let cur_mode = *mode.lock().expect("mode lock poisoned");
                 if !cur_mode.is_continuous() {
                     // Send one-shot trigger opcode, then release the mutex during conversion sleep

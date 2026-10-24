@@ -11,7 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use speaker_core::hardware::{
-    I2cAddress, Illuminance, LUX_TO_FOOT_CANDLES, LightSensor, MeasurementMode,
+    BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance, LUX_TO_FOOT_CANDLES, LightSensor,
+    MeasurementMode,
 };
 
 /// Default polling interval between light measurements.
@@ -201,6 +202,10 @@ impl Statistics {
         self.errors += 1;
     }
 
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "read counts are small; f64 precision is exact for integer counts"
+    )]
     fn average_lux(&self) -> Option<f64> {
         (self.successful_reads > 0).then(|| self.lux_sum / self.successful_reads as f64)
     }
@@ -236,6 +241,10 @@ fn print_diagnostic_registers(sensor: &LightSensor) {
     println!("--------------------------------------------------");
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "read counts are small; f32 precision is exact for percentages"
+)]
 fn print_session_summary(stats: &Statistics) {
     println!("\n--- Light Diagnostic Session Summary ---");
     println!("Total reads : {}", stats.total_reads);
@@ -324,7 +333,7 @@ fn handle_light_iteration(
                     );
                 }
                 OutputFormat::Human => {
-                    println!("[{timestamp}] Read error: {err}");
+                    eprintln!("[{timestamp}] Read error: {err}");
                 }
             }
         }
@@ -403,7 +412,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let sensor = match LightSensor::with_bus_and_address(1, opts.address) {
+    let sensor = match LightSensor::with_bus_and_address(BH1750_DEFAULT_I2C_BUS, opts.address) {
         Ok(s) => s,
         Err(err) => {
             if opts.format == OutputFormat::Json {

@@ -30,6 +30,7 @@ Before designing types, writing modules, implementing error handling, or writing
 1. **Mockable I/O & Hardware (`M-MOCKABLE-SYSCALLS`, `M-DI-HIERARCHY`):**
    * Hardware drivers and external I/O types must never perform unmockable ad-hoc syscalls or offer `Default` implementations (`#[expect(clippy::new_without_default, reason = "...")]`).
    * Provide inherent mocking via `new_mocked() -> (Self, MockCtrl)` using an internal backend enum (`Sysfs`/`Hardware` vs. `Mock`) so tests can inject readings and faults deterministically without physical hardware.
+   * *Project Convention (`M-TEST-UTIL`):* Diagnostic and peripheral drivers intentionally provide inherent `new_mocked()` companion controllers unconditionally in production builds to guarantee that CI coverage verification, integration tests, and standalone diagnostic utilities execute host-agnostically without physical hardware.
 2. **Three-Fold Purpose for Hardware Classes:**
    Every hardware peripheral abstraction in `speaker_core::hardware` must serve three purposes:
    * **Core Service:** Cheaply cloneable (`Arc`-backed per `M-SERVICES-CLONE`), `Send + Sync` (`M-TYPES-SEND`), with non-blocking `async` methods that isolate slow/blocking hardware I/O on `tokio::task::spawn_blocking`.

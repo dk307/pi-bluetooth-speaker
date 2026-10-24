@@ -13,7 +13,6 @@ process environment variable limit.
 
 import os
 import re
-import sys
 from pathlib import Path
 
 # Linux kernel MAX_ARG_STRLEN limit is 128 KB (131,072 bytes).
@@ -52,6 +51,11 @@ def split_top_level_sections(md: str) -> list[str]:
             current_section = [line]
         else:
             current_section.append(line)
+
+    if current_fence is not None:
+        raise ValueError(
+            f"unbalanced code fences detected in markdown file: fence {current_fence} was not closed"
+        )
 
     if current_section:
         sections.append("".join(current_section))
@@ -119,7 +123,9 @@ Perform a rigorous, constructive, and actionable engineering review adhering str
   5. Actionable Recommendations with code snippets where helpful
 """
     byte_len = len(prompt.encode("utf-8"))
-    print(f"Generated review prompt size: {byte_len} bytes ({byte_len / 1024:.2f} KB)")
+    print(
+        f"Generated review prompt size: {byte_len} bytes ({byte_len / 1024:.2f} KB) across {len(kept_sections)} guideline sections"
+    )
 
     if byte_len > MAX_PROMPT_BYTES:
         raise ValueError(
