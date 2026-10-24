@@ -6,13 +6,12 @@
 //! illuminance (lux and foot-candles) alongside hardware registers.
 
 use std::process::ExitCode;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use speaker_core::diag::{
     CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads, foot_candles,
     format_timestamp, next_arg_value, parse_args_with_common, resolve_cli_opts, round_2dp,
-    should_print_summary,
+    run_poll_loop, should_print_summary,
 };
 use speaker_core::hardware::{
     BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance, LightError, LightSensor, MeasurementMode,
@@ -62,29 +61,6 @@ fn print_usage(bin_name: &str) {
     println!("  -h, --help               Display this help text");
 }
 
-const MODE_LOOKUP: &[(&str, MeasurementMode)] = &[
-    ("high-res", MeasurementMode::ContinuousHighRes),
-    ("highres", MeasurementMode::ContinuousHighRes),
-    ("h-res", MeasurementMode::ContinuousHighRes),
-    ("h1", MeasurementMode::ContinuousHighRes),
-    ("high-res2", MeasurementMode::ContinuousHighRes2),
-    ("highres2", MeasurementMode::ContinuousHighRes2),
-    ("h-res2", MeasurementMode::ContinuousHighRes2),
-    ("h2", MeasurementMode::ContinuousHighRes2),
-    ("low-res", MeasurementMode::ContinuousLowRes),
-    ("lowres", MeasurementMode::ContinuousLowRes),
-    ("l-res", MeasurementMode::ContinuousLowRes),
-    ("low", MeasurementMode::ContinuousLowRes),
-];
-
-fn parse_mode(s: &str) -> Result<MeasurementMode, String> {
-    let lower = s.to_ascii_lowercase();
-    MODE_LOOKUP
-        .iter()
-        .find_map(|(key, mode)| (*key == lower).then_some(*mode))
-        .ok_or_else(|| format!("invalid mode '{lower}'. Supported: high-res, high-res2, low-res"))
-}
-
 fn parse_cli_args_from<I>(args: I) -> Result<Option<CliOptions>, String>
 where
     I: IntoIterator<Item = String>,
@@ -95,7 +71,7 @@ where
         |o| &mut o.common,
         |opts, arg, args| match arg {
             "-m" | "--mode" => {
-                opts.mode = parse_mode(&next_arg_value(args, "--mode")?)?;
+                opts.mode = MeasurementMode::parse_slug(&next_arg_value(args, "--mode")?)?;
                 Ok(true)
             }
             "-a" | "--address" => {
@@ -155,16 +131,17 @@ fn print_session_summary(stats: &NumericStats) {
             stats.error_rate_percent()
         );
     }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "average of f32 lux samples fits in f32"
-    )]
     if let (Some(min), Some(max), Some(avg)) = (stats.min(), stats.max(), stats.average()) {
         println!("Min Light   : {min:7.2} lx ({:6.2} fc)", foot_candles(min));
         println!("Max Light   : {max:7.2} lx ({:6.2} fc)", foot_candles(max));
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "average of f32 lux samples fits in f32"
+        )]
+        let avg_f32 = avg as f32;
         println!(
             "Avg Light   : {avg:7.2} lx ({:6.2} fc)",
-            foot_candles(avg as f32)
+            foot_candles(avg_f32)
         );
     }
 }
@@ -280,23 +257,12 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
 
     let mut stats = NumericStats::default();
 
-    loop {
-        let loop_start = Instant::now();
-        let timestamp = format_timestamp();
-
-        handle_light_iteration(sensor, opts, &timestamp, &mut stats);
-
-        if let Some(max) = opts.common.max_count {
-            if stats.total_reads() >= max {
-                break;
-            }
-        }
-
-        let elapsed = loop_start.elapsed();
-        if let Some(remaining) = opts.common.interval.checked_sub(elapsed) {
-            thread::sleep(remaining);
-        }
-    }
+    run_poll_loop(opts.common.interval, |timestamp| {
+        handle_light_iteration(sensor, opts, timestamp, &mut stats);
+        opts.common
+            .max_count
+            .is_some_and(|m| stats.total_reads() >= m)
+    });
 
     if should_print_summary(
         opts.common.format,
@@ -356,9 +322,9 @@ mod tests {
             ("l-res", MeasurementMode::ContinuousLowRes),
             ("low", MeasurementMode::ContinuousLowRes),
         ] {
-            assert_eq!(parse_mode(input).unwrap(), expected);
+            assert_eq!(MeasurementMode::parse_slug(input).unwrap(), expected);
         }
-        let err = parse_mode("invalid-mode").unwrap_err();
+        let err = MeasurementMode::parse_slug("invalid-mode").unwrap_err();
         assert!(err.contains("invalid mode 'invalid-mode'"));
     }
 

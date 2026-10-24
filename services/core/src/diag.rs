@@ -10,7 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static TEMP_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -345,6 +345,27 @@ impl NumericStats {
     }
 }
 
+/// Executes a periodic polling loop with interval regulation and cumulative termination.
+///
+/// In each iteration, `step` is called with the formatted timestamp string and returns `true`
+/// if polling should terminate (e.g. cumulative count reached). If `step` returns `true`, the loop
+/// terminates immediately without sleeping; otherwise, the thread sleeps for the remainder of
+/// `interval` before executing the next iteration.
+pub fn run_poll_loop(interval: Duration, mut step: impl FnMut(&str) -> bool) {
+    loop {
+        let loop_start = Instant::now();
+        let timestamp = format_timestamp();
+        if step(&timestamp) {
+            break;
+        }
+
+        let elapsed = loop_start.elapsed();
+        if let Some(remaining) = interval.checked_sub(elapsed) {
+            std::thread::sleep(remaining);
+        }
+    }
+}
+
 /// RAII temporary directory that automatically removes itself and its contents on drop.
 ///
 /// Exported unconditionally alongside [`TempSensor::new_mocked`](crate::hardware::TempSensor::new_mocked)
@@ -365,8 +386,7 @@ impl ScopedTempDir {
         let id = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
         let path = env::temp_dir().join(format!("{prefix}_{pid}_{id}"));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path)?;
+        fs::create_dir(&path)?;
         Ok(Self { path })
     }
 
@@ -583,5 +603,15 @@ mod tests {
     fn numeric_stats_record_success_panics_on_infinity() {
         let mut stats = NumericStats::default();
         stats.record_success(f32::INFINITY);
+    }
+
+    #[test]
+    fn run_poll_loop_terminates_on_is_done() {
+        let mut count = 0;
+        run_poll_loop(Duration::from_millis(1), |_timestamp| {
+            count += 1;
+            count >= 3
+        });
+        assert_eq!(count, 3);
     }
 }

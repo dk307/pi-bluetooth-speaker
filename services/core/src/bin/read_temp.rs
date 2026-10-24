@@ -7,12 +7,11 @@
 //! diagnostic registers.
 
 use std::process::ExitCode;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use speaker_core::diag::{
     CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads, fahrenheit,
-    format_timestamp, next_arg_value, parse_args_with_common, resolve_cli_opts,
+    format_timestamp, next_arg_value, parse_args_with_common, resolve_cli_opts, run_poll_loop,
     should_print_summary,
 };
 use speaker_core::hardware::{
@@ -46,7 +45,7 @@ fn print_usage(bin_name: &str) {
     println!();
     println!("Options:");
     println!("  -1, --once               Read once and exit");
-    println!("  -n, --count <COUNT>      Read COUNT times and exit");
+    println!("  -n, --count <COUNT>      Read at most COUNT device samples and exit");
     println!("  -i, --interval <SECS>    Polling interval in seconds (default: 1.0)");
     println!(
         "  -v, --verbose            Show detailed sensor registers & diagnostics (human format only)"
@@ -316,28 +315,17 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
 
     let mut stats = Statistics::default();
 
-    loop {
-        let loop_start = Instant::now();
-        let timestamp = format_timestamp();
+    run_poll_loop(opts.common.interval, |timestamp| {
         let soc = if opts.include_soc {
             SocThermal::read().ok()
         } else {
             None
         };
-
-        handle_sensor_iteration(sensor, &target_devices, opts, &timestamp, soc, &mut stats);
-
-        if let Some(limit) = opts.common.max_count {
-            if stats.samples.total_reads() >= limit {
-                break;
-            }
-        }
-
-        let elapsed = loop_start.elapsed();
-        if let Some(remaining) = opts.common.interval.checked_sub(elapsed) {
-            thread::sleep(remaining);
-        }
-    }
+        handle_sensor_iteration(sensor, &target_devices, opts, timestamp, soc, &mut stats);
+        opts.common
+            .max_count
+            .is_some_and(|m| stats.samples.total_reads() >= m)
+    });
 
     if should_print_summary(
         opts.common.format,

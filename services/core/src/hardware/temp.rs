@@ -41,7 +41,7 @@ pub const SOC_THERMAL_SYSFS_PATH: &str = "/sys/devices/virtual/thermal/thermal_z
 const DS18B20_FAMILY_PREFIX: &str = "28-";
 
 /// Standard format description for DS18B20 sensor identifiers.
-pub const SENSOR_ID_FORMAT_HELP: &str = "expected '28-<hex>' format";
+pub(crate) const SENSOR_ID_FORMAT_HELP: &str = "expected '28-<hex>' format";
 
 /// Minimum operating temperature supported by the DS18B20 hardware (`-55.0 °C` in millidegrees).
 const MIN_MILLIDEGREES_C: i32 = -55_000;

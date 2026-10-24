@@ -42,6 +42,11 @@ class TestGenerateReviewPrompt(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unterminated HTML comment"):
             grp.strip_decorations_outside_fences("Hello <!-- unclosed\nstill open\n")
 
+    def test_unterminated_html_comment_before_fence_raises(self) -> None:
+        md = "<!-- unclosed comment\n```rust\nfn main() {}\n```\n"
+        with self.assertRaisesRegex(ValueError, "unterminated HTML comment before code fence"):
+            grp.strip_decorations_outside_fences(md)
+
     def test_stray_close_arrow_before_open_comment_handled_cleanly(self) -> None:
         md = "a --> b <!-- multiline\ncomment --> c\n"
         self.assertEqual(grp.strip_decorations_outside_fences(md), "a --> b  c")

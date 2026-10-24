@@ -70,9 +70,9 @@ Before designing types, writing modules, implementing error handling, or writing
      1. Use datasheet **maximum** conversion times (`max_measurement_time()`), never typical times, when sleeping on conversions.
      2. Track mode/reset transitions (`last_transition: Instant`) and explicit sleep state (`powered: bool`) inside `Mutex<HwState>` under `op_lock` so callers never have to guess settle times and reads while powered down return a typed `is_powered_down()` error. Document how `OneShot*` auto-power-down differs from explicit `power_down()`.
      3. Precede mode opcodes with `CMD_POWER_ON` when waking from `power_down`.
-     4. Serialize all bus transactions (`power_down`, `reset`, `set_mode`, `read_raw_word`) behind `op_lock` on cloneable handles (collapse with a `with_hw_transaction` helper).
+     4. Serialize all bus transactions (`power_down`, `reset`, `set_mode`, `read_lux`) inside a single `Mutex<HardwareDevice>` wrapping the `embedded-hal` driver; do not nest redundant per-bus mutexes (`Mutex<I2c>` inside `op_lock`).
      5. Assert that bus numbers passed to platform-specific pinout constructors (`I2cHardwareInfo::rpi3_with_bus_and_address`) match the physical hardware controller modeled.
-     6. Re-arm continuous mode conversions on reset per datasheet (`CMD_POWER_ON` + `CMD_RESET` leaves chip in "waiting for measurement instruction", so `reset()` must re-send the continuous mode opcode to restart conversions; model this in `HwState::record_wake_or_reset` returning `Option<u8>`).
+     6. Re-arm continuous mode conversions on reset per datasheet when resetting while in continuous mode.
      7. Mutate internal driver state (`HwState: powered, mode, last_transition`) strictly **after** all fallible bus transactions succeed.
 
 ---

@@ -99,6 +99,8 @@ def strip_decorations_outside_fences(md: str) -> str:
                 continue
 
         if is_delim or in_fence:
+            if in_html_comment:
+                raise ValueError("unterminated HTML comment before code fence delimiter")
             # Fence delimiter or code block content: preserve exactly as authored
             out.append(line)
             consecutive_blank_lines = 0
