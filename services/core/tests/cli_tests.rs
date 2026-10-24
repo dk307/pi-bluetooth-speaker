@@ -48,6 +48,11 @@ fn wait_with_deadline(mut child: Child, timeout: Duration, context: &str) -> Out
     }
 }
 
+/// Panics with `msg` when running inside a CI environment (`CI` env var set).
+fn fail_if_ci(msg: &str) {
+    assert!(std::env::var("CI").is_err(), "{msg}");
+}
+
 /// Probes whether a compiled binary is executable in the current environment.
 ///
 /// In CI environments, any execution failure or timeout panics loudly to prevent
@@ -59,10 +64,7 @@ fn can_exec_binary(bin_path: &str) -> bool {
         .stderr(Stdio::piped())
         .spawn()
     else {
-        assert!(
-            std::env::var("CI").is_err(),
-            "failed to spawn {bin_path} in CI environment"
-        );
+        fail_if_ci(&format!("failed to spawn {bin_path} in CI environment"));
         return false;
     };
 
@@ -71,11 +73,10 @@ fn can_exec_binary(bin_path: &str) -> bool {
         return true;
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        std::env::var("CI").is_err(),
+    fail_if_ci(&format!(
         "binary '{bin_path}' exited {:?} in CI ({stderr}); must never skip silently",
         output.status
-    );
+    ));
     false
 }
 
@@ -137,47 +138,37 @@ fn read_temp_cli_help_displays() {
     assert!(short_status.success());
 }
 
-#[test]
-fn read_temp_cli_argument_validation() {
-    let bin_path = env!("CARGO_BIN_EXE_read_temp");
-    if !can_exec_binary(bin_path) {
-        return;
-    }
+/// Shared invalid CLI flag cases common to all `read_*` diagnostic utilities.
+const COMMON_INVALID_ARGS: &[(&[&str], &str)] = &[
+    (&["--invalid-flag"], "unknown option '--invalid-flag'"),
+    (&["--count"], "missing value for --count"),
+    (&["--count", "not-a-number"], "invalid count 'not-a-number'"),
+    (&["--count", "0"], "--count must be at least 1"),
+    (
+        &["--count", "9999999999999999999999999999999999999999"],
+        "invalid count",
+    ),
+    (&["--interval"], "missing value for --interval"),
+    (
+        &["--interval", "0"],
+        "interval must be a finite value greater than 0",
+    ),
+    (&["--interval", "invalid"], "invalid interval 'invalid'"),
+    (
+        &["--interval", "-1.0"],
+        "interval must be a finite value greater than 0",
+    ),
+    (
+        &["--interval", "1e400"],
+        "interval must be a finite value greater than 0",
+    ),
+    (
+        &["--interval", "nan"],
+        "interval must be a finite value greater than 0",
+    ),
+];
 
-    let cases: &[(&[&str], &str)] = &[
-        (&["--invalid-flag"], "unknown option '--invalid-flag'"),
-        (&["--count"], "missing value for --count"),
-        (&["--count", "not-a-number"], "invalid count 'not-a-number'"),
-        (&["--count", "0"], "--count must be at least 1"),
-        (
-            &["--count", "9999999999999999999999999999999999999999"],
-            "invalid count",
-        ),
-        (&["--interval"], "missing value for --interval"),
-        (
-            &["--interval", "0"],
-            "interval must be a finite value greater than 0",
-        ),
-        (&["--interval", "invalid"], "invalid interval 'invalid'"),
-        (
-            &["--interval", "-1.0"],
-            "interval must be a finite value greater than 0",
-        ),
-        (
-            &["--interval", "1e400"],
-            "interval must be a finite value greater than 0",
-        ),
-        (
-            &["--interval", "nan"],
-            "interval must be a finite value greater than 0",
-        ),
-        (&["--device"], "missing value for --device"),
-        (
-            &["--device", "invalid-device-id"],
-            "invalid DS18B20 sensor ID",
-        ),
-    ];
-
+fn assert_cli_rejects(bin_path: &str, cases: &[(&[&str], &str)]) {
     for (args, expected_err) in cases {
         let (status, _, stderr) = run_cli(bin_path, args);
         assert!(!status.success(), "expected failure for args: {args:?}");
@@ -186,6 +177,26 @@ fn read_temp_cli_argument_validation() {
             "expected stderr to contain '{expected_err}' for args {args:?}, got: '{stderr}'"
         );
     }
+}
+
+#[test]
+fn read_temp_cli_argument_validation() {
+    let bin_path = env!("CARGO_BIN_EXE_read_temp");
+    if !can_exec_binary(bin_path) {
+        return;
+    }
+
+    assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
+    assert_cli_rejects(
+        bin_path,
+        &[
+            (&["--device"], "missing value for --device"),
+            (
+                &["--device", "invalid-device-id"],
+                "invalid DS18B20 sensor ID",
+            ),
+        ],
+    );
 }
 
 #[test]
@@ -213,50 +224,19 @@ fn read_light_cli_argument_validation() {
         return;
     }
 
-    let cases: &[(&[&str], &str)] = &[
-        (&["--invalid-flag"], "unknown option '--invalid-flag'"),
-        (&["--count"], "missing value for --count"),
-        (&["--count", "not-a-number"], "invalid count 'not-a-number'"),
-        (&["--count", "0"], "--count must be at least 1"),
-        (
-            &["--count", "9999999999999999999999999999999999999999"],
-            "invalid count",
-        ),
-        (&["--interval"], "missing value for --interval"),
-        (
-            &["--interval", "0"],
-            "interval must be a finite value greater than 0",
-        ),
-        (&["--interval", "not-float"], "invalid interval 'not-float'"),
-        (
-            &["--interval", "-1.0"],
-            "interval must be a finite value greater than 0",
-        ),
-        (
-            &["--interval", "1e400"],
-            "interval must be a finite value greater than 0",
-        ),
-        (
-            &["--interval", "nan"],
-            "interval must be a finite value greater than 0",
-        ),
-        (&["--mode"], "missing value for --mode"),
-        (&["--mode", "ultra-mode"], "invalid mode 'ultra-mode'"),
-        (&["--address"], "missing value for --address"),
-        (&["--address", "not-hex"], "invalid hex address"),
-        (&["--address", "0xzz"], "invalid hex address"),
-        (&["--address", "0x00"], "invalid BH1750 I2C address"),
-        (&["--address", "0x42"], "invalid BH1750 I2C address"),
-        (&["--address", "0x77"], "invalid BH1750 I2C address"),
-        (&["--address", "0x80"], "invalid BH1750 I2C address"),
-    ];
-
-    for (args, expected_err) in cases {
-        let (status, _, stderr) = run_cli(bin_path, args);
-        assert!(!status.success(), "expected failure for args: {args:?}");
-        assert!(
-            stderr.contains(expected_err),
-            "expected stderr to contain '{expected_err}' for args {args:?}, got: '{stderr}'"
-        );
-    }
+    assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
+    assert_cli_rejects(
+        bin_path,
+        &[
+            (&["--mode"], "missing value for --mode"),
+            (&["--mode", "ultra-mode"], "invalid mode 'ultra-mode'"),
+            (&["--address"], "missing value for --address"),
+            (&["--address", "not-hex"], "invalid hex address"),
+            (&["--address", "0xzz"], "invalid hex address"),
+            (&["--address", "0x00"], "invalid BH1750 I2C address"),
+            (&["--address", "0x42"], "invalid BH1750 I2C address"),
+            (&["--address", "0x77"], "invalid BH1750 I2C address"),
+            (&["--address", "0x80"], "invalid BH1750 I2C address"),
+        ],
+    );
 }

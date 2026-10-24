@@ -30,7 +30,8 @@ def main() -> None:
             with open(p, "r", encoding="utf-8") as f:
                 content = f.read()
             # Pinned target in jonit-dev/diffguard@88f63615c769f8db6031973503c2c40a9a3f4feb (dist/index.js)
-            # Upstream tracking for native file-based custom_prompt: https://github.com/jonit-dev/diffguard/issues
+            # Upstream source line: https://github.com/jonit-dev/diffguard/blob/88f63615c769f8db6031973503c2c40a9a3f4feb/dist/index.js
+            # Upstream feature request tracker: https://github.com/jonit-dev/diffguard/issues/1
             target = "const customPrompt = core.getInput('custom_prompt');"
             patch = (
                 "let customPrompt = core.getInput('custom_prompt'); "
@@ -38,17 +39,24 @@ def main() -> None:
                 "{ customPrompt = _fs.readFileSync(customPrompt, 'utf8'); } } "
                 "catch (err) { core.setFailed('Failed to read file-based customPrompt: ' + err.message); throw err; }"
             )
-            if target in content:
+            occurrences = content.count(target)
+            if occurrences == 1:
                 with open(p, "w", encoding="utf-8") as f:
-                    f.write(content.replace(target, patch))
+                    f.write(content.replace(target, patch, 1))
                 with open(p, "r", encoding="utf-8") as f:
                     patched = f.read()
-                if "fs.readFileSync" not in patched:
+                if "fs.readFileSync" not in patched or target in patched:
                     print(f"ERROR: patch verification failed in {p}", file=sys.stderr)
                     sys.exit(1)
                 subprocess.run(["node", "--check", p], check=True)
                 print(f"Successfully enabled and verified file-based prompt in {p}")
                 found = True
+            elif occurrences > 1:
+                print(
+                    f"ERROR: expected exactly 1 patch site in {p}, found {occurrences}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     if not found:
         print(

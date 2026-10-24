@@ -17,6 +17,9 @@ from pathlib import Path
 
 # Prompt file output path at repo root
 PROMPT_OUTPUT_FILENAME = "review_prompt.txt"
+# Maximum prompt byte budget (~200 KB ≈ 50k–60k tokens at ~3.5–4 bytes/token),
+# leaving >68k tokens of headroom inside the 128k context window for PR diffs and model output.
+MAX_PROMPT_BYTES = 200_000
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 
 
@@ -181,6 +184,10 @@ Perform a rigorous, constructive, and actionable engineering review adhering str
     print(
         f"Generated review prompt size: {byte_len} bytes ({byte_len / 1024:.2f} KB) across {len(kept_sections)} guideline sections"
     )
+    if byte_len > MAX_PROMPT_BYTES:
+        raise SystemExit(
+            f"ERROR: review prompt size ({byte_len} bytes) exceeds configured model context budget ({MAX_PROMPT_BYTES} bytes)"
+        )
 
     return prompt
 
@@ -191,14 +198,6 @@ def main() -> None:
     repo_root = script_dir.parent.parent
 
     prompt = build_review_prompt(repo_root)
-    byte_len = len(prompt.encode("utf-8"))
-
-    # Enforce model context budget for OpenRouter @preset/code-review (~128k token context window)
-    MAX_PROMPT_BYTES = 200_000
-    if byte_len > MAX_PROMPT_BYTES:
-        raise SystemExit(
-            f"ERROR: review prompt size ({byte_len} bytes) exceeds configured model context budget ({MAX_PROMPT_BYTES} bytes)"
-        )
 
     # Save to external file at repo root so action can read it directly without environment limits
     prompt_file = repo_root / PROMPT_OUTPUT_FILENAME

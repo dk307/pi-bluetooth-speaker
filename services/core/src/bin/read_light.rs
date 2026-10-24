@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use speaker_core::diag::{
     OutputFormat, env_args, exit_code_for_reads, format_timestamp, parse_count_arg,
-    parse_interval_arg, program_name,
+    parse_interval_arg, program_name, should_print_summary,
 };
 use speaker_core::hardware::{
     BH1750_ALT_I2C_ADDR, BH1750_DEFAULT_I2C_ADDR, BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance,
@@ -24,19 +24,13 @@ use speaker_core::hardware::{
 /// with ample headroom for Linux scheduling, ensuring a fresh conversion is available on each poll.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(300);
 
-/// Diagnostic display options.
-#[derive(Debug, Clone, Copy, Default)]
-struct DiagnosticFlags {
-    verbose: bool,
-}
-
 /// Command-line configuration parameters.
 #[derive(Debug, Clone, Copy)]
 struct CliOptions {
     max_count: Option<usize>,
     interval: Duration,
     format: OutputFormat,
-    flags: DiagnosticFlags,
+    verbose: bool,
     address: I2cAddress,
     mode: MeasurementMode,
 }
@@ -47,7 +41,7 @@ impl Default for CliOptions {
             max_count: None,
             interval: DEFAULT_POLL_INTERVAL,
             format: OutputFormat::Human,
-            flags: DiagnosticFlags::default(),
+            verbose: false,
             address: I2cAddress::default(),
             mode: MeasurementMode::ContinuousHighRes,
         }
@@ -114,7 +108,7 @@ where
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
             "-1" | "--once" => opts.max_count = Some(1),
-            "-v" | "--verbose" => opts.flags.verbose = true,
+            "-v" | "--verbose" => opts.verbose = true,
             "-j" | "--json" => opts.format = OutputFormat::Json,
             "-n" | "--count" => opts.max_count = Some(parse_count_arg(args.next())?),
             "-i" | "--interval" => opts.interval = parse_interval_arg(args.next())?,
@@ -146,7 +140,6 @@ fn parse_cli_args() -> Result<Option<CliOptions>, String> {
 struct Statistics {
     total_reads: usize,
     successful_reads: usize,
-    errors: usize,
     min_lux: Option<f32>,
     max_lux: Option<f32>,
     lux_sum: f64,
@@ -164,7 +157,10 @@ impl Statistics {
 
     fn record_error(&mut self) {
         self.total_reads += 1;
-        self.errors += 1;
+    }
+
+    const fn errors(&self) -> usize {
+        self.total_reads - self.successful_reads
     }
 
     #[expect(
@@ -216,10 +212,10 @@ fn print_session_summary(stats: &Statistics) {
     println!("Successful  : {}", stats.successful_reads);
     if stats.total_reads > 0 {
         let total = stats.total_reads as f32;
+        let errors = stats.errors();
         println!(
-            "Read errors : {} ({:.2}% error rate)",
-            stats.errors,
-            (stats.errors as f32 / total) * 100.0
+            "Read errors : {errors} ({:.2}% error rate)",
+            (errors as f32 / total) * 100.0
         );
     }
     if let (Some(min), Some(max), Some(avg)) = (stats.min_lux, stats.max_lux, stats.average_lux()) {
@@ -261,6 +257,25 @@ fn output_json_reading(
     println!("{obj}");
 }
 
+fn output_json_error(
+    timestamp: &str,
+    bus: u8,
+    address: I2cAddress,
+    mode: MeasurementMode,
+    err: &dyn std::fmt::Display,
+) {
+    println!(
+        "{}",
+        serde_json::json!({
+            "timestamp": timestamp,
+            "i2c_bus": bus,
+            "i2c_address": address.to_string(),
+            "mode": mode.as_str(),
+            "error": err.to_string(),
+        })
+    );
+}
+
 fn handle_light_iteration(
     sensor: &LightSensor,
     opts: &CliOptions,
@@ -287,15 +302,12 @@ fn handle_light_iteration(
             stats.record_error();
             match opts.format {
                 OutputFormat::Json => {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "timestamp": timestamp,
-                            "i2c_bus": sensor.i2c_bus(),
-                            "i2c_address": sensor.i2c_address().to_string(),
-                            "mode": opts.mode.to_string(),
-                            "error": err.to_string(),
-                        })
+                    output_json_error(
+                        timestamp,
+                        sensor.i2c_bus(),
+                        sensor.i2c_address(),
+                        opts.mode,
+                        &err,
                     );
                 }
                 OutputFormat::Human => {
@@ -309,7 +321,13 @@ fn handle_light_iteration(
 fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
     if let Err(err) = sensor.set_mode(opts.mode) {
         if opts.format == OutputFormat::Json {
-            println!("{}", serde_json::json!({ "error": err.to_string() }));
+            output_json_error(
+                &format_timestamp(),
+                sensor.i2c_bus(),
+                sensor.i2c_address(),
+                opts.mode,
+                &err,
+            );
         } else {
             eprintln!("Failed to set BH1750 mode to {}: {err}", opts.mode);
         }
@@ -318,7 +336,7 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
 
     if opts.format == OutputFormat::Human {
         print_header(sensor);
-        if opts.flags.verbose {
+        if opts.verbose {
             print_diagnostic_registers(sensor);
         }
         if opts.max_count.is_none() {
@@ -329,7 +347,6 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
     }
 
     let mut stats = Statistics::default();
-    let mut iterations = 0;
 
     loop {
         let loop_start = Instant::now();
@@ -337,9 +354,8 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
 
         handle_light_iteration(sensor, opts, &timestamp, &mut stats);
 
-        iterations += 1;
         if let Some(max) = opts.max_count {
-            if iterations >= max {
+            if stats.total_reads >= max {
                 break;
             }
         }
@@ -350,7 +366,7 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
         }
     }
 
-    if opts.format == OutputFormat::Human && opts.max_count != Some(1) {
+    if should_print_summary(opts.format, opts.max_count, stats.total_reads) {
         print_session_summary(&stats);
     }
 
@@ -374,7 +390,13 @@ fn main() -> ExitCode {
         Ok(s) => s,
         Err(err) => {
             if opts.format == OutputFormat::Json {
-                println!("{}", serde_json::json!({ "error": err.to_string() }));
+                output_json_error(
+                    &format_timestamp(),
+                    BH1750_DEFAULT_I2C_BUS,
+                    opts.address,
+                    opts.mode,
+                    &err,
+                );
             } else {
                 eprintln!("Failed to initialize BH1750 light sensor: {err}");
             }
@@ -451,7 +473,7 @@ mod tests {
 
         assert_eq!(stats.total_reads, 3);
         assert_eq!(stats.successful_reads, 2);
-        assert_eq!(stats.errors, 1);
+        assert_eq!(stats.errors(), 1);
         assert_eq!(stats.min_lux, Some(100.0));
         assert_eq!(stats.max_lux, Some(200.0));
         assert!((stats.average_lux().unwrap() - 150.0).abs() < 1e-4);
@@ -477,7 +499,7 @@ mod tests {
             max_count: Some(1),
             interval: Duration::from_millis(10),
             format: OutputFormat::Human,
-            flags: DiagnosticFlags { verbose: true },
+            verbose: true,
             address: I2cAddress::default(),
             mode: MeasurementMode::ContinuousHighRes,
         };
@@ -496,7 +518,7 @@ mod tests {
         mock.set_fault(Some("hardware disconnected".into()));
         handle_light_iteration(&sensor, &opts_human, "12:00:02", &mut stats);
         handle_light_iteration(&sensor, &opts_json, "12:00:03", &mut stats);
-        assert_eq!(stats.errors, 2);
+        assert_eq!(stats.errors(), 2);
 
         // Test run_app in human mode
         mock.set_fault(None);
@@ -504,7 +526,7 @@ mod tests {
             max_count: Some(2),
             interval: Duration::from_millis(1),
             format: OutputFormat::Human,
-            flags: DiagnosticFlags { verbose: true },
+            verbose: true,
             address: I2cAddress::default(),
             mode: MeasurementMode::ContinuousHighRes,
         };
@@ -515,7 +537,7 @@ mod tests {
             max_count: Some(1),
             interval: Duration::from_millis(1),
             format: OutputFormat::Json,
-            flags: DiagnosticFlags::default(),
+            verbose: false,
             address: I2cAddress::default(),
             mode: MeasurementMode::ContinuousHighRes,
         };
@@ -527,7 +549,7 @@ mod tests {
             max_count: Some(1),
             interval: Duration::from_millis(1),
             format: OutputFormat::Human,
-            flags: DiagnosticFlags::default(),
+            verbose: false,
             address: I2cAddress::default(),
             mode: MeasurementMode::ContinuousHighRes,
         };
@@ -570,7 +592,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(opts.max_count, Some(5));
-        assert!(opts.flags.verbose);
+        assert!(opts.verbose);
         assert_eq!(opts.format, OutputFormat::Json);
         assert_eq!(opts.mode, MeasurementMode::ContinuousLowRes);
         assert_eq!(opts.address, I2cAddress::alternate_address());

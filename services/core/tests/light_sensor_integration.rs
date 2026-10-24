@@ -66,7 +66,9 @@ async fn concurrent_sensor_clones_power_and_mode_operations() {
     let h1 = tokio::spawn(async move {
         for _ in 0..10 {
             s1.set_mode(MeasurementMode::ContinuousLowRes).unwrap();
-            let _ = s1.read_lux_async().await.unwrap();
+            if let Err(err) = s1.read_lux_async().await {
+                assert!(err.is_powered_down(), "unexpected error: {err}");
+            }
         }
     });
 

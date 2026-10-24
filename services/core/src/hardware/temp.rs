@@ -1115,19 +1115,9 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::map_join_result;
+    use crate::diag::ScopedTempDir;
+    use crate::runtime::abort_and_map;
     use std::error::Error;
-
-    struct AutoCleanupPath(std::path::PathBuf);
-    impl Drop for AutoCleanupPath {
-        fn drop(&mut self) {
-            if self.0.is_dir() {
-                let _ = fs::remove_dir_all(&self.0);
-            } else if self.0.is_file() {
-                let _ = fs::remove_file(&self.0);
-            }
-        }
-    }
 
     #[test]
     fn temperature_conversions_and_bounds() {
@@ -1278,8 +1268,15 @@ a7 01 4b 46 7f ff 0c 10 5c
 
     #[tokio::test]
     async fn async_methods_read_from_sensor_without_blocking() {
+        fn assert_send<T: Send>(_: T) {}
         let (sensor, mock) = TempSensor::new_mocked();
         let id = SensorId::parse("28-00000abcdef1").unwrap();
+        assert_send(sensor.discover_sensors_async());
+        assert_send(sensor.read_primary_temperature_async());
+        assert_send(sensor.read_all_async());
+        assert_send(sensor.read_sensor_async(&id));
+        assert_send(sensor.read_diagnostics_async(&id));
+
         mock.set_temperature(
             id.clone(),
             Temperature::from_millidegrees_celsius(28_500).unwrap(),
@@ -1300,13 +1297,7 @@ a7 01 4b 46 7f ff 0c 10 5c
 
     #[tokio::test]
     async fn cancelled_blocking_task_maps_to_temp_error_cancelled() {
-        let task = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            Ok::<_, TempError>(())
-        });
-        task.abort();
-        let join_res = task.await.map(Ok::<_, TempError>);
-        let err = map_join_result(join_res, "1-Wire sensor read").unwrap_err();
+        let err: TempError = abort_and_map("1-Wire sensor read").await;
         assert!(err.is_cancelled());
         assert!(!err.is_io());
         assert!(
@@ -1317,11 +1308,8 @@ a7 01 4b 46 7f ff 0c 10 5c
 
     #[test]
     fn soc_thermal_parses_content() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("soc_thermal_test_{}", std::process::id()));
-        let _guard = AutoCleanupPath(temp_dir.clone());
-        let _ = fs::create_dir_all(&temp_dir);
-        let path = temp_dir.join("temp");
+        let temp_dir = ScopedTempDir::new("soc_thermal_test");
+        let path = temp_dir.path().join("temp");
         fs::write(&path, "41856\n").unwrap();
 
         let soc = SocThermal::read_from_path(&path).unwrap();
@@ -1333,13 +1321,14 @@ a7 01 4b 46 7f ff 0c 10 5c
         assert!((soc.delta_from_chassis(chassis) - 17.856).abs() < 1e-2);
 
         // Parse error
-        let bad_path = temp_dir.join("bad_temp");
+        let bad_path = temp_dir.path().join("bad_temp");
         fs::write(&bad_path, "not-a-number\n").unwrap();
         let err = SocThermal::read_from_path(&bad_path).unwrap_err();
         assert!(err.is_parse_error());
 
         // Missing file
-        let missing_err = SocThermal::read_from_path(temp_dir.join("nonexistent")).unwrap_err();
+        let missing_err =
+            SocThermal::read_from_path(temp_dir.path().join("nonexistent")).unwrap_err();
         assert!(missing_err.is_io());
     }
 
@@ -1600,10 +1589,9 @@ a7 01 4b 46 7f ff 0c 10 5c
         );
 
         // Test sysfs path that is a file (triggers Err(NotADirectory) in discover_sysfs_sensors)
-        let temp_file =
-            std::env::temp_dir().join(format!("ds18b20_file_test_{}", std::process::id()));
-        let _guard = AutoCleanupPath(temp_file.clone());
-        let _ = fs::write(&temp_file, "not a directory");
+        let temp_dir = ScopedTempDir::new("ds18b20_file_test");
+        let temp_file = temp_dir.path().join("not_a_dir");
+        fs::write(&temp_file, "not a directory").unwrap();
         let file_sensor = TempSensor::with_sysfs_path(&temp_file);
         let res = file_sensor.discover_sensors();
         assert!(res.unwrap_err().is_io());

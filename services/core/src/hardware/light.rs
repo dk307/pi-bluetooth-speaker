@@ -1,7 +1,7 @@
-//! BH1750 ambient light sensor hardware abstraction and mock controller.
+//! BH1750FVI digital ambient light sensor driver with typed domain models and inherent mocking.
 //!
-//! Provides strongly-typed, non-blocking interfaces for the ROHM BH1750FVI
-//! digital ambient light sensor on the Raspberry Pi I2C-1 bus (`/dev/i2c-1`).
+//! Provides strongly-typed, non-blocking interfaces for the ROHM BH1750FVI on the
+//! Raspberry Pi I2C-1 bus (`/dev/i2c-1`).
 //!
 //! # Hardware Configuration
 //! - **Bus:** I2C-1 (`/dev/i2c-1`)
@@ -232,10 +232,16 @@ pub struct Illuminance {
 }
 
 impl Illuminance {
-    /// Maximum valid illuminance reading supported by the BH1750 sensor (120,000 lux).
+    /// Maximum valid illuminance reading supported by the BH1750FVI datasheet (120,000 lux).
+    ///
+    /// Bounds the full datasheet range including extended-`MTreg` sensitivity configurations;
+    /// this driver pins the default `MTreg = 69`, so raw-derived readings peak at
+    /// `65535 / 1.2 ≈ 54,612.5 lx`.
     pub const MAX_LUX: f32 = 120_000.0;
 
     /// Creates an [`Illuminance`] from a raw float in lux.
+    ///
+    /// Accepts values across the full BH1750FVI datasheet range (`0.0..=Self::MAX_LUX`).
     ///
     /// # Errors
     /// Returns [`LightError`] if `lux` is negative, NaN, infinite, or exceeds [`Self::MAX_LUX`].
@@ -250,6 +256,9 @@ impl Illuminance {
     }
 
     /// Converts a raw 16-bit register word and measurement mode into [`Illuminance`].
+    ///
+    /// # Panics
+    /// Panics in debug builds if the converted lux value falls outside `0.0..=Self::MAX_LUX`.
     #[must_use]
     pub fn from_raw_and_mode(raw: u16, mode: MeasurementMode) -> Self {
         let base_lux = f32::from(raw) / BH1750_ACCURACY_FACTOR;
@@ -420,13 +429,13 @@ impl I2cHardwareInfo {
 #[derive(Debug)]
 pub(crate) enum LightErrorKind {
     I2c {
-        message: Box<str>,
+        message: Option<Box<str>>,
         source: Option<rppal::i2c::Error>,
     },
     Io {
-        message: Box<str>,
         source: io::Error,
     },
+    PowerDown,
     Cancelled {
         message: Box<str>,
     },
@@ -458,23 +467,24 @@ impl LightError {
 
     pub(crate) fn i2c(message: impl Into<Box<str>>) -> Self {
         Self::new(LightErrorKind::I2c {
-            message: message.into(),
+            message: Some(message.into()),
             source: None,
         })
     }
 
     pub(crate) fn from_i2c_err(err: rppal::i2c::Error) -> Self {
         Self::new(LightErrorKind::I2c {
-            message: err.to_string().into_boxed_str(),
+            message: None,
             source: Some(err),
         })
     }
 
-    pub(crate) fn from_io_err(err: io::Error) -> Self {
-        Self::new(LightErrorKind::Io {
-            message: err.to_string().into_boxed_str(),
-            source: err,
-        })
+    pub(crate) fn from_io_err(source: io::Error) -> Self {
+        Self::new(LightErrorKind::Io { source })
+    }
+
+    pub(crate) fn powered_down() -> Self {
+        Self::new(LightErrorKind::PowerDown)
     }
 
     pub(crate) fn cancelled(message: impl Into<Box<str>>) -> Self {
@@ -509,6 +519,12 @@ impl LightError {
     #[must_use]
     pub const fn is_io(&self) -> bool {
         matches!(self.kind, LightErrorKind::Io { .. })
+    }
+
+    /// Returns `true` if this error occurred because the sensor is currently powered down.
+    #[must_use]
+    pub const fn is_powered_down(&self) -> bool {
+        matches!(self.kind, LightErrorKind::PowerDown)
     }
 
     /// Returns `true` if this error was caused by task cancellation or runtime shutdown.
@@ -548,8 +564,23 @@ impl LightError {
 impl Display for LightError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            LightErrorKind::I2c { message, .. } => write!(f, "I2C bus error: {message}"),
-            LightErrorKind::Io { message, .. } => write!(f, "I/O error: {message}"),
+            LightErrorKind::I2c {
+                message: Some(message),
+                ..
+            } => write!(f, "I2C bus error: {message}"),
+            LightErrorKind::I2c {
+                message: None,
+                source: Some(err),
+            } => write!(f, "I2C bus error: {err}"),
+            LightErrorKind::I2c {
+                message: None,
+                source: None,
+            } => write!(f, "I2C bus error"),
+            LightErrorKind::Io { source } => write!(f, "I/O error: {source}"),
+            LightErrorKind::PowerDown => write!(
+                f,
+                "sensor is powered down; call set_mode() or reset() before reading"
+            ),
             LightErrorKind::Cancelled { message } => write!(f, "task cancelled: {message}"),
             LightErrorKind::InvalidAddress { address } => {
                 write!(
@@ -610,6 +641,7 @@ struct MockState {
     raw_word: u16,
     desired_lux: Option<f32>,
     mode: MeasurementMode,
+    powered: bool,
     fault: Option<String>,
 }
 
@@ -620,6 +652,7 @@ impl LightSensorMock {
                 raw_word: 120, // 100 lx (120 / 1.2)
                 desired_lux: Some(100.0),
                 mode: MeasurementMode::ContinuousHighRes,
+                powered: true,
                 fault: None,
             })),
         }
@@ -681,6 +714,9 @@ impl LightSensorMock {
         if let Some(ref fault) = state.fault {
             return Err(LightError::mock_fault(fault.clone()));
         }
+        if !state.powered {
+            return Err(LightError::powered_down());
+        }
         let raw = if let Some(lux) = state.desired_lux {
             let mult = match state.mode {
                 MeasurementMode::ContinuousHighRes2 | MeasurementMode::OneShotHighRes2 => 2.0,
@@ -699,17 +735,25 @@ impl LightSensorMock {
             return Err(LightError::mock_fault(fault.clone()));
         }
         state.mode = mode;
+        state.powered = true;
         Ok(())
     }
 
     fn power_down(&self) -> Result<(), LightError> {
-        let state = self.state.read().expect("mock lock poisoned");
+        let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(LightError::mock_fault(fault.clone()));
         }
+        state.powered = false;
         Ok(())
     }
 
+    /// Resets the mock measurement register.
+    ///
+    /// Note: unlike physical hardware in continuous mode (which immediately starts a
+    /// new conversion after `CMD_RESET`), the mock zeroes `desired_lux` and `raw_word`
+    /// until the next [`set_lux()`](Self::set_lux) or [`set_raw_word()`](Self::set_raw_word) call
+    /// so tests can deterministically verify that a reset occurred.
     fn reset(&self) -> Result<(), LightError> {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
@@ -717,6 +761,7 @@ impl LightSensorMock {
         }
         state.desired_lux = Some(0.0);
         state.raw_word = 0;
+        state.powered = true;
         Ok(())
     }
 }
@@ -727,6 +772,7 @@ enum Backend {
         bus: u8,
         address: I2cAddress,
         mode: Mutex<MeasurementMode>,
+        powered: Mutex<bool>,
         op_lock: Mutex<()>,
         last_transition: Mutex<Instant>,
     },
@@ -784,6 +830,7 @@ impl LightSensor {
                 bus,
                 address,
                 mode: Mutex::new(MeasurementMode::ContinuousHighRes),
+                powered: Mutex::new(true),
                 op_lock: Mutex::new(()),
                 last_transition: Mutex::new(Instant::now()),
             }),
@@ -836,17 +883,26 @@ impl LightSensor {
     /// Panics if an internal mutex lock is poisoned.
     pub fn power_down(&self) -> Result<(), LightError> {
         match self.inner.as_ref() {
-            Backend::Hardware { i2c, op_lock, .. } => {
+            Backend::Hardware {
+                i2c,
+                powered,
+                op_lock,
+                ..
+            } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
                 guard.write(&[CMD_POWER_DOWN])?;
+                *powered.lock().expect("power lock poisoned") = false;
                 Ok(())
             }
             Backend::Mock(mock) => mock.power_down(),
         }
     }
 
-    /// Resets the sensor measurement data register.
+    /// Resets the sensor measurement data register and awakens the sensor if powered down.
+    ///
+    /// In mock mode, `reset()` zeroes the simulated illuminance and raw register word
+    /// until the next [`LightSensorMock::set_lux()`] or [`LightSensorMock::set_raw_word()`] call.
     ///
     /// # Errors
     /// Returns [`LightError`] if writing the command opcode fails.
@@ -857,6 +913,7 @@ impl LightSensor {
         match self.inner.as_ref() {
             Backend::Hardware {
                 i2c,
+                powered,
                 op_lock,
                 last_transition,
                 ..
@@ -865,8 +922,8 @@ impl LightSensor {
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
                 guard.write(&[CMD_POWER_ON])?;
                 guard.write(&[CMD_RESET])?;
-                let mut trans_guard = last_transition.lock().expect("transition lock poisoned");
-                *trans_guard = Instant::now();
+                *powered.lock().expect("power lock poisoned") = true;
+                *last_transition.lock().expect("transition lock poisoned") = Instant::now();
                 Ok(())
             }
             Backend::Mock(mock) => mock.reset(),
@@ -885,6 +942,7 @@ impl LightSensor {
             Backend::Hardware {
                 i2c,
                 mode,
+                powered,
                 op_lock,
                 last_transition,
                 ..
@@ -893,10 +951,9 @@ impl LightSensor {
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
                 guard.write(&[CMD_POWER_ON])?;
                 guard.write(&[new_mode.opcode()])?;
-                let mut cur_mode = mode.lock().expect("mode lock poisoned");
-                *cur_mode = new_mode;
-                let mut trans_guard = last_transition.lock().expect("transition lock poisoned");
-                *trans_guard = Instant::now();
+                *mode.lock().expect("mode lock poisoned") = new_mode;
+                *powered.lock().expect("power lock poisoned") = true;
+                *last_transition.lock().expect("transition lock poisoned") = Instant::now();
                 Ok(())
             }
             Backend::Mock(mock) => mock.set_mode(new_mode),
@@ -908,11 +965,15 @@ impl LightSensor {
             Backend::Hardware {
                 i2c,
                 mode,
+                powered,
                 op_lock,
                 last_transition,
                 ..
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
+                if !*powered.lock().expect("power lock poisoned") {
+                    return Err(LightError::powered_down());
+                }
                 let cur_mode = *mode.lock().expect("mode lock poisoned");
                 if cur_mode.is_continuous() {
                     let elapsed = last_transition
@@ -923,8 +984,9 @@ impl LightSensor {
                         std::thread::sleep(remaining);
                     }
                 } else {
-                    // Send one-shot trigger opcode, then release the mutex during conversion sleep
+                    // Power on and send one-shot trigger opcode, then release I2C mutex during conversion sleep
                     let mut guard = i2c.lock().expect("I2C lock poisoned");
+                    guard.write(&[CMD_POWER_ON])?;
                     guard.write(&[cur_mode.opcode()])?;
                     drop(guard);
                     std::thread::sleep(cur_mode.max_measurement_time());
@@ -1024,7 +1086,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::map_join_result;
+    use crate::runtime::abort_and_map;
     use std::error::Error;
 
     #[test]
@@ -1117,7 +1179,11 @@ mod tests {
 
     #[tokio::test]
     async fn async_methods_read_from_mock_sensor() {
+        fn assert_send<T: Send>(_: T) {}
         let (sensor, mock) = LightSensor::new_mocked();
+        assert_send(sensor.read_lux_async());
+        assert_send(sensor.read_diagnostics_async());
+
         mock.set_lux(250.0);
 
         let reading = sensor.read_lux_async().await.unwrap();
@@ -1129,13 +1195,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_blocking_task_maps_to_light_error_cancelled() {
-        let task = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            Ok::<_, LightError>(())
-        });
-        task.abort();
-        let join_res = task.await.map(Ok::<_, LightError>);
-        let err = map_join_result(join_res, "BH1750 illuminance read").unwrap_err();
+        let err: LightError = abort_and_map("BH1750 illuminance read").await;
         assert!(err.is_cancelled());
         assert!(!err.is_i2c());
         assert!(
@@ -1321,6 +1381,7 @@ mod tests {
         assert!(cancel_err.is_cancelled());
         assert!(!cancel_err.is_i2c());
         assert!(!cancel_err.is_io());
+        assert!(!cancel_err.is_powered_down());
         assert!(matches!(
             cancel_err.backtrace().status(),
             BacktraceStatus::Captured | BacktraceStatus::Disabled
@@ -1329,6 +1390,21 @@ mod tests {
             cancel_err
                 .to_string()
                 .contains("task cancelled: operation aborted")
+        );
+
+        let pwr_err = LightError::powered_down();
+        assert!(pwr_err.is_powered_down());
+        assert!(!pwr_err.is_i2c());
+        assert!(pwr_err.to_string().contains("sensor is powered down"));
+        assert!(pwr_err.source().is_none());
+
+        let bare_i2c = LightError::new(LightErrorKind::I2c {
+            message: None,
+            source: None,
+        });
+        assert_eq!(
+            bare_i2c.to_string().lines().next().unwrap(),
+            "I2C bus error"
         );
 
         // std::error::Error trait
@@ -1379,9 +1455,21 @@ mod tests {
         assert_eq!(sensor.read_lux().unwrap().lux(), 0.0);
 
         sensor.power_down().unwrap();
+        let pwr_err = sensor.read_lux().unwrap_err();
+        assert!(pwr_err.is_powered_down());
+        assert!(sensor.read_diagnostics().unwrap_err().is_powered_down());
 
+        // set_mode re-awakens sensor after power_down
+        mock.set_lux(300.0);
         sensor.set_mode(MeasurementMode::ContinuousLowRes).unwrap();
         assert_eq!(mock.current_mode(), MeasurementMode::ContinuousLowRes);
+        assert!((sensor.read_lux().unwrap().lux() - 300.0).abs() < 1.0);
+
+        // reset also re-awakens sensor after power_down
+        sensor.power_down().unwrap();
+        assert!(sensor.read_lux().unwrap_err().is_powered_down());
+        sensor.reset().unwrap();
+        assert_eq!(sensor.read_lux().unwrap().lux(), 0.0);
 
         // Debug output
         let debug_str = format!("{sensor:?}");

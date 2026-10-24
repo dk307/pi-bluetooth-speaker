@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use speaker_core::diag::{
     OutputFormat, env_args, exit_code_for_reads, format_timestamp, parse_count_arg,
-    parse_interval_arg, program_name,
+    parse_interval_arg, program_name, should_print_summary,
 };
 use speaker_core::hardware::{
     SensorDiagnostics, SensorId, SocThermal, TempError, TempSensor, Temperature,
@@ -242,6 +242,17 @@ fn output_json_reading(
     );
 }
 
+fn output_json_error(timestamp: &str, sensor_id: Option<&SensorId>, err: &dyn std::fmt::Display) {
+    println!(
+        "{}",
+        serde_json::json!({
+            "timestamp": timestamp,
+            "sensor_id": sensor_id.map(SensorId::as_str),
+            "error": err.to_string(),
+        })
+    );
+}
+
 fn handle_sensor_iteration(
     sensor: &TempSensor,
     devices: &[SensorId],
@@ -286,14 +297,7 @@ fn handle_sensor_iteration(
                 stats.record_error(&err);
                 match opts.format {
                     OutputFormat::Json => {
-                        println!(
-                            "{}",
-                            serde_json::json!({
-                                "timestamp": timestamp,
-                                "sensor_id": dev.as_str(),
-                                "error": err.to_string(),
-                            })
-                        );
+                        output_json_error(timestamp, Some(dev), &err);
                     }
                     OutputFormat::Human => {
                         eprintln!("[{timestamp}] [{dev}] Read error: {err}");
@@ -331,7 +335,7 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
         Ok(devs) => devs,
         Err(err) => {
             if opts.format == OutputFormat::Json {
-                println!("{}", serde_json::json!({ "error": err }));
+                output_json_error(&format_timestamp(), opts.target_sensor.as_ref(), &err);
             } else {
                 eprintln!("Error: {err}");
             }
@@ -381,7 +385,7 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
         }
     }
 
-    if opts.format == OutputFormat::Human && stats.total_reads > 1 {
+    if should_print_summary(opts.format, opts.max_count, stats.total_reads) {
         print_session_summary(&stats);
     }
 
@@ -408,13 +412,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct AutoCleanupDir(std::path::PathBuf);
-    impl Drop for AutoCleanupDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use speaker_core::diag::ScopedTempDir;
 
     #[test]
     fn print_usage_runs_cleanly() {
@@ -463,11 +461,8 @@ mod tests {
         let bad_id = SensorId::parse("28-000000000099").unwrap();
         print_diagnostic_registers(&sensor, &[bad_id]);
 
-        let temp_dir =
-            std::env::temp_dir().join(format!("read_temp_bin_test_{}", std::process::id()));
-        let _guard = AutoCleanupDir(temp_dir.clone());
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let soc_file = temp_dir.join("temp");
+        let temp_dir = ScopedTempDir::new("read_temp_bin_test");
+        let soc_file = temp_dir.path().join("temp");
         std::fs::write(&soc_file, "42000\n").unwrap();
         let soc = SocThermal::read_from_path(&soc_file).ok();
 

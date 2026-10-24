@@ -72,6 +72,19 @@ where
 }
 
 #[cfg(test)]
+pub(crate) async fn abort_and_map<E>(task_context: &'static str) -> E
+where
+    E: FromJoinError + std::fmt::Debug + Send + 'static,
+{
+    let task = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        Ok::<(), E>(())
+    });
+    task.abort();
+    map_join_result(task.await, task_context).unwrap_err()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -110,16 +123,7 @@ mod tests {
 
     #[tokio::test]
     async fn map_join_result_handles_cancellation() {
-        let task = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            Ok::<u32, DummyError>(99)
-        });
-
-        task.abort();
-        let join_res = task.await;
-        assert!(join_res.as_ref().unwrap_err().is_cancelled());
-
-        let err = map_join_result(join_res, "temperature polling").unwrap_err();
+        let err: DummyError = abort_and_map("temperature polling").await;
         assert_eq!(
             err,
             DummyError("temperature polling task was cancelled".into())
