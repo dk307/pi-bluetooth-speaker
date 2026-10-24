@@ -167,7 +167,7 @@ impl SensorId {
     ///
     /// # Errors
     /// Returns [`TempError`] with [`TempError::is_invalid_sensor_id`] if `id` does
-    /// not begin with `"28-"` or has an empty/non-alphanumeric serial suffix.
+    /// not begin with `"28-"` or has an empty or non-hexadecimal serial suffix.
     pub fn parse(id: impl AsRef<str>) -> Result<Self, TempError> {
         let raw = id.as_ref().trim();
         let Some(suffix) = raw.strip_prefix(DS18B20_FAMILY_PREFIX) else {
@@ -175,7 +175,7 @@ impl SensorId {
                 value: raw.into(),
             }));
         };
-        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_alphanumeric()) {
+        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(TempError::new(ErrorKind::InvalidSensorId {
                 value: raw.into(),
             }));
@@ -1168,6 +1168,17 @@ mod tests {
                 .unwrap_err()
                 .is_invalid_sensor_id()
         );
+        // Non-hexadecimal characters ('g', 'z') must be rejected per 1-Wire DS18B20 specification
+        assert!(
+            SensorId::parse("28-00000diag001")
+                .unwrap_err()
+                .is_invalid_sensor_id()
+        );
+        assert!(
+            SensorId::parse("28-0000000xyz01")
+                .unwrap_err()
+                .is_invalid_sensor_id()
+        );
     }
 
     #[test]
@@ -1284,6 +1295,23 @@ a7 01 4b 46 7f ff 0c 10 5c
 
         let diag = sensor.read_diagnostics_async(&id).await.unwrap();
         assert_eq!(diag.temperature.millidegrees_celsius(), 28_500);
+    }
+
+    #[tokio::test]
+    async fn cancelled_blocking_task_maps_to_temp_error_cancelled() {
+        let task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            Ok::<_, TempError>(())
+        });
+        task.abort();
+        let join_res = task.await.map(Ok::<_, TempError>);
+        let err = map_join_result(join_res, "1-Wire sensor read").unwrap_err();
+        assert!(err.is_cancelled());
+        assert!(!err.is_io());
+        assert!(
+            err.to_string()
+                .contains("1-Wire sensor read task was cancelled")
+        );
     }
 
     #[test]

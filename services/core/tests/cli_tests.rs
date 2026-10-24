@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 /// Probes whether a compiled binary is executable in the current environment.
 ///
 /// In CI environments without cross-compilation emulation, failures panic loudly
-/// to prevent silent skips from masking test regressions.
+/// to prevent silent skips from masking test regressions. `CROSS_COMPILE` may only
+/// be set on non-native targets running without kernel `binfmt_misc` emulation.
 fn can_exec_binary(bin_path: &str) -> bool {
     match Command::new(bin_path).arg("--help").output() {
         Ok(output) if output.status.success() => true,
@@ -62,6 +63,8 @@ fn core_main_binary_executes() {
     // Note: core binary currently executes an initial diagnostic banner and exits.
     // The banner prints static GPIO/hardware pin metadata via `TempSensor::gpio_info()`
     // which does not perform live sysfs I/O, ensuring deterministic execution on host.
+    // Standard output is well under the default OS pipe buffer capacity (~64 KB),
+    // ensuring `run_cli` / `output()` will not block or deadlock on pipe drainage.
     let bin_path = env!("CARGO_BIN_EXE_core");
     if !can_exec_binary(bin_path) {
         return;
@@ -225,7 +228,9 @@ fn read_light_cli_argument_validation() {
         (&["--mode", "ultra-mode"], "invalid mode 'ultra-mode'"),
         (&["--address"], "missing value for --address"),
         (&["--address", "not-hex"], "invalid hex address"),
+        (&["--address", "0xzz"], "invalid hex address"),
         (&["--address", "0x00"], "invalid BH1750 I2C address"),
+        (&["--address", "0x42"], "invalid BH1750 I2C address"),
         (&["--address", "0x77"], "invalid BH1750 I2C address"),
         (&["--address", "0x80"], "invalid BH1750 I2C address"),
     ];

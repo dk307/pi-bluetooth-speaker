@@ -58,4 +58,6 @@ To eliminate repetitive code review churn across sessions, AI agents working in 
   * **Guard Float Types Against NaN:** Always guard float domain parsing and constructors with `val.is_finite()`, as `NaN` evaluates to `false` in range comparisons and bypasses min/max checks.
   * **Ensure Hermetic Tests:** Never depend on host-specific paths like `/dev/null` for negative sysfs tests; always create temporary files in `env::temp_dir()`.
   * **Lint Placement Hygiene:** Place compile-time `assert_send_sync` assertions before `mod tests` to prevent `clippy::items-after-test-module`. Apply `#[expect(...)]` to `let` statements or functions rather than raw expressions. In task tests, avoid post-panic code altogether by mapping the join handle (`task.await.map(...)`).
+  * **Domain String Invariant Precision:** Strong domain types (like 1-Wire `SensorId`) must enforce hardware-accurate character sets (`is_ascii_hexdigit()` vs `is_ascii_alphanumeric()`) matching the domain error message and hardware spec.
+  * **Production Task Mapping Tests:** Don't test runtime traits solely with dummy errors; add tests verifying cancelled Tokio tasks mapped into production error types (`TempError`, `LightError`) asserting `is_cancelled()` predicates and contextual cancellation messages.
 

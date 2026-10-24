@@ -75,6 +75,10 @@ Before designing types, writing modules, implementing error handling, or writing
    * **Clippy & Lint Placement Hygiene:**
      * In stable Rust, `#[expect(...)]` cannot annotate raw expressions; attach to statements (`let`), items, or functions.
      * Place compile-time `const _: () = { assert_send_sync::<T>(); };` checks before `#[cfg(test)] mod tests` to avoid `clippy::items-after-test-module`.
+   * **Domain Invariant Validation & Hex Character Sets:**
+     * When validating sensor hardware IDs (like DS18B20 `28-*`), enforce the precise hardware character set (`is_ascii_hexdigit()`, not `is_ascii_alphanumeric()`) matching the domain error message and 1-Wire hardware spec.
+   * **Production Runtime Cancellation Tests:**
+     * Ensure production error types (`TempError`, `LightError`) implementing `FromJoinError` have dedicated tests verifying cancelled Tokio tasks mapped through `map_join_result` yield `is_cancelled() == true` with the expected contextual message.
 
 ---
 

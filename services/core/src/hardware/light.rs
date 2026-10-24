@@ -1036,6 +1036,23 @@ mod tests {
         assert!((diag.illuminance.lux() - 250.0).abs() < 1e-1);
     }
 
+    #[tokio::test]
+    async fn cancelled_blocking_task_maps_to_light_error_cancelled() {
+        let task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            Ok::<_, LightError>(())
+        });
+        task.abort();
+        let join_res = task.await.map(Ok::<_, LightError>);
+        let err = map_join_result(join_res, "BH1750 illuminance read").unwrap_err();
+        assert!(err.is_cancelled());
+        assert!(!err.is_i2c());
+        assert!(
+            err.to_string()
+                .contains("BH1750 illuminance read task was cancelled")
+        );
+    }
+
     #[test]
     fn measurement_modes_and_opcodes_all_variants() {
         let modes = [

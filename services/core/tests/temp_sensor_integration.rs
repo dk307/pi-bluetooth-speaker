@@ -121,9 +121,9 @@ async fn shared_clones_and_async_polling_observe_live_mock_updates() {
 fn sysfs_backend_reads_full_diagnostics_and_various_power_modes() {
     let temp_dir = ScopedTempDir::new("w1_diag_test");
 
-    let dev1 = temp_dir.path.join("28-00000diag001");
-    let dev2 = temp_dir.path.join("28-00000diag002");
-    let dev3 = temp_dir.path.join("28-00000diag003");
+    let dev1 = temp_dir.path.join("28-00000d1a0001");
+    let dev2 = temp_dir.path.join("28-00000d1a0002");
+    let dev3 = temp_dir.path.join("28-00000d1a0003");
 
     fs::create_dir_all(&dev1).unwrap();
     fs::create_dir_all(&dev2).unwrap();
@@ -157,18 +157,18 @@ fn sysfs_backend_reads_full_diagnostics_and_various_power_modes() {
     fs::write(dev3.join("ext_power"), "99\n").unwrap();
 
     let sensor = TempSensor::with_sysfs_path(&temp_dir.path);
-    let id1 = SensorId::parse("28-00000diag001").unwrap();
+    let id1 = SensorId::parse("28-00000d1a0001").unwrap();
     let diag1 = sensor.read_diagnostics(&id1).unwrap();
     assert_eq!(diag1.resolution_bits, Some(12));
     assert_eq!(diag1.conversion_time_ms, Some(750));
     assert_eq!(diag1.alarms, Some((0, 75)));
     assert_eq!(diag1.power_mode, Some(PowerSupplyMode::External));
 
-    let id2 = SensorId::parse("28-00000diag002").unwrap();
+    let id2 = SensorId::parse("28-00000d1a0002").unwrap();
     let diag2 = sensor.read_diagnostics(&id2).unwrap();
     assert_eq!(diag2.power_mode, Some(PowerSupplyMode::Parasite));
 
-    let id3 = SensorId::parse("28-00000diag003").unwrap();
+    let id3 = SensorId::parse("28-00000d1a0003").unwrap();
     let diag3 = sensor.read_diagnostics(&id3).unwrap();
     assert_eq!(diag3.power_mode, Some(PowerSupplyMode::Unknown(99)));
 }

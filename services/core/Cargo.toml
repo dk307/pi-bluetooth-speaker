@@ -11,6 +11,7 @@ default-run = "core"
 name = "speaker_core"
 path = "src/lib.rs"
 
+# Main daemon binary; matches DietPi /etc/systemd/system/core.service unit definition.
 [[bin]]
 name = "core"
 path = "src/main.rs"
