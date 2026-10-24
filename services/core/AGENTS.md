@@ -53,65 +53,22 @@ Before designing types, writing modules, implementing error handling, or writing
    * **Target Standards:** Maintain **>85%–90%+** line and function coverage across the library, hardware modules, and diagnostic CLI binaries.
    * **Testable CLI Utilities:** Architect CLI diagnostic binaries with modular, testable entrypoints (`fn run_app(sensor: &Sensor, opts: &CliOptions) -> ExitCode`) to enable deterministic unit and integration testing of CLI flags, JSON outputs, session summaries, and error handling without physical hardware.
    * **Thorough Mock & Invariant Coverage:** Test domain invariant bounds, conversions, all mock state controls, and fault injections. Isolated physical hardware syscalls (e.g., `/dev/i2c-1`) must have their surrounding logic completely tested.
-8. **Applied Engineering Hardening & Anti-Churn Patterns:**
-   * **Module Boundaries (Runtime vs Hardware):**
-     * Generic async runtime helpers (`map_join_result`, `FromJoinError`) belong in `crate::runtime` with dedicated unit tests. Do not place Tokio runtime glue in `crate::hardware`.
-     * Concrete implementations (`impl FromJoinError for <Error>`) must live next to the respective error type in its own module.
-   * **Tokio Task Join Semantics:**
-     * `tokio::task::JoinError` represents either worker panics (`is_panic()`) or task cancellations (`is_cancelled()`).
-     * Always propagate panics with `std::panic::resume_unwind(join_err.into_panic())`. Never convert thread crashes into recoverable I/O errors (**M-PANIC-ON-BUG**).
-     * Provide diagnostic context in `map_join_result(res, "task context")` so concurrent cancellations produce identifiable messages (e.g. `"temperature read task was cancelled"`).
-     * Do not attach `From<io::Error>` or other unrelated supertraits to `FromJoinError` to serve an unreachable branch; mark dead fallbacks with `unreachable!()`.
-     * In task panic tests, avoid dead code and expression attributes after `panic!()`: reshape the result with `task.await.map(Ok::<_, ErrorType>)`.
-   * **Float Validation & NaN Protection:**
-     * All float domain constructors and CLI interval parsers must check `val.is_finite()` before range comparison, as `NaN` evaluates to `false` for all inequality checks and would otherwise bypass bounds.
-   * **Cancellation Domain Semantics:**
-     * Map cancelled tasks to domain `Cancelled { message: Box<str> }` variants per **M-BOX-DST**.
-     * Document in `is_cancelled()` predicates that cancellations represent expected termination during graceful daemon shutdown and must not be retried or logged as hardware faults by callers or supervisor loops.
-   * **Hermetic Tests & Subprocess Assertions:**
-     * Never depend on `/dev/null` or ambient system paths; generate temporary files/directories inside `std::env::temp_dir()`.
-     * In `cli_tests.rs`, helper `can_exec_binary` must assert that binaries successfully run under CI (i.e., native Linux runners must never silently skip CLI tests).
-     * Use table-driven tests `(args, expected_stderr_fragment)` to cover negative values (`-1.0`), infinities (`1e400`), zero rejection, large number overflows, and missing arguments without repetitive boilerplate.
-   * **Clippy & Lint Placement Hygiene:**
-     * In stable Rust, `#[expect(...)]` cannot annotate raw expressions; attach to statements (`let`), items, or functions.
-     * Place compile-time `const _: () = { assert_send_sync::<T>(); };` checks before `#[cfg(test)] mod tests` to avoid `clippy::items-after-test-module`.
-   * **Domain Invariant Validation & Hex Character Sets:**
-     * When validating sensor hardware IDs (like DS18B20 `28-*`), enforce the precise hardware character set (`is_ascii_hexdigit()`, not `is_ascii_alphanumeric()`) matching the domain error message and 1-Wire hardware spec.
-   * **Production Runtime Cancellation Tests:**
-     * Ensure production error types (`TempError`, `LightError`) implementing `FromJoinError` have dedicated tests verifying cancelled Tokio tasks mapped through `map_join_result` yield `is_cancelled() == true` with the expected contextual message.
-   * **Layered Bus Locking & Clone Concurrency:**
-     * Any hardware driver allowing cloneable handles must acquire transaction serialization locks (`op_lock`) for all bus state mutations (`power_down`, `reset`, `set_mode`, `read_raw_word`) to prevent command collisions across concurrent tasks.
-   * **Compile-Time Pin Initializers:**
-     * Use `const` initializers (`BcmPin::new(2)`, `PhysicalPin::new(3)`) for static hardware pin mappings rather than runtime fallible calls (`from_u8(...).expect(...)`).
-   * **Hardware Settle-Time Contract & Transition Tracking:**
-     * Hardware sensor drivers must track mode transitions and guarantee settle/integration times before returning conversion results, rather than relying on application or CLI layers to guess or sleep.
-     * When transitioning sensor state (such as continuous mode start or sensor reset), track `last_transition: Mutex<Instant>` under the bus transaction lock (`op_lock`) and delay in `read_raw_word` if `elapsed < max_measurement_time()`.
-   * **Datasheet Conversion Time Bounds:**
-     * Always use the datasheet maximum conversion/integration time (e.g. 180 ms for BH1750 H-Res, 24 ms for Low-Res) rather than typical integration times when waiting on one-shot or continuous initial conversions to prevent races against slower silicon.
-   * **Clean Error Propagation with `?`:**
-     * When canonical domain error types implement `From<ForeignError>` (e.g., `From<rppal::i2c::Error> for LightError`), always leverage the `?` operator directly instead of writing verbose `.map_err(DomainError::from)`.
-   * **Soften User-Facing Input Errors:**
-     * Differentiate programmer backtraces from end-user CLI argument validation errors. User-facing CLI input rejections should return clean, concise messages without stack backtraces.
-   * **Dynamic Bus Device Paths via Box<str>:**
-     * Use heap-allocated `Box<str>` for dynamic system paths (such as `/dev/i2c-{bus}`) rather than rigid `match` arms returning `&'static str`.
-   * **Subprocess Probe Timeout Discipline:**
-     * Subprocess probes (such as checking whether a binary is executable via `can_exec_binary`) must never use unbounded blocking calls (`Command::output()`). Always run inside a deadline loop with an explicit timeout (e.g., 10s) and kill the spawned child if it hangs, preventing infinite CI hangs if a binary regresses to a loop.
-   * **Peripheral Bus Pinout Accuracy:**
-     * Peripheral metadata structures (`I2cHardwareInfo`, `GpioPinInfo`) must only claim pinout descriptors matching the physical hardware bus. Validate/assert that caller-provided bus numbers match the hardware controller whose pinout is modeled.
-   * **Fence-Aware Markdown Transformations:**
-     * Markdown processing scripts must never apply regex substitutions or newline collapses globally across full document text (`flags=re.DOTALL`). All comment stripping and whitespace normalization must occur strictly on lines outside fenced code blocks, preserving code examples verbatim.
-   * **Action Bundle Monkey-Patch Upstream Tracking:**
-     * CI patching scripts must use explicit conditional checks (`sys.exit(1)`) rather than Python `assert` (which is stripped under `-O`), and must record pinned commit hashes and upstream issue links.
-   * **Compile-Time Constant Proofs:**
-     * Use compile-time `const _: () = { ... }` invariant assertions to mathematically prove type limits (such as `(Illuminance::MAX_LUX * 1000.0) as u128 <= u32::MAX as u128`).
-   * **Strict Hex Address Validation:**
-     * Hex address parsers must reject signed inputs (`+`, `-`) before passing to radix parsers, as signs are non-standard in device address specifications.
+8. **Code Simplification & Deduplication (`speaker-core` Architecture):**
+   * **Shared Diagnostic & Test Infrastructure:** Do not copy-paste CLI scaffolding (`format_timestamp`, `Statistics`, interval parsing, session summary output) across `src/bin/read_*.rs` utilities, or duplicate `AutoCleanupDir` / `AutoCleanupPath` guards across `tests/*.rs`. Extract shared utilities into reusable modules when patterns repeat across two or more targets.
+   * **Minimal Surface Area & Direct Control Flow:** Prefer `#[derive(Copy)]` on small value-type option structs, bare `?` error propagation via `From`, `Duration::checked_sub` for settle calculations, and explicit `drop(guard)` before blocking sleeps rather than nested anonymous blocks.
+   * **Upfront Datasheet & Concurrency Checklist for `hardware::*`:**
+     1. Use datasheet **maximum** conversion times (`max_measurement_time()`), never typical times, when sleeping on conversions.
+     2. Track mode/reset transitions (`last_transition: Mutex<Instant>`) inside the driver under `op_lock` so callers never have to guess or sleep for initial settle times.
+     3. Precede mode opcodes with `CMD_POWER_ON` when waking from `power_down`.
+     4. Serialize all bus transactions (`power_down`, `reset`, `set_mode`, `read_raw_word`) behind `op_lock` on cloneable handles.
+     5. Assert that bus numbers passed to platform-specific pinout constructors (`I2cHardwareInfo::rpi3_with_bus_and_address`) match the physical hardware controller modeled.
 
 ---
 
-## 3. Continuous Learning & Self-Improvement Protocol
+## 3. Zero-Retry Pre-Push Gate, Simplification Review & Continuous Learning
 
-AI agents working on this codebase **MUST** maintain and update these instructions:
-* After any code review (whether from DiffGuard AI review, human reviewer comments, or CI compiler/lint errors), review what caused churn or rework.
-* If a pattern was corrected or an architectural principle clarified, **immediately update this document** with the concrete rule and practical example before marking the task complete.
-* Ensure future agents inherit the learnings so that recurring review comments and anti-patterns are permanently avoided.
+AI agents working on `speaker-core` **MUST** follow the repository-wide **First-Pass PR Quality, Code Simplification & Continuous Learning Protocol** in [root `AGENTS.md` (§4)](../../AGENTS.md):
+* **Mandatory Local Pre-Push Gate:** Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo llvm-cov --fail-under-lines 90 --fail-under-functions 90`, and the `aarch64-unknown-linux-gnu` release build locally before *every* commit/push. Never rely on CI or AI review to catch compile, lint, or test failures.
+* **Batch Fixes & Class-of-Bug Sweeps:** Resolve 100% of review findings in a single commit and sweep all sibling drivers, binaries (`read_temp`, `read_light`, `core`), and integration tests for the same class of defect before pushing.
+* **Mandatory Code Simplification Review:** Every self-review and PR review must evaluate how the code can be simplified — identifying duplicated code to unify, over-engineered abstractions to flatten, and unnecessary complexity to remove.
+* **Continuous Post-Review Distillation:** Record all newly discovered anti-patterns or review learnings into [root `AGENTS.md` (§4.3)](../../AGENTS.md) and this file before completing the task.

@@ -11,8 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use speaker_core::hardware::{
-    BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance, LUX_TO_FOOT_CANDLES, LightSensor,
-    MeasurementMode,
+    BH1750_ALT_I2C_ADDR, BH1750_DEFAULT_I2C_ADDR, BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance,
+    LUX_TO_FOOT_CANDLES, LightSensor, MeasurementMode,
 };
 
 /// Default polling interval between light measurements.
@@ -113,8 +113,11 @@ fn parse_hex_address(s: &str) -> Result<I2cAddress, String> {
         .unwrap_or(clean);
     let addr =
         u8::from_str_radix(clean, 16).map_err(|e| format!("invalid hex address '{s}': {e}"))?;
-    I2cAddress::new(addr)
-        .map_err(|_err| format!("invalid BH1750 I2C address '{s}' (expected 0x23 or 0x5C)"))
+    I2cAddress::new(addr).map_err(|_err| {
+        format!(
+            "invalid BH1750 I2C address '{s}' (expected 0x{BH1750_DEFAULT_I2C_ADDR:02X} or 0x{BH1750_ALT_I2C_ADDR:02X})"
+        )
+    })
 }
 
 fn parse_cli_args_from<I>(args: I) -> Result<Option<CliOptions>, String>

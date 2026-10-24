@@ -70,6 +70,13 @@ def strip_decorations_outside_fences(md: str) -> str:
     consecutive_blank_lines = 0
 
     for line in lines:
+        if current_fence is None and in_html_comment:
+            if "-->" in line:
+                in_html_comment = False
+                line = line.split("-->", 1)[1]
+            else:
+                continue
+
         m = FENCE_RE.match(line)
         if m:
             marker = m.group(1)
@@ -88,13 +95,6 @@ def strip_decorations_outside_fences(md: str) -> str:
             continue
 
         # Outside fences: handle HTML comments without crossing fence boundaries
-        if in_html_comment:
-            if "-->" in line:
-                in_html_comment = False
-                line = line.split("-->", 1)[1]
-            else:
-                continue
-
         while "<!--" in line:
             if "-->" in line:
                 before, rest = line.split("<!--", 1)
@@ -144,7 +144,7 @@ def build_review_prompt(repo_root: Path) -> str:
     ]
 
     for section in sections:
-        header = section.splitlines()[0] if section else ""
+        header = next((line for line in section.splitlines() if line.startswith("# ")), "")
         if any(keyword in header for keyword in excluded_keywords):
             continue
         kept_sections.append(section)
@@ -167,13 +167,15 @@ Perform a rigorous, constructive, and actionable engineering review adhering str
 # REVIEW INSTRUCTIONS & REQUIRED OUTPUT FORMAT:
 - Analyze all diffs thoroughly against the above standards.
 - Point out concrete issues with exact file paths and line numbers.
-- Avoid generic advice; focus on actionable defects, invariant violations, unsafe patterns, and compliance gaps.
+- Avoid generic advice or low-value style nitpicks; focus on actionable defects, invariant violations, unsafe patterns, compliance gaps, and concrete code simplifications.
+- Explicitly evaluate how the code can be simplified: identify duplicated scaffolding across binaries/tests that can be unified, over-engineered abstractions or redundant state that can be removed, and control flow or error handling that can be flattened.
 - Structure your review using the following sections:
   1. Brief Summary of changes
   2. Strengths / Good patterns observed
   3. Critical Issues (bugs, invariant violations, unhandled errors, panics, boundary issues)
   4. Compliance Findings (Pragmatic Rust Guidelines, Target Architecture Cortex-A53 / NEON, Code Coverage >85-90%+)
-  5. Actionable Recommendations with code snippets where helpful
+  5. Code Simplification & Deduplication Opportunities (concrete ways to reduce complexity, eliminate duplication, and shrink surface area)
+  6. Actionable Recommendations with code snippets where helpful
 """
     byte_len = len(prompt.encode("utf-8"))
     print(

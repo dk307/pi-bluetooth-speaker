@@ -43,11 +43,35 @@ All code developed in this repository must maintain high, verifiable test covera
 
 ---
 
-## 4. Continuous Engineering Learnings & Self-Improvement Protocol
+## 4. First-Pass PR Quality, Code Simplification & Continuous Learning Protocol
 
-To eliminate repetitive code review churn across sessions, AI agents working in this repository **MUST** continuously capture and record engineering learnings into the instructions:
+To prevent multi-iteration PR review churn and excessive token/CI consumption, AI agents working in this repository **MUST** follow these engineering and review rules:
 
-* **Mandatory Post-Review Distillation:** Whenever code review feedback (DiffGuard AI review, human reviewer comments, or CI failures) identifies architectural placement issues, anti-patterns, or subtle edge cases, the agent **MUST** distill the root cause and record actionable rules in the relevant `AGENTS.md` before finishing the task.
+### 4.1 Zero-Retry Pre-Push Gate (Never Use CI as a Linter)
+* **Mandatory Local Verification Before Every Push:** Never push a commit without first passing all local gates in order:
+  1. `cargo fmt --manifest-path services/core/Cargo.toml -- --check`
+  2. `cargo clippy --manifest-path services/core/Cargo.toml --all-targets -- -D warnings`
+  3. `cargo llvm-cov --manifest-path services/core/Cargo.toml --fail-under-lines 90 --fail-under-functions 90`
+  4. `cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins`
+  5. If any CI script (`.github/scripts/*.py`) or workflow is touched, execute and verify it locally against real repository inputs before committing.
+* **Batch All Fixes & Sweep by Bug Class:** Never trickle-push partial fixes. When addressing code review feedback, read the *entire* review (Critical Issues, Compliance Findings, Simplification Opportunities, and Recommendations) and resolve 100% of items in a single commit. For every defect found in one place, sweep all sibling methods, binaries, and tests for the same class of bug before committing.
+* **Upfront Hardware Datasheet & Concurrency Audit:** Before writing or modifying a hardware driver, verify:
+  1. Maximum (not typical) datasheet conversion/integration times.
+  2. Power-state wake-up sequences (e.g., `CMD_POWER_ON` before mode commands) and first-conversion settle times (`last_transition: Mutex<Instant>`).
+  3. Transaction-level locking (`op_lock`) across all state-mutating and multi-step bus operations on cloned handles.
+  4. Hardware controller pinout accuracy (assert valid bus numbers for fixed GPIO pin descriptors).
+
+### 4.2 Code Simplification & Anti-Bloat Mandate (Authoring & Review)
+* **Actively Minimize Code Volume & Duplication:** Every line of duplicated boilerplate doubles the surface area for bugs and review churn. Extract shared helpers (CLI argument/interval parsing, session statistics, timestamp formatting, test temp-dir cleanup guards) into shared modules instead of copy-pasting across binaries or test files.
+* **Prefer Direct, Idiomatic Constructs:**
+  * Use `?` via `From<ForeignError>` instead of verbose `.map_err(DomainError::from)`.
+  * Use `Duration::checked_sub` / `saturating_*` instead of manual conditional subtraction.
+  * Use `const` pin initializers (`BcmPin::new(...)`) and compile-time `const _: () = { assert!(...); }` proofs instead of runtime checks where possible.
+  * Avoid speculative abstractions, dead trait bounds, or redundant wrapper layers.
+* **Review Requirement — How Code Can Be Simplified:** Every self-review and automated PR review **MUST** explicitly evaluate how the code can be simplified: identifying duplicated logic to unify, over-engineered abstractions to flatten, verbose error/lock plumbing to streamline, and lines of code that can be removed while preserving safety and domain invariants.
+
+### 4.3 Continuous Post-Review Distillation & Anti-Churn Rules
+* **Mandatory Post-Review Distillation:** Whenever code review feedback (DiffGuard AI review, human reviewer comments, or CI failures) identifies architectural placement issues, anti-patterns, or subtle edge cases, distill the root cause and record actionable rules in [`AGENTS.md`](AGENTS.md) / [`services/core/AGENTS.md`](services/core/AGENTS.md) before finishing the task.
 * **How to Apply Guidelines (Practical Anti-Churn Rules):**
   * **Keep Hardware and Async Runtime Separated:** Generic task join helpers and error-mapping glue (`map_join_result`, `FromJoinError`) belong in `crate::runtime` or `crate::util`, never mixed into peripheral hardware modules (`hardware::*`). Concrete trait implementations belong alongside the respective domain error.
   * **Do Not Create Dead Branches for Tokio JoinError:** In Tokio, `JoinError` is guaranteed to be either a panic or cancellation. Never add artificial trait bounds (such as forcing `From<io::Error>`) just to serve an unreachable branch; use `unreachable!()` with a descriptive message.
@@ -57,7 +81,7 @@ To eliminate repetitive code review churn across sessions, AI agents working in 
   * **Table-Drive CLI Subprocess Tests:** Subprocess CLI tests must never silently pass on CI runners (fail loudly if native binary execution fails in CI). Avoid repetitive boilerplate by using table-driven test cases covering boundary values (`0`, `-1.0`, `nan`, infinity, `u64::MAX` overflow, missing arguments).
   * **Guard Float Types Against NaN:** Always guard float domain parsing and constructors with `val.is_finite()`, as `NaN` evaluates to `false` in range comparisons and bypasses min/max checks.
   * **Ensure Hermetic Tests:** Never depend on host-specific paths like `/dev/null` for negative sysfs tests; always create temporary files in `env::temp_dir()`.
-  * **Lint Placement Hygiene:** Place compile-time `assert_send_sync` assertions before `mod tests` to prevent `clippy::items-after-test-module`. Apply `#[expect(...)]` to `let` statements or functions rather than raw expressions. In task tests, avoid post-panic code altogether by mapping the join handle (`task.await.map(...)`).
+  * **Lint Placement Hygiene:** Place compile-time `assert_send_sync` assertions before `mod tests` to prevent `clippy::items-after-test-module`, and place `const` items before statements in functions to prevent `clippy::items-after-statements`. Apply `#[expect(...)]` to `let` statements or functions rather than raw expressions. In task tests, avoid post-panic code altogether by mapping the join handle (`task.await.map(...)`).
   * **Domain String Invariant Precision:** Strong domain types (like 1-Wire `SensorId`) must enforce hardware-accurate character sets (`is_ascii_hexdigit()` vs `is_ascii_alphanumeric()`) matching the domain error message and hardware spec.
   * **Production Task Mapping Tests:** Don't test runtime traits solely with dummy errors; add tests verifying cancelled Tokio tasks mapped into production error types (`TempError`, `LightError`) asserting `is_cancelled()` predicates and contextual cancellation messages.
   * **Layered Bus Locking on Shared Clones:** Peripheral drivers supporting concurrent clones must serialize all bus transactions (including `power_down` and `reset`) behind transaction mutexes (`op_lock`) to prevent bus interleaving during multi-step measurement conversions.

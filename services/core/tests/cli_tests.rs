@@ -8,16 +8,52 @@
 //! are unit-tested via `run_app` entrypoints using mock backends in `src/bin/read_temp.rs`
 //! and `src/bin/read_light.rs`.
 
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Maximum wait time for fast CLI probes (`--help` and argument validation).
+///
+/// Generous 10s bound accommodates emulated CI runners while guarding against infinite loops.
+const CLI_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum wait time for the `core` binary diagnostic startup banner.
+///
+/// Generous 30s bound prevents false-positive timeouts under heavy CI load.
+const CORE_MAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Polling interval while waiting for a spawned child process to exit.
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Waits for a spawned child process up to `timeout`, killing the process and panicking if it hangs.
+fn wait_with_deadline(mut child: Child, timeout: Duration, context: &str) -> Output {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                return child
+                    .wait_with_output()
+                    .unwrap_or_else(|e| panic!("failed to collect output for '{context}': {e}"));
+            }
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(WAIT_POLL_INTERVAL);
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("subprocess '{context}' timed out after {timeout:?}");
+            }
+            Err(e) => panic!("wait failed for '{context}': {e}"),
+        }
+    }
+}
 
 /// Probes whether a compiled binary is executable in the current environment.
 ///
 /// In CI environments, any execution failure or timeout panics loudly to prevent
 /// silent skips from masking test regressions or binfmt misconfigurations.
 fn can_exec_binary(bin_path: &str) -> bool {
-    let Ok(mut child) = Command::new(bin_path)
+    let Ok(child) = Command::new(bin_path)
         .arg("--help")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -30,38 +66,28 @@ fn can_exec_binary(bin_path: &str) -> bool {
         return false;
     };
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if status.success() {
-                    return true;
-                }
-                assert!(
-                    std::env::var("CI").is_err(),
-                    "binary '{bin_path}' exited {status:?} in CI; must never skip silently"
-                );
-                return false;
-            }
-            Ok(None) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(20));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("probe for '{bin_path}' timed out — binary must exit promptly on --help");
-            }
-            Err(e) => panic!("probe wait failed for '{bin_path}': {e}"),
-        }
+    let output = wait_with_deadline(child, CLI_PROBE_TIMEOUT, bin_path);
+    if output.status.success() {
+        return true;
     }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        std::env::var("CI").is_err(),
+        "binary '{bin_path}' exited {:?} in CI ({stderr}); must never skip silently",
+        output.status
+    );
+    false
 }
 
-/// Helper to execute a binary with arguments and capture status, stdout, and stderr.
+/// Helper to execute a binary with arguments under a strict deadline and capture status, stdout, and stderr.
 fn run_cli(bin: &str, args: &[&str]) -> (ExitStatus, String, String) {
-    let output = Command::new(bin)
+    let child = Command::new(bin)
         .args(args)
-        .output()
-        .unwrap_or_else(|e| panic!("failed to execute binary '{bin}' with args {args:?}: {e}"));
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn binary '{bin}' with args {args:?}: {e}"));
+    let output = wait_with_deadline(child, CLI_PROBE_TIMEOUT, bin);
     (
         output.status,
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -74,38 +100,17 @@ fn core_main_binary_executes() {
     // Note: core binary currently executes an initial diagnostic banner and exits.
     // The banner prints static GPIO/hardware pin metadata via `TempSensor::gpio_info()`
     // which does not perform live sysfs I/O, ensuring deterministic execution on host.
-    // Standard output is well under the default OS pipe buffer capacity (~64 KB),
-    // ensuring `run_cli` / `output()` will not block or deadlock on pipe drainage.
     let bin_path = env!("CARGO_BIN_EXE_core");
     if !can_exec_binary(bin_path) {
         return;
     }
 
-    let mut child = Command::new(bin_path)
+    let child = Command::new(bin_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn core main binary");
-
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let output = loop {
-        match child.try_wait() {
-            Ok(Some(_status)) => {
-                break child
-                    .wait_with_output()
-                    .expect("failed to collect output after exit");
-            }
-            Ok(None) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(20));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("core binary timed out after 30s");
-            }
-            Err(e) => panic!("failed to wait for core binary: {e}"),
-        }
-    };
+    let output = wait_with_deadline(child, CORE_MAIN_TIMEOUT, bin_path);
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);

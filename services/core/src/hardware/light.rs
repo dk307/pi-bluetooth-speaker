@@ -449,7 +449,6 @@ pub struct LightError {
 }
 
 impl LightError {
-    #[cfg(test)]
     pub(crate) fn i2c(message: impl Into<String>) -> Self {
         Self {
             kind: LightErrorKind::I2c {
@@ -569,7 +568,7 @@ impl Display for LightError {
             LightErrorKind::InvalidAddress { address } => {
                 write!(
                     f,
-                    "invalid BH1750 I2C address: 0x{address:02X} (expected 0x23 or 0x5C)"
+                    "invalid BH1750 I2C address: 0x{address:02X} (expected 0x{BH1750_DEFAULT_I2C_ADDR:02X} or 0x{BH1750_ALT_I2C_ADDR:02X})"
                 )
             }
             LightErrorKind::InvalidIlluminance { message } => {
@@ -779,8 +778,13 @@ impl LightSensor {
     /// Creates a new [`LightSensor`] with a specific I2C bus and 7-bit address.
     ///
     /// # Errors
-    /// Returns [`LightError`] if the I2C bus cannot be opened.
+    /// Returns [`LightError`] if `bus` is not [`BH1750_DEFAULT_I2C_BUS`] (`1`) or if the I2C bus cannot be opened.
     pub fn with_bus_and_address(bus: u8, address: I2cAddress) -> Result<Self, LightError> {
+        if bus != BH1750_DEFAULT_I2C_BUS {
+            return Err(LightError::i2c(format!(
+                "unsupported I2C bus {bus}: hardware driver models Raspberry Pi 3 BSC1 (i2c-{BH1750_DEFAULT_I2C_BUS}) only"
+            )));
+        }
         let mut i2c = I2c::with_bus(bus)?;
         i2c.set_slave_address(address.as_u16())?;
 
@@ -1032,6 +1036,9 @@ const _: () = {
     )]
     let max_mlx = (Illuminance::MAX_LUX * 1000.0) as u128;
     assert!(max_mlx <= u32::MAX as u128);
+
+    // Compile-time invariant proof: maximum raw register u16::MAX / 1.2 (54,612.5 lx) <= MAX_LUX (120,000.0 lx)
+    assert!((u16::MAX as f32 / BH1750_ACCURACY_FACTOR) <= Illuminance::MAX_LUX);
 };
 
 #[cfg(test)]
@@ -1410,8 +1417,11 @@ mod tests {
                 .is_mock_fault()
         );
 
-        // Hardware error path test on non-existent bus
-        let bus_err = LightSensor::with_bus_and_address(99, I2cAddress::alternate_address());
-        assert!(bus_err.unwrap_err().is_i2c());
+        // Hardware error path test on unsupported bus and default constructor probe
+        let bus_err =
+            LightSensor::with_bus_and_address(99, I2cAddress::alternate_address()).unwrap_err();
+        assert!(bus_err.is_i2c());
+        assert!(bus_err.to_string().contains("unsupported I2C bus 99"));
+        let _ = LightSensor::new();
     }
 }

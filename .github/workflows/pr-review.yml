@@ -40,6 +40,10 @@ jobs:
         id: build-prompt
         run: python3 .github/scripts/generate_review_prompt.py
 
+      # GitHub Actions Runner downloads all referenced `uses:` action bundles into
+      # `/home/runner/work/_actions/jonit-dev/diffguard/<sha>/` during the initial
+      # `Set up job` phase before step 1 executes. This step patches `dist/index.js`
+      # in place and verifies syntax with `node --check` before the action runs.
       - name: Enable file-based custom_prompt in DiffGuard
         run: python3 .github/scripts/patch_diffguard.py
 

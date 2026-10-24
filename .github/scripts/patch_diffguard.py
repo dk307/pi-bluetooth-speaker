@@ -8,6 +8,7 @@ when custom_prompt points to an existing file path.
 
 import glob
 import os
+import subprocess
 import sys
 
 
@@ -29,12 +30,13 @@ def main() -> None:
             with open(p, "r", encoding="utf-8") as f:
                 content = f.read()
             # Pinned target in jonit-dev/diffguard@88f63615c769f8db6031973503c2c40a9a3f4feb (dist/index.js)
+            # Upstream tracking for native file-based custom_prompt: https://github.com/jonit-dev/diffguard/issues
             target = "const customPrompt = core.getInput('custom_prompt');"
             patch = (
                 "let customPrompt = core.getInput('custom_prompt'); "
                 "try { const _fs = require('fs'); if (customPrompt && _fs.existsSync(customPrompt)) "
                 "{ customPrompt = _fs.readFileSync(customPrompt, 'utf8'); } } "
-                "catch (err) { core.warning('Failed to read file-based customPrompt: ' + err.message); }"
+                "catch (err) { core.setFailed('Failed to read file-based customPrompt: ' + err.message); throw err; }"
             )
             if target in content:
                 with open(p, "w", encoding="utf-8") as f:
@@ -44,6 +46,7 @@ def main() -> None:
                 if "fs.readFileSync" not in patched:
                     print(f"ERROR: patch verification failed in {p}", file=sys.stderr)
                     sys.exit(1)
+                subprocess.run(["node", "--check", p], check=True)
                 print(f"Successfully enabled and verified file-based prompt in {p}")
                 found = True
 
