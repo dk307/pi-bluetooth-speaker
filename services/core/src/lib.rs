@@ -5,3 +5,4 @@
 //! standalone hardware diagnostic utilities.
 
 pub mod hardware;
+pub mod runtime;

@@ -8,26 +8,48 @@
 //! are unit-tested via `run_app` entrypoints using mock backends in `src/bin/read_temp.rs`
 //! and `src/bin/read_light.rs`.
 
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Probes whether a compiled binary is executable in the current environment.
+///
+/// In CI environments without cross-compilation emulation, failures panic loudly
+/// to prevent silent skips from masking test regressions.
 fn can_exec_binary(bin_path: &str) -> bool {
     match Command::new(bin_path).arg("--help").output() {
         Ok(_) => true,
         Err(e) => {
             eprintln!(
-                "Skipping binary test: cannot execute target binary '{bin_path}' in current environment: {e}"
+                "SKIPPED: target binary '{bin_path}' cannot execute on host architecture: {e}"
+            );
+            assert!(
+                std::env::var("CI").is_err() || std::env::var("CROSS_COMPILE").is_ok(),
+                "CLI tests unexpectedly failed to execute binary in CI environment: {bin_path} ({e})"
             );
             false
         }
     }
 }
 
+/// Helper to execute a binary with arguments and capture status, stdout, and stderr.
+fn run_cli(bin: &str, args: &[&str]) -> (ExitStatus, String, String) {
+    let output = Command::new(bin)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to execute binary '{bin}' with args {args:?}: {e}"));
+    (
+        output.status,
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
 #[test]
 fn core_main_binary_executes() {
     // Note: core binary currently executes an initial diagnostic banner and exits.
-    // When converted to a long-running daemon, this will invoke `--self-test` or `--version`.
+    // The banner prints static GPIO/hardware pin metadata via `TempSensor::gpio_info()`
+    // which does not perform live sysfs I/O, ensuring deterministic execution on host.
     let bin_path = env!("CARGO_BIN_EXE_core");
     if !can_exec_binary(bin_path) {
         return;
@@ -73,22 +95,15 @@ fn read_temp_cli_help_displays() {
         return;
     }
 
-    let output = Command::new(bin_path)
-        .arg("--help")
-        .output()
-        .expect("failed to run read_temp");
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (status, stdout, _) = run_cli(bin_path, &["--help"]);
+    assert!(status.success());
     assert!(stdout.contains("DS18B20 1-Wire Temperature Diagnostic Utility"));
     assert!(stdout.contains("Usage:"));
     assert!(stdout.contains("--count"));
     assert!(stdout.contains("--interval"));
 
-    let short_help = Command::new(bin_path)
-        .arg("-h")
-        .output()
-        .expect("failed to run read_temp");
-    assert!(short_help.status.success());
+    let (short_status, _, _) = run_cli(bin_path, &["-h"]);
+    assert!(short_status.success());
 }
 
 #[test]
@@ -98,72 +113,44 @@ fn read_temp_cli_argument_validation() {
         return;
     }
 
-    // Invalid flag
-    let err_arg = Command::new(bin_path)
-        .arg("--invalid-flag")
-        .output()
-        .expect("failed to run read_temp");
-    assert!(!err_arg.status.success());
+    let cases: &[(&[&str], &str)] = &[
+        (&["--invalid-flag"], "unknown option '--invalid-flag'"),
+        (&["--count"], "missing value for --count"),
+        (&["--count", "not-a-number"], "invalid count 'not-a-number'"),
+        (&["--count", "0"], "--count must be at least 1"),
+        (
+            &["--count", "9999999999999999999999999999999999999999"],
+            "invalid count",
+        ),
+        (&["--interval"], "missing value for --interval"),
+        (
+            &["--interval", "0"],
+            "interval must be a finite value greater than 0",
+        ),
+        (&["--interval", "invalid"], "invalid interval 'invalid'"),
+        (
+            &["--interval", "-1.0"],
+            "interval must be a finite value greater than 0",
+        ),
+        (
+            &["--interval", "1e400"],
+            "interval must be a finite value greater than 0",
+        ),
+        (&["--device"], "missing value for --device"),
+        (
+            &["--device", "invalid-device-id"],
+            "invalid DS18B20 sensor ID",
+        ),
+    ];
 
-    // Missing count parameter
-    let missing_count = Command::new(bin_path)
-        .arg("--count")
-        .output()
-        .expect("failed to run read_temp");
-    assert!(!missing_count.status.success());
-
-    // Non-integer count
-    let invalid_count = Command::new(bin_path)
-        .args(["--count", "not-a-number"])
-        .output()
-        .expect("failed to run read_temp");
-    assert!(!invalid_count.status.success());
-
-    // Zero count rejected
-    let zero_count = Command::new(bin_path)
-        .args(["--count", "0"])
-        .output()
-        .expect("failed to run read_temp");
-    assert!(!zero_count.status.success());
-    let stderr_count = String::from_utf8_lossy(&zero_count.stderr);
-    assert!(stderr_count.contains("--count must be at least 1"));
-
-    // Missing interval parameter
-    let missing_interval = Command::new(bin_path)
-        .arg("--interval")
-        .output()
-        .expect("failed to run read_temp");
-    assert!(!missing_interval.status.success());
-
-    // Zero interval rejected
-    let zero_interval = Command::new(bin_path)
-        .args(["--interval", "0"])
-        .output()
-        .expect("failed to run read_temp");
-    assert!(!zero_interval.status.success());
-
-    // Non-float interval
-    let invalid_interval = Command::new(bin_path)
-        .args(["--interval", "invalid"])
-        .output()
-        .expect("failed to run read_temp");
-    assert!(!invalid_interval.status.success());
-
-    // Missing device parameter
-    let missing_device = Command::new(bin_path)
-        .arg("--device")
-        .output()
-        .expect("failed to run read_temp");
-    assert!(!missing_device.status.success());
-
-    // Invalid device ID format
-    let invalid_device = Command::new(bin_path)
-        .args(["--device", "invalid-device-id"])
-        .output()
-        .expect("failed to run read_temp");
-    assert!(!invalid_device.status.success());
-    let stderr_dev = String::from_utf8_lossy(&invalid_device.stderr);
-    assert!(stderr_dev.contains("invalid DS18B20 sensor ID"));
+    for (args, expected_err) in cases {
+        let (status, _, stderr) = run_cli(bin_path, args);
+        assert!(!status.success(), "expected failure for args: {args:?}");
+        assert!(
+            stderr.contains(expected_err),
+            "expected stderr to contain '{expected_err}' for args {args:?}, got: '{stderr}'"
+        );
+    }
 }
 
 #[test]
@@ -173,22 +160,15 @@ fn read_light_cli_help_displays() {
         return;
     }
 
-    let output = Command::new(bin_path)
-        .arg("--help")
-        .output()
-        .expect("failed to run read_light");
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (status, stdout, _) = run_cli(bin_path, &["--help"]);
+    assert!(status.success());
     assert!(stdout.contains("BH1750 Ambient Light Diagnostic Utility"));
     assert!(stdout.contains("Usage:"));
     assert!(stdout.contains("--mode"));
     assert!(stdout.contains("--address"));
 
-    let short_help = Command::new(bin_path)
-        .arg("-h")
-        .output()
-        .expect("failed to run read_light");
-    assert!(short_help.status.success());
+    let (short_status, _, _) = run_cli(bin_path, &["-h"]);
+    assert!(short_status.success());
 }
 
 #[test]
@@ -198,101 +178,42 @@ fn read_light_cli_argument_validation() {
         return;
     }
 
-    // Invalid flag
-    let err_arg = Command::new(bin_path)
-        .arg("--invalid-flag")
-        .output()
-        .expect("failed to run read_light");
-    assert!(!err_arg.status.success());
+    let cases: &[(&[&str], &str)] = &[
+        (&["--invalid-flag"], "unknown option '--invalid-flag'"),
+        (&["--count"], "missing value for --count"),
+        (&["--count", "not-a-number"], "invalid count 'not-a-number'"),
+        (&["--count", "0"], "--count must be at least 1"),
+        (
+            &["--count", "9999999999999999999999999999999999999999"],
+            "invalid count",
+        ),
+        (&["--interval"], "missing value for --interval"),
+        (
+            &["--interval", "0"],
+            "interval must be a finite value greater than 0",
+        ),
+        (&["--interval", "not-float"], "invalid interval 'not-float'"),
+        (
+            &["--interval", "-1.0"],
+            "interval must be a finite value greater than 0",
+        ),
+        (
+            &["--interval", "1e400"],
+            "interval must be a finite value greater than 0",
+        ),
+        (&["--mode"], "missing value for --mode"),
+        (&["--mode", "ultra-mode"], "invalid mode 'ultra-mode'"),
+        (&["--address"], "missing value for --address"),
+        (&["--address", "not-hex"], "invalid hex address"),
+        (&["--address", "0x77"], "invalid BH1750 I2C address"),
+    ];
 
-    // Missing count parameter
-    let missing_count = Command::new(bin_path)
-        .arg("--count")
-        .output()
-        .expect("failed to run read_light");
-    assert!(!missing_count.status.success());
-
-    // Non-integer count
-    let invalid_count = Command::new(bin_path)
-        .args(["--count", "not-a-number"])
-        .output()
-        .expect("failed to run read_light");
-    assert!(!invalid_count.status.success());
-
-    // Zero count rejected
-    let zero_count = Command::new(bin_path)
-        .args(["--count", "0"])
-        .output()
-        .expect("failed to run read_light");
-    assert!(!zero_count.status.success());
-    let stderr_count = String::from_utf8_lossy(&zero_count.stderr);
-    assert!(stderr_count.contains("--count must be at least 1"));
-
-    // Missing interval parameter
-    let missing_interval = Command::new(bin_path)
-        .arg("--interval")
-        .output()
-        .expect("failed to run read_light");
-    assert!(!missing_interval.status.success());
-
-    // Zero interval rejected
-    let zero_interval = Command::new(bin_path)
-        .args(["--interval", "0"])
-        .output()
-        .expect("failed to run read_light");
-    assert!(!zero_interval.status.success());
-
-    // Non-float interval
-    let invalid_interval = Command::new(bin_path)
-        .args(["--interval", "not-float"])
-        .output()
-        .expect("failed to run read_light");
-    assert!(!invalid_interval.status.success());
-}
-
-#[test]
-fn read_light_cli_mode_and_address_validation() {
-    let bin_path = env!("CARGO_BIN_EXE_read_light");
-    if !can_exec_binary(bin_path) {
-        return;
+    for (args, expected_err) in cases {
+        let (status, _, stderr) = run_cli(bin_path, args);
+        assert!(!status.success(), "expected failure for args: {args:?}");
+        assert!(
+            stderr.contains(expected_err),
+            "expected stderr to contain '{expected_err}' for args {args:?}, got: '{stderr}'"
+        );
     }
-
-    // Mode parsing & errors
-    let missing_mode = Command::new(bin_path)
-        .arg("--mode")
-        .output()
-        .expect("failed to run read_light");
-    assert!(!missing_mode.status.success());
-
-    let invalid_mode = Command::new(bin_path)
-        .args(["--mode", "ultra-mode"])
-        .output()
-        .expect("failed to run read_light");
-    assert!(!invalid_mode.status.success());
-    let stderr_mode = String::from_utf8_lossy(&invalid_mode.stderr);
-    assert!(stderr_mode.contains("invalid mode 'ultra-mode'"));
-
-    // Address parsing & errors
-    let missing_addr = Command::new(bin_path)
-        .arg("--address")
-        .output()
-        .expect("failed to run read_light");
-    assert!(!missing_addr.status.success());
-
-    let invalid_hex = Command::new(bin_path)
-        .args(["--address", "not-hex"])
-        .output()
-        .expect("failed to run read_light");
-    assert!(!invalid_hex.status.success());
-    let stderr_hex = String::from_utf8_lossy(&invalid_hex.stderr);
-    assert!(stderr_hex.contains("invalid hex address"));
-
-    // Non-BH1750 address rejected
-    let unsupported_addr = Command::new(bin_path)
-        .args(["--address", "0x77"])
-        .output()
-        .expect("failed to run read_light");
-    assert!(!unsupported_addr.status.success());
-    let stderr_addr = String::from_utf8_lossy(&unsupported_addr.stderr);
-    assert!(stderr_addr.contains("invalid BH1750 I2C address"));
 }

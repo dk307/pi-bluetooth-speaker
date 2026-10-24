@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use crate::hardware::{BcmPin, GpioPinInfo, PhysicalPin, map_join_result};
+use crate::hardware::{BcmPin, GpioPinInfo, PhysicalPin};
+use crate::runtime::{FromJoinError, map_join_result};
 
 /// BCM GPIO pin assigned to the DS18B20 1-Wire data line (`BCM GPIO 26`).
 pub const DS18B20_BCM_GPIO_PIN: BcmPin = BcmPin::new(26);
@@ -386,7 +387,7 @@ pub(crate) enum ErrorKind {
     /// Underlying filesystem or bus I/O failure.
     Io(io::Error),
     /// Asynchronous task was cancelled or the runtime shut down.
-    Cancelled { message: String },
+    Cancelled { message: Box<str> },
 }
 
 /// Error returned by DS18B20 1-Wire temperature sensor operations.
@@ -444,12 +445,15 @@ impl TempError {
     }
 
     /// Returns `true` if this error was caused by task cancellation or runtime shutdown.
+    ///
+    /// Daemon services should inspect this predicate during graceful shutdown to avoid
+    /// treating normal task cancellation or service termination as hardware faults.
     #[must_use]
     pub const fn is_cancelled(&self) -> bool {
         matches!(self.kind, ErrorKind::Cancelled { .. })
     }
 
-    pub(crate) fn cancelled(message: impl Into<String>) -> Self {
+    pub(crate) fn cancelled(message: impl Into<Box<str>>) -> Self {
         Self::new(ErrorKind::Cancelled {
             message: message.into(),
         })
@@ -521,6 +525,12 @@ impl std::error::Error for TempError {
 impl From<io::Error> for TempError {
     fn from(err: io::Error) -> Self {
         Self::new(ErrorKind::Io(err))
+    }
+}
+
+impl FromJoinError for TempError {
+    fn from_cancelled(message: impl Into<Box<str>>) -> Self {
+        Self::cancelled(message)
     }
 }
 
@@ -1178,7 +1188,9 @@ a7 01 4b 46 7f ff 0c 10 5c
                 .is_parse_error()
         );
 
-        // Missing colon on line 1 without YES
+        // Missing colon on line 1 without YES: the 1-Wire kernel driver signals hardware
+        // cyclic redundancy check failures with "NO" on line 1; thus payloads lacking "YES"
+        // classify as CRC mismatches.
         let no_colon = "a7 01 4b 46 7f ff 0c 10 5c crc=5c NO\na7 01 4b 46 7f ff 0c 10 5c t=26437\n";
         assert!(parse_w1_slave(no_colon).unwrap_err().is_crc_mismatch());
 
@@ -1463,6 +1475,21 @@ a7 01 4b 46 7f ff 0c 10 5c
         assert!(temp_io_err.is_io());
         assert!(temp_io_err.to_string().contains("1-Wire sysfs I/O error"));
         assert!(temp_io_err.source().is_some());
+
+        let cancel_err = TempError::cancelled("worker cancelled");
+        assert!(cancel_err.is_cancelled());
+        assert!(!cancel_err.is_io());
+        assert!(!cancel_err.is_no_sensors());
+        assert!(matches!(
+            cancel_err.backtrace().status(),
+            BacktraceStatus::Captured | BacktraceStatus::Disabled
+        ));
+        assert!(
+            cancel_err
+                .to_string()
+                .contains("task cancelled: worker cancelled")
+        );
+        assert!(cancel_err.source().is_none());
     }
 
     #[tokio::test]
@@ -1520,7 +1547,12 @@ a7 01 4b 46 7f ff 0c 10 5c
         );
 
         // Test sysfs path that is a file (triggers Err(NotADirectory) in discover_sysfs_sensors)
-        let file_sensor = TempSensor::with_sysfs_path("/dev/null");
-        assert!(file_sensor.discover_sensors().unwrap_err().is_io());
+        let temp_file =
+            std::env::temp_dir().join(format!("ds18b20_file_test_{}", std::process::id()));
+        let _ = fs::write(&temp_file, "not a directory");
+        let file_sensor = TempSensor::with_sysfs_path(&temp_file);
+        let res = file_sensor.discover_sensors();
+        let _ = fs::remove_file(&temp_file);
+        assert!(res.unwrap_err().is_io());
     }
 }

@@ -25,6 +25,8 @@ use std::time::Duration;
 
 use rppal::i2c::I2c;
 
+use crate::runtime::{FromJoinError, map_join_result};
+
 use super::{BcmPin, GpioPinInfo, PhysicalPin};
 
 /// BH1750 optical measurement accuracy coefficient from datasheet: lux = raw / 1.2 at default `MTreg`.
@@ -394,7 +396,7 @@ pub(crate) enum LightErrorKind {
         source: io::Error,
     },
     Cancelled {
-        message: String,
+        message: Box<str>,
     },
     InvalidAddress {
         address: u8,
@@ -446,7 +448,7 @@ impl LightError {
         }
     }
 
-    pub(crate) fn cancelled(message: impl Into<String>) -> Self {
+    pub(crate) fn cancelled(message: impl Into<Box<str>>) -> Self {
         Self {
             kind: LightErrorKind::Cancelled {
                 message: message.into(),
@@ -493,6 +495,9 @@ impl LightError {
     }
 
     /// Returns `true` if this error was caused by task cancellation or runtime shutdown.
+    ///
+    /// Daemon services should inspect this predicate during graceful shutdown to avoid
+    /// treating normal task cancellation or service termination as hardware faults.
     #[must_use]
     pub const fn is_cancelled(&self) -> bool {
         matches!(self.kind, LightErrorKind::Cancelled { .. })
@@ -514,6 +519,12 @@ impl LightError {
     #[must_use]
     pub const fn is_mock_fault(&self) -> bool {
         matches!(self.kind, LightErrorKind::MockFault { .. })
+    }
+
+    /// Returns the captured backtrace for this error.
+    #[must_use]
+    pub const fn backtrace(&self) -> &Backtrace {
+        &self.backtrace
     }
 }
 
@@ -562,6 +573,12 @@ impl From<io::Error> for LightError {
 impl From<rppal::i2c::Error> for LightError {
     fn from(err: rppal::i2c::Error) -> Self {
         Self::from_i2c_err(err)
+    }
+}
+
+impl FromJoinError for LightError {
+    fn from_cancelled(message: impl Into<Box<str>>) -> Self {
+        Self::cancelled(message)
     }
 }
 
@@ -913,7 +930,7 @@ impl LightSensor {
     /// programming errors to the caller.
     pub async fn read_lux_async(&self) -> Result<Illuminance, LightError> {
         let this = self.clone();
-        super::map_join_result(tokio::task::spawn_blocking(move || this.read_lux()).await)
+        map_join_result(tokio::task::spawn_blocking(move || this.read_lux()).await)
     }
 
     /// Asynchronously reads extended diagnostics from the sensor.
@@ -926,7 +943,7 @@ impl LightSensor {
     /// programming errors to the caller.
     pub async fn read_diagnostics_async(&self) -> Result<LightDiagnostics, LightError> {
         let this = self.clone();
-        super::map_join_result(tokio::task::spawn_blocking(move || this.read_diagnostics()).await)
+        map_join_result(tokio::task::spawn_blocking(move || this.read_diagnostics()).await)
     }
 }
 
@@ -1176,6 +1193,10 @@ mod tests {
         assert!(cancel_err.is_cancelled());
         assert!(!cancel_err.is_i2c());
         assert!(!cancel_err.is_io());
+        assert!(matches!(
+            cancel_err.backtrace().status(),
+            BacktraceStatus::Captured | BacktraceStatus::Disabled
+        ));
         assert!(
             cancel_err
                 .to_string()
