@@ -10,8 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use speaker_core::diag::{
-    NumericStats, OutputFormat, env_args, exit_code_for_reads, format_timestamp, next_arg_value,
-    parse_count_arg, parse_interval_arg, resolve_cli_opts, round_2dp, should_print_summary,
+    NumericStats, OutputFormat, env_args, exit_code_for_reads, foot_candles, format_timestamp,
+    next_arg_value, parse_count_arg, parse_interval_arg, resolve_cli_opts, round_2dp,
+    should_print_summary,
 };
 use speaker_core::hardware::{
     BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance, LightSensor, MeasurementMode,
@@ -169,18 +170,16 @@ fn print_session_summary(stats: &NumericStats) {
             stats.error_rate_percent(errors)
         );
     }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "average of f32 lux samples fits in f32"
+    )]
     if let (Some(min), Some(max), Some(avg)) = (stats.min(), stats.max(), stats.average()) {
-        println!(
-            "Min Light   : {min:7.2} lx ({:6.2} fc)",
-            Illuminance::lux_to_foot_candles(f64::from(min))
-        );
-        println!(
-            "Max Light   : {max:7.2} lx ({:6.2} fc)",
-            Illuminance::lux_to_foot_candles(f64::from(max))
-        );
+        println!("Min Light   : {min:7.2} lx ({:6.2} fc)", foot_candles(min));
+        println!("Max Light   : {max:7.2} lx ({:6.2} fc)", foot_candles(max));
         println!(
             "Avg Light   : {avg:7.2} lx ({:6.2} fc)",
-            Illuminance::lux_to_foot_candles(avg)
+            foot_candles(avg as f32)
         );
     }
 }

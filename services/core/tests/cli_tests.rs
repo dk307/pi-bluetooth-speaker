@@ -79,21 +79,26 @@ fn try_run_cli(
     ))
 }
 
-/// Probes whether a compiled binary is executable in the current environment.
+/// Probes whether a compiled binary is executable in the current environment via `--help`.
 ///
+/// Returns `Some((status, stdout, stderr))` when `--help` succeeds, allowing callers to
+/// inspect the help output directly without spawning a duplicate `--help` subprocess.
 /// In CI environments, any execution failure or timeout panics loudly to prevent
 /// silent skips from masking test regressions or binfmt misconfigurations.
-fn can_exec_binary(bin_path: &str) -> bool {
-    let Some((status, _, stderr)) = try_run_cli(bin_path, &["--help"], CLI_PROBE_TIMEOUT) else {
-        return false;
-    };
+fn probe_help(bin_path: &str) -> Option<(ExitStatus, String, String)> {
+    let (status, stdout, stderr) = try_run_cli(bin_path, &["--help"], CLI_PROBE_TIMEOUT)?;
     if status.success() {
-        return true;
+        return Some((status, stdout, stderr));
     }
     fail_if_ci(&format!(
         "binary '{bin_path}' exited {status:?} in CI ({stderr}); must never skip silently"
     ));
-    false
+    None
+}
+
+/// Returns `true` if the compiled binary can be executed in the current environment.
+fn can_exec_binary(bin_path: &str) -> bool {
+    probe_help(bin_path).is_some()
 }
 
 /// Executes a binary with arguments under `CLI_PROBE_TIMEOUT` and captures status, stdout, and stderr.
@@ -124,11 +129,9 @@ fn core_main_binary_executes() {
 #[test]
 fn read_temp_cli_help_displays() {
     let bin_path = env!("CARGO_BIN_EXE_read_temp");
-    if !can_exec_binary(bin_path) {
+    let Some((status, stdout, _)) = probe_help(bin_path) else {
         return;
-    }
-
-    let (status, stdout, _) = run_cli(bin_path, &["--help"]);
+    };
     assert!(status.success());
     assert!(stdout.contains("DS18B20 1-Wire Temperature Diagnostic Utility"));
     assert!(stdout.contains("Usage:"));
@@ -203,11 +206,9 @@ fn read_temp_cli_argument_validation() {
 #[test]
 fn read_light_cli_help_displays() {
     let bin_path = env!("CARGO_BIN_EXE_read_light");
-    if !can_exec_binary(bin_path) {
+    let Some((status, stdout, _)) = probe_help(bin_path) else {
         return;
-    }
-
-    let (status, stdout, _) = run_cli(bin_path, &["--help"]);
+    };
     assert!(status.success());
     assert!(stdout.contains("BH1750 Ambient Light Diagnostic Utility"));
     assert!(stdout.contains("Usage:"));

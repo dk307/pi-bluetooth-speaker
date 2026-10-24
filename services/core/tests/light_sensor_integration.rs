@@ -27,9 +27,7 @@ fn address_validation_and_hardware_metadata() {
 
     let illum = Illuminance::from_lux(250.0).unwrap();
     assert_eq!(illum.millilux(), 250_000);
-    assert!(
-        (Illuminance::lux_to_foot_candles(250.0) - f64::from(illum.foot_candles())).abs() < 1e-4
-    );
+    assert!((speaker_core::diag::foot_candles(250.0) - illum.foot_candles()).abs() < 1e-4);
 }
 
 #[tokio::test]

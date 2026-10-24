@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Enables file-based custom_prompt in DiffGuard GitHub Action.
 
+Requires Python >= 3.10.
+
 Bypasses the Linux MAX_ARG_STRLEN (128 KB) environment variable limit by patching
 DiffGuard's runner bundle (dist/index.js) to read custom_prompt directly from disk
 when custom_prompt points to an existing file path.
@@ -10,6 +12,19 @@ import glob
 import os
 import subprocess
 import sys
+
+# Pinned commit hash in jonit-dev/diffguard (v1.0.0)
+# Upstream source line: https://github.com/jonit-dev/diffguard/blob/88f63615c769f8db6031973503c2c40a9a3f4feb/dist/index.js
+# Upstream feature request tracker: https://github.com/jonit-dev/diffguard/issues/1
+PINNED_SHA = "88f63615c769f8db6031973503c2c40a9a3f4feb"
+TARGET_LINE = "const customPrompt = core.getInput('custom_prompt');"
+PATCH_MARKER = "_fs.readFileSync(customPrompt, 'utf8')"
+PATCH_LINE = (
+    TARGET_LINE.replace("const ", "let ", 1)
+    + " try { const _fs = require('fs'); if (customPrompt && _fs.existsSync(customPrompt)) "
+    "{ customPrompt = _fs.readFileSync(customPrompt, 'utf8'); } } "
+    "catch (err) { core.setFailed('Failed to read file-based customPrompt: ' + err.message); throw err; }"
+)
 
 
 def verify_js_syntax(path: str) -> None:
@@ -46,50 +61,47 @@ def patch_bundle_in_roots(search_roots: list[str]) -> None:
             os.path.join(root, "**", "diffguard", "**", "dist", "index.js"),
             recursive=True,
         ):
+            if PINNED_SHA not in p:
+                print(
+                    f"ERROR: diffguard bundle path '{p}' does not match pinned SHA '{PINNED_SHA}'",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
             with open(p, "r", encoding="utf-8") as f:
                 content = f.read()
-            # Pinned target in jonit-dev/diffguard@88f63615c769f8db6031973503c2c40a9a3f4feb (dist/index.js)
-            # Upstream source line: https://github.com/jonit-dev/diffguard/blob/88f63615c769f8db6031973503c2c40a9a3f4feb/dist/index.js
-            # Upstream feature request tracker: https://github.com/jonit-dev/diffguard/issues/1
-            target = "const customPrompt = core.getInput('custom_prompt');"
-            patch_marker = "_fs.readFileSync(customPrompt, 'utf8')"
-            patch = (
-                "let customPrompt = core.getInput('custom_prompt'); "
-                "try { const _fs = require('fs'); if (customPrompt && _fs.existsSync(customPrompt)) "
-                "{ customPrompt = _fs.readFileSync(customPrompt, 'utf8'); } } "
-                "catch (err) { core.setFailed('Failed to read file-based customPrompt: ' + err.message); throw err; }"
-            )
-            if patch_marker in content and target in content:
+
+            if PATCH_MARKER in content and TARGET_LINE in content:
                 print(
                     f"ERROR: {p} is in an unknown half-patched state (marker and target both present)",
                     file=sys.stderr,
                 )
                 sys.exit(1)
 
-            if patch_marker in content and target not in content:
+            if PATCH_MARKER in content and TARGET_LINE not in content:
                 verify_js_syntax(p)
                 print(f"Already patched and verified file-based prompt in {p}")
                 found = True
                 continue
 
-            occurrences = content.count(target)
-            if occurrences == 1:
-                with open(p, "w", encoding="utf-8") as f:
-                    f.write(content.replace(target, patch, 1))
-                with open(p, "r", encoding="utf-8") as f:
-                    patched = f.read()
-                if patch_marker not in patched or target in patched:
-                    print(f"ERROR: patch verification failed in {p}", file=sys.stderr)
-                    sys.exit(1)
-                verify_js_syntax(p)
-                print(f"Successfully enabled and verified file-based prompt in {p}")
-                found = True
-            elif occurrences > 1:
+            occurrences = content.count(TARGET_LINE)
+            if occurrences != 1:
                 print(
                     f"ERROR: expected exactly 1 patch site in {p}, found {occurrences}",
                     file=sys.stderr,
                 )
                 sys.exit(1)
+
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(content.replace(TARGET_LINE, PATCH_LINE, 1))
+            with open(p, "r", encoding="utf-8") as f:
+                patched = f.read()
+            if PATCH_MARKER not in patched or TARGET_LINE in patched:
+                print(f"ERROR: patch verification failed in {p}", file=sys.stderr)
+                sys.exit(1)
+            verify_js_syntax(p)
+            print(f"Successfully enabled and verified file-based prompt in {p}")
+            found = True
 
     if not found:
         print(

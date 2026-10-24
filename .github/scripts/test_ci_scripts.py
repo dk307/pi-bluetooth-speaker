@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Unit tests for CI support scripts (generate_review_prompt.py and patch_diffguard.py)."""
+"""Unit tests for CI support scripts (generate_review_prompt.py and patch_diffguard.py).
+
+Requires Python >= 3.10.
+"""
 
 from pathlib import Path
 import subprocess
@@ -21,20 +24,29 @@ class TestGenerateReviewPrompt(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unbalanced code fences"):
             list(grp.iter_fence_tracked_lines("```rust\nlet x = 1;\n"))
 
+    def test_four_space_indented_backticks_are_not_treated_as_fence(self) -> None:
+        md = "    ```rust\n    indented code block\n"
+        events = list(grp.iter_fence_tracked_lines(md))
+        self.assertEqual(events, [(False, False, "    ```rust\n"), (False, False, "    indented code block\n")])
+
     def test_inner_fence_with_info_string_does_not_close_outer_fence(self) -> None:
         md = "```markdown\n```rust\nlet x = 1;\n```\n"
         events = list(grp.iter_fence_tracked_lines(md))
         self.assertEqual(len(events), 4)
-        # Line 0 opens outer fence
         self.assertEqual(events[0][:2], (True, True))
-        # Line 1 has info string 'rust', so CommonMark treats it as content inside the open fence
         self.assertEqual(events[1][:2], (False, True))
-        # Line 3 has no info string, closing the fence
         self.assertEqual(events[3][:2], (True, False))
 
     def test_unterminated_html_comment_raises(self) -> None:
         with self.assertRaisesRegex(ValueError, "unterminated HTML comment"):
             grp.strip_decorations_outside_fences("Hello <!-- unclosed\nstill open\n")
+
+    def test_stray_close_arrow_before_open_comment_handled_cleanly(self) -> None:
+        md = "a --> b <!-- multiline\ncomment --> c\n"
+        self.assertEqual(grp.strip_decorations_outside_fences(md), "a --> b  c")
+
+        with self.assertRaisesRegex(ValueError, "unterminated HTML comment"):
+            grp.strip_decorations_outside_fences("a --> b <!-- unclosed\n")
 
     def test_preserves_comments_and_links_inside_fences(self) -> None:
         md = (
@@ -55,12 +67,29 @@ class TestGenerateReviewPrompt(unittest.TestCase):
         self.assertIn("# Inside Fence", sections[0])
         self.assertTrue(sections[1].startswith("# Section Two"))
 
+    def test_load_file_missing_raises(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            grp.load_file(Path("/nonexistent/path/to/guidelines.md"))
+
+    def test_build_review_prompt_on_repo_and_budget_overflow(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        prompt = grp.build_review_prompt(repo_root)
+        self.assertLessEqual(len(prompt.encode("utf-8")), grp.MAX_PROMPT_BYTES)
+        self.assertIn("# SECTION 1: REPOSITORY ROOT RULES", prompt)
+        self.assertIn("# SECTION 3: MICROSOFT PRAGMATIC RUST GUIDELINES", prompt)
+        self.assertNotIn("# FFI Guidelines", prompt)
+        self.assertNotIn("# Macros Guidelines", prompt)
+
+        with patch.object(grp, "MAX_PROMPT_BYTES", 100):
+            with self.assertRaises(SystemExit):
+                grp.build_review_prompt(repo_root)
+
 
 class TestPatchDiffguard(unittest.TestCase):
     """Tests idempotent action-bundle patching, syntax checks, and failure modes."""
 
-    def _create_bundle(self, root: Path, content: str) -> Path:
-        bundle = root / "jonit-dev" / "diffguard" / "v1" / "dist" / "index.js"
+    def _create_bundle(self, root: Path, content: str, sha: str = pdg.PINNED_SHA) -> Path:
+        bundle = root / "jonit-dev" / "diffguard" / sha / "dist" / "index.js"
         bundle.parent.mkdir(parents=True, exist_ok=True)
         bundle.write_text(content, encoding="utf-8")
         return bundle
@@ -74,11 +103,10 @@ class TestPatchDiffguard(unittest.TestCase):
                 "const customPrompt = core.getInput('custom_prompt');\n",
             )
             with patch("patch_diffguard.subprocess.run") as mock_run:
-                # First run applies the patch
                 pdg.patch_bundle_in_roots([str(root)])
                 patched_text = bundle.read_text(encoding="utf-8")
-                self.assertIn("_fs.readFileSync(customPrompt, 'utf8')", patched_text)
-                self.assertNotIn("const customPrompt = core.getInput('custom_prompt');", patched_text)
+                self.assertIn(pdg.PATCH_MARKER, patched_text)
+                self.assertNotIn(pdg.TARGET_LINE, patched_text)
                 mock_run.assert_called_with(
                     ["node", "--check", str(bundle)],
                     check=True,
@@ -91,28 +119,35 @@ class TestPatchDiffguard(unittest.TestCase):
                 pdg.patch_bundle_in_roots([str(root)])
                 self.assertEqual(mock_run.call_count, 2)
 
-    def test_verify_js_syntax_handles_timeout_and_errors(self) -> None:
-        with patch(
-            "patch_diffguard.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(cmd=["node", "--check"], timeout=10),
-        ):
-            with self.assertRaises(SystemExit) as ctx:
-                pdg.verify_js_syntax("dummy.js")
-            self.assertEqual(ctx.exception.code, 1)
-
-        with patch("patch_diffguard.subprocess.run", side_effect=FileNotFoundError()):
-            with self.assertRaises(SystemExit) as ctx:
-                pdg.verify_js_syntax("dummy.js")
-            self.assertEqual(ctx.exception.code, 1)
-
-    def test_rejects_half_patched_bundle(self) -> None:
+    def test_rejects_mismatched_sha_half_patched_zero_or_multi_target(self) -> None:
+        # Mismatched SHA path
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self._create_bundle(
-                root,
-                "const customPrompt = core.getInput('custom_prompt');\n"
-                "// _fs.readFileSync(customPrompt, 'utf8')\n",
-            )
+            self._create_bundle(root, pdg.TARGET_LINE, sha="deadbeef")
+            with self.assertRaises(SystemExit) as ctx:
+                pdg.patch_bundle_in_roots([str(root)])
+            self.assertEqual(ctx.exception.code, 1)
+
+        # Half-patched bundle
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._create_bundle(root, f"{pdg.TARGET_LINE}\n// {pdg.PATCH_MARKER}\n")
+            with self.assertRaises(SystemExit) as ctx:
+                pdg.patch_bundle_in_roots([str(root)])
+            self.assertEqual(ctx.exception.code, 1)
+
+        # Zero occurrences of target in matched bundle
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._create_bundle(root, "console.log('unrelated bundle');\n")
+            with self.assertRaises(SystemExit) as ctx:
+                pdg.patch_bundle_in_roots([str(root)])
+            self.assertEqual(ctx.exception.code, 1)
+
+        # Multiple occurrences of target in matched bundle
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._create_bundle(root, f"{pdg.TARGET_LINE}\n{pdg.TARGET_LINE}\n")
             with self.assertRaises(SystemExit) as ctx:
                 pdg.patch_bundle_in_roots([str(root)])
             self.assertEqual(ctx.exception.code, 1)
@@ -122,6 +157,17 @@ class TestPatchDiffguard(unittest.TestCase):
             with self.assertRaises(SystemExit) as ctx:
                 pdg.patch_bundle_in_roots([tmp])
             self.assertEqual(ctx.exception.code, 1)
+
+    def test_verify_js_syntax_handles_timeout_and_errors(self) -> None:
+        for side_effect in (
+            subprocess.TimeoutExpired(cmd=["node", "--check"], timeout=10),
+            FileNotFoundError(),
+            subprocess.CalledProcessError(returncode=1, cmd=["node", "--check"], stderr="SyntaxError"),
+        ):
+            with patch("patch_diffguard.subprocess.run", side_effect=side_effect):
+                with self.assertRaises(SystemExit) as ctx:
+                    pdg.verify_js_syntax("dummy.js")
+                self.assertEqual(ctx.exception.code, 1)
 
 
 if __name__ == "__main__":

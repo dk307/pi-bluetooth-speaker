@@ -170,12 +170,10 @@ impl SensorId {
     /// followed by non-empty ASCII hexadecimal digits.
     pub fn parse_str(id: &str) -> Result<Self, String> {
         let raw = id.trim();
-        let Some(suffix) = raw.strip_prefix(DS18B20_FAMILY_PREFIX) else {
-            return Err(format!(
-                "invalid DS18B20 sensor ID '{raw}': expected '28-<hex>' family prefix"
-            ));
-        };
-        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_hexdigit()) {
+        let valid = raw
+            .strip_prefix(DS18B20_FAMILY_PREFIX)
+            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit()));
+        if !valid {
             return Err(format!(
                 "invalid DS18B20 sensor ID '{raw}': expected '28-<hex>' family prefix"
             ));

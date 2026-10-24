@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Generates the full custom review prompt for DiffGuard AI PR Review.
 
+Requires Python >= 3.10.
+
 Reads repository guidelines directly from:
 - AGENTS.md (Root architecture, target hardware, safety rules, coverage)
 - services/core/AGENTS.md (Hardware abstraction, inherent mocking, domain types)
@@ -21,7 +23,8 @@ PROMPT_OUTPUT_FILENAME = "review_prompt.txt"
 # Maximum prompt byte budget (~200 KB ≈ 50k–60k tokens at ~3.5–4 bytes/token),
 # leaving >68k tokens of headroom inside the 128k context window for PR diffs and model output.
 MAX_PROMPT_BYTES = 200_000
-FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+# CommonMark §4.5: code fences may be indented by at most 3 leading spaces (4+ spaces is indented code).
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 
 def load_file(path: Path) -> str:
@@ -103,12 +106,12 @@ def strip_decorations_outside_fences(md: str) -> str:
 
         # Outside fences: handle HTML comments without crossing fence boundaries
         while "<!--" in line:
-            if "-->" in line:
-                before, rest = line.split("<!--", 1)
+            before, rest = line.split("<!--", 1)
+            if "-->" in rest:
                 _, after = rest.split("-->", 1)
                 line = before + after
             else:
-                line = line.split("<!--", 1)[0]
+                line = before
                 in_html_comment = True
                 break
 
@@ -148,19 +151,12 @@ def build_review_prompt(repo_root: Path) -> str:
     # 1. Filter top-level sections (`# AI Guidelines`, `# FFI Guidelines`, `# Macros Guidelines`)
     #    present in `services/.guidelines/microsoft-rust-guidelines.md` that do not apply to
     #    pure-Rust daemon/driver code reviews.
-    sections = split_top_level_sections(raw_guidelines)
-    kept_sections = []
-    excluded_keywords = [
-        "AI Guidelines",
-        "FFI Guidelines",
-        "Macros Guidelines",
+    excluded_keywords = ("AI Guidelines", "FFI Guidelines", "Macros Guidelines")
+    kept_sections = [
+        section
+        for section in split_top_level_sections(raw_guidelines)
+        if not any(kw in section.splitlines()[0] for kw in excluded_keywords)
     ]
-
-    for section in sections:
-        header = next((line for line in section.splitlines() if line.startswith("# ")), "")
-        if any(keyword in header for keyword in excluded_keywords):
-            continue
-        kept_sections.append(section)
 
     guidelines_body = "\n".join(kept_sections)
     guidelines_body = strip_decorations_outside_fences(guidelines_body)

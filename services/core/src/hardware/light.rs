@@ -312,11 +312,13 @@ impl Illuminance {
 
     /// Converts a raw 16-bit register word and measurement mode into [`Illuminance`].
     ///
+    /// Note: primitive `raw as f32` is used here because `f32::from(u16)` is not `const fn` in stable Rust.
+    ///
     /// # Panics
     /// Panics in debug builds if the converted lux value falls outside `0.0..=Self::MAX_LUX`.
     #[must_use]
-    pub fn from_raw_and_mode(raw: u16, mode: MeasurementMode) -> Self {
-        let base_lux = f32::from(raw) / BH1750_ACCURACY_FACTOR;
+    pub const fn from_raw_and_mode(raw: u16, mode: MeasurementMode) -> Self {
+        let base_lux = raw as f32 / BH1750_ACCURACY_FACTOR;
         let lux = match mode {
             MeasurementMode::ContinuousHighRes2 | MeasurementMode::OneShotHighRes2 => {
                 base_lux / 2.0
@@ -327,8 +329,8 @@ impl Illuminance {
             | MeasurementMode::OneShotLowRes => base_lux,
         };
         debug_assert!(
-            (0.0..=Self::MAX_LUX).contains(&lux),
-            "raw conversion breached Illuminance invariant: {lux}"
+            lux >= 0.0 && lux <= Self::MAX_LUX,
+            "raw conversion breached Illuminance invariant"
         );
         Self { lux }
     }
@@ -356,14 +358,8 @@ impl Illuminance {
 
     /// Returns illuminance converted to foot-candles (fc).
     #[must_use]
-    pub fn foot_candles(self) -> f32 {
-        self.lux * LUX_TO_FOOT_CANDLES
-    }
-
-    /// Converts a lux value (`f64`) to foot-candles (`lux * LUX_TO_FOOT_CANDLES`).
-    #[must_use]
-    pub fn lux_to_foot_candles(lux: f64) -> f64 {
-        lux * f64::from(LUX_TO_FOOT_CANDLES)
+    pub const fn foot_candles(self) -> f32 {
+        crate::diag::foot_candles(self.lux)
     }
 }
 
@@ -972,6 +968,13 @@ impl LightSensor {
         }
     }
 
+    fn write_wake_opcode(i2c: &Mutex<I2c>, opcode: u8) -> Result<(), LightError> {
+        let mut guard = i2c.lock().expect("I2C lock poisoned");
+        guard.write(&[CMD_POWER_ON])?;
+        guard.write(&[opcode])?;
+        Ok(())
+    }
+
     /// Resets the sensor measurement data register and awakens the sensor if powered down.
     ///
     /// In mock mode, `reset()` zeroes the simulated illuminance and raw register word
@@ -991,10 +994,7 @@ impl LightSensor {
                 ..
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
-                let mut guard = i2c.lock().expect("I2C lock poisoned");
-                guard.write(&[CMD_POWER_ON])?;
-                guard.write(&[CMD_RESET])?;
-                drop(guard);
+                Self::write_wake_opcode(i2c, CMD_RESET)?;
                 let mut hw = state.lock().expect("state lock poisoned");
                 hw.powered = true;
                 hw.last_transition = Instant::now();
@@ -1020,10 +1020,7 @@ impl LightSensor {
                 ..
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
-                let mut guard = i2c.lock().expect("I2C lock poisoned");
-                guard.write(&[CMD_POWER_ON])?;
-                guard.write(&[new_mode.opcode()])?;
-                drop(guard);
+                Self::write_wake_opcode(i2c, new_mode.opcode())?;
                 let mut hw = state.lock().expect("state lock poisoned");
                 hw.mode = new_mode;
                 hw.powered = true;
@@ -1055,11 +1052,8 @@ impl LightSensor {
                         std::thread::sleep(remaining);
                     }
                 } else {
-                    // Power on and send one-shot trigger opcode, then release I2C mutex during conversion sleep
-                    let mut guard = i2c.lock().expect("I2C lock poisoned");
-                    guard.write(&[CMD_POWER_ON])?;
-                    guard.write(&[cur_mode.opcode()])?;
-                    drop(guard);
+                    // Power on and send one-shot trigger opcode, then sleep outside the I2C mutex
+                    Self::write_wake_opcode(i2c, cur_mode.opcode())?;
                     std::thread::sleep(cur_mode.max_measurement_time());
                 }
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
@@ -1156,7 +1150,8 @@ const _: () = {
     assert!(max_mlx <= u32::MAX as u128);
 
     // Compile-time invariant proof: maximum raw register u16::MAX / 1.2 (54,612.5 lx) <= MAX_LUX (120,000.0 lx)
-    assert!((u16::MAX as f32 / BH1750_ACCURACY_FACTOR) <= Illuminance::MAX_LUX);
+    let max_from_raw = Illuminance::from_raw_and_mode(u16::MAX, MeasurementMode::ContinuousHighRes);
+    assert!(max_from_raw.lux() <= Illuminance::MAX_LUX);
 };
 
 #[cfg(test)]

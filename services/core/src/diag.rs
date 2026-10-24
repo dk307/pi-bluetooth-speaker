@@ -57,6 +57,12 @@ pub const fn fahrenheit(celsius: f32) -> f32 {
     (celsius * 9.0 / 5.0) + 32.0
 }
 
+/// Converts illuminance in lux (`f32`) to foot-candles (`lx * LUX_TO_FOOT_CANDLES`).
+#[must_use]
+pub const fn foot_candles(lux: f32) -> f32 {
+    lux * crate::hardware::LUX_TO_FOOT_CANDLES
+}
+
 /// Rounds a `f32` measurement to 2 decimal places as `f64` for JSON telemetry serialization.
 #[must_use]
 pub fn round_2dp(value: f32) -> f64 {
