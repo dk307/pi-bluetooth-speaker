@@ -28,6 +28,7 @@ services/core/
 ├── AGENTS.md           # Agent instructions & guidelines
 ├── build.rs            # Slint ahead-of-time (AOT) UI compiler
 ├── src/
+│   ├── diag.rs         # Shared CLI diagnostic helpers (formatting, flag parsing, exit codes)
 │   ├── lib.rs          # Core library root (hardware drivers, mocks, domain types, task runtime)
 │   ├── main.rs         # Core daemon entrypoint, Tokio runtime, and event dispatch
 │   ├── runtime.rs      # Asynchronous task join helpers & panic propagation

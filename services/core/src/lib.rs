@@ -4,5 +4,6 @@
 //! testing, asynchronous runtime task join helpers, and shared domain models used
 //! by both the `core` daemon and standalone hardware diagnostic utilities.
 
+pub mod diag;
 pub mod hardware;
 pub mod runtime;

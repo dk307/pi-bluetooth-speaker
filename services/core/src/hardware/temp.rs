@@ -20,7 +20,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use crate::hardware::{BcmPin, GpioPinInfo, PhysicalPin};
-use crate::runtime::{FromJoinError, map_join_result};
+use crate::runtime::{FromJoinError, run_blocking};
 
 /// BCM GPIO pin assigned to the DS18B20 1-Wire data line (`BCM GPIO 26`).
 pub const DS18B20_BCM_GPIO_PIN: BcmPin = BcmPin::new(26);
@@ -968,12 +968,10 @@ impl TempSensor {
     /// # Errors
     /// Returns [`TempError`] if no sensors are discovered or if reading a sensor fails.
     pub fn read_all(&self) -> Result<Vec<SensorReading>, TempError> {
-        let ids = self.discover_sensors()?;
-        let mut readings = Vec::with_capacity(ids.len());
-        for id in &ids {
-            readings.push(self.read_sensor(id)?);
-        }
-        Ok(readings)
+        self.discover_sensors()?
+            .iter()
+            .map(|id| self.read_sensor(id))
+            .collect()
     }
 
     /// Reads the temperature of the primary (first discovered) DS18B20 sensor.
@@ -1002,10 +1000,7 @@ impl TempSensor {
     /// programming errors to the caller.
     pub async fn discover_sensors_async(&self) -> Result<Vec<SensorId>, TempError> {
         let this = self.clone();
-        map_join_result(
-            tokio::task::spawn_blocking(move || this.discover_sensors()).await,
-            "1-Wire sensor discovery",
-        )
+        run_blocking("1-Wire sensor discovery", move || this.discover_sensors()).await
     }
 
     /// Asynchronously reads a specific DS18B20 sensor on the blocking threadpool.
@@ -1022,10 +1017,7 @@ impl TempSensor {
     ) -> Result<SensorReading, TempError> {
         let this = self.clone();
         let id = sensor_id.clone();
-        map_join_result(
-            tokio::task::spawn_blocking(move || this.read_sensor(&id)).await,
-            "1-Wire sensor read",
-        )
+        run_blocking("1-Wire sensor read", move || this.read_sensor(&id)).await
     }
 
     /// Asynchronously reads diagnostics from a DS18B20 sensor on the blocking threadpool.
@@ -1042,10 +1034,10 @@ impl TempSensor {
     ) -> Result<SensorDiagnostics, TempError> {
         let this = self.clone();
         let id = sensor_id.clone();
-        map_join_result(
-            tokio::task::spawn_blocking(move || this.read_diagnostics(&id)).await,
-            "1-Wire diagnostics read",
-        )
+        run_blocking("1-Wire diagnostics read", move || {
+            this.read_diagnostics(&id)
+        })
+        .await
     }
 
     /// Asynchronously discovers and reads all DS18B20 sensors on the blocking threadpool.
@@ -1058,10 +1050,7 @@ impl TempSensor {
     /// programming errors to the caller.
     pub async fn read_all_async(&self) -> Result<Vec<SensorReading>, TempError> {
         let this = self.clone();
-        map_join_result(
-            tokio::task::spawn_blocking(move || this.read_all()).await,
-            "1-Wire read-all sensors",
-        )
+        run_blocking("1-Wire read-all sensors", move || this.read_all()).await
     }
 
     /// Asynchronously reads the primary DS18B20 sensor temperature on the blocking threadpool.
@@ -1074,10 +1063,10 @@ impl TempSensor {
     /// programming errors to the caller.
     pub async fn read_primary_temperature_async(&self) -> Result<Temperature, TempError> {
         let this = self.clone();
-        map_join_result(
-            tokio::task::spawn_blocking(move || this.read_primary_temperature()).await,
-            "1-Wire primary temperature read",
-        )
+        run_blocking("1-Wire primary temperature read", move || {
+            this.read_primary_temperature()
+        })
+        .await
     }
 }
 
@@ -1126,6 +1115,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::map_join_result;
     use std::error::Error;
 
     struct AutoCleanupPath(std::path::PathBuf);

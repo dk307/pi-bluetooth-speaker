@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use rppal::i2c::I2c;
 
-use crate::runtime::{FromJoinError, map_join_result};
+use crate::runtime::{FromJoinError, run_blocking};
 
 use super::{BcmPin, GpioPinInfo, PhysicalPin};
 
@@ -420,11 +420,11 @@ impl I2cHardwareInfo {
 #[derive(Debug)]
 pub(crate) enum LightErrorKind {
     I2c {
-        message: String,
+        message: Box<str>,
         source: Option<rppal::i2c::Error>,
     },
     Io {
-        message: String,
+        message: Box<str>,
         source: io::Error,
     },
     Cancelled {
@@ -434,10 +434,10 @@ pub(crate) enum LightErrorKind {
         address: u8,
     },
     InvalidIlluminance {
-        message: String,
+        message: Box<str>,
     },
     MockFault {
-        message: String,
+        message: Box<str>,
     },
 }
 
@@ -449,68 +449,54 @@ pub struct LightError {
 }
 
 impl LightError {
-    pub(crate) fn i2c(message: impl Into<String>) -> Self {
+    pub(crate) fn new(kind: LightErrorKind) -> Self {
         Self {
-            kind: LightErrorKind::I2c {
-                message: message.into(),
-                source: None,
-            },
+            kind,
             backtrace: Backtrace::capture(),
         }
+    }
+
+    pub(crate) fn i2c(message: impl Into<Box<str>>) -> Self {
+        Self::new(LightErrorKind::I2c {
+            message: message.into(),
+            source: None,
+        })
     }
 
     pub(crate) fn from_i2c_err(err: rppal::i2c::Error) -> Self {
-        Self {
-            kind: LightErrorKind::I2c {
-                message: err.to_string(),
-                source: Some(err),
-            },
-            backtrace: Backtrace::capture(),
-        }
+        Self::new(LightErrorKind::I2c {
+            message: err.to_string().into_boxed_str(),
+            source: Some(err),
+        })
     }
 
     pub(crate) fn from_io_err(err: io::Error) -> Self {
-        Self {
-            kind: LightErrorKind::Io {
-                message: err.to_string(),
-                source: err,
-            },
-            backtrace: Backtrace::capture(),
-        }
+        Self::new(LightErrorKind::Io {
+            message: err.to_string().into_boxed_str(),
+            source: err,
+        })
     }
 
     pub(crate) fn cancelled(message: impl Into<Box<str>>) -> Self {
-        Self {
-            kind: LightErrorKind::Cancelled {
-                message: message.into(),
-            },
-            backtrace: Backtrace::capture(),
-        }
+        Self::new(LightErrorKind::Cancelled {
+            message: message.into(),
+        })
     }
 
     pub(crate) fn invalid_address(address: u8) -> Self {
-        Self {
-            kind: LightErrorKind::InvalidAddress { address },
-            backtrace: Backtrace::capture(),
-        }
+        Self::new(LightErrorKind::InvalidAddress { address })
     }
 
-    pub(crate) fn invalid_illuminance(message: impl Into<String>) -> Self {
-        Self {
-            kind: LightErrorKind::InvalidIlluminance {
-                message: message.into(),
-            },
-            backtrace: Backtrace::capture(),
-        }
+    pub(crate) fn invalid_illuminance(message: impl Into<Box<str>>) -> Self {
+        Self::new(LightErrorKind::InvalidIlluminance {
+            message: message.into(),
+        })
     }
 
-    pub(crate) fn mock_fault(message: impl Into<String>) -> Self {
-        Self {
-            kind: LightErrorKind::MockFault {
-                message: message.into(),
-            },
-            backtrace: Backtrace::capture(),
-        }
+    pub(crate) fn mock_fault(message: impl Into<Box<str>>) -> Self {
+        Self::new(LightErrorKind::MockFault {
+            message: message.into(),
+        })
     }
 
     /// Returns `true` if this error was caused by an I2C communication or bus failure.
@@ -1000,10 +986,7 @@ impl LightSensor {
     /// programming errors to the caller.
     pub async fn read_lux_async(&self) -> Result<Illuminance, LightError> {
         let this = self.clone();
-        map_join_result(
-            tokio::task::spawn_blocking(move || this.read_lux()).await,
-            "BH1750 illuminance read",
-        )
+        run_blocking("BH1750 illuminance read", move || this.read_lux()).await
     }
 
     /// Asynchronously reads extended diagnostics from the sensor.
@@ -1016,10 +999,7 @@ impl LightSensor {
     /// programming errors to the caller.
     pub async fn read_diagnostics_async(&self) -> Result<LightDiagnostics, LightError> {
         let this = self.clone();
-        map_join_result(
-            tokio::task::spawn_blocking(move || this.read_diagnostics()).await,
-            "BH1750 diagnostics read",
-        )
+        run_blocking("BH1750 diagnostics read", move || this.read_diagnostics()).await
     }
 }
 
@@ -1044,6 +1024,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::map_join_result;
     use std::error::Error;
 
     #[test]

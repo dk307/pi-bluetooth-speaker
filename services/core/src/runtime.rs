@@ -53,6 +53,24 @@ pub fn map_join_result<T, E: FromJoinError>(
     }
 }
 
+/// Spawns a blocking closure on the Tokio threadpool and maps the join outcome via [`map_join_result`].
+///
+/// # Panics
+///
+/// Resumes unwinding if `f` panics on the worker thread (**M-PANIC-ON-BUG**).
+///
+/// # Errors
+///
+/// Returns `Err(E)` if `f` returns an error or if the blocking task is cancelled.
+pub async fn run_blocking<T, E, F>(task_context: &'static str, f: F) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: FromJoinError + Send + 'static,
+    F: FnOnce() -> Result<T, E> + Send + 'static,
+{
+    map_join_result(tokio::task::spawn_blocking(f).await, task_context)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,11 +5,14 @@
 //! configures measurement resolution, and continuously reports live optical
 //! illuminance (lux and foot-candles) alongside hardware registers.
 
-use std::env;
 use std::process::ExitCode;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
+use speaker_core::diag::{
+    OutputFormat, env_args, exit_code_for_reads, format_timestamp, parse_count_arg,
+    parse_interval_arg, program_name,
+};
 use speaker_core::hardware::{
     BH1750_ALT_I2C_ADDR, BH1750_DEFAULT_I2C_ADDR, BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance,
     LUX_TO_FOOT_CANDLES, LightSensor, MeasurementMode,
@@ -20,26 +23,6 @@ use speaker_core::hardware::{
 /// Set to 300 ms to exceed the worst-case continuous High-Res conversion time (180 ms)
 /// with ample headroom for Linux scheduling, ensuring a fresh conversion is available on each poll.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(300);
-
-/// Formats UTC wall-clock time as `HH:MM:SS`.
-fn format_timestamp() -> String {
-    let total_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let hours = (total_secs / 3600) % 24;
-    let minutes = (total_secs / 60) % 60;
-    let seconds = total_secs % 60;
-    format!("{hours:02}:{minutes:02}:{seconds:02}")
-}
-
-/// Output formatting mode for diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum OutputFormat {
-    #[default]
-    Human,
-    Json,
-}
 
 /// Diagnostic display options.
 #[derive(Debug, Clone, Copy, Default)]
@@ -133,32 +116,8 @@ where
             "-1" | "--once" => opts.max_count = Some(1),
             "-v" | "--verbose" => opts.flags.verbose = true,
             "-j" | "--json" => opts.format = OutputFormat::Json,
-            "-n" | "--count" => {
-                let Some(val) = args.next() else {
-                    return Err("missing value for --count".into());
-                };
-                let count = val
-                    .parse::<usize>()
-                    .map_err(|e| format!("invalid count '{val}': {e}"))?;
-                if count == 0 {
-                    return Err("--count must be at least 1".into());
-                }
-                opts.max_count = Some(count);
-            }
-            "-i" | "--interval" => {
-                let Some(val) = args.next() else {
-                    return Err("missing value for --interval".into());
-                };
-                let secs = val
-                    .parse::<f32>()
-                    .map_err(|e| format!("invalid interval '{val}': {e}"))?;
-                opts.interval = Duration::try_from_secs_f32(secs)
-                    .ok()
-                    .filter(|d| !d.is_zero())
-                    .ok_or_else(|| {
-                        format!("interval must be a finite value greater than 0, got '{val}'")
-                    })?;
-            }
+            "-n" | "--count" => opts.max_count = Some(parse_count_arg(args.next())?),
+            "-i" | "--interval" => opts.interval = parse_interval_arg(args.next())?,
             "-m" | "--mode" => {
                 let Some(val) = args.next() else {
                     return Err("missing value for --mode".into());
@@ -179,11 +138,7 @@ where
 }
 
 fn parse_cli_args() -> Result<Option<CliOptions>, String> {
-    parse_cli_args_from(
-        env::args_os()
-            .skip(1)
-            .map(|a| a.to_string_lossy().into_owned()),
-    )
+    parse_cli_args_from(env_args())
 }
 
 /// Running statistical summary for ambient light telemetry.
@@ -399,21 +354,14 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
         print_session_summary(&stats);
     }
 
-    if stats.total_reads > 0 && stats.successful_reads == 0 {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
+    exit_code_for_reads(stats.total_reads, stats.successful_reads)
 }
 
 fn main() -> ExitCode {
     let opts = match parse_cli_args() {
         Ok(Some(o)) => o,
         Ok(None) => {
-            let bin_name = env::args_os()
-                .next()
-                .map_or_else(|| "read_light".into(), |a| a.to_string_lossy().into_owned());
-            print_usage(&bin_name);
+            print_usage(&program_name("read_light"));
             return ExitCode::SUCCESS;
         }
         Err(err) => {
@@ -440,14 +388,6 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn format_timestamp_returns_valid_time() {
-        let ts = format_timestamp();
-        assert_eq!(ts.len(), 8);
-        assert_eq!(&ts[2..3], ":");
-        assert_eq!(&ts[5..6], ":");
-    }
 
     #[test]
     fn mode_parsing_variants_and_errors() {
