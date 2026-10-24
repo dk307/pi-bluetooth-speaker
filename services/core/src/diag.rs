@@ -51,14 +51,24 @@ pub fn program_name(default_name: &str) -> String {
         .map_or_else(|| default_name.into(), |a| a.to_string_lossy().into_owned())
 }
 
+/// Extracts the next argument value for `flag`, or returns a `"missing value for {flag}"` error.
+///
+/// # Errors
+/// Returns a descriptive user-facing error string if `args` yields `None`.
+pub fn next_arg_value(
+    args: &mut impl Iterator<Item = String>,
+    flag: &str,
+) -> Result<String, String> {
+    args.next()
+        .ok_or_else(|| format!("missing value for {flag}"))
+}
+
 /// Parses and validates a `--count <COUNT>` argument value (must be `>= 1`).
 ///
 /// # Errors
 /// Returns a descriptive user-facing error string if `val` is missing, non-numeric, or `0`.
 pub fn parse_count_arg(val: Option<String>) -> Result<usize, String> {
-    let Some(val) = val else {
-        return Err("missing value for --count".into());
-    };
+    let val = next_arg_value(&mut val.into_iter(), "--count")?;
     let count = val
         .parse::<usize>()
         .map_err(|e| format!("invalid count '{val}': {e}"))?;
@@ -73,9 +83,7 @@ pub fn parse_count_arg(val: Option<String>) -> Result<usize, String> {
 /// # Errors
 /// Returns a descriptive user-facing error string if `val` is missing, non-numeric, NaN, infinite, or `<= 0`.
 pub fn parse_interval_arg(val: Option<String>) -> Result<Duration, String> {
-    let Some(val) = val else {
-        return Err("missing value for --interval".into());
-    };
+    let val = next_arg_value(&mut val.into_iter(), "--interval")?;
     let secs = val
         .parse::<f32>()
         .map_err(|e| format!("invalid interval '{val}': {e}"))?;

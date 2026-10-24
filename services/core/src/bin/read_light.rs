@@ -10,12 +10,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use speaker_core::diag::{
-    NumericStats, OutputFormat, env_args, exit_code_for_reads, format_timestamp, parse_count_arg,
-    parse_interval_arg, program_name, should_print_summary,
+    NumericStats, OutputFormat, env_args, exit_code_for_reads, format_timestamp, next_arg_value,
+    parse_count_arg, parse_interval_arg, program_name, should_print_summary,
 };
 use speaker_core::hardware::{
-    BH1750_ALT_I2C_ADDR, BH1750_DEFAULT_I2C_ADDR, BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance,
-    LUX_TO_FOOT_CANDLES, LightSensor, MeasurementMode,
+    BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance, LUX_TO_FOOT_CANDLES, LightSensor,
+    MeasurementMode,
 };
 
 /// Default polling interval between light measurements.
@@ -58,10 +58,12 @@ fn print_usage(bin_name: &str) {
     println!("  -n, --count <COUNT>      Read COUNT times and exit");
     println!("  -i, --interval <SECS>    Polling interval in seconds (default: 0.3)");
     println!(
-        "  -m, --mode <MODE>        Measurement mode: high-res, high-res2, low-res (default: high-res)"
+        "  -m, --mode <MODE>        Measurement mode: high-res (h1), high-res2 (h2), low-res (low) (default: high-res)"
     );
     println!("  -a, --address <HEX>      I2C address in hex: 0x23 (default) or 0x5C");
-    println!("  -v, --verbose            Display extended hardware registers and info");
+    println!(
+        "  -v, --verbose            Display extended hardware registers and info (human format only)"
+    );
     println!("  -j, --json               Stream readings in newline-delimited JSON");
     println!("  -h, --help               Display this help text");
 }
@@ -89,26 +91,6 @@ fn parse_mode(s: &str) -> Result<MeasurementMode, String> {
         .ok_or_else(|| format!("invalid mode '{lower}'. Supported: high-res, high-res2, low-res"))
 }
 
-fn parse_hex_address(s: &str) -> Result<I2cAddress, String> {
-    let clean = s.trim();
-    if clean.starts_with(['+', '-']) {
-        return Err(format!(
-            "invalid hex address '{s}': sign characters are not allowed"
-        ));
-    }
-    let clean = clean
-        .strip_prefix("0x")
-        .or_else(|| clean.strip_prefix("0X"))
-        .unwrap_or(clean);
-    let addr =
-        u8::from_str_radix(clean, 16).map_err(|e| format!("invalid hex address '{s}': {e}"))?;
-    I2cAddress::new(addr).map_err(|_err| {
-        format!(
-            "invalid BH1750 I2C address '{s}' (expected 0x{BH1750_DEFAULT_I2C_ADDR:02X} or 0x{BH1750_ALT_I2C_ADDR:02X})"
-        )
-    })
-}
-
 fn parse_cli_args_from<I>(args: I) -> Result<Option<CliOptions>, String>
 where
     I: IntoIterator<Item = String>,
@@ -124,17 +106,9 @@ where
             "-j" | "--json" => opts.format = OutputFormat::Json,
             "-n" | "--count" => opts.max_count = Some(parse_count_arg(args.next())?),
             "-i" | "--interval" => opts.interval = parse_interval_arg(args.next())?,
-            "-m" | "--mode" => {
-                let Some(val) = args.next() else {
-                    return Err("missing value for --mode".into());
-                };
-                opts.mode = parse_mode(&val)?;
-            }
+            "-m" | "--mode" => opts.mode = parse_mode(&next_arg_value(&mut args, "--mode")?)?,
             "-a" | "--address" => {
-                let Some(val) = args.next() else {
-                    return Err("missing value for --address".into());
-                };
-                opts.address = parse_hex_address(&val)?;
+                opts.address = I2cAddress::parse_hex(&next_arg_value(&mut args, "--address")?)?;
             }
             unknown => return Err(format!("unknown option '{unknown}', use --help for usage")),
         }
@@ -177,6 +151,10 @@ fn print_diagnostic_registers(sensor: &LightSensor) {
     println!("--------------------------------------------------");
 }
 
+fn to_fc(lux: f64) -> f64 {
+    lux * f64::from(LUX_TO_FOOT_CANDLES)
+}
+
 fn print_session_summary(stats: &NumericStats) {
     println!("\n--- Light Diagnostic Session Summary ---");
     println!("Total reads : {}", stats.total_reads());
@@ -191,16 +169,13 @@ fn print_session_summary(stats: &NumericStats) {
     if let (Some(min), Some(max), Some(avg)) = (stats.min(), stats.max(), stats.average()) {
         println!(
             "Min Light   : {min:7.2} lx ({:6.2} fc)",
-            min * LUX_TO_FOOT_CANDLES
+            to_fc(f64::from(min))
         );
         println!(
             "Max Light   : {max:7.2} lx ({:6.2} fc)",
-            max * LUX_TO_FOOT_CANDLES
+            to_fc(f64::from(max))
         );
-        println!(
-            "Avg Light   : {avg:7.2} lx ({:6.2} fc)",
-            avg * f64::from(LUX_TO_FOOT_CANDLES)
-        );
+        println!("Avg Light   : {avg:7.2} lx ({:6.2} fc)", to_fc(avg));
     }
 }
 
@@ -411,24 +386,25 @@ mod tests {
             parse_mode("low").unwrap(),
             MeasurementMode::ContinuousLowRes
         );
-        let _ = parse_mode("invalid-mode").unwrap_err();
+        let err = parse_mode("invalid-mode").unwrap_err();
+        assert!(err.contains("invalid mode 'invalid-mode'"));
     }
 
     #[test]
     fn hex_address_parsing() {
-        assert_eq!(parse_hex_address("0x23").unwrap().as_u8(), 0x23);
-        assert_eq!(parse_hex_address("0X5C").unwrap().as_u8(), 0x5C);
-        assert_eq!(parse_hex_address("23").unwrap().as_u8(), 0x23);
-        let err = parse_hex_address("0x77").unwrap_err();
+        assert_eq!(I2cAddress::parse_hex("0x23").unwrap().as_u8(), 0x23);
+        assert_eq!(I2cAddress::parse_hex("0X5C").unwrap().as_u8(), 0x5C);
+        assert_eq!(I2cAddress::parse_hex("23").unwrap().as_u8(), 0x23);
+        let err = I2cAddress::parse_hex("0x77").unwrap_err();
         assert_eq!(
             err,
             "invalid BH1750 I2C address '0x77' (expected 0x23 or 0x5C)"
         );
-        let err_not_hex = parse_hex_address("not-hex").unwrap_err();
+        let err_not_hex = I2cAddress::parse_hex("not-hex").unwrap_err();
         assert!(err_not_hex.contains("invalid hex address"));
-        let err_plus = parse_hex_address("+0x23").unwrap_err();
+        let err_plus = I2cAddress::parse_hex("+0x23").unwrap_err();
         assert!(err_plus.contains("sign characters are not allowed"));
-        let err_minus = parse_hex_address("-0x23").unwrap_err();
+        let err_minus = I2cAddress::parse_hex("-0x23").unwrap_err();
         assert!(err_minus.contains("sign characters are not allowed"));
     }
 

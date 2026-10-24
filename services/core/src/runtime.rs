@@ -53,7 +53,7 @@ pub fn map_join_result<T, E: FromJoinError>(
     }
 }
 
-/// Spawns a blocking closure on the Tokio threadpool and maps the join outcome via [`map_join_result`].
+/// Spawns a blocking closure on Tokio and maps the join outcome via [`map_join_result`].
 ///
 /// # Panics
 ///
@@ -149,7 +149,7 @@ mod tests {
         ];
 
         for (expected_substr, task) in cases {
-            let join_res: Result<Result<u32, DummyError>, _> = task.await.map(Ok::<_, DummyError>);
+            let join_res: Result<Result<(), DummyError>, _> = task.await.map(Ok::<(), DummyError>);
             assert!(join_res.as_ref().unwrap_err().is_panic());
 
             let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

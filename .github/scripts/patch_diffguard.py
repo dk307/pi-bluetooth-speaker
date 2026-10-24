@@ -20,9 +20,13 @@ def verify_js_syntax(path: str) -> None:
             check=True,
             capture_output=True,
             text=True,
+            timeout=10,
         )
     except FileNotFoundError:
         print("ERROR: 'node' binary not found in PATH while verifying bundle syntax", file=sys.stderr)
+        sys.exit(1)
+    except subprocess.TimeoutExpired:
+        print(f"ERROR: 'node --check {path}' timed out after 10s", file=sys.stderr)
         sys.exit(1)
     except subprocess.CalledProcessError as exc:
         print(
@@ -60,6 +64,13 @@ def main() -> None:
                 "{ customPrompt = _fs.readFileSync(customPrompt, 'utf8'); } } "
                 "catch (err) { core.setFailed('Failed to read file-based customPrompt: ' + err.message); throw err; }"
             )
+            if patch_marker in content and target in content:
+                print(
+                    f"ERROR: {p} is in an unknown half-patched state (marker and target both present)",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
             if patch_marker in content and target not in content:
                 verify_js_syntax(p)
                 print(f"Already patched and verified file-based prompt in {p}")

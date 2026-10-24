@@ -11,6 +11,7 @@ Formats all rules into a comprehensive review prompt and writes it directly to
 to completely bypass the Linux MAX_ARG_STRLEN (128 KB) environment variable limit.
 """
 
+from collections.abc import Iterator
 import os
 import re
 from pathlib import Path
@@ -30,34 +31,40 @@ def load_file(path: Path) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
-def split_top_level_sections(md: str) -> list[str]:
-    """Splits markdown into top-level sections (# Title), ignoring headers inside code fences."""
-    lines = md.splitlines(keepends=True)
-    sections = []
-    current_section = []
-    current_fence = None
-
-    for line in lines:
+def iter_fence_tracked_lines(md: str) -> Iterator[tuple[bool, bool, str]]:
+    """Yields (is_fence_delimiter, is_inside_fence, line) while validating balanced fences."""
+    current_fence: str | None = None
+    for line in md.splitlines(keepends=True):
         m = FENCE_RE.match(line)
         if m:
-            fence_chars = m.group(1)
+            marker = m.group(1)
             if current_fence is None:
-                current_fence = fence_chars
-            elif fence_chars[0] == current_fence[0] and len(fence_chars) >= len(current_fence):
+                current_fence = marker
+                yield True, True, line
+                continue
+            if marker[0] == current_fence[0] and len(marker) >= len(current_fence):
                 current_fence = None
-            current_section.append(line)
-            continue
-
-        if current_fence is None and re.match(r"^# [A-Z]", line) and current_section:
-            sections.append("".join(current_section))
-            current_section = [line]
-        else:
-            current_section.append(line)
+                yield True, False, line
+                continue
+        yield False, current_fence is not None, line
 
     if current_fence is not None:
         raise ValueError(
             f"unbalanced code fences detected in markdown file: fence {current_fence} was not closed"
         )
+
+
+def split_top_level_sections(md: str) -> list[str]:
+    """Splits markdown into top-level sections (# Title), ignoring headers inside code fences."""
+    sections: list[str] = []
+    current_section: list[str] = []
+
+    for is_delim, in_fence, line in iter_fence_tracked_lines(md):
+        if not is_delim and not in_fence and re.match(r"^# [A-Z]", line) and current_section:
+            sections.append("".join(current_section))
+            current_section = [line]
+        else:
+            current_section.append(line)
 
     if current_section:
         sections.append("".join(current_section))
@@ -66,33 +73,20 @@ def split_top_level_sections(md: str) -> list[str]:
 
 def strip_decorations_outside_fences(md: str) -> str:
     """Strips anchor tags and link URLs outside of code fences, preserving code blocks."""
-    lines = md.splitlines(keepends=True)
     out: list[str] = []
-    current_fence = None
     in_html_comment = False
     consecutive_blank_lines = 0
 
-    for line in lines:
-        if current_fence is None and in_html_comment:
+    for is_delim, in_fence, line in iter_fence_tracked_lines(md):
+        if not is_delim and not in_fence and in_html_comment:
             if "-->" in line:
                 in_html_comment = False
                 line = line.split("-->", 1)[1]
             else:
                 continue
 
-        m = FENCE_RE.match(line)
-        if m:
-            marker = m.group(1)
-            if current_fence is None:
-                current_fence = marker
-            elif marker[0] == current_fence[0] and len(marker) >= len(current_fence):
-                current_fence = None
-            out.append(line)
-            consecutive_blank_lines = 0
-            continue
-
-        if current_fence is not None:
-            # Code block content: preserve exactly as authored
+        if is_delim or in_fence:
+            # Fence delimiter or code block content: preserve exactly as authored
             out.append(line)
             consecutive_blank_lines = 0
             continue

@@ -232,6 +232,8 @@ fn read_light_cli_argument_validation() {
             (&["--mode"], "missing value for --mode"),
             (&["--mode", "ultra-mode"], "invalid mode 'ultra-mode'"),
             (&["--address"], "missing value for --address"),
+            (&["--address", "+0x23"], "sign characters are not allowed"),
+            (&["--address", "-0x23"], "sign characters are not allowed"),
             (&["--address", "not-hex"], "invalid hex address"),
             (&["--address", "0xzz"], "invalid hex address"),
             (&["--address", "0x00"], "invalid BH1750 I2C address"),

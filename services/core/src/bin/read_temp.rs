@@ -11,8 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use speaker_core::diag::{
-    NumericStats, OutputFormat, env_args, exit_code_for_reads, format_timestamp, parse_count_arg,
-    parse_interval_arg, program_name, should_print_summary,
+    NumericStats, OutputFormat, env_args, exit_code_for_reads, format_timestamp, next_arg_value,
+    parse_count_arg, parse_interval_arg, program_name, should_print_summary,
 };
 use speaker_core::hardware::{
     SensorDiagnostics, SensorId, SocThermal, TempError, TempSensor, Temperature,
@@ -57,9 +57,13 @@ fn print_usage(bin_name: &str) {
     println!("  -1, --once               Read once and exit");
     println!("  -n, --count <COUNT>      Read COUNT times and exit");
     println!("  -i, --interval <SECS>    Polling interval in seconds (default: 1.0)");
-    println!("  -v, --verbose            Show detailed sensor registers & diagnostics");
+    println!(
+        "  -v, --verbose            Show detailed sensor registers & diagnostics (human format only)"
+    );
     println!("  -s, --soc                Include BCM2837 SoC core temperature & delta");
-    println!("  -r, --raw                Display raw w1_slave scratchpad payload");
+    println!(
+        "  -r, --raw                Display raw w1_slave scratchpad payload (human format only)"
+    );
     println!("  -d, --device <ID>        Target specific sensor (e.g. 28-01201b7d5396)");
     println!("  -j, --json               Output readings as JSON lines");
     println!("  -h, --help               Show this help message and exit");
@@ -88,9 +92,7 @@ where
             "-n" | "--count" => opts.max_count = Some(parse_count_arg(args.next())?),
             "-i" | "--interval" => opts.interval = parse_interval_arg(args.next())?,
             "-d" | "--device" => {
-                let Some(val) = args.next() else {
-                    return Err("missing value for --device".into());
-                };
+                let val = next_arg_value(&mut args, "--device")?;
                 let sensor_id =
                     SensorId::parse(&val).map_err(|e| format!("invalid sensor ID '{val}': {e}"))?;
                 opts.target_sensor = Some(sensor_id);
@@ -112,15 +114,11 @@ struct Statistics {
     samples: NumericStats,
     crc_errors: usize,
     other_errors: usize,
-    min_temp: Option<Temperature>,
-    max_temp: Option<Temperature>,
 }
 
 impl Statistics {
     fn record_success(&mut self, temp: Temperature) {
         self.samples.record_success(temp.celsius());
-        self.min_temp = Some(self.min_temp.map_or(temp, |cur| cur.min(temp)));
-        self.max_temp = Some(self.max_temp.map_or(temp, |cur| cur.max(temp)));
     }
 
     fn record_error(&mut self, err: &TempError) {
@@ -180,17 +178,11 @@ fn print_session_summary(stats: &Statistics) {
             s.error_rate_percent(stats.other_errors)
         );
     }
-    if let (Some(min), Some(max), Some(avg)) = (stats.min_temp, stats.max_temp, s.average()) {
-        println!(
-            "Chassis Min : {:.2}°C ({:.2}°F)",
-            min.celsius(),
-            min.fahrenheit()
-        );
-        println!(
-            "Chassis Max : {:.2}°C ({:.2}°F)",
-            max.celsius(),
-            max.fahrenheit()
-        );
+    if let (Some(min_c), Some(max_c), Some(avg)) = (s.min(), s.max(), s.average()) {
+        let min_f = min_c * 1.8 + 32.0;
+        let max_f = max_c * 1.8 + 32.0;
+        println!("Chassis Min : {min_c:.2}°C ({min_f:.2}°F)");
+        println!("Chassis Max : {max_c:.2}°C ({max_f:.2}°F)");
         println!("Chassis Avg : {avg:.2}°C");
     }
 }
@@ -419,8 +411,8 @@ mod tests {
         assert_eq!(stats.samples.successful_reads(), 2);
         assert_eq!(stats.crc_errors, 1);
         assert_eq!(stats.other_errors, 1);
-        assert_eq!(stats.min_temp.unwrap().celsius(), 20.0);
-        assert_eq!(stats.max_temp.unwrap().celsius(), 30.0);
+        assert_eq!(stats.samples.min(), Some(20.0));
+        assert_eq!(stats.samples.max(), Some(30.0));
         assert!((stats.samples.average().unwrap() - 25.0).abs() < 1e-4);
 
         print_session_summary(&stats);

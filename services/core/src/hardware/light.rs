@@ -211,6 +211,33 @@ impl I2cAddress {
         }
     }
 
+    /// Parses a hexadecimal string (`0x23`, `0X5C`, `23`) into a validated [`I2cAddress`].
+    ///
+    /// Rejects leading `+` or `-` signs as non-standard in hardware address specifications.
+    ///
+    /// # Errors
+    /// Returns a descriptive user-facing error message if `s` is signed, non-hexadecimal,
+    /// or does not match a valid BH1750 slave address (`0x23` or `0x5C`).
+    pub fn parse_hex(s: &str) -> Result<Self, String> {
+        let clean = s.trim();
+        if clean.starts_with(['+', '-']) {
+            return Err(format!(
+                "invalid hex address '{s}': sign characters are not allowed"
+            ));
+        }
+        let clean = clean
+            .strip_prefix("0x")
+            .or_else(|| clean.strip_prefix("0X"))
+            .unwrap_or(clean);
+        let addr =
+            u8::from_str_radix(clean, 16).map_err(|e| format!("invalid hex address '{s}': {e}"))?;
+        Self::new(addr).map_err(|_err| {
+            format!(
+                "invalid BH1750 I2C address '{s}' (expected 0x{BH1750_DEFAULT_I2C_ADDR:02X} or 0x{BH1750_ALT_I2C_ADDR:02X})"
+            )
+        })
+    }
+
     /// Returns the raw 7-bit slave address as `u8`.
     #[must_use]
     pub const fn as_u8(self) -> u8 {
@@ -221,6 +248,14 @@ impl I2cAddress {
     #[must_use]
     pub const fn as_u16(self) -> u16 {
         self.0 as u16
+    }
+}
+
+impl TryFrom<u8> for I2cAddress {
+    type Error = LightError;
+
+    fn try_from(addr: u8) -> Result<Self, Self::Error> {
+        Self::new(addr)
     }
 }
 
@@ -438,29 +473,23 @@ impl I2cHardwareInfo {
     }
 }
 
+/// Underlying detail for an I2C bus failure.
+#[derive(Debug)]
+pub(crate) enum I2cDetail {
+    Message(Box<str>),
+    Source(rppal::i2c::Error),
+}
+
 /// Categorized failure kinds for ambient light sensor operations.
 #[derive(Debug)]
 pub(crate) enum LightErrorKind {
-    I2c {
-        message: Option<Box<str>>,
-        source: Option<rppal::i2c::Error>,
-    },
-    Io {
-        source: io::Error,
-    },
+    I2c(I2cDetail),
+    Io { source: io::Error },
     PowerDown,
-    Cancelled {
-        message: Box<str>,
-    },
-    InvalidAddress {
-        address: u8,
-    },
-    InvalidIlluminance {
-        message: Box<str>,
-    },
-    MockFault {
-        message: Box<str>,
-    },
+    Cancelled { message: Box<str> },
+    InvalidAddress { address: u8 },
+    InvalidIlluminance { message: Box<str> },
+    MockFault { message: Box<str> },
 }
 
 /// Canonical error returned by ambient light sensor drivers and utilities.
@@ -479,17 +508,11 @@ impl LightError {
     }
 
     pub(crate) fn i2c(message: impl Into<Box<str>>) -> Self {
-        Self::new(LightErrorKind::I2c {
-            message: Some(message.into()),
-            source: None,
-        })
+        Self::new(LightErrorKind::I2c(I2cDetail::Message(message.into())))
     }
 
     pub(crate) fn from_i2c_err(err: rppal::i2c::Error) -> Self {
-        Self::new(LightErrorKind::I2c {
-            message: None,
-            source: Some(err),
-        })
+        Self::new(LightErrorKind::I2c(I2cDetail::Source(err)))
     }
 
     pub(crate) fn from_io_err(source: io::Error) -> Self {
@@ -525,7 +548,7 @@ impl LightError {
     /// Returns `true` if this error was caused by an I2C communication or bus failure.
     #[must_use]
     pub const fn is_i2c(&self) -> bool {
-        matches!(self.kind, LightErrorKind::I2c { .. })
+        matches!(self.kind, LightErrorKind::I2c(_))
     }
 
     /// Returns `true` if this error was caused by a generic I/O error.
@@ -577,16 +600,8 @@ impl LightError {
 impl Display for LightError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            LightErrorKind::I2c { message, source } => {
-                write!(f, "I2C bus error")?;
-                if let Some(msg) = message {
-                    write!(f, ": {msg}")
-                } else if let Some(err) = source {
-                    write!(f, ": {err}")
-                } else {
-                    Ok(())
-                }
-            }
+            LightErrorKind::I2c(I2cDetail::Message(msg)) => write!(f, "I2C bus error: {msg}"),
+            LightErrorKind::I2c(I2cDetail::Source(err)) => write!(f, "I2C bus error: {err}"),
             LightErrorKind::Io { source } => write!(f, "I/O error: {source}"),
             LightErrorKind::PowerDown => write!(
                 f,
@@ -614,10 +629,8 @@ impl Display for LightError {
 impl std::error::Error for LightError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.kind {
-            LightErrorKind::I2c { source, .. } => source
-                .as_ref()
-                .map(|s| s as &(dyn std::error::Error + 'static)),
-            LightErrorKind::Io { source, .. } => Some(source),
+            LightErrorKind::I2c(I2cDetail::Source(err)) => Some(err),
+            LightErrorKind::Io { source } => Some(source),
             _ => None,
         }
     }
@@ -641,6 +654,15 @@ impl FromJoinError for LightError {
     }
 }
 
+/// Simulated measurement source for [`LightSensorMock`].
+#[derive(Debug, Clone, Copy)]
+enum SimSource {
+    /// Mode-adaptive illuminance in lux (`0.0..=Illuminance::MAX_LUX`).
+    Lux(f32),
+    /// Direct 16-bit raw register word override.
+    Raw(u16),
+}
+
 /// Controllable in-memory mock for [`LightSensor`].
 #[derive(Debug, Clone)]
 pub struct LightSensorMock {
@@ -649,8 +671,7 @@ pub struct LightSensorMock {
 
 #[derive(Debug)]
 struct MockState {
-    raw_word: u16,
-    desired_lux: Option<f32>,
+    source: SimSource,
     mode: MeasurementMode,
     powered: bool,
     fault: Option<Box<str>>,
@@ -660,8 +681,7 @@ impl LightSensorMock {
     fn new() -> Self {
         Self {
             state: Arc::new(RwLock::new(MockState {
-                raw_word: 120, // 100 lx (120 / 1.2)
-                desired_lux: Some(100.0),
+                source: SimSource::Lux(100.0),
                 mode: MeasurementMode::ContinuousHighRes,
                 powered: true,
                 fault: None,
@@ -681,7 +701,7 @@ impl LightSensorMock {
     pub fn set_lux(&self, lux: f32) {
         assert!(lux.is_finite(), "mock lux must be finite, got {lux}");
         let mut state = self.state.write().expect("mock lock poisoned");
-        state.desired_lux = Some(lux.clamp(0.0, Illuminance::MAX_LUX));
+        state.source = SimSource::Lux(lux.clamp(0.0, Illuminance::MAX_LUX));
     }
 
     /// Sets the raw 16-bit register word directly.
@@ -692,8 +712,7 @@ impl LightSensorMock {
     /// Panics if the mock state lock is poisoned.
     pub fn set_raw_word(&self, raw: u16) {
         let mut state = self.state.write().expect("mock lock poisoned");
-        state.desired_lux = None;
-        state.raw_word = raw;
+        state.source = SimSource::Raw(raw);
     }
 
     /// Injects or clears a simulated hardware fault.
@@ -734,14 +753,16 @@ impl LightSensorMock {
         if !state.powered {
             return Err(LightError::powered_down());
         }
-        let raw = if let Some(lux) = state.desired_lux {
-            let mult = match state.mode {
-                MeasurementMode::ContinuousHighRes2 | MeasurementMode::OneShotHighRes2 => 2.0,
-                _ => 1.0,
-            };
-            ((lux * mult * BH1750_ACCURACY_FACTOR).round()).clamp(0.0, f32::from(u16::MAX)) as u16
-        } else {
-            state.raw_word
+        let raw = match state.source {
+            SimSource::Lux(lux) => {
+                let mult = match state.mode {
+                    MeasurementMode::ContinuousHighRes2 | MeasurementMode::OneShotHighRes2 => 2.0,
+                    _ => 1.0,
+                };
+                ((lux * mult * BH1750_ACCURACY_FACTOR).round()).clamp(0.0, f32::from(u16::MAX))
+                    as u16
+            }
+            SimSource::Raw(raw) => raw,
         };
         Ok((raw, state.mode))
     }
@@ -768,7 +789,7 @@ impl LightSensorMock {
     /// Resets the mock measurement register.
     ///
     /// Note: unlike physical hardware in continuous mode (which immediately starts a
-    /// new conversion after `CMD_RESET`), the mock zeroes `desired_lux` and `raw_word`
+    /// new conversion after `CMD_RESET`), the mock zeroes the simulated reading
     /// until the next [`set_lux()`](Self::set_lux) or [`set_raw_word()`](Self::set_raw_word) call
     /// so tests can deterministically verify that a reset occurred.
     fn reset(&self) -> Result<(), LightError> {
@@ -776,8 +797,7 @@ impl LightSensorMock {
         if let Some(ref fault) = state.fault {
             return Err(LightError::mock_fault(fault.clone()));
         }
-        state.desired_lux = Some(0.0);
-        state.raw_word = 0;
+        state.source = SimSource::Lux(0.0);
         state.powered = true;
         Ok(())
     }
@@ -786,6 +806,12 @@ impl LightSensorMock {
 #[derive(Debug)]
 struct HwState {
     mode: MeasurementMode,
+    /// Tracks whether the sensor is awakened (`true`) or explicitly placed into sleep mode
+    /// via [`LightSensor::power_down()`] (`false`).
+    ///
+    /// Note: in `OneShot*` modes, the BH1750 hardware automatically enters power-down after
+    /// each conversion, and [`LightSensor::read_raw_word()`] transparently re-sends `CMD_POWER_ON`
+    /// plus the one-shot opcode on each read as long as `powered` is `true`.
     powered: bool,
     last_transition: Instant,
 }
@@ -1028,11 +1054,14 @@ impl LightSensor {
     ///
     /// # Power State
     /// If [`power_down()`](Self::power_down) was previously invoked, conversions
-    /// cease until the sensor is re-awakened via [`set_mode()`](Self::set_mode) or
-    /// [`reset()`](Self::reset).
+    /// cease and this method returns an error with [`LightError::is_powered_down()`]
+    /// until the sensor is re-awakened via [`set_mode()`](Self::set_mode) or
+    /// [`reset()`](Self::reset). In `OneShot*` modes (while not explicitly powered down),
+    /// each call automatically issues `CMD_POWER_ON` and the one-shot trigger opcode
+    /// before reading the converted word.
     ///
     /// # Errors
-    /// Returns [`LightError`] if I2C bus communication fails or returns invalid data.
+    /// Returns [`LightError`] if the sensor is powered down or I2C communication fails.
     ///
     /// # Panics
     /// Panics if an internal mutex lock is poisoned.
@@ -1093,11 +1122,13 @@ const _: () = {
     assert_send_sync::<LightSensor>();
     assert_send_sync::<LightSensorMock>();
 
-    // Compile-time invariant proof: MAX_LUX * 1000 fits in u32 for millilux
+    // Compile-time invariant proofs:
+    // Note: primitive `as` casts (`u32::MAX as u128`, `u16::MAX as f32`) are required here
+    // because `From::from` trait methods cannot be invoked inside a `const` block in stable Rust.
     #[expect(
         clippy::cast_sign_loss,
         clippy::cast_possible_truncation,
-        reason = "compile-time constant invariant proof"
+        reason = "compile-time constant invariant proof; From::from is not const fn"
     )]
     let max_mlx = (Illuminance::MAX_LUX * 1000.0) as u128;
     assert!(max_mlx <= u32::MAX as u128);
@@ -1137,10 +1168,36 @@ mod tests {
     fn i2c_address_validates_known_addresses() {
         assert_eq!(I2cAddress::new(0x23).unwrap().as_u8(), 0x23);
         assert_eq!(I2cAddress::new(0x5C).unwrap().as_u8(), 0x5C);
+        assert_eq!(I2cAddress::try_from(0x23).unwrap().as_u8(), 0x23);
+        assert_eq!(I2cAddress::try_from(0x5C).unwrap().as_u8(), 0x5C);
+        assert!(I2cAddress::try_from(0x42).unwrap_err().is_invalid_address());
         assert!(I2cAddress::new(0x00).unwrap_err().is_invalid_address());
         assert!(I2cAddress::new(0x20).unwrap_err().is_invalid_address());
         assert!(I2cAddress::new(0x77).unwrap_err().is_invalid_address());
         assert!(I2cAddress::new(0x80).unwrap_err().is_invalid_address());
+
+        assert_eq!(I2cAddress::parse_hex("0x23").unwrap().as_u8(), 0x23);
+        assert_eq!(I2cAddress::parse_hex(" 0X5C ").unwrap().as_u8(), 0x5C);
+        assert_eq!(I2cAddress::parse_hex("23").unwrap().as_u8(), 0x23);
+        assert!(
+            I2cAddress::parse_hex("+0x23")
+                .unwrap_err()
+                .contains("sign characters are not allowed")
+        );
+        assert!(
+            I2cAddress::parse_hex("-0x23")
+                .unwrap_err()
+                .contains("sign characters are not allowed")
+        );
+        assert!(
+            I2cAddress::parse_hex("not-hex")
+                .unwrap_err()
+                .contains("invalid hex address")
+        );
+        assert_eq!(
+            I2cAddress::parse_hex("0x77").unwrap_err(),
+            "invalid BH1750 I2C address '0x77' (expected 0x23 or 0x5C)"
+        );
     }
 
     #[test]
