@@ -67,13 +67,13 @@ Before designing types, writing modules, implementing error handling, or writing
    * **Enforce Parsing & Backtrace-Free Machine Summaries at the Domain Boundary (`M-STRONG-TYPES-GUARD`):** Implement both programmatic constructors (`SensorId::parse`, `I2cAddress::new`, `TryFrom`) and soft user-facing string parsers (`SensorId::parse_str`, `I2cAddress::parse_hex` returning `Result<Self, String>`) sharing a zero-allocation validator on the domain type in `hardware::*`, rejecting signed inputs (`+`, `-`) both before and after any `0x`/`0X` prefix. Expose a single-line `err.summary()` method on canonical errors (`LightError`, `TempError`) via `impl_canonical_error_display!` for `NDJSON` telemetry so `RUST_BACKTRACE=1` never injects multi-line stack traces into machine streams.
    * **Minimal Surface Area & Host-Testable State Machines (`HwState`):** Encapsulate driver state transitions and settle-time calculations on `HwState` (`prepare_read`, `record_power_down`, `record_wake_or_reset`, `record_mode_change`) so they are unit-testable on any host. Prefer `#[derive(Copy)]` on small value-type option structs, bare `?` error propagation via `From`, `Duration::checked_sub` for settle calculations, and struct-update syntax (`..CliOptions::default()`) in tests.
    * **Upfront Datasheet & Concurrency Checklist for `hardware::*`:**
-     1. Use datasheet **maximum** conversion times (`max_measurement_time()`), never typical times, when sleeping on conversions.
-     2. Track mode/reset transitions (`last_transition: Instant`) and explicit sleep state (`powered: bool`) inside `Mutex<HwState>` under `op_lock` so callers never have to guess settle times and reads while powered down return a typed `is_powered_down()` error. Document how `OneShot*` auto-power-down differs from explicit `power_down()`.
-     3. Precede mode opcodes with `CMD_POWER_ON` when waking from `power_down`.
-     4. Serialize all bus transactions (`power_down`, `reset`, `set_mode`, `read_lux`) inside a single `Mutex<HardwareDevice>` wrapping the `embedded-hal` driver; do not nest redundant per-bus mutexes (`Mutex<I2c>` inside `op_lock`).
+     1. Use datasheet **maximum** conversion times (180 ms), never typical times, when calculating settle delays.
+     2. Standardize on Continuous High-Resolution Mode for ambient lighting and display brightness; avoid speculative one-shot or alternate-resolution modes that introduce state-machine races and settle complexity.
+     3. Track reset/transition times (`last_transition: Instant`) and explicit sleep state (`powered: bool`) inside `HwState` so callers never have to guess settle times and reads while powered down return a typed `is_powered_down()` error.
+     4. Serialize all bus transactions (`power_down`, `reset`, `read_lux`) inside a single `Mutex<HardwareDevice>` wrapping the `embedded-hal` driver; do not nest redundant per-bus mutexes.
      5. Assert that bus numbers passed to platform-specific pinout constructors (`I2cHardwareInfo::rpi3_with_bus_and_address`) match the physical hardware controller modeled.
-     6. Re-arm continuous mode conversions on reset per datasheet when resetting while in continuous mode.
-     7. Mutate internal driver state (`HwState: powered, mode, last_transition`) strictly **after** all fallible bus transactions succeed.
+     6. Re-arm continuous mode conversions on reset per datasheet so readings do not stall.
+     7. Mutate internal driver state (`HwState: powered, last_transition`) strictly **after** all fallible bus transactions succeed.
 
 ---
 
