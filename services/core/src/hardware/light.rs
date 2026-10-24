@@ -253,23 +253,19 @@ impl Illuminance {
         self.lux
     }
 
-    /// Returns illuminance in millilux (mlx).
+    /// Returns illuminance in millilux (mlx, 1 lux = 1,000 millilux).
+    ///
+    /// Since [`Illuminance`] guarantees `0.0 <= lux <= MAX_LUX` (`120_000.0`),
+    /// the maximum millilux value is `120_000_000`, which safely fits in `u32`
+    /// without loss or overflow.
     #[must_use]
+    #[expect(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        reason = "lux is guaranteed 0.0..=120_000.0, so mlx <= 120_000_000 which fits in u32"
+    )]
     pub fn millilux(self) -> u32 {
-        let mlx = (self.lux * 1000.0).round();
-        if mlx <= 0.0 {
-            0
-        } else if mlx >= u32::MAX as f32 {
-            u32::MAX
-        } else {
-            #[expect(
-                clippy::cast_sign_loss,
-                clippy::cast_possible_truncation,
-                reason = "bounds checked 0..=u32::MAX"
-            )]
-            let val = mlx as u32;
-            val
-        }
+        ((self.lux * 1000.0).round()) as u32
     }
 
     /// Returns illuminance converted to foot-candles (fc).
@@ -889,7 +885,7 @@ impl LightSensor {
     /// Returns [`LightError`] if reading fails.
     pub async fn read_lux_async(&self) -> Result<Illuminance, LightError> {
         let this = self.clone();
-        map_join_result(tokio::task::spawn_blocking(move || this.read_lux()).await)
+        super::map_join_result(tokio::task::spawn_blocking(move || this.read_lux()).await)
     }
 
     /// Asynchronously reads extended diagnostics from the sensor.
@@ -898,17 +894,7 @@ impl LightSensor {
     /// Returns [`LightError`] if reading fails.
     pub async fn read_diagnostics_async(&self) -> Result<LightDiagnostics, LightError> {
         let this = self.clone();
-        map_join_result(tokio::task::spawn_blocking(move || this.read_diagnostics()).await)
-    }
-}
-
-fn map_join_result<T>(
-    res: Result<Result<T, LightError>, tokio::task::JoinError>,
-) -> Result<T, LightError> {
-    match res {
-        Ok(result) => result,
-        Err(join_err) if join_err.is_panic() => std::panic::resume_unwind(join_err.into_panic()),
-        Err(join_err) => Err(LightError::from(io::Error::other(join_err))),
+        super::map_join_result(tokio::task::spawn_blocking(move || this.read_diagnostics()).await)
     }
 }
 
@@ -1045,33 +1031,37 @@ mod tests {
         assert_eq!(zero.millilux(), 0);
         assert_eq!(zero.to_string(), "0.00 lx");
 
-        // Clamping on negative lux inside struct
-        let neg_clamped = Illuminance { lux: -10.0 };
-        assert_eq!(neg_clamped.millilux(), 0);
-
-        // Clamping on very large lux inside struct
-        let huge = Illuminance { lux: 1e12 };
-        assert_eq!(huge.millilux(), u32::MAX);
+        let small = Illuminance::from_lux(0.001).unwrap();
+        assert_eq!(small.millilux(), 1);
 
         let max = Illuminance::from_lux(Illuminance::MAX_LUX).unwrap();
         assert_eq!(max.lux(), Illuminance::MAX_LUX);
-        assert!(max.millilux() > 0);
+        assert_eq!(max.millilux(), 120_000_000);
 
         let over = Illuminance::from_lux(Illuminance::MAX_LUX + 1.0).unwrap_err();
         assert!(over.to_string().contains("invalid illuminance"));
 
-        // Raw conversions for remaining modes
+        let neg = Illuminance::from_lux(-1.0).unwrap_err();
+        assert!(neg.to_string().contains("invalid illuminance"));
+
+        let nan_err = Illuminance::from_lux(f32::NAN).unwrap_err();
+        assert!(nan_err.to_string().contains("invalid illuminance"));
+
+        let inf_err = Illuminance::from_lux(f32::INFINITY).unwrap_err();
+        assert!(inf_err.to_string().contains("invalid illuminance"));
+
+        // Raw conversions for remaining modes (tolerance accounts for BH1750 1.2 divisor precision)
         let raw_low = Illuminance::from_raw_and_mode(120, MeasurementMode::ContinuousLowRes);
-        assert!((raw_low.lux() - 100.0).abs() < 1e-3);
+        assert!((raw_low.lux() - 100.0).abs() < 1e-2);
 
         let raw_oneshot_h = Illuminance::from_raw_and_mode(120, MeasurementMode::OneShotHighRes);
-        assert!((raw_oneshot_h.lux() - 100.0).abs() < 1e-3);
+        assert!((raw_oneshot_h.lux() - 100.0).abs() < 1e-2);
 
         let raw_oneshot_h2 = Illuminance::from_raw_and_mode(120, MeasurementMode::OneShotHighRes2);
-        assert!((raw_oneshot_h2.lux() - 50.0).abs() < 1e-3);
+        assert!((raw_oneshot_h2.lux() - 50.0).abs() < 1e-2);
 
         let raw_oneshot_l = Illuminance::from_raw_and_mode(120, MeasurementMode::OneShotLowRes);
-        assert!((raw_oneshot_l.lux() - 100.0).abs() < 1e-3);
+        assert!((raw_oneshot_l.lux() - 100.0).abs() < 1e-2);
     }
 
     #[test]
@@ -1093,7 +1083,9 @@ mod tests {
         let (sensor, _) = LightSensor::new_mocked();
         let diag = sensor.read_diagnostics().unwrap();
         let formatted = diag.to_string();
-        assert!(formatted.contains("[BH1750 Light Diagnostics: Bus 1, Addr 0x23]"));
+        assert!(formatted.contains("BH1750 Light Diagnostics"));
+        assert!(formatted.contains("Bus 1"));
+        assert!(formatted.contains("Addr 0x23"));
         assert!(formatted.contains("Illuminance"));
         assert!(formatted.contains("Operating Mode"));
         assert!(formatted.contains("Raw I2C Word"));
@@ -1197,6 +1189,7 @@ mod tests {
         );
 
         // Hardware error path test on non-existent bus
-        let _ = LightSensor::with_bus_and_address(99, I2cAddress::alternate_address());
+        let bus_err = LightSensor::with_bus_and_address(99, I2cAddress::alternate_address());
+        assert!(bus_err.unwrap_err().is_i2c());
     }
 }

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use crate::hardware::{BcmPin, GpioPinInfo, PhysicalPin};
+use crate::hardware::{BcmPin, GpioPinInfo, PhysicalPin, map_join_result};
 
 /// BCM GPIO pin assigned to the DS18B20 1-Wire data line (`BCM GPIO 26`).
 pub const DS18B20_BCM_GPIO_PIN: BcmPin = BcmPin::new(26);
@@ -1016,16 +1016,6 @@ impl TempSensor {
     pub async fn read_primary_temperature_async(&self) -> Result<Temperature, TempError> {
         let this = self.clone();
         map_join_result(tokio::task::spawn_blocking(move || this.read_primary_temperature()).await)
-    }
-}
-
-fn map_join_result<T>(
-    res: Result<Result<T, TempError>, tokio::task::JoinError>,
-) -> Result<T, TempError> {
-    match res {
-        Ok(result) => result,
-        Err(join_err) if join_err.is_panic() => std::panic::resume_unwind(join_err.into_panic()),
-        Err(join_err) => Err(TempError::from(io::Error::other(join_err))),
     }
 }
 

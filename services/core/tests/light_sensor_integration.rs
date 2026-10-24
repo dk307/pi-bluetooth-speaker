@@ -11,7 +11,7 @@ fn address_validation_and_hardware_metadata() {
     let hw = sensor.hardware_info();
 
     assert_eq!(addr.as_u8(), 0x23);
-    assert_eq!(addr.as_u16(), 0x23);
+    assert_eq!(addr.as_u16(), 0x0023);
     assert_eq!(hw.bus, 1);
     assert_eq!(hw.address.as_u8(), 0x23);
     assert_eq!(hw.sda_pin.bcm_pin.as_u8(), 2);
