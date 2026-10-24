@@ -128,7 +128,7 @@ impl Temperature {
     /// Returns the temperature in degrees Fahrenheit (`°F`).
     #[must_use]
     pub fn fahrenheit(self) -> f32 {
-        (self.celsius() * 9.0 / 5.0) + 32.0
+        crate::diag::fahrenheit(self.celsius())
     }
 }
 
@@ -149,7 +149,7 @@ impl Display for Temperature {
 /// Validated 1-Wire DS18B20 device identifier (family code `28-*`).
 ///
 /// Guards the invariant that the sensor ID begins with `"28-"` followed by a
-/// non-empty ASCII alphanumeric serial identifier.
+/// non-empty ASCII hexadecimal serial identifier.
 ///
 /// # Examples
 /// ```
@@ -163,6 +163,26 @@ impl Display for Temperature {
 pub struct SensorId(Box<str>);
 
 impl SensorId {
+    /// Parses a DS18B20 sensor ID from user-supplied CLI input without capturing a backtrace.
+    ///
+    /// # Errors
+    /// Returns a descriptive user-facing error message if `id` does not begin with `"28-"`
+    /// followed by non-empty ASCII hexadecimal digits.
+    pub fn parse_str(id: &str) -> Result<Self, String> {
+        let raw = id.trim();
+        let Some(suffix) = raw.strip_prefix(DS18B20_FAMILY_PREFIX) else {
+            return Err(format!(
+                "invalid DS18B20 sensor ID '{raw}': expected '28-<hex>' family prefix"
+            ));
+        };
+        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!(
+                "invalid DS18B20 sensor ID '{raw}': expected '28-<hex>' family prefix"
+            ));
+        }
+        Ok(Self(raw.into()))
+    }
+
     /// Validates and constructs a `SensorId` from a string slice.
     ///
     /// # Errors
@@ -170,17 +190,8 @@ impl SensorId {
     /// not begin with `"28-"` or has an empty or non-hexadecimal serial suffix.
     pub fn parse(id: impl AsRef<str>) -> Result<Self, TempError> {
         let raw = id.as_ref().trim();
-        let Some(suffix) = raw.strip_prefix(DS18B20_FAMILY_PREFIX) else {
-            return Err(TempError::new(ErrorKind::InvalidSensorId {
-                value: raw.into(),
-            }));
-        };
-        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(TempError::new(ErrorKind::InvalidSensorId {
-                value: raw.into(),
-            }));
-        }
-        Ok(Self(raw.into()))
+        Self::parse_str(raw)
+            .map_err(|_err| TempError::new(ErrorKind::InvalidSensorId { value: raw.into() }))
     }
 
     /// Returns the sensor identifier as a string slice.

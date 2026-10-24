@@ -36,13 +36,8 @@ def verify_js_syntax(path: str) -> None:
         sys.exit(1)
 
 
-def main() -> None:
-    workspace = os.environ.get("GITHUB_WORKSPACE", ".")
-    search_roots = [
-        "/home/runner/work/_actions",
-        os.path.abspath(os.path.join(workspace, "..", "..", "_actions")),
-        os.path.abspath(os.path.join(workspace, "..", "_actions")),
-    ]
+def patch_bundle_in_roots(search_roots: list[str]) -> None:
+    """Searches `search_roots` for DiffGuard's `dist/index.js` and applies the file-prompt patch."""
     found = False
     for root in search_roots:
         if not os.path.exists(root):
@@ -102,6 +97,16 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+
+def main() -> None:
+    workspace = os.environ.get("GITHUB_WORKSPACE", ".")
+    search_roots = [
+        "/home/runner/work/_actions",
+        os.path.abspath(os.path.join(workspace, "..", "..", "_actions")),
+        os.path.abspath(os.path.join(workspace, "..", "_actions")),
+    ]
+    patch_bundle_in_roots(search_roots)
 
 
 if __name__ == "__main__":

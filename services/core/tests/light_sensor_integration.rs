@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use speaker_core::hardware::{I2cAddress, LUX_TO_FOOT_CANDLES, LightSensor, MeasurementMode};
+use speaker_core::hardware::{
+    I2cAddress, Illuminance, LUX_TO_FOOT_CANDLES, LightSensor, MeasurementMode,
+};
 
 #[test]
 fn address_validation_and_hardware_metadata() {
@@ -12,10 +14,22 @@ fn address_validation_and_hardware_metadata() {
 
     assert_eq!(addr.as_u8(), 0x23);
     assert_eq!(addr.as_u16(), 0x0023);
+    assert_eq!(I2cAddress::parse_hex("0x5C").unwrap().as_u8(), 0x5C);
+    assert!(
+        I2cAddress::parse_hex("+0x23")
+            .unwrap_err()
+            .contains("sign characters")
+    );
     assert_eq!(hw.bus, 1);
     assert_eq!(hw.address.as_u8(), 0x23);
     assert_eq!(hw.sda_pin.bcm_pin.as_u8(), 2);
     assert_eq!(hw.scl_pin.bcm_pin.as_u8(), 3);
+
+    let illum = Illuminance::from_lux(250.0).unwrap();
+    assert_eq!(illum.millilux(), 250_000);
+    assert!(
+        (Illuminance::lux_to_foot_candles(250.0) - f64::from(illum.foot_candles())).abs() < 1e-4
+    );
 }
 
 #[tokio::test]

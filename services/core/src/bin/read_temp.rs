@@ -11,8 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use speaker_core::diag::{
-    NumericStats, OutputFormat, env_args, exit_code_for_reads, format_timestamp, next_arg_value,
-    parse_count_arg, parse_interval_arg, program_name, should_print_summary,
+    NumericStats, OutputFormat, env_args, exit_code_for_reads, fahrenheit, format_timestamp,
+    next_arg_value, parse_count_arg, parse_interval_arg, resolve_cli_opts, should_print_summary,
 };
 use speaker_core::hardware::{
     SensorDiagnostics, SensorId, SocThermal, TempError, TempSensor, Temperature,
@@ -93,9 +93,7 @@ where
             "-i" | "--interval" => opts.interval = parse_interval_arg(args.next())?,
             "-d" | "--device" => {
                 let val = next_arg_value(&mut args, "--device")?;
-                let sensor_id =
-                    SensorId::parse(&val).map_err(|e| format!("invalid sensor ID '{val}': {e}"))?;
-                opts.target_sensor = Some(sensor_id);
+                opts.target_sensor = Some(SensorId::parse_str(&val)?);
             }
             unknown => return Err(format!("unknown option '{unknown}', use --help for usage")),
         }
@@ -179,10 +177,8 @@ fn print_session_summary(stats: &Statistics) {
         );
     }
     if let (Some(min_c), Some(max_c), Some(avg)) = (s.min(), s.max(), s.average()) {
-        let min_f = min_c * 1.8 + 32.0;
-        let max_f = max_c * 1.8 + 32.0;
-        println!("Chassis Min : {min_c:.2}°C ({min_f:.2}°F)");
-        println!("Chassis Max : {max_c:.2}°C ({max_f:.2}°F)");
+        println!("Chassis Min : {min_c:.2}°C ({:.2}°F)", fahrenheit(min_c));
+        println!("Chassis Max : {max_c:.2}°C ({:.2}°F)", fahrenheit(max_c));
         println!("Chassis Avg : {avg:.2}°C");
     }
 }
@@ -212,7 +208,7 @@ fn output_json_reading(
     );
 }
 
-fn output_json_error(timestamp: &str, sensor_id: Option<&SensorId>, err: &dyn std::fmt::Display) {
+fn output_json_error(timestamp: &str, sensor_id: Option<&SensorId>, err: impl std::fmt::Display) {
     println!(
         "{}",
         serde_json::json!({
@@ -366,20 +362,10 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let opts = match parse_cli_args() {
-        Ok(Some(o)) => o,
-        Ok(None) => {
-            print_usage(&program_name("read_temp"));
-            return ExitCode::SUCCESS;
-        }
-        Err(err) => {
-            eprintln!("Error: {err}\nRun with --help for usage information.");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let sensor = TempSensor::new();
-    run_app(&sensor, &opts)
+    match resolve_cli_opts(parse_cli_args(), "read_temp", print_usage) {
+        Ok(opts) => run_app(&TempSensor::new(), &opts),
+        Err(code) => code,
+    }
 }
 
 #[cfg(test)]
@@ -587,12 +573,23 @@ mod tests {
         );
 
         // Errors
-        let _ = parse_cli_args_from(["--count".into()]).unwrap_err();
-        let _ = parse_cli_args_from(["--count".into(), "abc".into()]).unwrap_err();
-        let _ = parse_cli_args_from(["--interval".into()]).unwrap_err();
-        let _ = parse_cli_args_from(["--interval".into(), "0".into()]).unwrap_err();
-        let _ = parse_cli_args_from(["--device".into()]).unwrap_err();
-        let _ = parse_cli_args_from(["--device".into(), "bad-id".into()]).unwrap_err();
-        let _ = parse_cli_args_from(["--unknown".into()]).unwrap_err();
+        for (bad_args, expected_msg) in [
+            (&["--count"][..], "missing value for --count"),
+            (&["--count", "abc"][..], "invalid count"),
+            (&["--interval"][..], "missing value for --interval"),
+            (
+                &["--interval", "0"][..],
+                "interval must be a finite value greater than 0",
+            ),
+            (&["--device"][..], "missing value for --device"),
+            (&["--device", "bad-id"][..], "invalid DS18B20 sensor ID"),
+            (&["--unknown"][..], "unknown option '--unknown'"),
+        ] {
+            let err = parse_cli_args_from(bad_args.iter().map(|s| (*s).to_string())).unwrap_err();
+            assert!(
+                err.contains(expected_msg),
+                "expected '{expected_msg}' in '{err}'"
+            );
+        }
     }
 }

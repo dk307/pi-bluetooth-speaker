@@ -36,6 +36,9 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Run CI Script Unit Tests
+        run: python3 -m unittest discover -s .github/scripts -p "test_*.py" -v
+
       - name: Build custom review prompt from guidelines
         id: build-prompt
         run: python3 .github/scripts/generate_review_prompt.py

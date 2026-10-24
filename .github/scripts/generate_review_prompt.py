@@ -32,17 +32,27 @@ def load_file(path: Path) -> str:
 
 
 def iter_fence_tracked_lines(md: str) -> Iterator[tuple[bool, bool, str]]:
-    """Yields (is_fence_delimiter, is_inside_fence, line) while validating balanced fences."""
+    """Yields (is_fence_delimiter, is_inside_fence, line) while validating balanced fences.
+
+    Per CommonMark §4.5, a closing code fence may only contain the fence marker and
+    optional trailing whitespace; lines with info strings (e.g., ```rust) inside an
+    already-open fence are preserved as code content rather than closing the fence.
+    """
     current_fence: str | None = None
     for line in md.splitlines(keepends=True):
         m = FENCE_RE.match(line)
         if m:
             marker = m.group(1)
+            trailing = line[m.end() :].strip()
             if current_fence is None:
                 current_fence = marker
                 yield True, True, line
                 continue
-            if marker[0] == current_fence[0] and len(marker) >= len(current_fence):
+            if (
+                marker[0] == current_fence[0]
+                and len(marker) >= len(current_fence)
+                and trailing == ""
+            ):
                 current_fence = None
                 yield True, False, line
                 continue

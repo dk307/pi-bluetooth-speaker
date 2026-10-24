@@ -11,11 +11,10 @@ use std::time::{Duration, Instant};
 
 use speaker_core::diag::{
     NumericStats, OutputFormat, env_args, exit_code_for_reads, format_timestamp, next_arg_value,
-    parse_count_arg, parse_interval_arg, program_name, should_print_summary,
+    parse_count_arg, parse_interval_arg, resolve_cli_opts, round_2dp, should_print_summary,
 };
 use speaker_core::hardware::{
-    BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance, LUX_TO_FOOT_CANDLES, LightSensor,
-    MeasurementMode,
+    BH1750_DEFAULT_I2C_BUS, I2cAddress, Illuminance, LightSensor, MeasurementMode,
 };
 
 /// Default polling interval between light measurements.
@@ -68,16 +67,19 @@ fn print_usage(bin_name: &str) {
     println!("  -h, --help               Display this help text");
 }
 
-const MODE_ALIASES: &[(&str, MeasurementMode)] = &[
-    ("high-res", MeasurementMode::ContinuousHighRes),
+const CONTINUOUS_MODES: [MeasurementMode; 3] = [
+    MeasurementMode::ContinuousHighRes,
+    MeasurementMode::ContinuousHighRes2,
+    MeasurementMode::ContinuousLowRes,
+];
+
+const MODE_SHORT_ALIASES: &[(&str, MeasurementMode)] = &[
     ("highres", MeasurementMode::ContinuousHighRes),
     ("h-res", MeasurementMode::ContinuousHighRes),
     ("h1", MeasurementMode::ContinuousHighRes),
-    ("high-res2", MeasurementMode::ContinuousHighRes2),
     ("highres2", MeasurementMode::ContinuousHighRes2),
     ("h-res2", MeasurementMode::ContinuousHighRes2),
     ("h2", MeasurementMode::ContinuousHighRes2),
-    ("low-res", MeasurementMode::ContinuousLowRes),
     ("lowres", MeasurementMode::ContinuousLowRes),
     ("l-res", MeasurementMode::ContinuousLowRes),
     ("low", MeasurementMode::ContinuousLowRes),
@@ -85,9 +87,14 @@ const MODE_ALIASES: &[(&str, MeasurementMode)] = &[
 
 fn parse_mode(s: &str) -> Result<MeasurementMode, String> {
     let lower = s.to_ascii_lowercase();
-    MODE_ALIASES
-        .iter()
-        .find_map(|(alias, mode)| (*alias == lower).then_some(*mode))
+    CONTINUOUS_MODES
+        .into_iter()
+        .find(|m| m.slug() == lower)
+        .or_else(|| {
+            MODE_SHORT_ALIASES
+                .iter()
+                .find_map(|(alias, mode)| (*alias == lower).then_some(*mode))
+        })
         .ok_or_else(|| format!("invalid mode '{lower}'. Supported: high-res, high-res2, low-res"))
 }
 
@@ -151,10 +158,6 @@ fn print_diagnostic_registers(sensor: &LightSensor) {
     println!("--------------------------------------------------");
 }
 
-fn to_fc(lux: f64) -> f64 {
-    lux * f64::from(LUX_TO_FOOT_CANDLES)
-}
-
 fn print_session_summary(stats: &NumericStats) {
     println!("\n--- Light Diagnostic Session Summary ---");
     println!("Total reads : {}", stats.total_reads());
@@ -169,13 +172,16 @@ fn print_session_summary(stats: &NumericStats) {
     if let (Some(min), Some(max), Some(avg)) = (stats.min(), stats.max(), stats.average()) {
         println!(
             "Min Light   : {min:7.2} lx ({:6.2} fc)",
-            to_fc(f64::from(min))
+            Illuminance::lux_to_foot_candles(f64::from(min))
         );
         println!(
             "Max Light   : {max:7.2} lx ({:6.2} fc)",
-            to_fc(f64::from(max))
+            Illuminance::lux_to_foot_candles(f64::from(max))
         );
-        println!("Avg Light   : {avg:7.2} lx ({:6.2} fc)", to_fc(avg));
+        println!(
+            "Avg Light   : {avg:7.2} lx ({:6.2} fc)",
+            Illuminance::lux_to_foot_candles(avg)
+        );
     }
 }
 
@@ -185,18 +191,15 @@ fn output_json_reading(
     illum: Illuminance,
     mode: MeasurementMode,
 ) {
-    let lux_val = (f64::from(illum.lux()) * 100.0).round() / 100.0;
-    let fc_val = (f64::from(illum.foot_candles()) * 100.0).round() / 100.0;
-
     let obj = serde_json::json!({
         "timestamp": timestamp,
         "i2c_bus": sensor.i2c_bus(),
         "i2c_address": sensor.i2c_address().to_string(),
         "mode": mode.slug(),
         "illuminance": {
-            "lux": lux_val,
+            "lux": round_2dp(illum.lux()),
             "millilux": illum.millilux(),
-            "foot_candles": fc_val,
+            "foot_candles": round_2dp(illum.foot_candles()),
         }
     });
     println!("{obj}");
@@ -207,7 +210,7 @@ fn output_json_error(
     bus: u8,
     address: I2cAddress,
     mode: MeasurementMode,
-    err: &dyn std::fmt::Display,
+    err: impl std::fmt::Display,
 ) {
     println!(
         "{}",
@@ -319,16 +322,9 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let opts = match parse_cli_args() {
-        Ok(Some(o)) => o,
-        Ok(None) => {
-            print_usage(&program_name("read_light"));
-            return ExitCode::SUCCESS;
-        }
-        Err(err) => {
-            eprintln!("Error: {err}\nRun with --help for usage information.");
-            return ExitCode::FAILURE;
-        }
+    let opts = match resolve_cli_opts(parse_cli_args(), "read_light", print_usage) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
 
     let sensor = match LightSensor::with_bus_and_address(BH1750_DEFAULT_I2C_BUS, opts.address) {
@@ -544,13 +540,24 @@ mod tests {
         assert_eq!(opts.address, I2cAddress::alternate_address());
 
         // Errors
-        let _ = parse_cli_args_from(["--count".into()]).unwrap_err();
-        let _ = parse_cli_args_from(["--count".into(), "abc".into()]).unwrap_err();
-        let _ = parse_cli_args_from(["--interval".into()]).unwrap_err();
-        let _ = parse_cli_args_from(["--interval".into(), "0".into()]).unwrap_err();
-        let _ = parse_cli_args_from(["--interval".into(), "bad".into()]).unwrap_err();
-        let _ = parse_cli_args_from(["--mode".into()]).unwrap_err();
-        let _ = parse_cli_args_from(["--address".into()]).unwrap_err();
-        let _ = parse_cli_args_from(["--unknown".into()]).unwrap_err();
+        for (bad_args, expected_msg) in [
+            (&["--count"][..], "missing value for --count"),
+            (&["--count", "abc"][..], "invalid count"),
+            (&["--interval"][..], "missing value for --interval"),
+            (
+                &["--interval", "0"][..],
+                "interval must be a finite value greater than 0",
+            ),
+            (&["--interval", "bad"][..], "invalid interval"),
+            (&["--mode"][..], "missing value for --mode"),
+            (&["--address"][..], "missing value for --address"),
+            (&["--unknown"][..], "unknown option '--unknown'"),
+        ] {
+            let err = parse_cli_args_from(bad_args.iter().map(|s| (*s).to_string())).unwrap_err();
+            assert!(
+                err.contains(expected_msg),
+                "expected '{expected_msg}' in '{err}'"
+            );
+        }
     }
 }

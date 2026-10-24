@@ -199,12 +199,16 @@ impl I2cAddress {
         Self(BH1750_ALT_I2C_ADDR)
     }
 
+    const fn is_valid(addr: u8) -> bool {
+        addr == BH1750_DEFAULT_I2C_ADDR || addr == BH1750_ALT_I2C_ADDR
+    }
+
     /// Creates an [`I2cAddress`] validating that the address matches BH1750 hardware specs.
     ///
     /// # Errors
     /// Returns [`LightError`] if `addr` is neither `0x23` nor `0x5C`.
     pub fn new(addr: u8) -> Result<Self, LightError> {
-        if addr == BH1750_DEFAULT_I2C_ADDR || addr == BH1750_ALT_I2C_ADDR {
+        if Self::is_valid(addr) {
             Ok(Self(addr))
         } else {
             Err(LightError::invalid_address(addr))
@@ -213,7 +217,8 @@ impl I2cAddress {
 
     /// Parses a hexadecimal string (`0x23`, `0X5C`, `23`) into a validated [`I2cAddress`].
     ///
-    /// Rejects leading `+` or `-` signs as non-standard in hardware address specifications.
+    /// Rejects leading `+` or `-` signs as non-standard in hardware address specifications,
+    /// returning a soft user-facing error message without capturing a stack backtrace.
     ///
     /// # Errors
     /// Returns a descriptive user-facing error message if `s` is signed, non-hexadecimal,
@@ -231,11 +236,13 @@ impl I2cAddress {
             .unwrap_or(clean);
         let addr =
             u8::from_str_radix(clean, 16).map_err(|e| format!("invalid hex address '{s}': {e}"))?;
-        Self::new(addr).map_err(|_err| {
-            format!(
+        if Self::is_valid(addr) {
+            Ok(Self(addr))
+        } else {
+            Err(format!(
                 "invalid BH1750 I2C address '{s}' (expected 0x{BH1750_DEFAULT_I2C_ADDR:02X} or 0x{BH1750_ALT_I2C_ADDR:02X})"
-            )
-        })
+            ))
+        }
     }
 
     /// Returns the raw 7-bit slave address as `u8`.
@@ -351,6 +358,12 @@ impl Illuminance {
     #[must_use]
     pub fn foot_candles(self) -> f32 {
         self.lux * LUX_TO_FOOT_CANDLES
+    }
+
+    /// Converts a lux value (`f64`) to foot-candles (`lux * LUX_TO_FOOT_CANDLES`).
+    #[must_use]
+    pub fn lux_to_foot_candles(lux: f64) -> f64 {
+        lux * f64::from(LUX_TO_FOOT_CANDLES)
     }
 }
 
@@ -697,11 +710,14 @@ impl LightSensorMock {
     /// are saturated to `u16::MAX` when encoded into the raw register.
     ///
     /// # Panics
-    /// Panics if `lux` is not finite (`NaN` or infinite), or if the mock state lock is poisoned.
+    /// Panics if `lux` is negative or not finite (`NaN` or infinite), or if the mock state lock is poisoned.
     pub fn set_lux(&self, lux: f32) {
-        assert!(lux.is_finite(), "mock lux must be finite, got {lux}");
+        assert!(
+            lux.is_finite() && lux >= 0.0,
+            "mock lux must be finite and non-negative, got {lux}"
+        );
         let mut state = self.state.write().expect("mock lock poisoned");
-        state.source = SimSource::Lux(lux.clamp(0.0, Illuminance::MAX_LUX));
+        state.source = SimSource::Lux(lux.min(Illuminance::MAX_LUX));
     }
 
     /// Sets the raw 16-bit register word directly.
@@ -816,6 +832,12 @@ struct HwState {
     last_transition: Instant,
 }
 
+/// Internal I2C / mock backend dispatch for [`LightSensor`].
+///
+/// Coverage note: `Backend::Hardware` interacts directly with the Linux kernel I2C device
+/// (`/dev/i2c-1` via `rppal::i2c::I2c` ioctl syscalls) and is verified on physical
+/// Raspberry Pi 3 hardware (`root@192.168.2.110`), while `Backend::Mock` exercises all
+/// domain invariants, scaling calculations, error predicates, and CLI telemetry on host/CI.
 enum Backend {
     Hardware {
         i2c: Mutex<I2c>,
@@ -1230,10 +1252,17 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "mock lux must be finite")]
+    #[should_panic(expected = "mock lux must be finite and non-negative")]
     fn mock_set_lux_panics_on_nan() {
         let (_, mock) = LightSensor::new_mocked();
         mock.set_lux(f32::NAN);
+    }
+
+    #[test]
+    #[should_panic(expected = "mock lux must be finite and non-negative")]
+    fn mock_set_lux_panics_on_negative() {
+        let (_, mock) = LightSensor::new_mocked();
+        mock.set_lux(-1.0);
     }
 
     #[test]

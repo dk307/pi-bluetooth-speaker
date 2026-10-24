@@ -51,6 +51,41 @@ pub fn program_name(default_name: &str) -> String {
         .map_or_else(|| default_name.into(), |a| a.to_string_lossy().into_owned())
 }
 
+/// Converts degrees Celsius to degrees Fahrenheit (`°C * 9 / 5 + 32`).
+#[must_use]
+pub const fn fahrenheit(celsius: f32) -> f32 {
+    (celsius * 9.0 / 5.0) + 32.0
+}
+
+/// Rounds a `f32` measurement to 2 decimal places as `f64` for JSON telemetry serialization.
+#[must_use]
+pub fn round_2dp(value: f32) -> f64 {
+    (f64::from(value) * 100.0).round() / 100.0
+}
+
+/// Evaluates a CLI option parser result, printing usage on `Ok(None)` or an error on `Err`.
+///
+/// # Errors
+/// Returns `Err(ExitCode::SUCCESS)` when `--help` was requested (`Ok(None)`), or
+/// `Err(ExitCode::FAILURE)` when argument validation failed (`Err(msg)`).
+pub fn resolve_cli_opts<T>(
+    parsed: Result<Option<T>, String>,
+    default_bin_name: &str,
+    print_usage: fn(&str),
+) -> Result<T, ExitCode> {
+    match parsed {
+        Ok(Some(opts)) => Ok(opts),
+        Ok(None) => {
+            print_usage(&program_name(default_bin_name));
+            Err(ExitCode::SUCCESS)
+        }
+        Err(err) => {
+            eprintln!("Error: {err}\nRun with --help for usage information.");
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
 /// Extracts the next argument value for `flag`, or returns a `"missing value for {flag}"` error.
 ///
 /// # Errors
@@ -68,7 +103,7 @@ pub fn next_arg_value(
 /// # Errors
 /// Returns a descriptive user-facing error string if `val` is missing, non-numeric, or `0`.
 pub fn parse_count_arg(val: Option<String>) -> Result<usize, String> {
-    let val = next_arg_value(&mut val.into_iter(), "--count")?;
+    let val = val.ok_or_else(|| "missing value for --count".to_string())?;
     let count = val
         .parse::<usize>()
         .map_err(|e| format!("invalid count '{val}': {e}"))?;
@@ -83,7 +118,7 @@ pub fn parse_count_arg(val: Option<String>) -> Result<usize, String> {
 /// # Errors
 /// Returns a descriptive user-facing error string if `val` is missing, non-numeric, NaN, infinite, or `<= 0`.
 pub fn parse_interval_arg(val: Option<String>) -> Result<Duration, String> {
-    let val = next_arg_value(&mut val.into_iter(), "--interval")?;
+    let val = val.ok_or_else(|| "missing value for --interval".to_string())?;
     let secs = val
         .parse::<f32>()
         .map_err(|e| format!("invalid interval '{val}': {e}"))?;
@@ -131,7 +166,15 @@ pub struct NumericStats {
 
 impl NumericStats {
     /// Records a successful numeric sensor sample.
+    ///
+    /// # Panics
+    /// Panics if `value` is not finite (`NaN` or infinite), preventing silent
+    /// corruption of running averages and bounds.
     pub fn record_success(&mut self, value: f32) {
+        assert!(
+            value.is_finite(),
+            "numeric sample must be finite, got {value}"
+        );
         self.total_reads += 1;
         self.successful_reads += 1;
         self.sum += f64::from(value);
@@ -200,6 +243,11 @@ impl NumericStats {
 }
 
 /// RAII temporary directory that automatically removes itself and its contents on drop.
+///
+/// Exported unconditionally alongside [`TempSensor::new_mocked`](crate::hardware::TempSensor::new_mocked)
+/// and [`LightSensor::new_mocked`](crate::hardware::LightSensor::new_mocked) per the repository
+/// `M-TEST-UTIL` convention so unit tests, binary tests, and integration tests share a single
+/// hermetic filesystem guard without requiring feature flags.
 #[derive(Debug)]
 pub struct ScopedTempDir {
     path: PathBuf,
@@ -279,6 +327,8 @@ mod tests {
 
     #[test]
     fn exit_code_and_arg_helpers() {
+        fn noop_usage(_: &str) {}
+
         assert_eq!(exit_code_for_reads(0, 0), ExitCode::SUCCESS);
         assert_eq!(exit_code_for_reads(3, 1), ExitCode::SUCCESS);
         assert_eq!(exit_code_for_reads(3, 0), ExitCode::FAILURE);
@@ -311,5 +361,44 @@ mod tests {
         assert_eq!(stats.max(), Some(30.0));
         assert!((stats.average().unwrap() - 20.0).abs() < 1e-6);
         assert!((stats.error_rate_percent(1) - (100.0 / 3.0)).abs() < 1e-4);
+
+        assert!((fahrenheit(0.0) - 32.0).abs() < 1e-5);
+        assert!((fahrenheit(100.0) - 212.0).abs() < 1e-4);
+        assert!((round_2dp(12.3456) - 12.35).abs() < 1e-6);
+
+        let mut args = ["val".to_string()].into_iter();
+        assert_eq!(next_arg_value(&mut args, "--flag").unwrap(), "val");
+        assert!(
+            next_arg_value(&mut args, "--flag")
+                .unwrap_err()
+                .contains("missing value for --flag")
+        );
+
+        assert_eq!(
+            resolve_cli_opts(Ok(Some(42)), "bin", noop_usage).unwrap(),
+            42
+        );
+        assert_eq!(
+            resolve_cli_opts::<i32>(Ok(None), "bin", noop_usage).unwrap_err(),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            resolve_cli_opts::<i32>(Err("bad arg".into()), "bin", noop_usage).unwrap_err(),
+            ExitCode::FAILURE
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "numeric sample must be finite")]
+    fn numeric_stats_record_success_panics_on_nan() {
+        let mut stats = NumericStats::default();
+        stats.record_success(f32::NAN);
+    }
+
+    #[test]
+    #[should_panic(expected = "numeric sample must be finite")]
+    fn numeric_stats_record_success_panics_on_infinity() {
+        let mut stats = NumericStats::default();
+        stats.record_success(f32::INFINITY);
     }
 }
