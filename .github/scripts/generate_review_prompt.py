@@ -19,6 +19,7 @@ from pathlib import Path
 # Linux kernel MAX_ARG_STRLEN limit is 128 KB (131,072 bytes).
 # We enforce a safe upper threshold of 120 KB (122,880 bytes).
 MAX_PROMPT_BYTES = 122880
+FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
 
 def load_file(path: Path) -> str:
@@ -26,6 +27,30 @@ def load_file(path: Path) -> str:
     if not path.is_file():
         raise FileNotFoundError(f"Guidelines file not found at: {path}")
     return path.read_text(encoding="utf-8").strip()
+
+
+def split_top_level_sections(md: str) -> list[str]:
+    """Splits markdown into top-level sections (# Title), ignoring headers inside code fences."""
+    lines = md.splitlines(keepends=True)
+    sections = []
+    current_section = []
+    in_fence = False
+
+    for line in lines:
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+            current_section.append(line)
+            continue
+
+        if not in_fence and re.match(r"^# [A-Z]", line) and current_section:
+            sections.append("".join(current_section))
+            current_section = [line]
+        else:
+            current_section.append(line)
+
+    if current_section:
+        sections.append("".join(current_section))
+    return sections
 
 
 def build_review_prompt(repo_root: Path) -> str:
@@ -40,14 +65,13 @@ def build_review_prompt(repo_root: Path) -> str:
 
     # Process guidelines:
     # 1. Filter sections that are irrelevant to native Rust code reviews (e.g. C-FFI Windows DLLs,
-    #    proc-macro development, meta AI-assistant prompt design, and raw clippy comment templates).
-    sections = re.split(r"\n(?=# [A-Z])", raw_guidelines)
+    #    proc-macro crate development, and meta AI-assistant prompt instructions).
+    sections = split_top_level_sections(raw_guidelines)
     kept_sections = []
     excluded_keywords = [
         "AI Guidelines",
         "FFI Guidelines",
         "Macros Guidelines",
-        "Define custom opt outs",
     ]
 
     for section in sections:

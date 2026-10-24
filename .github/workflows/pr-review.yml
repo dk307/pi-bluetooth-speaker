@@ -16,6 +16,7 @@ jobs:
   review:
     name: DiffGuard AI Code Review
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: github.event.pull_request.draft == false
     steps:
       - name: Checkout repository
@@ -36,5 +37,5 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           open_router_key: ${{ secrets.OPENROUTER_API_KEY }}
           model_id: "@preset/code-review"
-          max_tokens: "4096"
+          max_tokens: "8192"
           custom_prompt: ${{ steps.build-prompt.outputs.prompt }}

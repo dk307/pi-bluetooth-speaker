@@ -17,6 +17,9 @@ use speaker_core::hardware::{
 /// Default polling interval between light measurements.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(300);
 
+/// Margin added to the typical integration time to guarantee full measurement conversion.
+const MEASUREMENT_SETTLE_MARGIN: Duration = Duration::from_millis(60);
+
 /// Formats UTC wall-clock time as `HH:MM:SS`.
 fn format_timestamp() -> String {
     let total_secs = SystemTime::now()
@@ -334,6 +337,13 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Allow sensor integration time to produce first valid measurement for the chosen mode
+    thread::sleep(
+        opts.mode
+            .typical_measurement_time()
+            .saturating_add(MEASUREMENT_SETTLE_MARGIN),
+    );
+
     if opts.format == OutputFormat::Human {
         print_header(sensor);
         if opts.flags.verbose {
@@ -368,7 +378,11 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
         print_session_summary(&stats);
     }
 
-    ExitCode::SUCCESS
+    if stats.total_reads > 0 && stats.successful_reads == 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn main() -> ExitCode {
@@ -396,9 +410,6 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-
-    // Allow sensor integration time before initial reading
-    thread::sleep(Duration::from_millis(150));
 
     run_app(&sensor, &opts)
 }

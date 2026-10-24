@@ -417,7 +417,11 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
         print_session_summary(&stats);
     }
 
-    ExitCode::SUCCESS
+    if stats.total_reads > 0 && stats.successful_reads == 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn main() -> ExitCode {

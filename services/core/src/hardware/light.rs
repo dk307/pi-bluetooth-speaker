@@ -387,10 +387,23 @@ impl I2cHardwareInfo {
 /// Categorized failure kinds for ambient light sensor operations.
 #[derive(Debug)]
 pub(crate) enum LightErrorKind {
-    I2c { message: String },
-    InvalidAddress { address: u8 },
-    InvalidIlluminance { message: String },
-    MockFault { message: String },
+    I2c {
+        message: String,
+        source: Option<rppal::i2c::Error>,
+    },
+    Io {
+        message: String,
+        source: io::Error,
+    },
+    InvalidAddress {
+        address: u8,
+    },
+    InvalidIlluminance {
+        message: String,
+    },
+    MockFault {
+        message: String,
+    },
 }
 
 /// Canonical error returned by ambient light sensor drivers and utilities.
@@ -401,10 +414,32 @@ pub struct LightError {
 }
 
 impl LightError {
+    #[cfg(test)]
     pub(crate) fn i2c(message: impl Into<String>) -> Self {
         Self {
             kind: LightErrorKind::I2c {
                 message: message.into(),
+                source: None,
+            },
+            backtrace: Backtrace::capture(),
+        }
+    }
+
+    pub(crate) fn from_i2c_err(err: rppal::i2c::Error) -> Self {
+        Self {
+            kind: LightErrorKind::I2c {
+                message: err.to_string(),
+                source: Some(err),
+            },
+            backtrace: Backtrace::capture(),
+        }
+    }
+
+    pub(crate) fn from_io_err(err: io::Error) -> Self {
+        Self {
+            kind: LightErrorKind::Io {
+                message: err.to_string(),
+                source: err,
             },
             backtrace: Backtrace::capture(),
         }
@@ -438,7 +473,10 @@ impl LightError {
     /// Returns `true` if this error was caused by an I2C communication or bus failure.
     #[must_use]
     pub const fn is_i2c(&self) -> bool {
-        matches!(self.kind, LightErrorKind::I2c { .. })
+        matches!(
+            self.kind,
+            LightErrorKind::I2c { .. } | LightErrorKind::Io { .. }
+        )
     }
 
     /// Returns `true` if this error was caused by an invalid I2C address.
@@ -463,7 +501,8 @@ impl LightError {
 impl Display for LightError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            LightErrorKind::I2c { message } => write!(f, "I2C bus error: {message}"),
+            LightErrorKind::I2c { message, .. } => write!(f, "I2C bus error: {message}"),
+            LightErrorKind::Io { message, .. } => write!(f, "I/O error: {message}"),
             LightErrorKind::InvalidAddress { address } => {
                 write!(
                     f,
@@ -482,17 +521,27 @@ impl Display for LightError {
     }
 }
 
-impl std::error::Error for LightError {}
+impl std::error::Error for LightError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.kind {
+            LightErrorKind::I2c { source, .. } => source
+                .as_ref()
+                .map(|s| s as &(dyn std::error::Error + 'static)),
+            LightErrorKind::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 impl From<io::Error> for LightError {
     fn from(err: io::Error) -> Self {
-        Self::i2c(err.to_string())
+        Self::from_io_err(err)
     }
 }
 
 impl From<rppal::i2c::Error> for LightError {
     fn from(err: rppal::i2c::Error) -> Self {
-        Self::i2c(err.to_string())
+        Self::from_i2c_err(err)
     }
 }
 
@@ -698,10 +747,13 @@ impl LightSensor {
     ///
     /// # Errors
     /// Returns [`LightError`] if writing the command opcode fails.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
     pub fn power_down(&self) -> Result<(), LightError> {
         match self.inner.as_ref() {
             Backend::Hardware { i2c, .. } => {
-                let mut guard = i2c.lock().map_err(|e| LightError::i2c(e.to_string()))?;
+                let mut guard = i2c.lock().expect("I2C lock poisoned");
                 guard.write(&[CMD_POWER_DOWN]).map_err(LightError::from)?;
                 Ok(())
             }
@@ -713,10 +765,13 @@ impl LightSensor {
     ///
     /// # Errors
     /// Returns [`LightError`] if writing the command opcode fails.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
     pub fn reset(&self) -> Result<(), LightError> {
         match self.inner.as_ref() {
             Backend::Hardware { i2c, .. } => {
-                let mut guard = i2c.lock().map_err(|e| LightError::i2c(e.to_string()))?;
+                let mut guard = i2c.lock().expect("I2C lock poisoned");
                 guard.write(&[CMD_POWER_ON]).map_err(LightError::from)?;
                 guard.write(&[CMD_RESET]).map_err(LightError::from)?;
                 Ok(())
@@ -729,14 +784,17 @@ impl LightSensor {
     ///
     /// # Errors
     /// Returns [`LightError`] if writing the command opcode fails.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
     pub fn set_mode(&self, new_mode: MeasurementMode) -> Result<(), LightError> {
         match self.inner.as_ref() {
             Backend::Hardware { i2c, mode, .. } => {
-                let mut guard = i2c.lock().map_err(|e| LightError::i2c(e.to_string()))?;
+                let mut guard = i2c.lock().expect("I2C lock poisoned");
                 guard
                     .write(&[new_mode.opcode()])
                     .map_err(LightError::from)?;
-                let mut cur_mode = mode.lock().map_err(|e| LightError::i2c(e.to_string()))?;
+                let mut cur_mode = mode.lock().expect("mode lock poisoned");
                 *cur_mode = new_mode;
                 Ok(())
             }
@@ -748,14 +806,17 @@ impl LightSensor {
     ///
     /// # Errors
     /// Returns [`LightError`] if I2C bus communication fails or returns invalid data.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
     pub fn read_lux(&self) -> Result<Illuminance, LightError> {
         match self.inner.as_ref() {
             Backend::Hardware { i2c, mode, .. } => {
-                let mut guard = i2c.lock().map_err(|e| LightError::i2c(e.to_string()))?;
+                let mut guard = i2c.lock().expect("I2C lock poisoned");
                 let mut buf = [0u8; 2];
                 guard.read(&mut buf).map_err(LightError::from)?;
                 let raw = (u16::from(buf[0]) << 8) | u16::from(buf[1]);
-                let cur_mode = *mode.lock().map_err(|e| LightError::i2c(e.to_string()))?;
+                let cur_mode = *mode.lock().expect("mode lock poisoned");
                 Ok(Illuminance::from_raw_and_mode(raw, cur_mode))
             }
             Backend::Mock(mock) => {
@@ -769,6 +830,9 @@ impl LightSensor {
     ///
     /// # Errors
     /// Returns [`LightError`] if reading from the sensor fails.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
     pub fn read_diagnostics(&self) -> Result<LightDiagnostics, LightError> {
         match self.inner.as_ref() {
             Backend::Hardware {
@@ -777,11 +841,11 @@ impl LightSensor {
                 address,
                 mode,
             } => {
-                let mut guard = i2c.lock().map_err(|e| LightError::i2c(e.to_string()))?;
+                let mut guard = i2c.lock().expect("I2C lock poisoned");
                 let mut buf = [0u8; 2];
                 guard.read(&mut buf).map_err(LightError::from)?;
                 let raw_word = (u16::from(buf[0]) << 8) | u16::from(buf[1]);
-                let cur_mode = *mode.lock().map_err(|e| LightError::i2c(e.to_string()))?;
+                let cur_mode = *mode.lock().expect("mode lock poisoned");
                 let illuminance = Illuminance::from_raw_and_mode(raw_word, cur_mode);
                 Ok(LightDiagnostics {
                     illuminance,
@@ -1062,15 +1126,22 @@ mod tests {
 
         // std::error::Error trait
         assert!(i2c_err.source().is_none());
+        assert!(fault_err.source().is_none());
+        assert!(illum_err.source().is_none());
+        assert!(addr_err.source().is_none());
 
-        // From conversions
+        // From conversions and error cause preservation
         let io_err = io::Error::new(io::ErrorKind::NotFound, "device missing");
         let from_io = LightError::from(io_err);
         assert!(from_io.is_i2c());
+        assert!(from_io.source().is_some());
+        assert!(from_io.to_string().contains("I/O error: device missing"));
 
         let rppal_err = rppal::i2c::Error::Io(io::Error::new(io::ErrorKind::TimedOut, "timed out"));
         let from_rppal = LightError::from(rppal_err);
         assert!(from_rppal.is_i2c());
+        assert!(from_rppal.source().is_some());
+        assert!(from_rppal.to_string().contains("timed out"));
     }
 
     #[test]
@@ -1107,11 +1178,7 @@ mod tests {
                 .is_mock_fault()
         );
 
-        // Hardware constructor attempts on test machine (skip device 1 if physical I2C bus exists to avoid mutations)
-        if !std::path::Path::new("/dev/i2c-1").exists() {
-            let _ = LightSensor::new();
-            let _ = LightSensor::with_bus_and_address(1, I2cAddress::default());
-        }
+        // Hardware error path test on non-existent bus
         let _ = LightSensor::with_bus_and_address(99, I2cAddress::alternate_address());
     }
 }

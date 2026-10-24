@@ -116,7 +116,9 @@ fn read_temp_cli_help_and_flags() {
         .args(["--once", "--json", "--device", "28-000000000001"])
         .output()
         .expect("failed to run read_temp");
-    assert!(!json_run.status.success());
+    if !Path::new("/sys/bus/w1/devices").exists() {
+        assert!(!json_run.status.success());
+    }
 }
 
 #[test]
@@ -242,5 +244,7 @@ fn read_light_cli_help_and_flags() {
         .args(["--once", "--verbose", "--json", "--address", "0x5C"])
         .output()
         .expect("failed to run read_light");
-    assert!(!run_json.status.success());
+    if !Path::new("/dev/i2c-1").exists() {
+        assert!(!run_json.status.success());
+    }
 }
