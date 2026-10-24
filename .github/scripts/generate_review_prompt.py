@@ -122,6 +122,11 @@ def strip_decorations_outside_fences(md: str) -> str:
             consecutive_blank_lines = 0
             out.append(line)
 
+    if in_html_comment:
+        raise ValueError(
+            "unterminated HTML comment ('<!--' without matching '-->') detected in markdown"
+        )
+
     return "".join(out).strip()
 
 
@@ -136,8 +141,9 @@ def build_review_prompt(repo_root: Path) -> str:
     raw_guidelines = load_file(guidelines_path)
 
     # Process guidelines:
-    # 1. Filter sections that are irrelevant to native Rust code reviews (e.g. C-FFI Windows DLLs,
-    #    proc-macro crate development, and meta AI-assistant prompt instructions).
+    # 1. Filter top-level sections (`# AI Guidelines`, `# FFI Guidelines`, `# Macros Guidelines`)
+    #    present in `services/.guidelines/microsoft-rust-guidelines.md` that do not apply to
+    #    pure-Rust daemon/driver code reviews.
     sections = split_top_level_sections(raw_guidelines)
     kept_sections = []
     excluded_keywords = [

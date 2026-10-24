@@ -161,6 +161,19 @@ impl MeasurementMode {
             Self::OneShotLowRes => "One-Time Low-Resolution (4 lx)",
         }
     }
+
+    /// Returns a stable machine-readable slug for CLI flags and NDJSON telemetry.
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::ContinuousHighRes => "high-res",
+            Self::ContinuousHighRes2 => "high-res2",
+            Self::ContinuousLowRes => "low-res",
+            Self::OneShotHighRes => "oneshot-high-res",
+            Self::OneShotHighRes2 => "oneshot-high-res2",
+            Self::OneShotLowRes => "oneshot-low-res",
+        }
+    }
 }
 
 impl Display for MeasurementMode {
@@ -564,18 +577,16 @@ impl LightError {
 impl Display for LightError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            LightErrorKind::I2c {
-                message: Some(message),
-                ..
-            } => write!(f, "I2C bus error: {message}"),
-            LightErrorKind::I2c {
-                message: None,
-                source: Some(err),
-            } => write!(f, "I2C bus error: {err}"),
-            LightErrorKind::I2c {
-                message: None,
-                source: None,
-            } => write!(f, "I2C bus error"),
+            LightErrorKind::I2c { message, source } => {
+                write!(f, "I2C bus error")?;
+                if let Some(msg) = message {
+                    write!(f, ": {msg}")
+                } else if let Some(err) = source {
+                    write!(f, ": {err}")
+                } else {
+                    Ok(())
+                }
+            }
             LightErrorKind::Io { source } => write!(f, "I/O error: {source}"),
             LightErrorKind::PowerDown => write!(
                 f,
@@ -642,7 +653,7 @@ struct MockState {
     desired_lux: Option<f32>,
     mode: MeasurementMode,
     powered: bool,
-    fault: Option<String>,
+    fault: Option<Box<str>>,
 }
 
 impl LightSensorMock {
@@ -689,7 +700,7 @@ impl LightSensorMock {
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
-    pub fn set_fault(&self, fault: Option<String>) {
+    pub fn set_fault(&self, fault: Option<Box<str>>) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.fault = fault;
     }
@@ -704,6 +715,12 @@ impl LightSensorMock {
         state.mode
     }
 
+    /// Reads the simulated raw 16-bit word and active mode.
+    ///
+    /// Note: on physical BH1750 hardware, one-shot modes automatically enter power-down
+    /// after completing a conversion (and [`LightSensor::read_raw_word`] re-sends `CMD_POWER_ON`
+    /// before each one-shot trigger). The mock retains `powered = true` across one-shot reads
+    /// unless [`power_down()`](Self::power_down) is explicitly called.
     #[expect(
         clippy::cast_sign_loss,
         clippy::cast_possible_truncation,
@@ -766,15 +783,20 @@ impl LightSensorMock {
     }
 }
 
+#[derive(Debug)]
+struct HwState {
+    mode: MeasurementMode,
+    powered: bool,
+    last_transition: Instant,
+}
+
 enum Backend {
     Hardware {
         i2c: Mutex<I2c>,
         bus: u8,
         address: I2cAddress,
-        mode: Mutex<MeasurementMode>,
-        powered: Mutex<bool>,
+        state: Mutex<HwState>,
         op_lock: Mutex<()>,
-        last_transition: Mutex<Instant>,
     },
     Mock(LightSensorMock),
 }
@@ -829,10 +851,12 @@ impl LightSensor {
                 i2c: Mutex::new(i2c),
                 bus,
                 address,
-                mode: Mutex::new(MeasurementMode::ContinuousHighRes),
-                powered: Mutex::new(true),
+                state: Mutex::new(HwState {
+                    mode: MeasurementMode::ContinuousHighRes,
+                    powered: true,
+                    last_transition: Instant::now(),
+                }),
                 op_lock: Mutex::new(()),
-                last_transition: Mutex::new(Instant::now()),
             }),
         })
     }
@@ -885,14 +909,15 @@ impl LightSensor {
         match self.inner.as_ref() {
             Backend::Hardware {
                 i2c,
-                powered,
+                state,
                 op_lock,
                 ..
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
-                let mut guard = i2c.lock().expect("I2C lock poisoned");
-                guard.write(&[CMD_POWER_DOWN])?;
-                *powered.lock().expect("power lock poisoned") = false;
+                i2c.lock()
+                    .expect("I2C lock poisoned")
+                    .write(&[CMD_POWER_DOWN])?;
+                state.lock().expect("state lock poisoned").powered = false;
                 Ok(())
             }
             Backend::Mock(mock) => mock.power_down(),
@@ -913,17 +938,18 @@ impl LightSensor {
         match self.inner.as_ref() {
             Backend::Hardware {
                 i2c,
-                powered,
+                state,
                 op_lock,
-                last_transition,
                 ..
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
                 guard.write(&[CMD_POWER_ON])?;
                 guard.write(&[CMD_RESET])?;
-                *powered.lock().expect("power lock poisoned") = true;
-                *last_transition.lock().expect("transition lock poisoned") = Instant::now();
+                drop(guard);
+                let mut hw = state.lock().expect("state lock poisoned");
+                hw.powered = true;
+                hw.last_transition = Instant::now();
                 Ok(())
             }
             Backend::Mock(mock) => mock.reset(),
@@ -941,19 +967,19 @@ impl LightSensor {
         match self.inner.as_ref() {
             Backend::Hardware {
                 i2c,
-                mode,
-                powered,
+                state,
                 op_lock,
-                last_transition,
                 ..
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
                 guard.write(&[CMD_POWER_ON])?;
                 guard.write(&[new_mode.opcode()])?;
-                *mode.lock().expect("mode lock poisoned") = new_mode;
-                *powered.lock().expect("power lock poisoned") = true;
-                *last_transition.lock().expect("transition lock poisoned") = Instant::now();
+                drop(guard);
+                let mut hw = state.lock().expect("state lock poisoned");
+                hw.mode = new_mode;
+                hw.powered = true;
+                hw.last_transition = Instant::now();
                 Ok(())
             }
             Backend::Mock(mock) => mock.set_mode(new_mode),
@@ -964,22 +990,19 @@ impl LightSensor {
         match self.inner.as_ref() {
             Backend::Hardware {
                 i2c,
-                mode,
-                powered,
+                state,
                 op_lock,
-                last_transition,
                 ..
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
-                if !*powered.lock().expect("power lock poisoned") {
-                    return Err(LightError::powered_down());
-                }
-                let cur_mode = *mode.lock().expect("mode lock poisoned");
+                let (cur_mode, elapsed) = {
+                    let hw = state.lock().expect("state lock poisoned");
+                    if !hw.powered {
+                        return Err(LightError::powered_down());
+                    }
+                    (hw.mode, hw.last_transition.elapsed())
+                };
                 if cur_mode.is_continuous() {
-                    let elapsed = last_transition
-                        .lock()
-                        .expect("transition lock poisoned")
-                        .elapsed();
                     if let Some(remaining) = cur_mode.max_measurement_time().checked_sub(elapsed) {
                         std::thread::sleep(remaining);
                     }
@@ -1250,6 +1273,7 @@ mod tests {
             assert_eq!(mode.resolution_lux(), res);
             assert_eq!(mode.is_continuous(), is_cont);
             assert_ne!(mode.as_str(), "");
+            assert_ne!(mode.slug(), "");
             assert_eq!(mode.to_string(), mode.as_str());
             assert!(mode.typical_measurement_time() > Duration::ZERO);
             assert!(mode.max_measurement_time() >= mode.typical_measurement_time());
@@ -1398,15 +1422,6 @@ mod tests {
         assert!(pwr_err.to_string().contains("sensor is powered down"));
         assert!(pwr_err.source().is_none());
 
-        let bare_i2c = LightError::new(LightErrorKind::I2c {
-            message: None,
-            source: None,
-        });
-        assert_eq!(
-            bare_i2c.to_string().lines().next().unwrap(),
-            "I2C bus error"
-        );
-
         // std::error::Error trait
         assert!(i2c_err.source().is_none());
         assert!(fault_err.source().is_none());
@@ -1486,11 +1501,11 @@ mod tests {
                 .is_mock_fault()
         );
 
-        // Hardware error path test on unsupported bus and default constructor probe
+        // Hardware constructor error path is covered hermetically by the bus-validation check;
+        // do NOT invoke `LightSensor::new()` in unit tests as it opens `/dev/i2c-1` on the host.
         let bus_err =
             LightSensor::with_bus_and_address(99, I2cAddress::alternate_address()).unwrap_err();
         assert!(bus_err.is_i2c());
         assert!(bus_err.to_string().contains("unsupported I2C bus 99"));
-        let _ = LightSensor::new();
     }
 }

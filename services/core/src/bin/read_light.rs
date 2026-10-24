@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use speaker_core::diag::{
-    OutputFormat, env_args, exit_code_for_reads, format_timestamp, parse_count_arg,
+    NumericStats, OutputFormat, env_args, exit_code_for_reads, format_timestamp, parse_count_arg,
     parse_interval_arg, program_name, should_print_summary,
 };
 use speaker_core::hardware::{
@@ -66,15 +66,27 @@ fn print_usage(bin_name: &str) {
     println!("  -h, --help               Display this help text");
 }
 
+const MODE_ALIASES: &[(&str, MeasurementMode)] = &[
+    ("high-res", MeasurementMode::ContinuousHighRes),
+    ("highres", MeasurementMode::ContinuousHighRes),
+    ("h-res", MeasurementMode::ContinuousHighRes),
+    ("h1", MeasurementMode::ContinuousHighRes),
+    ("high-res2", MeasurementMode::ContinuousHighRes2),
+    ("highres2", MeasurementMode::ContinuousHighRes2),
+    ("h-res2", MeasurementMode::ContinuousHighRes2),
+    ("h2", MeasurementMode::ContinuousHighRes2),
+    ("low-res", MeasurementMode::ContinuousLowRes),
+    ("lowres", MeasurementMode::ContinuousLowRes),
+    ("l-res", MeasurementMode::ContinuousLowRes),
+    ("low", MeasurementMode::ContinuousLowRes),
+];
+
 fn parse_mode(s: &str) -> Result<MeasurementMode, String> {
-    match s.to_ascii_lowercase().as_str() {
-        "high-res" | "highres" | "h-res" | "h1" => Ok(MeasurementMode::ContinuousHighRes),
-        "high-res2" | "highres2" | "h-res2" | "h2" => Ok(MeasurementMode::ContinuousHighRes2),
-        "low-res" | "lowres" | "l-res" | "low" => Ok(MeasurementMode::ContinuousLowRes),
-        other => Err(format!(
-            "invalid mode '{other}'. Supported: high-res, high-res2, low-res"
-        )),
-    }
+    let lower = s.to_ascii_lowercase();
+    MODE_ALIASES
+        .iter()
+        .find_map(|(alias, mode)| (*alias == lower).then_some(*mode))
+        .ok_or_else(|| format!("invalid mode '{lower}'. Supported: high-res, high-res2, low-res"))
 }
 
 fn parse_hex_address(s: &str) -> Result<I2cAddress, String> {
@@ -135,43 +147,6 @@ fn parse_cli_args() -> Result<Option<CliOptions>, String> {
     parse_cli_args_from(env_args())
 }
 
-/// Running statistical summary for ambient light telemetry.
-#[derive(Debug, Default)]
-struct Statistics {
-    total_reads: usize,
-    successful_reads: usize,
-    min_lux: Option<f32>,
-    max_lux: Option<f32>,
-    lux_sum: f64,
-}
-
-impl Statistics {
-    fn record_success(&mut self, illum: Illuminance) {
-        self.total_reads += 1;
-        self.successful_reads += 1;
-        let lux = illum.lux();
-        self.lux_sum += f64::from(lux);
-        self.min_lux = Some(self.min_lux.map_or(lux, |cur| cur.min(lux)));
-        self.max_lux = Some(self.max_lux.map_or(lux, |cur| cur.max(lux)));
-    }
-
-    fn record_error(&mut self) {
-        self.total_reads += 1;
-    }
-
-    const fn errors(&self) -> usize {
-        self.total_reads - self.successful_reads
-    }
-
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "read counts are small; f64 precision is exact for integer counts"
-    )]
-    fn average_lux(&self) -> Option<f64> {
-        (self.successful_reads > 0).then(|| self.lux_sum / self.successful_reads as f64)
-    }
-}
-
 fn print_header(sensor: &LightSensor) {
     let hw = sensor.hardware_info();
     println!("==================================================");
@@ -202,23 +177,18 @@ fn print_diagnostic_registers(sensor: &LightSensor) {
     println!("--------------------------------------------------");
 }
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "read counts are small; f32 precision is exact for percentages"
-)]
-fn print_session_summary(stats: &Statistics) {
+fn print_session_summary(stats: &NumericStats) {
     println!("\n--- Light Diagnostic Session Summary ---");
-    println!("Total reads : {}", stats.total_reads);
-    println!("Successful  : {}", stats.successful_reads);
-    if stats.total_reads > 0 {
-        let total = stats.total_reads as f32;
+    println!("Total reads : {}", stats.total_reads());
+    println!("Successful  : {}", stats.successful_reads());
+    if stats.total_reads() > 0 {
         let errors = stats.errors();
         println!(
             "Read errors : {errors} ({:.2}% error rate)",
-            (errors as f32 / total) * 100.0
+            stats.error_rate_percent(errors)
         );
     }
-    if let (Some(min), Some(max), Some(avg)) = (stats.min_lux, stats.max_lux, stats.average_lux()) {
+    if let (Some(min), Some(max), Some(avg)) = (stats.min(), stats.max(), stats.average()) {
         println!(
             "Min Light   : {min:7.2} lx ({:6.2} fc)",
             min * LUX_TO_FOOT_CANDLES
@@ -247,7 +217,7 @@ fn output_json_reading(
         "timestamp": timestamp,
         "i2c_bus": sensor.i2c_bus(),
         "i2c_address": sensor.i2c_address().to_string(),
-        "mode": mode.as_str(),
+        "mode": mode.slug(),
         "illuminance": {
             "lux": lux_val,
             "millilux": illum.millilux(),
@@ -270,7 +240,7 @@ fn output_json_error(
             "timestamp": timestamp,
             "i2c_bus": bus,
             "i2c_address": address.to_string(),
-            "mode": mode.as_str(),
+            "mode": mode.slug(),
             "error": err.to_string(),
         })
     );
@@ -280,11 +250,11 @@ fn handle_light_iteration(
     sensor: &LightSensor,
     opts: &CliOptions,
     timestamp: &str,
-    stats: &mut Statistics,
+    stats: &mut NumericStats,
 ) {
     match sensor.read_lux() {
         Ok(illum) => {
-            stats.record_success(illum);
+            stats.record_success(illum.lux());
             match opts.format {
                 OutputFormat::Json => {
                     output_json_reading(timestamp, sensor, illum, opts.mode);
@@ -346,7 +316,7 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
         }
     }
 
-    let mut stats = Statistics::default();
+    let mut stats = NumericStats::default();
 
     loop {
         let loop_start = Instant::now();
@@ -355,7 +325,7 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
         handle_light_iteration(sensor, opts, &timestamp, &mut stats);
 
         if let Some(max) = opts.max_count {
-            if stats.total_reads >= max {
+            if stats.total_reads() >= max {
                 break;
             }
         }
@@ -366,11 +336,11 @@ fn run_app(sensor: &LightSensor, opts: &CliOptions) -> ExitCode {
         }
     }
 
-    if should_print_summary(opts.format, opts.max_count, stats.total_reads) {
+    if should_print_summary(opts.format, opts.max_count, stats.total_reads()) {
         print_session_summary(&stats);
     }
 
-    exit_code_for_reads(stats.total_reads, stats.successful_reads)
+    exit_code_for_reads(stats.total_reads(), stats.successful_reads())
 }
 
 fn main() -> ExitCode {
@@ -464,23 +434,23 @@ mod tests {
 
     #[test]
     fn statistics_computations() {
-        let mut stats = Statistics::default();
-        assert!(stats.average_lux().is_none());
+        let mut stats = NumericStats::default();
+        assert!(stats.average().is_none());
 
-        stats.record_success(Illuminance::from_lux(100.0).unwrap());
-        stats.record_success(Illuminance::from_lux(200.0).unwrap());
+        stats.record_success(100.0);
+        stats.record_success(200.0);
         stats.record_error();
 
-        assert_eq!(stats.total_reads, 3);
-        assert_eq!(stats.successful_reads, 2);
+        assert_eq!(stats.total_reads(), 3);
+        assert_eq!(stats.successful_reads(), 2);
         assert_eq!(stats.errors(), 1);
-        assert_eq!(stats.min_lux, Some(100.0));
-        assert_eq!(stats.max_lux, Some(200.0));
-        assert!((stats.average_lux().unwrap() - 150.0).abs() < 1e-4);
+        assert_eq!(stats.min(), Some(100.0));
+        assert_eq!(stats.max(), Some(200.0));
+        assert!((stats.average().unwrap() - 150.0).abs() < 1e-4);
 
         print_session_summary(&stats);
 
-        let empty_stats = Statistics::default();
+        let empty_stats = NumericStats::default();
         print_session_summary(&empty_stats);
     }
 
@@ -503,16 +473,16 @@ mod tests {
             address: I2cAddress::default(),
             mode: MeasurementMode::ContinuousHighRes,
         };
-        let mut stats = Statistics::default();
+        let mut stats = NumericStats::default();
         handle_light_iteration(&sensor, &opts_human, "12:00:00", &mut stats);
-        assert_eq!(stats.successful_reads, 1);
+        assert_eq!(stats.successful_reads(), 1);
 
         let opts_json = CliOptions {
             format: OutputFormat::Json,
             ..opts_human
         };
         handle_light_iteration(&sensor, &opts_json, "12:00:01", &mut stats);
-        assert_eq!(stats.successful_reads, 2);
+        assert_eq!(stats.successful_reads(), 2);
 
         // Injected error iteration
         mock.set_fault(Some("hardware disconnected".into()));

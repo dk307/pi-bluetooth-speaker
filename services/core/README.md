@@ -68,4 +68,4 @@ The crate provides standalone diagnostics for testing and inspecting physical ha
 - `read_temp`: Scans `/sys/bus/w1/devices/28-*/w1_slave` for attached DS18B20 1-Wire temperature sensors.
 - `read_light`: Queries `/dev/i2c-1` for BH1750 ambient light sensors at addresses `0x23` and `0x5C`.
 
-Both utilities output in human-readable or NDJSON formats (`--format json`), support bounded iterations (`--count N`), and return exit code `0` on successful reads or `1` if all polling attempts fail.
+Both utilities output in human-readable or NDJSON formats (`--json`), support bounded iterations (`--once`, `--count N`), print a statistical session summary on exit for multi-sample human-readable runs (suppressed for `--once` / `--count 1`), report human-mode read errors to `stderr`, and return exit code `0` on successful reads or `1` if all polling attempts fail.

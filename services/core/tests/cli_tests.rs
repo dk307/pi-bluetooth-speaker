@@ -26,6 +26,9 @@ const CORE_MAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Waits for a spawned child process up to `timeout`, killing the process and panicking if it hangs.
+///
+/// Invariant: all probed CLI binaries emit bounded output (< 4 KiB, well within the 64 KiB OS pipe
+/// buffer), so polling `try_wait()` before `wait_with_output()` cannot deadlock on pipe writes.
 fn wait_with_deadline(mut child: Child, timeout: Duration, context: &str) -> Output {
     let deadline = Instant::now() + timeout;
     loop {
@@ -53,47 +56,50 @@ fn fail_if_ci(msg: &str) {
     assert!(std::env::var("CI").is_err(), "{msg}");
 }
 
+/// Spawns `bin` with `args` and waits up to `timeout`, returning `None` if the binary cannot be spawned.
+fn try_run_cli(
+    bin: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Option<(ExitStatus, String, String)> {
+    let Ok(child) = Command::new(bin)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    else {
+        fail_if_ci(&format!("failed to spawn {bin} in CI environment"));
+        return None;
+    };
+    let output = wait_with_deadline(child, timeout, bin);
+    Some((
+        output.status,
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
 /// Probes whether a compiled binary is executable in the current environment.
 ///
 /// In CI environments, any execution failure or timeout panics loudly to prevent
 /// silent skips from masking test regressions or binfmt misconfigurations.
 fn can_exec_binary(bin_path: &str) -> bool {
-    let Ok(child) = Command::new(bin_path)
-        .arg("--help")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    else {
-        fail_if_ci(&format!("failed to spawn {bin_path} in CI environment"));
+    let Some((status, _, stderr)) = try_run_cli(bin_path, &["--help"], CLI_PROBE_TIMEOUT) else {
         return false;
     };
-
-    let output = wait_with_deadline(child, CLI_PROBE_TIMEOUT, bin_path);
-    if output.status.success() {
+    if status.success() {
         return true;
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
     fail_if_ci(&format!(
-        "binary '{bin_path}' exited {:?} in CI ({stderr}); must never skip silently",
-        output.status
+        "binary '{bin_path}' exited {status:?} in CI ({stderr}); must never skip silently"
     ));
     false
 }
 
-/// Helper to execute a binary with arguments under a strict deadline and capture status, stdout, and stderr.
+/// Executes a binary with arguments under `CLI_PROBE_TIMEOUT` and captures status, stdout, and stderr.
 fn run_cli(bin: &str, args: &[&str]) -> (ExitStatus, String, String) {
-    let child = Command::new(bin)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn binary '{bin}' with args {args:?}: {e}"));
-    let output = wait_with_deadline(child, CLI_PROBE_TIMEOUT, bin);
-    (
-        output.status,
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
+    try_run_cli(bin, args, CLI_PROBE_TIMEOUT)
+        .unwrap_or_else(|| panic!("failed to spawn binary '{bin}' with args {args:?}"))
 }
 
 #[test]
@@ -106,15 +112,10 @@ fn core_main_binary_executes() {
         return;
     }
 
-    let child = Command::new(bin_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn core main binary");
-    let output = wait_with_deadline(child, CORE_MAIN_TIMEOUT, bin_path);
+    let (status, stdout, _) =
+        try_run_cli(bin_path, &[], CORE_MAIN_TIMEOUT).expect("failed to spawn core main binary");
 
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(status.success());
     assert!(stdout.contains("Speaker Core Service is running on Raspberry Pi 3!"));
     assert!(stdout.contains("ARM Cortex-A53 (aarch64)"));
     assert!(stdout.contains("Thermal Sensor:"));

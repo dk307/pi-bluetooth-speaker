@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use speaker_core::diag::{
-    OutputFormat, env_args, exit_code_for_reads, format_timestamp, parse_count_arg,
+    NumericStats, OutputFormat, env_args, exit_code_for_reads, format_timestamp, parse_count_arg,
     parse_interval_arg, program_name, should_print_summary,
 };
 use speaker_core::hardware::{
@@ -109,39 +109,27 @@ fn parse_cli_args() -> Result<Option<CliOptions>, String> {
 /// Running statistical summary.
 #[derive(Debug, Default)]
 struct Statistics {
-    total_reads: usize,
-    successful_reads: usize,
+    samples: NumericStats,
     crc_errors: usize,
     other_errors: usize,
     min_temp: Option<Temperature>,
     max_temp: Option<Temperature>,
-    temp_sum_celsius: f64,
 }
 
 impl Statistics {
     fn record_success(&mut self, temp: Temperature) {
-        self.total_reads += 1;
-        self.successful_reads += 1;
-        self.temp_sum_celsius += f64::from(temp.celsius());
+        self.samples.record_success(temp.celsius());
         self.min_temp = Some(self.min_temp.map_or(temp, |cur| cur.min(temp)));
         self.max_temp = Some(self.max_temp.map_or(temp, |cur| cur.max(temp)));
     }
 
     fn record_error(&mut self, err: &TempError) {
-        self.total_reads += 1;
+        self.samples.record_error();
         if err.is_crc_mismatch() {
             self.crc_errors += 1;
         } else {
             self.other_errors += 1;
         }
-    }
-
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "read counts are small; f64 precision is exact for integer counts"
-    )]
-    fn average_celsius(&self) -> Option<f64> {
-        (self.successful_reads > 0).then(|| self.temp_sum_celsius / self.successful_reads as f64)
     }
 }
 
@@ -175,34 +163,24 @@ fn print_diagnostic_registers(sensor: &TempSensor, devices: &[SensorId]) {
     }
 }
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "read counts are small; f32 precision is exact for percentages"
-)]
 fn print_session_summary(stats: &Statistics) {
+    let s = &stats.samples;
     println!("\n--- Diagnostic Session Summary ---");
-    println!("Total reads : {}", stats.total_reads);
-    println!("Successful  : {}", stats.successful_reads);
-    if stats.total_reads > 0 {
-        let total = stats.total_reads as f32;
+    println!("Total reads : {}", s.total_reads());
+    println!("Successful  : {}", s.successful_reads());
+    println!(
+        "CRC errors  : {} ({:.2}% error rate)",
+        stats.crc_errors,
+        s.error_rate_percent(stats.crc_errors)
+    );
+    if stats.other_errors > 0 {
         println!(
-            "CRC errors  : {} ({:.2}% error rate)",
-            stats.crc_errors,
-            (stats.crc_errors as f32 / total) * 100.0
+            "Other errors: {} ({:.2}% error rate)",
+            stats.other_errors,
+            s.error_rate_percent(stats.other_errors)
         );
-        if stats.other_errors > 0 {
-            println!(
-                "Other errors: {} ({:.2}% error rate)",
-                stats.other_errors,
-                (stats.other_errors as f32 / total) * 100.0
-            );
-        }
-    } else {
-        println!("CRC errors  : 0 (0.00% error rate)");
     }
-    if let (Some(min), Some(max), Some(avg)) =
-        (stats.min_temp, stats.max_temp, stats.average_celsius())
-    {
+    if let (Some(min), Some(max), Some(avg)) = (stats.min_temp, stats.max_temp, s.average()) {
         println!(
             "Chassis Min : {:.2}°C ({:.2}°F)",
             min.celsius(),
@@ -385,11 +363,14 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
         }
     }
 
-    if should_print_summary(opts.format, opts.max_count, stats.total_reads) {
+    if should_print_summary(opts.format, opts.max_count, stats.samples.total_reads()) {
         print_session_summary(&stats);
     }
 
-    exit_code_for_reads(stats.total_reads, stats.successful_reads)
+    exit_code_for_reads(
+        stats.samples.total_reads(),
+        stats.samples.successful_reads(),
+    )
 }
 
 fn main() -> ExitCode {
@@ -422,7 +403,7 @@ mod tests {
     #[test]
     fn statistics_computations_and_summary() {
         let mut stats = Statistics::default();
-        assert!(stats.average_celsius().is_none());
+        assert!(stats.samples.average().is_none());
 
         stats.record_success(Temperature::from_celsius(20.0).unwrap());
         stats.record_success(Temperature::from_celsius(30.0).unwrap());
@@ -434,13 +415,13 @@ mod tests {
         let io_err = TempError::from(std::io::Error::other("bus down"));
         stats.record_error(&io_err);
 
-        assert_eq!(stats.total_reads, 4);
-        assert_eq!(stats.successful_reads, 2);
+        assert_eq!(stats.samples.total_reads(), 4);
+        assert_eq!(stats.samples.successful_reads(), 2);
         assert_eq!(stats.crc_errors, 1);
         assert_eq!(stats.other_errors, 1);
         assert_eq!(stats.min_temp.unwrap().celsius(), 20.0);
         assert_eq!(stats.max_temp.unwrap().celsius(), 30.0);
-        assert!((stats.average_celsius().unwrap() - 25.0).abs() < 1e-4);
+        assert!((stats.samples.average().unwrap() - 25.0).abs() < 1e-4);
 
         print_session_summary(&stats);
 
@@ -487,7 +468,7 @@ mod tests {
             soc,
             &mut stats,
         );
-        assert_eq!(stats.successful_reads, 1);
+        assert_eq!(stats.samples.successful_reads(), 1);
 
         // JSON format with SoC
         let opts_json = CliOptions {
@@ -502,7 +483,7 @@ mod tests {
             soc,
             &mut stats,
         );
-        assert_eq!(stats.successful_reads, 2);
+        assert_eq!(stats.samples.successful_reads(), 2);
 
         // Injected error iteration
         mock.set_io_error("device removed");

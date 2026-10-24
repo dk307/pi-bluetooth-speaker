@@ -12,6 +12,26 @@ import subprocess
 import sys
 
 
+def verify_js_syntax(path: str) -> None:
+    """Verifies JavaScript syntax via `node --check`, exiting non-zero on failure."""
+    try:
+        subprocess.run(
+            ["node", "--check", path],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        print("ERROR: 'node' binary not found in PATH while verifying bundle syntax", file=sys.stderr)
+        sys.exit(1)
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"ERROR: 'node --check {path}' failed (exit {exc.returncode}):\n{exc.stderr}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def main() -> None:
     workspace = os.environ.get("GITHUB_WORKSPACE", ".")
     search_roots = [
@@ -33,22 +53,29 @@ def main() -> None:
             # Upstream source line: https://github.com/jonit-dev/diffguard/blob/88f63615c769f8db6031973503c2c40a9a3f4feb/dist/index.js
             # Upstream feature request tracker: https://github.com/jonit-dev/diffguard/issues/1
             target = "const customPrompt = core.getInput('custom_prompt');"
+            patch_marker = "_fs.readFileSync(customPrompt, 'utf8')"
             patch = (
                 "let customPrompt = core.getInput('custom_prompt'); "
                 "try { const _fs = require('fs'); if (customPrompt && _fs.existsSync(customPrompt)) "
                 "{ customPrompt = _fs.readFileSync(customPrompt, 'utf8'); } } "
                 "catch (err) { core.setFailed('Failed to read file-based customPrompt: ' + err.message); throw err; }"
             )
+            if patch_marker in content and target not in content:
+                verify_js_syntax(p)
+                print(f"Already patched and verified file-based prompt in {p}")
+                found = True
+                continue
+
             occurrences = content.count(target)
             if occurrences == 1:
                 with open(p, "w", encoding="utf-8") as f:
                     f.write(content.replace(target, patch, 1))
                 with open(p, "r", encoding="utf-8") as f:
                     patched = f.read()
-                if "fs.readFileSync" not in patched or target in patched:
+                if patch_marker not in patched or target in patched:
                     print(f"ERROR: patch verification failed in {p}", file=sys.stderr)
                     sys.exit(1)
-                subprocess.run(["node", "--check", p], check=True)
+                verify_js_syntax(p)
                 print(f"Successfully enabled and verified file-based prompt in {p}")
                 found = True
             elif occurrences > 1:

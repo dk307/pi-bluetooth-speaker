@@ -111,6 +111,86 @@ pub const fn should_print_summary(
     matches!(format, OutputFormat::Human) && !matches!(max_count, Some(1)) && total_reads > 1
 }
 
+/// Shared numeric telemetry accumulator for CLI diagnostic polling sessions.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NumericStats {
+    total_reads: usize,
+    successful_reads: usize,
+    min: Option<f32>,
+    max: Option<f32>,
+    sum: f64,
+}
+
+impl NumericStats {
+    /// Records a successful numeric sensor sample.
+    pub fn record_success(&mut self, value: f32) {
+        self.total_reads += 1;
+        self.successful_reads += 1;
+        self.sum += f64::from(value);
+        self.min = Some(self.min.map_or(value, |cur| cur.min(value)));
+        self.max = Some(self.max.map_or(value, |cur| cur.max(value)));
+    }
+
+    /// Records a failed sensor read attempt.
+    pub fn record_error(&mut self) {
+        self.total_reads += 1;
+    }
+
+    /// Returns the total number of attempted reads.
+    #[must_use]
+    pub const fn total_reads(&self) -> usize {
+        self.total_reads
+    }
+
+    /// Returns the number of successful reads.
+    #[must_use]
+    pub const fn successful_reads(&self) -> usize {
+        self.successful_reads
+    }
+
+    /// Returns the total number of failed reads (`total_reads - successful_reads`).
+    #[must_use]
+    pub const fn errors(&self) -> usize {
+        self.total_reads - self.successful_reads
+    }
+
+    /// Returns the minimum observed sample value, if any read succeeded.
+    #[must_use]
+    pub const fn min(&self) -> Option<f32> {
+        self.min
+    }
+
+    /// Returns the maximum observed sample value, if any read succeeded.
+    #[must_use]
+    pub const fn max(&self) -> Option<f32> {
+        self.max
+    }
+
+    /// Returns the arithmetic mean of all successful samples, if any read succeeded.
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "read counts are small; f64 precision is exact for integer counts"
+    )]
+    pub fn average(&self) -> Option<f64> {
+        (self.successful_reads > 0).then(|| self.sum / self.successful_reads as f64)
+    }
+
+    /// Returns the percentage `(error_count / total_reads) * 100.0`, or `0.0` if `total_reads == 0`.
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "read counts are small; f32 precision is exact for percentages"
+    )]
+    pub fn error_rate_percent(&self, error_count: usize) -> f32 {
+        if self.total_reads == 0 {
+            0.0
+        } else {
+            (error_count as f32 / self.total_reads as f32) * 100.0
+        }
+    }
+}
+
 /// RAII temporary directory that automatically removes itself and its contents on drop.
 #[derive(Debug)]
 pub struct ScopedTempDir {
@@ -208,5 +288,20 @@ mod tests {
             temp.path().to_path_buf()
         };
         assert!(!dir_path.exists());
+
+        let mut stats = NumericStats::default();
+        assert_eq!(stats.total_reads(), 0);
+        assert_eq!(stats.error_rate_percent(0), 0.0);
+        assert!(stats.average().is_none());
+        stats.record_success(10.0);
+        stats.record_success(30.0);
+        stats.record_error();
+        assert_eq!(stats.total_reads(), 3);
+        assert_eq!(stats.successful_reads(), 2);
+        assert_eq!(stats.errors(), 1);
+        assert_eq!(stats.min(), Some(10.0));
+        assert_eq!(stats.max(), Some(30.0));
+        assert!((stats.average().unwrap() - 20.0).abs() < 1e-6);
+        assert!((stats.error_rate_percent(1) - (100.0 / 3.0)).abs() < 1e-4);
     }
 }
