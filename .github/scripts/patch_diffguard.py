@@ -28,6 +28,7 @@ def main() -> None:
         ):
             with open(p, "r", encoding="utf-8") as f:
                 content = f.read()
+            # Pinned target in jonit-dev/diffguard@88f63615c769f8db6031973503c2c40a9a3f4feb (dist/index.js)
             target = "const customPrompt = core.getInput('custom_prompt');"
             patch = (
                 "let customPrompt = core.getInput('custom_prompt'); "
@@ -40,7 +41,9 @@ def main() -> None:
                     f.write(content.replace(target, patch))
                 with open(p, "r", encoding="utf-8") as f:
                     patched = f.read()
-                assert "fs.readFileSync" in patched, f"Patch verification failed in {p}"
+                if "fs.readFileSync" not in patched:
+                    print(f"ERROR: patch verification failed in {p}", file=sys.stderr)
+                    sys.exit(1)
                 print(f"Successfully enabled and verified file-based prompt in {p}")
                 found = True
 

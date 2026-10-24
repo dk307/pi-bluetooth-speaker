@@ -66,6 +66,9 @@ def strip_decorations_outside_fences(md: str) -> str:
     lines = md.splitlines(keepends=True)
     out: list[str] = []
     current_fence = None
+    in_html_comment = False
+    consecutive_blank_lines = 0
+
     for line in lines:
         m = FENCE_RE.match(line)
         if m:
@@ -75,17 +78,48 @@ def strip_decorations_outside_fences(md: str) -> str:
             elif marker[0] == current_fence[0] and len(marker) >= len(current_fence):
                 current_fence = None
             out.append(line)
-        elif current_fence is not None:
+            consecutive_blank_lines = 0
+            continue
+
+        if current_fence is not None:
+            # Code block content: preserve exactly as authored
             out.append(line)
+            consecutive_blank_lines = 0
+            continue
+
+        # Outside fences: handle HTML comments without crossing fence boundaries
+        if in_html_comment:
+            if "-->" in line:
+                in_html_comment = False
+                line = line.split("-->", 1)[1]
+            else:
+                continue
+
+        while "<!--" in line:
+            if "-->" in line:
+                before, rest = line.split("<!--", 1)
+                _, after = rest.split("-->", 1)
+                line = before + after
+            else:
+                line = line.split("<!--", 1)[0]
+                in_html_comment = True
+                break
+
+        line = re.sub(r"^\s*\[[^\]]+\]:\s+\S+.*$", "", line)
+        line = re.sub(r"\s*\{\s*#[A-Za-z0-9\-_]+\s*\}", "", line)
+        line = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", line)
+
+        # Collapse excessive blank lines outside fences
+        if not line.strip():
+            consecutive_blank_lines += 1
+            if consecutive_blank_lines > 1:
+                continue
+            out.append("\n")
         else:
-            line = re.sub(r"^\s*\[[^\]]+\]:\s+\S+.*$", "", line)
-            line = re.sub(r"\s*\{\s*#[A-Za-z0-9\-_]+\s*\}", "", line)
-            line = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", line)
+            consecutive_blank_lines = 0
             out.append(line)
-    text = "".join(out)
-    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    return text
+
+    return "".join(out).strip()
 
 
 def build_review_prompt(repo_root: Path) -> str:
@@ -155,6 +189,14 @@ def main() -> None:
     repo_root = script_dir.parent.parent
 
     prompt = build_review_prompt(repo_root)
+    byte_len = len(prompt.encode("utf-8"))
+
+    # Enforce model context budget for OpenRouter @preset/code-review (~128k token context window)
+    MAX_PROMPT_BYTES = 200_000
+    if byte_len > MAX_PROMPT_BYTES:
+        raise SystemExit(
+            f"ERROR: review prompt size ({byte_len} bytes) exceeds configured model context budget ({MAX_PROMPT_BYTES} bytes)"
+        )
 
     # Save to external file at repo root so action can read it directly without environment limits
     prompt_file = repo_root / PROMPT_OUTPUT_FILENAME

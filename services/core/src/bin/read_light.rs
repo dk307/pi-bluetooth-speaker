@@ -16,6 +16,9 @@ use speaker_core::hardware::{
 };
 
 /// Default polling interval between light measurements.
+///
+/// Set to 300 ms to exceed the worst-case continuous High-Res conversion time (180 ms)
+/// with ample headroom for Linux scheduling, ensuring a fresh conversion is available on each poll.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(300);
 
 /// Formats UTC wall-clock time as `HH:MM:SS`.
@@ -98,10 +101,16 @@ fn parse_mode(s: &str) -> Result<MeasurementMode, String> {
 }
 
 fn parse_hex_address(s: &str) -> Result<I2cAddress, String> {
-    let clean = s
+    let clean = s.trim();
+    if clean.starts_with(['+', '-']) {
+        return Err(format!(
+            "invalid hex address '{s}': sign characters are not allowed"
+        ));
+    }
+    let clean = clean
         .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
+        .or_else(|| clean.strip_prefix("0X"))
+        .unwrap_or(clean);
     let addr =
         u8::from_str_radix(clean, 16).map_err(|e| format!("invalid hex address '{s}': {e}"))?;
     I2cAddress::new(addr)
@@ -482,6 +491,10 @@ mod tests {
         );
         let err_not_hex = parse_hex_address("not-hex").unwrap_err();
         assert!(err_not_hex.contains("invalid hex address"));
+        let err_plus = parse_hex_address("+0x23").unwrap_err();
+        assert!(err_plus.contains("sign characters are not allowed"));
+        let err_minus = parse_hex_address("-0x23").unwrap_err();
+        assert!(err_minus.contains("sign characters are not allowed"));
     }
 
     #[test]

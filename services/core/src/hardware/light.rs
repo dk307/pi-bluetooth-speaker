@@ -374,12 +374,21 @@ impl I2cHardwareInfo {
     }
 
     /// Returns the Raspberry Pi 3 pinout for the specified I2C bus and address.
+    ///
+    /// # Panics
+    /// Panics if `bus` is not [`BH1750_DEFAULT_I2C_BUS`] (`1`), as the modeled GPIO
+    /// metadata corresponds strictly to Broadcom BSC1 controller pins (SDA BCM 2 / SCL BCM 3).
     #[must_use]
     pub fn rpi3_with_bus_and_address(bus: u8, address: I2cAddress) -> Self {
         const SDA_BCM: BcmPin = BcmPin::new(2);
         const SDA_PHYS: PhysicalPin = PhysicalPin::new(3);
         const SCL_BCM: BcmPin = BcmPin::new(3);
         const SCL_PHYS: PhysicalPin = PhysicalPin::new(5);
+
+        assert!(
+            bus == BH1750_DEFAULT_I2C_BUS,
+            "GPIO metadata models Raspberry Pi 3 BSC1 (i2c-{BH1750_DEFAULT_I2C_BUS}) only, got bus {bus}"
+        );
 
         let device_path = format!("/dev/i2c-{bus}").into_boxed_str();
 
@@ -925,10 +934,9 @@ impl LightSensor {
                     }
                 } else {
                     // Send one-shot trigger opcode, then release the mutex during conversion sleep
-                    {
-                        let mut guard = i2c.lock().expect("I2C lock poisoned");
-                        guard.write(&[cur_mode.opcode()])?;
-                    };
+                    let mut guard = i2c.lock().expect("I2C lock poisoned");
+                    guard.write(&[cur_mode.opcode()])?;
+                    drop(guard);
                     std::thread::sleep(cur_mode.max_measurement_time());
                 }
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
@@ -1015,6 +1023,15 @@ const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<LightSensor>();
     assert_send_sync::<LightSensorMock>();
+
+    // Compile-time invariant proof: MAX_LUX * 1000 fits in u32 for millilux
+    #[expect(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        reason = "compile-time constant invariant proof"
+    )]
+    let max_mlx = (Illuminance::MAX_LUX * 1000.0) as u128;
+    assert!(max_mlx <= u32::MAX as u128);
 };
 
 #[cfg(test)]
@@ -1266,11 +1283,16 @@ mod tests {
         assert_eq!(hw.sda_pin.signal_name, "I2C-1 Data (SDA)");
         assert_eq!(hw.scl_pin.signal_name, "I2C-1 Clock (SCL)");
 
-        let hw_bus2 =
-            I2cHardwareInfo::rpi3_with_bus_and_address(2, I2cAddress::alternate_address());
-        assert_eq!(hw_bus2.bus, 2);
-        assert_eq!(hw_bus2.device_path.as_ref(), "/dev/i2c-2");
-        assert_eq!(hw_bus2.address.as_u8(), 0x5C);
+        let hw_alt = I2cHardwareInfo::rpi3_default(I2cAddress::alternate_address());
+        assert_eq!(hw_alt.bus, 1);
+        assert_eq!(hw_alt.device_path.as_ref(), "/dev/i2c-1");
+        assert_eq!(hw_alt.address.as_u8(), 0x5C);
+    }
+
+    #[test]
+    #[should_panic(expected = "GPIO metadata models Raspberry Pi 3 BSC1")]
+    fn rpi3_hardware_info_panics_on_non_default_bus() {
+        let _ = I2cHardwareInfo::rpi3_with_bus_and_address(2, I2cAddress::default());
     }
 
     #[test]

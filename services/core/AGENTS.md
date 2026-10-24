@@ -94,6 +94,18 @@ Before designing types, writing modules, implementing error handling, or writing
      * Differentiate programmer backtraces from end-user CLI argument validation errors. User-facing CLI input rejections should return clean, concise messages without stack backtraces.
    * **Dynamic Bus Device Paths via Box<str>:**
      * Use heap-allocated `Box<str>` for dynamic system paths (such as `/dev/i2c-{bus}`) rather than rigid `match` arms returning `&'static str`.
+   * **Subprocess Probe Timeout Discipline:**
+     * Subprocess probes (such as checking whether a binary is executable via `can_exec_binary`) must never use unbounded blocking calls (`Command::output()`). Always run inside a deadline loop with an explicit timeout (e.g., 10s) and kill the spawned child if it hangs, preventing infinite CI hangs if a binary regresses to a loop.
+   * **Peripheral Bus Pinout Accuracy:**
+     * Peripheral metadata structures (`I2cHardwareInfo`, `GpioPinInfo`) must only claim pinout descriptors matching the physical hardware bus. Validate/assert that caller-provided bus numbers match the hardware controller whose pinout is modeled.
+   * **Fence-Aware Markdown Transformations:**
+     * Markdown processing scripts must never apply regex substitutions or newline collapses globally across full document text (`flags=re.DOTALL`). All comment stripping and whitespace normalization must occur strictly on lines outside fenced code blocks, preserving code examples verbatim.
+   * **Action Bundle Monkey-Patch Upstream Tracking:**
+     * CI patching scripts must use explicit conditional checks (`sys.exit(1)`) rather than Python `assert` (which is stripped under `-O`), and must record pinned commit hashes and upstream issue links.
+   * **Compile-Time Constant Proofs:**
+     * Use compile-time `const _: () = { ... }` invariant assertions to mathematically prove type limits (such as `(Illuminance::MAX_LUX * 1000.0) as u128 <= u32::MAX as u128`).
+   * **Strict Hex Address Validation:**
+     * Hex address parsers must reject signed inputs (`+`, `-`) before passing to radix parsers, as signs are non-standard in device address specifications.
 
 ---
 

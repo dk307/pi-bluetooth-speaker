@@ -14,32 +14,44 @@ use std::time::{Duration, Instant};
 
 /// Probes whether a compiled binary is executable in the current environment.
 ///
-/// In CI environments, any execution failure panics loudly to prevent silent skips
-/// from masking test regressions or binfmt misconfigurations.
+/// In CI environments, any execution failure or timeout panics loudly to prevent
+/// silent skips from masking test regressions or binfmt misconfigurations.
 fn can_exec_binary(bin_path: &str) -> bool {
-    match Command::new(bin_path).arg("--help").output() {
-        Ok(output) if output.status.success() => true,
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!(
-                "SKIPPED: target binary '{bin_path}' failed --help probe ({:?}): {stderr}",
-                output.status.code()
-            );
-            assert!(
-                std::env::var("CI").is_err(),
-                "CLI tests unexpectedly failed to execute binary in CI environment: {bin_path} ({stderr})"
-            );
-            false
-        }
-        Err(e) => {
-            eprintln!(
-                "SKIPPED: target binary '{bin_path}' cannot execute on host architecture: {e}"
-            );
-            assert!(
-                std::env::var("CI").is_err(),
-                "CLI tests unexpectedly failed to execute binary in CI environment: {bin_path} ({e})"
-            );
-            false
+    let Ok(mut child) = Command::new(bin_path)
+        .arg("--help")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    else {
+        assert!(
+            std::env::var("CI").is_err(),
+            "failed to spawn {bin_path} in CI environment"
+        );
+        return false;
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return true;
+                }
+                assert!(
+                    std::env::var("CI").is_err(),
+                    "binary '{bin_path}' exited {status:?} in CI; must never skip silently"
+                );
+                return false;
+            }
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("probe for '{bin_path}' timed out — binary must exit promptly on --help");
+            }
+            Err(e) => panic!("probe wait failed for '{bin_path}': {e}"),
         }
     }
 }
