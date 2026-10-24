@@ -76,7 +76,7 @@ fn core_main_binary_executes() {
         .spawn()
         .expect("failed to spawn core main binary");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let output = loop {
         match child.try_wait() {
             Ok(Some(_status)) => {

@@ -32,7 +32,8 @@ def main() -> None:
             patch = (
                 "let customPrompt = core.getInput('custom_prompt'); "
                 "try { const _fs = require('fs'); if (customPrompt && _fs.existsSync(customPrompt)) "
-                "{ customPrompt = _fs.readFileSync(customPrompt, 'utf8'); } } catch (_) {}"
+                "{ customPrompt = _fs.readFileSync(customPrompt, 'utf8'); } } "
+                "catch (err) { core.warning('Failed to read file-based customPrompt: ' + err.message); }"
             )
             if target in content:
                 with open(p, "w", encoding="utf-8") as f:

@@ -18,10 +18,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     steps:
       - name: Verify OpenRouter API Key
         run: |
-          if [ -z "${{ secrets.OPENROUTER_API_KEY }}" ]; then
+          if [ -z "$OPENROUTER_API_KEY" ]; then
             echo "ERROR: OPENROUTER_API_KEY secret is required for DiffGuard AI code review." >&2
             exit 1
           fi

@@ -48,7 +48,7 @@ struct DiagnosticFlags {
 }
 
 /// Command-line configuration parameters.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct CliOptions {
     max_count: Option<usize>,
     interval: Duration,

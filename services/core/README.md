@@ -59,3 +59,11 @@ cargo build --release -p speaker-core
 ```bash
 cargo run -p speaker-core --features simulator
 ```
+
+### Diagnostic CLI Utilities
+
+The crate provides standalone diagnostics for testing and inspecting physical hardware sensors:
+- `read_temp`: Scans `/sys/bus/w1/devices/28-*/w1_slave` for attached DS18B20 1-Wire temperature sensors.
+- `read_light`: Queries `/dev/i2c-1` for BH1750 ambient light sensors at addresses `0x23` and `0x5C`.
+
+Both utilities output in human-readable or NDJSON formats (`--format json`), support bounded iterations (`--count N`), and return exit code `0` on successful reads or `1` if all polling attempts fail.

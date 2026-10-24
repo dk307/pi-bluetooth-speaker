@@ -125,6 +125,21 @@ impl MeasurementMode {
         }
     }
 
+    /// Returns the maximum measurement integration time guaranteed by the BH1750 datasheet.
+    ///
+    /// Low-resolution conversion is guaranteed within 24 ms (typ. 16 ms).
+    /// High-resolution conversion is guaranteed within 180 ms (typ. 120 ms).
+    #[must_use]
+    pub const fn max_measurement_time(self) -> Duration {
+        match self {
+            Self::ContinuousLowRes | Self::OneShotLowRes => Duration::from_millis(24),
+            Self::ContinuousHighRes
+            | Self::ContinuousHighRes2
+            | Self::OneShotHighRes
+            | Self::OneShotHighRes2 => Duration::from_millis(180),
+        }
+    }
+
     /// Returns `true` if the mode continuously samples optical illuminance.
     #[must_use]
     pub const fn is_continuous(self) -> bool {
@@ -223,7 +238,7 @@ impl Illuminance {
     /// Creates an [`Illuminance`] from a raw float in lux.
     ///
     /// # Errors
-    /// Returns [`LightError`] if `lux` is negative, NaN, infinite, or exceeds [`MAX_LUX`].
+    /// Returns [`LightError`] if `lux` is negative, NaN, infinite, or exceeds [`Self::MAX_LUX`].
     pub fn from_lux(lux: f32) -> Result<Self, LightError> {
         if !lux.is_finite() || lux < 0.0 || lux > Self::MAX_LUX {
             return Err(LightError::invalid_illuminance(format!(
@@ -262,7 +277,7 @@ impl Illuminance {
 
     /// Returns illuminance in millilux (mlx, 1 lux = 1,000 millilux).
     ///
-    /// Since [`Illuminance`] guarantees `0.0 <= lux <= MAX_LUX` (`120_000.0`),
+    /// Since [`Illuminance`] guarantees `0.0 <= lux <= Self::MAX_LUX` (`120_000.0`),
     /// the maximum millilux value is `120_000_000`, which safely fits in `u32`
     /// without loss or overflow.
     #[must_use]
@@ -355,15 +370,26 @@ impl I2cHardwareInfo {
     /// Returns the standard Raspberry Pi 3 I2C-1 pinout for the BH1750 sensor.
     #[must_use]
     pub fn rpi3_default(address: I2cAddress) -> Self {
+        Self::rpi3_with_bus_and_address(BH1750_DEFAULT_I2C_BUS, address)
+    }
+
+    /// Returns the Raspberry Pi 3 pinout for the specified I2C bus and address.
+    #[must_use]
+    pub fn rpi3_with_bus_and_address(bus: u8, address: I2cAddress) -> Self {
         const SDA_BCM: BcmPin = BcmPin::new(2);
         const SDA_PHYS: PhysicalPin = PhysicalPin::new(3);
         const SCL_BCM: BcmPin = BcmPin::new(3);
         const SCL_PHYS: PhysicalPin = PhysicalPin::new(5);
 
+        let device_path = match bus {
+            1 => "/dev/i2c-1",
+            _ => "/dev/i2c-dev",
+        };
+
         Self {
-            bus: BH1750_DEFAULT_I2C_BUS,
+            bus,
             address,
-            device_path: "/dev/i2c-1",
+            device_path,
             sda_pin: GpioPinInfo {
                 bcm_pin: SDA_BCM,
                 physical_pin: SDA_PHYS,
@@ -799,7 +825,7 @@ impl LightSensor {
     /// Returns hardware and GPIO pinout metadata for this sensor.
     #[must_use]
     pub fn hardware_info(&self) -> I2cHardwareInfo {
-        I2cHardwareInfo::rpi3_default(self.i2c_address())
+        I2cHardwareInfo::rpi3_with_bus_and_address(self.i2c_bus(), self.i2c_address())
     }
 
     /// Powers down the sensor to enter sleep mode.
@@ -858,6 +884,7 @@ impl LightSensor {
             } => {
                 let _op_guard = op_lock.lock().expect("op lock poisoned");
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
+                guard.write(&[CMD_POWER_ON]).map_err(LightError::from)?;
                 guard
                     .write(&[new_mode.opcode()])
                     .map_err(LightError::from)?;
@@ -882,9 +909,9 @@ impl LightSensor {
                         let mut guard = i2c.lock().expect("I2C lock poisoned");
                         guard
                             .write(&[cur_mode.opcode()])
-                            .map_err(LightError::from)?
+                            .map_err(LightError::from)?;
                     };
-                    std::thread::sleep(cur_mode.typical_measurement_time());
+                    std::thread::sleep(cur_mode.max_measurement_time());
                 }
                 let mut guard = i2c.lock().expect("I2C lock poisoned");
                 let mut buf = [0u8; 2];
@@ -1142,6 +1169,7 @@ mod tests {
             assert_ne!(mode.as_str(), "");
             assert_eq!(mode.to_string(), mode.as_str());
             assert!(mode.typical_measurement_time() > Duration::ZERO);
+            assert!(mode.max_measurement_time() >= mode.typical_measurement_time());
         }
     }
 
@@ -1219,6 +1247,11 @@ mod tests {
         assert_eq!(hw.gnd_pin, "Ground (Physical Pin 9)");
         assert_eq!(hw.sda_pin.signal_name, "I2C-1 Data (SDA)");
         assert_eq!(hw.scl_pin.signal_name, "I2C-1 Clock (SCL)");
+
+        let hw_bus2 = I2cHardwareInfo::rpi3_with_bus_and_address(2, I2cAddress::alternate_address());
+        assert_eq!(hw_bus2.bus, 2);
+        assert_eq!(hw_bus2.device_path, "/dev/i2c-dev");
+        assert_eq!(hw_bus2.address.as_u8(), 0x5C);
     }
 
     #[test]
