@@ -19,6 +19,13 @@ jobs:
     timeout-minutes: 30
     if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false
     steps:
+      - name: Verify OpenRouter API Key
+        run: |
+          if [ -z "${{ secrets.OPENROUTER_API_KEY }}" ]; then
+            echo "ERROR: OPENROUTER_API_KEY secret is required for DiffGuard AI code review." >&2
+            exit 1
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -32,36 +39,7 @@ jobs:
         run: python3 .github/scripts/generate_review_prompt.py
 
       - name: Enable file-based custom_prompt in DiffGuard
-        run: |
-          python3 -c "
-          import glob, os, sys
-          workspace = os.environ.get('GITHUB_WORKSPACE', '.')
-          search_roots = [
-              '/home/runner/work/_actions',
-              os.path.abspath(os.path.join(workspace, '..', '..', '_actions')),
-              os.path.abspath(os.path.join(workspace, '..', '_actions')),
-          ]
-          found = False
-          for root in search_roots:
-              if not os.path.exists(root):
-                  continue
-              for p in glob.glob(os.path.join(root, '**', 'diffguard', '**', 'dist', 'index.js'), recursive=True):
-                  with open(p, 'r', encoding='utf-8') as f:
-                      content = f.read()
-                  target = \"const customPrompt = core.getInput('custom_prompt');\"
-                  patch = \"let customPrompt = core.getInput('custom_prompt'); try { const _fs = require('fs'); if (customPrompt && _fs.existsSync(customPrompt)) { customPrompt = _fs.readFileSync(customPrompt, 'utf8'); } } catch (_) {}\"
-                  if target in content:
-                      with open(p, 'w', encoding='utf-8') as f:
-                          f.write(content.replace(target, patch))
-                      with open(p, 'r', encoding='utf-8') as f:
-                          patched_content = f.read()
-                      assert 'fs.readFileSync' in patched_content, f'Patch verification failed for {p}'
-                      print(f'Successfully enabled and verified file-based prompt in {p}')
-                      found = True
-          if not found:
-              print(f'ERROR: diffguard bundle not found or target string missing in search roots: {search_roots}', file=sys.stderr)
-              sys.exit(1)
-          "
+        run: python3 .github/scripts/patch_diffguard.py
 
       - name: Run DiffGuard AI PR Review
         uses: jonit-dev/diffguard@88f63615c769f8db6031973503c2c40a9a3f4feb # v1.0.0

@@ -406,7 +406,9 @@ fn main() -> ExitCode {
     let opts = match parse_cli_args() {
         Ok(Some(o)) => o,
         Ok(None) => {
-            let bin_name = env::args().next().unwrap_or_else(|| "read_light".into());
+            let bin_name = env::args_os()
+                .next()
+                .map_or_else(|| "read_light".into(), |a| a.to_string_lossy().into_owned());
             print_usage(&bin_name);
             return ExitCode::SUCCESS;
         }

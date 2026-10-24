@@ -6,9 +6,9 @@ Reads repository guidelines directly from:
 - services/core/AGENTS.md (Hardware abstraction, inherent mocking, domain types)
 - services/.guidelines/microsoft-rust-guidelines.md (Microsoft Pragmatic Rust rules)
 
-Formats all rules into a comprehensive review prompt and writes it to GITHUB_OUTPUT
-as a multiline step output, staying safely below the Linux MAX_ARG_STRLEN (128 KB)
-process environment variable limit.
+Formats all rules into a comprehensive review prompt and writes it directly to
+`review_prompt.txt` at the repository root, exporting its file path to GITHUB_OUTPUT
+to completely bypass the Linux MAX_ARG_STRLEN (128 KB) environment variable limit.
 """
 
 import os
@@ -61,6 +61,33 @@ def split_top_level_sections(md: str) -> list[str]:
     return sections
 
 
+def strip_decorations_outside_fences(md: str) -> str:
+    """Strips anchor tags and link URLs outside of code fences, preserving code blocks."""
+    lines = md.splitlines(keepends=True)
+    out: list[str] = []
+    current_fence = None
+    for line in lines:
+        m = FENCE_RE.match(line)
+        if m:
+            marker = m.group(1)
+            if current_fence is None:
+                current_fence = marker
+            elif current_fence == marker:
+                current_fence = None
+            out.append(line)
+        elif current_fence is not None:
+            out.append(line)
+        else:
+            line = re.sub(r"^\s*\[[^\]]+\]:\s+\S+.*$", "", line)
+            line = re.sub(r"\s*\{\s*#[A-Za-z0-9\-_]+\s*\}", "", line)
+            line = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", line)
+            out.append(line)
+    text = "".join(out)
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
 def build_review_prompt(repo_root: Path) -> str:
     """Assembles the complete PR review prompt containing the full guidelines."""
     agents_path = repo_root / "AGENTS.md"
@@ -89,14 +116,7 @@ def build_review_prompt(repo_root: Path) -> str:
         kept_sections.append(section)
 
     guidelines_body = "\n".join(kept_sections)
-
-    # 2. Strip markdown link anchors ({ #M-... }), URLs in links ([text](url) -> text),
-    #    link-reference definitions ([name]: url), HTML comments, and consecutive blank lines.
-    guidelines_body = re.sub(r"<!--.*?-->", "", guidelines_body, flags=re.DOTALL)
-    guidelines_body = re.sub(r"^\s*\[[^\]]+\]:\s+\S+.*$", "", guidelines_body, flags=re.MULTILINE)
-    guidelines_body = re.sub(r"\s*\{\s*#[A-Za-z0-9\-_]+\s*\}", "", guidelines_body)
-    guidelines_body = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", guidelines_body)
-    guidelines_body = re.sub(r"\n{3,}", "\n\n", guidelines_body).strip()
+    guidelines_body = strip_decorations_outside_fences(guidelines_body)
 
     prompt = f"""You are reviewing pull requests for the Raspberry Pi Bluetooth Speaker & DSP Appliance project.
 Perform a rigorous, constructive, and actionable engineering review adhering strictly to the guidelines and standards below.

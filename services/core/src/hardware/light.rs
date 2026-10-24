@@ -247,7 +247,10 @@ impl Illuminance {
             | MeasurementMode::OneShotHighRes
             | MeasurementMode::OneShotLowRes => base_lux,
         };
-        // Raw 16-bit register maximum (65535) yields ~54,612.5 lux, safely within MAX_LUX (120,000.0).
+        debug_assert!(
+            (0.0..=Self::MAX_LUX).contains(&lux),
+            "raw conversion breached Illuminance invariant: {lux}"
+        );
         Self { lux }
     }
 
@@ -608,11 +611,14 @@ impl LightSensorMock {
     /// Sets the simulated illuminance in lux across operating modes.
     ///
     /// The mock calculates the mode-appropriate raw register word on read,
-    /// accounting for High-Res 2 scaling (0.5 lx resolution).
+    /// accounting for High-Res 2 scaling (0.5 lx resolution). Values above
+    /// the 16-bit register word ceiling (~54,612.5 lx at default `MTreg`)
+    /// are saturated to `u16::MAX` when encoded into the raw register.
     ///
     /// # Panics
-    /// Panics if the mock state lock is poisoned.
+    /// Panics if `lux` is not finite (`NaN` or infinite), or if the mock state lock is poisoned.
     pub fn set_lux(&self, lux: f32) {
+        assert!(lux.is_finite(), "mock lux must be finite, got {lux}");
         let mut state = self.state.write().expect("mock lock poisoned");
         state.desired_lux = Some(lux.clamp(0.0, Illuminance::MAX_LUX));
     }
@@ -1029,6 +1035,34 @@ mod tests {
         // Clear fault
         mock.set_fault(None);
         let _ = sensor.read_lux().unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "mock lux must be finite")]
+    fn mock_set_lux_panics_on_nan() {
+        let (_, mock) = LightSensor::new_mocked();
+        mock.set_lux(f32::NAN);
+    }
+
+    #[test]
+    fn raw_and_mode_u16_max_boundary_and_mock_saturation() {
+        let max_hres = Illuminance::from_raw_and_mode(u16::MAX, MeasurementMode::ContinuousHighRes);
+        assert!((max_hres.lux() - (65535.0 / 1.2)).abs() < 1e-2);
+        assert!(max_hres.lux() <= Illuminance::MAX_LUX);
+
+        let max_hres2 =
+            Illuminance::from_raw_and_mode(u16::MAX, MeasurementMode::ContinuousHighRes2);
+        assert!((max_hres2.lux() - (65535.0 / 2.4)).abs() < 1e-2);
+        assert!(max_hres2.lux() <= Illuminance::MAX_LUX);
+
+        let (sensor, mock) = LightSensor::new_mocked();
+        mock.set_lux(54_612.0);
+        let reading = sensor.read_lux().unwrap();
+        assert!((reading.lux() - 54_612.0).abs() < 1.0);
+
+        mock.set_lux(Illuminance::MAX_LUX);
+        let reading_saturated = sensor.read_lux().unwrap();
+        assert_eq!(reading_saturated.lux(), 65535.0 / 1.2);
     }
 
     #[tokio::test]

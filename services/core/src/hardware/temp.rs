@@ -1128,6 +1128,17 @@ mod tests {
     use super::*;
     use std::error::Error;
 
+    struct AutoCleanupPath(std::path::PathBuf);
+    impl Drop for AutoCleanupPath {
+        fn drop(&mut self) {
+            if self.0.is_dir() {
+                let _ = fs::remove_dir_all(&self.0);
+            } else if self.0.is_file() {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+    }
+
     #[test]
     fn temperature_conversions_and_bounds() {
         let t = Temperature::from_millidegrees_celsius(26_437).unwrap();
@@ -1318,6 +1329,7 @@ a7 01 4b 46 7f ff 0c 10 5c
     fn soc_thermal_parses_content() {
         let temp_dir =
             std::env::temp_dir().join(format!("soc_thermal_test_{}", std::process::id()));
+        let _guard = AutoCleanupPath(temp_dir.clone());
         let _ = fs::create_dir_all(&temp_dir);
         let path = temp_dir.join("temp");
         fs::write(&path, "41856\n").unwrap();
@@ -1339,8 +1351,6 @@ a7 01 4b 46 7f ff 0c 10 5c
         // Missing file
         let missing_err = SocThermal::read_from_path(temp_dir.join("nonexistent")).unwrap_err();
         assert!(missing_err.is_io());
-
-        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -1602,10 +1612,10 @@ a7 01 4b 46 7f ff 0c 10 5c
         // Test sysfs path that is a file (triggers Err(NotADirectory) in discover_sysfs_sensors)
         let temp_file =
             std::env::temp_dir().join(format!("ds18b20_file_test_{}", std::process::id()));
+        let _guard = AutoCleanupPath(temp_file.clone());
         let _ = fs::write(&temp_file, "not a directory");
         let file_sensor = TempSensor::with_sysfs_path(&temp_file);
         let res = file_sensor.discover_sensors();
-        let _ = fs::remove_file(&temp_file);
         assert!(res.unwrap_err().is_io());
     }
 }
