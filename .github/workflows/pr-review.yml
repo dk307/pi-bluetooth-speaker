@@ -33,8 +33,10 @@ jobs:
         include:
           - name: "Preset Primary"
             model: "openrouter/@preset/code-review"
+            reasoning_effort: "low"
           - name: "Preset Alt-1"
             model: "openrouter/@preset/code-review-alt-1"
+            reasoning_effort: "low"
     steps:
       - name: Verify OpenRouter API Key
         env:
@@ -51,7 +53,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER__KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENROUTER__REASONING_MAX_TOKENS: "32768"
+          OPENROUTER__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
+          CONFIG__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
           CONFIG__MODEL: ${{ matrix.model }}
           CONFIG__FALLBACK_MODELS: '[]'
           CONFIG__MAX_MODEL_TOKENS: "512000"
@@ -88,3 +91,4 @@ jobs:
             - Report Tier 1 (correctness, physical hardware protocol bugs, safety) and Tier 2 (build, clippy warnings, test failures, coverage < 90%) issues.
             - Do NOT report subjective Tier 3 style nitpicks or suggest speculative abstractions.
             - Include a dedicated "How Code Can Be Simplified" evaluation identifying duplicated logic to unify, over-engineered abstractions to flatten, and lines of code that can be removed while preserving safety and domain invariants.
+            - Keep internal reasoning concise and focused. Do not re-evaluate full guidelines repeatedly; conclude chain of thought directly and output the markdown review.
