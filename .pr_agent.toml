@@ -13,6 +13,7 @@ repo_context_from_default_branch = false
 
 [openrouter]
 reasoning_effort = "high"
+reasoning_max_tokens = 12000
 
 [pr_reviewer]
 require_tests_review = true

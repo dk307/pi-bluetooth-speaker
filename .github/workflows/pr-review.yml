@@ -35,9 +35,11 @@ jobs:
           - name: "Primary"
             model: "openrouter/@preset/code-review"
             reasoning_effort: "high"
+            reasoning_max_tokens: "12000"
           - name: "Alt-1"
             model: "openrouter/@preset/code-review-alt-1"
             reasoning_effort: "high"
+            reasoning_max_tokens: "12000"
     steps:
       - name: Verify OpenRouter API Key
         env:
@@ -55,6 +57,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER__KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
+          OPENROUTER__REASONING_MAX_TOKENS: ${{ matrix.reasoning_max_tokens }}
           CONFIG__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
           CONFIG__MODEL: ${{ matrix.model }}
           # PR_AGENT_CONFIG_BRANCH points to the PR branch for pull_request events
