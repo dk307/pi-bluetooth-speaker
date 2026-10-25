@@ -371,18 +371,13 @@ pub fn format_min_max_avg(
 ) -> Option<[String; 3]> {
     let (min, max, avg) = (stats.min()?, stats.max()?, stats.average_f32()?);
     let entries = [("Min", min), ("Max", max), ("Avg", avg)];
-    let mut lines = Vec::with_capacity(3);
-    for (stat_name, val) in entries {
-        if let Some((conv, sec_unit)) = to_secondary {
-            lines.push(format!(
-                "{label} {stat_name} : {val:.2} {unit} ({:.2} {sec_unit})",
-                conv(val)
-            ));
-        } else {
-            lines.push(format!("{label} {stat_name} : {val:.2} {unit}"));
-        }
-    }
-    lines.try_into().ok()
+    Some(entries.map(|(stat_name, val)| match to_secondary {
+        Some((conv, sec_unit)) => format!(
+            "{label} {stat_name} : {val:.2} {unit} ({:.2} {sec_unit})",
+            conv(val)
+        ),
+        None => format!("{label} {stat_name} : {val:.2} {unit}"),
+    }))
 }
 
 /// Prints min, max, and average bounds for a numeric sample set.

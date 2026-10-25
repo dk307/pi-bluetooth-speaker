@@ -293,7 +293,7 @@ pub struct I2cHardwareInfo {
 }
 
 /// Validates that `bus` corresponds to the Raspberry Pi 3 BSC1 controller (I2C-1).
-pub(crate) fn validate_rpi3_bus(bus: u8) -> Result<(), LightError> {
+fn validate_rpi3_bus(bus: u8) -> Result<(), LightError> {
     if bus != BH1750_DEFAULT_I2C_BUS {
         return Err(LightError::i2c(format!(
             "unsupported I2C bus {bus}: hardware driver models Raspberry Pi 3 BSC1 (i2c-{BH1750_DEFAULT_I2C_BUS}) only"
