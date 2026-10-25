@@ -18,6 +18,7 @@ concurrency:
 jobs:
   pr_agent:
     name: PR-Agent AI Review (${{ matrix.name }})
+    continue-on-error: ${{ matrix.optional || false }}
     if: >-
       github.event.sender.type != 'Bot' &&
       (
@@ -36,10 +37,17 @@ jobs:
             model: "openrouter/@preset/code-review"
             reasoning_effort: "high"
             reasoning_max_tokens: "12000"
+            optional: false
           - name: "Alt-1"
             model: "openrouter/@preset/code-review-alt-1"
             reasoning_effort: "high"
             reasoning_max_tokens: "12000"
+            optional: false
+          - name: "Free"
+            model: "openrouter/@preset/code-review-free"
+            reasoning_effort: "high"
+            reasoning_max_tokens: "12000"
+            optional: true
     steps:
       - name: Verify OpenRouter API Key
         env:
@@ -51,6 +59,7 @@ jobs:
           fi
 
       - name: Run PR-Agent (${{ matrix.name }})
+        continue-on-error: ${{ matrix.optional || false }}
         uses: the-pr-agent/pr-agent@981344be2755e303df501e18e3f60b848a188a80 # v0.48.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
