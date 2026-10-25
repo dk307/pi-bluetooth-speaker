@@ -48,9 +48,9 @@ jobs:
           CONFIG__REPO_CONTEXT_MAX_LINES: '1000'
           GITHUB_ACTION_CONFIG__AUTO_REVIEW: "true"
           GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: "false"
-          GITHUB_ACTION_CONFIG__AUTO_IMPROVE: "false"
+          GITHUB_ACTION_CONFIG__AUTO_IMPROVE: "true"
           GITHUB_ACTION_CONFIG__HANDLE_PUSH_TRIGGER: "true"
-          GITHUB_ACTION_CONFIG__PUSH_COMMANDS: '["/review"]'
+          GITHUB_ACTION_CONFIG__PUSH_COMMANDS: '["/review", "/improve"]'
           PR_REVIEWER__REQUIRE_TESTS_REVIEW: "true"
           PR_REVIEWER__REQUIRE_SECURITY_REVIEW: "true"
           PR_REVIEWER__REQUIRE_ESTIMATE_EFFORT_TO_REVIEW: "true"
@@ -58,3 +58,15 @@ jobs:
             Strictly adhere to the Microsoft Pragmatic Rust Guidelines and the repository review-triage rules in AGENTS.md.
             Only report Tier 1 (correctness, physical hardware protocol bugs, safety) and Tier 2 (build, clippy warnings, test failures, coverage < 90%) issues.
             Do not recommend subjective style refactorings, speculative abstractions, or out-of-scope changes.
+            Include an explicit "How Code Can Be Simplified" evaluation identifying duplicated logic to unify, over-engineered abstractions to flatten, and lines of code that can be removed while preserving safety and domain invariants.
+          PR_CODE_SUGGESTIONS__FOCUS_ONLY_ON_PROBLEMS: "false"
+          PR_CODE_SUGGESTIONS__COMMITTABLE_CODE_SUGGESTIONS: "true"
+          PR_CODE_SUGGESTIONS__NUM_CODE_SUGGESTIONS_PER_CHUNK: "4"
+          PR_CODE_SUGGESTIONS__PUBLISH_OUTPUT_NO_SUGGESTIONS: "false"
+          PR_CODE_SUGGESTIONS__EXTRA_INSTRUCTIONS: >-
+            Focus on code simplification and anti-bloat per repository guidelines (AGENTS.md Section 4.2):
+            1. Identify duplicated logic to extract or unify into shared helpers.
+            2. Flatten over-engineered abstractions, dead trait bounds, or unnecessary wrapper layers.
+            3. Streamline verbose error handling or lock plumbing.
+            4. Eliminate unnecessary memory allocations, string clones, or speculative conversions.
+            5. Suggest concrete, committable code simplifications that reduce lines of code while maintaining domain invariants and safety.

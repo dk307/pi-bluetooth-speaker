@@ -14,11 +14,26 @@ extra_instructions = """
 Strictly adhere to the Microsoft Pragmatic Rust Guidelines and the repository review-triage rules in AGENTS.md.
 Only report Tier 1 (correctness, physical hardware protocol bugs, safety) and Tier 2 (build, clippy warnings, test failures, coverage < 90%) issues.
 Do not recommend subjective style refactorings, speculative abstractions, or out-of-scope changes.
+Include an explicit "How Code Can Be Simplified" evaluation identifying duplicated logic to unify, over-engineered abstractions to flatten, and lines of code that can be removed while preserving safety and domain invariants.
+"""
+
+[pr_code_suggestions]
+focus_only_on_problems = false
+committable_code_suggestions = true
+num_code_suggestions_per_chunk = 4
+publish_output_no_suggestions = false
+extra_instructions = """
+Focus on code simplification and anti-bloat per repository guidelines (AGENTS.md Section 4.2):
+1. Identify duplicated logic to extract or unify into shared helpers.
+2. Flatten over-engineered abstractions, dead trait bounds, or unnecessary wrapper layers.
+3. Streamline verbose error handling or lock plumbing.
+4. Eliminate unnecessary memory allocations, string clones, or speculative conversions.
+5. Suggest concrete, committable code simplifications that reduce lines of code while maintaining domain invariants and safety.
 """
 
 [github_action_config]
 auto_review = true
 auto_describe = false
-auto_improve = false
+auto_improve = true
 handle_push_trigger = true
-push_commands = ["/review"]
+push_commands = ["/review", "/improve"]
