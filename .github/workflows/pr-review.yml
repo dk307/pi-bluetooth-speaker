@@ -45,8 +45,9 @@ jobs:
           CONFIG__MODEL: "openrouter/@preset/code-review"
           CONFIG__CUSTOM_MODEL_MAX_TOKENS: "32000"
           CONFIG__MAX_OUTPUT_TOKENS: "8192"
-          CONFIG__REPO_CONTEXT_FILES: '["AGENTS.md", "services/core/AGENTS.md"]'
-          CONFIG__REPO_CONTEXT_MAX_LINES: '1000'
+          CONFIG__REPO_CONTEXT_FILES: '["AGENTS.md", "services/core/AGENTS.md", "best_practices.md"]'
+          CONFIG__REPO_CONTEXT_MAX_LINES: '1500'
+          CONFIG__REPO_CONTEXT_FROM_DEFAULT_BRANCH: "false"
           GITHUB_ACTION_CONFIG__AUTO_REVIEW: "true"
           GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: "false"
           GITHUB_ACTION_CONFIG__AUTO_IMPROVE: "true"
@@ -56,18 +57,28 @@ jobs:
           PR_REVIEWER__REQUIRE_SECURITY_REVIEW: "true"
           PR_REVIEWER__REQUIRE_ESTIMATE_EFFORT_TO_REVIEW: "true"
           PR_REVIEWER__EXTRA_INSTRUCTIONS: >-
-            Strictly adhere to the Microsoft Pragmatic Rust Guidelines and the repository review-triage rules in AGENTS.md.
-            Only report Tier 1 (correctness, physical hardware protocol bugs, safety) and Tier 2 (build, clippy warnings, test failures, coverage < 90%) issues.
-            Do not recommend subjective style refactorings, speculative abstractions, or out-of-scope changes.
-            Include an explicit "How Code Can Be Simplified" evaluation identifying duplicated logic to unify, over-engineered abstractions to flatten, and lines of code that can be removed while preserving safety and domain invariants.
+            You are reviewing Rust code for a Raspberry Pi 3 embedded audio/DSP appliance.
+            Verify that the pull request strictly adheres to the Microsoft Pragmatic Rust Guidelines (services/.guidelines/microsoft-rust-guidelines.md, AGENTS.md, best_practices.md):
+            1. Mockable I/O (M-MOCKABLE-SYSCALLS, M-DI-HIERARCHY): Verify hardware I/O and peripherals are isolated behind inherent mocks (new_mocked()) rather than unmockable syscalls or leaky traits.
+            2. Strong Typing & Invariants (M-STRONG-TYPES, M-STRONG-TYPES-GUARD): Verify domain newtypes validate invariants at construction time (SensorId, I2cAddress) and reject signed/invalid inputs at boundaries. Guard float types against NaN via .is_finite().
+            3. Canonical Errors & Clean Propagation (M-ERRORS-CANONICAL-STRUCTS, M-FROM-ERROR): Verify error types are canonical structs with captured backtraces and query predicates (is_*), propagating errors via ? through From<ForeignError> rather than manual .map_err(). Flag any .unwrap() or .expect() on fallible paths.
+            4. Panic Discipline (M-PANIC-IS-STOP, M-PANIC-ON-BUG): Panics must represent bugs or unrecoverable termination, never expected hardware/runtime I/O failures. Thread worker panics must unwind with resume_unwind.
+            5. Surface & Documentation (M-SINGLE-ITEM-PATH, M-NO-GLOB-REEXPORTS, M-MODULE-DOCS, M-CANONICAL-DOCS, M-FIRST-DOC-SENTENCE): Verify single canonical item paths, no glob re-exports, //! module docs, ~15-word concise doc summaries, and canonical # Examples/# Errors/# Panics sections.
+            6. Lints (M-LINT-OVERRIDE-EXPECT): Verify #[expect(..., reason = "...")] is used instead of #[allow].
+            7. Memory & Types (M-BOX-DST, M-AVOID-WRAPPERS, M-SIMPLE-ABSTRACTIONS): Verify Box<str> / Box<[T]> for immutable owned strings and paths; flag redundant nested smart pointers or multi-layered locks.
+
+            Adhere strictly to repository review triage rules (AGENTS.md Section 4.1):
+            - Report Tier 1 (correctness, physical hardware protocol bugs, safety) and Tier 2 (build, clippy warnings, test failures, coverage < 90%) issues.
+            - Do NOT report subjective Tier 3 style nitpicks or suggest speculative abstractions.
+            - Include a dedicated "How Code Can Be Simplified" evaluation identifying duplicated logic to unify, over-engineered abstractions to flatten, and lines of code that can be removed while preserving safety and domain invariants.
           PR_CODE_SUGGESTIONS__FOCUS_ONLY_ON_PROBLEMS: "false"
           PR_CODE_SUGGESTIONS__COMMITTABLE_CODE_SUGGESTIONS: "true"
           PR_CODE_SUGGESTIONS__NUM_CODE_SUGGESTIONS_PER_CHUNK: "4"
           PR_CODE_SUGGESTIONS__PUBLISH_OUTPUT_NO_SUGGESTIONS: "false"
           PR_CODE_SUGGESTIONS__EXTRA_INSTRUCTIONS: >-
-            Focus on code simplification and anti-bloat per repository guidelines (AGENTS.md Section 4.2):
-            1. Identify duplicated logic to extract or unify into shared helpers.
-            2. Flatten over-engineered abstractions, dead trait bounds, or unnecessary wrapper layers.
-            3. Streamline verbose error handling or lock plumbing.
-            4. Eliminate unnecessary memory allocations, string clones, or speculative conversions.
-            5. Suggest concrete, committable code simplifications that reduce lines of code while maintaining domain invariants and safety.
+            Suggest concrete, committable code improvements adhering to the Microsoft Pragmatic Rust Guidelines (AGENTS.md, best_practices.md):
+            1. Error Simplification (M-FROM-ERROR): Replace verbose .map_err(DomainError::from) with idiomatic ? via From<ForeignError>.
+            2. Memory Efficiency (M-BOX-DST): Replace unnecessary String / Vec<T> with Box<str> / Box<[T]> for immutable owned buffers and paths.
+            3. Abstraction Flattening (M-AVOID-WRAPPERS, M-SIMPLE-ABSTRACTIONS): Flatten over-engineered wrapper layers, redundant mutex locks, and dead trait bounds.
+            4. Lint Hygiene (M-LINT-OVERRIDE-EXPECT): Convert any #[allow(...)] to #[expect(..., reason = "...")].
+            5. Code Deduplication: Unify duplicated scaffolding across binaries or tests into shared modules (crate::diag, crate::runtime), and eliminate dead code while maintaining domain invariants and safety.
