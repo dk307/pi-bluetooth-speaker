@@ -51,6 +51,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER__KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER__REASONING_MAX_TOKENS: "8000"
           CONFIG__MODEL: ${{ matrix.model }}
           CONFIG__FALLBACK_MODELS: '[]'
           CONFIG__MAX_MODEL_TOKENS: "256000"

@@ -9,6 +9,9 @@ repo_context_files = ["AGENTS.md", "services/core/AGENTS.md", "services/.guideli
 repo_context_max_lines = 4000
 repo_context_from_default_branch = false
 
+[openrouter]
+reasoning_max_tokens = 8000
+
 [pr_reviewer]
 require_tests_review = true
 require_security_review = true
