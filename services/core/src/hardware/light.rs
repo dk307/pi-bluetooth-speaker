@@ -355,11 +355,8 @@ impl I2cHardwareInfo {
     /// metadata corresponds strictly to Broadcom BSC1 controller pins (SDA BCM 2 / SCL BCM 3).
     #[must_use]
     pub fn rpi3_with_bus_and_address(bus: u8, address: I2cAddress) -> Self {
-        Self::try_rpi3_with_bus_and_address(bus, address).unwrap_or_else(|e| {
-            panic!(
-                "GPIO metadata models Raspberry Pi 3 BSC1 (i2c-{BH1750_DEFAULT_I2C_BUS}) only, got bus {bus}: {e}"
-            )
-        })
+        Self::try_rpi3_with_bus_and_address(bus, address)
+            .unwrap_or_else(|e| panic!("rpi3 pinout metadata: {e}"))
     }
 }
 
@@ -1201,7 +1198,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "GPIO metadata models Raspberry Pi 3 BSC1")]
+    #[should_panic(expected = "rpi3 pinout metadata:")]
     fn rpi3_hardware_info_panics_on_non_default_bus() {
         let _ = I2cHardwareInfo::rpi3_with_bus_and_address(2, I2cAddress::default());
     }

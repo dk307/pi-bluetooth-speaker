@@ -691,5 +691,9 @@ mod tests {
 
         let empty_stats = NumericStats::default();
         assert_eq!(format_min_max_avg(&empty_stats, "Test", "lx", None), None);
+
+        // Exercise print_min_max_avg to cover stdout rendering for both Some and None paths
+        print_min_max_avg(&stats, "Light", "lx", Some((foot_candles, "fc")));
+        print_min_max_avg(&empty_stats, "Empty", "lx", None);
     }
 }

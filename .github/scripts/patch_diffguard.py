@@ -9,7 +9,7 @@ when custom_prompt points to an existing file path.
 
 Runner Lifecycle Invariant:
 The GitHub Actions runner pre-downloads and extracts all actions declared via `uses:`
-(including jonit-dev/diffguard@88f63615c769f8db6031973503c2c40a9a3f4feb) into the runner
+(including jonit-dev/diffguard pinned in .github/workflows/review.yml) into the runner
 workspace (`../_actions/` or `_work/_actions/`) during the job initialization phase
 ("Set up job"), guaranteeing the action bundle is already present on disk before this
 patching step runs.
@@ -20,7 +20,8 @@ import os
 import subprocess
 import sys
 
-# Pinned commit hash in jonit-dev/diffguard (v1.0.0)
+# Pinned commit hash in jonit-dev/diffguard (v1.0.0, matching .github/workflows/review.yml)
+# Verified via: git ls-remote https://github.com/jonit-dev/diffguard refs/tags/v1.0.0
 # Upstream source line: https://github.com/jonit-dev/diffguard/blob/88f63615c769f8db6031973503c2c40a9a3f4feb/dist/index.js
 # Upstream feature request tracker: https://github.com/jonit-dev/diffguard/issues/1
 PINNED_SHA = "88f63615c769f8db6031973503c2c40a9a3f4feb"

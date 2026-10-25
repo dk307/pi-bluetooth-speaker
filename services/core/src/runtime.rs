@@ -145,48 +145,58 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn map_join_result_propagates_panic_payloads() {
+    #[test]
+    fn map_join_result_propagates_panic_payloads() {
+        // Mutates the process-global panic hook for the duration of this test;
+        // scoped via PanicHookGuard (RAII restore on drop or assertion panic).
         let _hook_guard = PanicHookGuard(Some(std::panic::take_hook()));
         std::panic::set_hook(Box::new(|_| {}));
 
-        // Table-driven verification of panic unwinding without unreachable post-panic code
-        let cases = [
-            (
-                "fatal static worker crash",
-                tokio::spawn(async {
-                    panic!("fatal static worker crash");
-                }),
-            ),
-            (
-                "formatted worker crash",
-                tokio::spawn(async {
-                    panic!("{}", "formatted worker crash");
-                }),
-            ),
-        ];
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build local current-thread runtime");
 
-        for (expected_substr, task) in cases {
-            let join_res: Result<Result<(), DummyError>, _> = task.await.map(Ok::<(), DummyError>);
-            assert!(join_res.as_ref().unwrap_err().is_panic());
+        rt.block_on(async {
+            // Table-driven verification of panic unwinding without unreachable post-panic code
+            let cases = [
+                (
+                    "fatal static worker crash",
+                    tokio::spawn(async {
+                        panic!("fatal static worker crash");
+                    }),
+                ),
+                (
+                    "formatted worker crash",
+                    tokio::spawn(async {
+                        panic!("{}", "formatted worker crash");
+                    }),
+                ),
+            ];
 
-            let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = map_join_result(join_res, "crash task");
-            }));
+            for (expected_substr, task) in cases {
+                let join_res: Result<Result<(), DummyError>, _> =
+                    task.await.map(Ok::<(), DummyError>);
+                assert!(join_res.as_ref().unwrap_err().is_panic());
 
-            assert!(panic_result.is_err());
-            let panic_payload = panic_result.unwrap_err();
-            let msg = panic_payload
-                .downcast_ref::<&'static str>()
-                .copied()
-                .map(str::to_owned)
-                .or_else(|| panic_payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| panic!("unexpected panic payload type"));
-            assert!(
-                msg.contains(expected_substr),
-                "expected panic message to contain '{expected_substr}', got '{msg}'"
-            );
-        }
+                let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = map_join_result(join_res, "crash task");
+                }));
+
+                assert!(panic_result.is_err());
+                let panic_payload = panic_result.unwrap_err();
+                let msg = panic_payload
+                    .downcast_ref::<&'static str>()
+                    .copied()
+                    .map(str::to_owned)
+                    .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| panic!("unexpected panic payload type"));
+                assert!(
+                    msg.contains(expected_substr),
+                    "expected panic message to contain '{expected_substr}', got '{msg}'"
+                );
+            }
+        });
     }
 
     #[test]
