@@ -86,4 +86,4 @@ AI agents working on `speaker-core` **MUST** follow the repository-wide **First-
   2. `cargo clippy --manifest-path services/core/Cargo.toml --all-targets -- -D warnings`
   3. `cargo llvm-cov --manifest-path services/core/Cargo.toml --fail-under-lines 90 --fail-under-functions 90`
   4. `cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins`
-* **Protocol & Review Rules:** Consult [root `AGENTS.md` (§4.1–§4.3)](../../AGENTS.md) for the 3-Tier review triage classification, strict PR blast radius containment, code anti-bloat mandate, and continuous post-review distillation requirements.
+* **Protocol & Review Rules:** Consult [root `AGENTS.md` (§4.1–§4.3)](../../AGENTS.md) for the 3-Tier review triage classification, mandatory critical analysis of code review comments before fixing (only fix what genuinely makes sense), strict PR blast radius containment, code anti-bloat mandate, and continuous post-review distillation requirements.

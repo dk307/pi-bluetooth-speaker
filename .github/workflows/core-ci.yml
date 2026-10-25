@@ -45,7 +45,9 @@ jobs:
           fail_ci_if_error: false
 
       - name: Build Speaker Core & Utilities (Release for RPi 3)
-        run: cargo build --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins
+        # Cargo discovers `.cargo/config.toml` from the working directory, not from
+        # `--manifest-path`; pass it explicitly so Cortex-A53 / NEON rustflags apply.
+        run: cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins
 
       - name: Verify Binary Architecture & Compatibility
         run: |

@@ -1,60 +1,69 @@
-name: DiffGuard AI PR Review
+name: PR-Agent AI PR Review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read
+  issues: write
   pull-requests: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: pr-agent-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
-  review:
-    name: DiffGuard AI Code Review
+  pr_agent:
+    name: PR-Agent AI Review (${{ matrix.name }})
+    if: >-
+      github.event.sender.type != 'Bot' &&
+      (
+        (github.event_name == 'pull_request' && !github.event.pull_request.draft && github.event.pull_request.head.repo.fork == false) ||
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request && github.event.issue.state == 'open' &&
+         (startsWith(github.event.comment.body, '/review') || startsWith(github.event.comment.body, '/improve') || startsWith(github.event.comment.body, '/ask') || startsWith(github.event.comment.body, '/describe')) &&
+         (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'COLLABORATOR' || github.event.comment.author_association == 'MEMBER'))
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Primary"
+            model: "openrouter/@preset/code-review"
+            reasoning_effort: "high"
+            reasoning_max_tokens: "12000"
+          - name: "Alt-1"
+            model: "openrouter/@preset/code-review-alt-1"
+            reasoning_effort: "high"
+            reasoning_max_tokens: "12000"
     steps:
       - name: Verify OpenRouter API Key
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           if [ -z "$OPENROUTER_API_KEY" ]; then
-            echo "ERROR: OPENROUTER_API_KEY secret is required for DiffGuard AI code review." >&2
+            echo "ERROR: OPENROUTER_API_KEY secret is required for PR-Agent code review." >&2
             exit 1
           fi
 
-      - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Set up Python
-        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
-        with:
-          python-version: "3.x"
-
-      - name: Run CI Script Unit Tests
-        run: python3 -m unittest discover -s .github/scripts -p "test_*.py" -v
-
-      - name: Build custom review prompt from guidelines
-        id: build-prompt
-        run: python3 .github/scripts/generate_review_prompt.py
-
-      # GitHub Actions Runner downloads all referenced `uses:` action bundles into
-      # `/home/runner/work/_actions/jonit-dev/diffguard/<sha>/` during the initial
-      # `Set up job` phase before step 1 executes. This step patches `dist/index.js`
-      # in place and verifies syntax with `node --check` before the action runs.
-      - name: Enable file-based custom_prompt in DiffGuard
-        run: python3 .github/scripts/patch_diffguard.py
-
-      - name: Run DiffGuard AI PR Review
-        uses: jonit-dev/diffguard@88f63615c769f8db6031973503c2c40a9a3f4feb # v1.0.0
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          open_router_key: ${{ secrets.OPENROUTER_API_KEY }}
-          model_id: "@preset/code-review"
-          max_tokens: "8192"
-          custom_prompt: ${{ steps.build-prompt.outputs.prompt_file }}
+      - name: Run PR-Agent (${{ matrix.name }})
+        uses: the-pr-agent/pr-agent@981344be2755e303df501e18e3f60b848a188a80 # v0.48.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER__KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
+          OPENROUTER__REASONING_MAX_TOKENS: ${{ matrix.reasoning_max_tokens }}
+          CONFIG__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
+          CONFIG__MODEL: ${{ matrix.model }}
+          # PR_AGENT_CONFIG_BRANCH points to the PR branch for pull_request events
+          # (where github.head_ref is available), allowing .pr_agent.toml changes to be
+          # tested before merging. For issue_comment triggers, github.head_ref is empty
+          # and falls back to github.ref_name (the default branch where .pr_agent.toml lives once merged).
+          # The PR head ref is safe because the job is strictly gated above against fork PRs.
+          PR_AGENT_CONFIG_BRANCH: ${{ github.head_ref || github.ref_name }}
+          CONFIG__CONFIG_BRANCH: ${{ github.head_ref || github.ref_name }}

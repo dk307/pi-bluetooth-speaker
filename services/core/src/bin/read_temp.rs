@@ -15,7 +15,7 @@ use speaker_core::diag::{
     run_poll_loop, should_print_summary,
 };
 use speaker_core::hardware::{
-    SensorDiagnostics, SensorId, SocThermal, TempError, TempSensor, Temperature,
+    SensorId, SensorReading, SocThermal, TempError, TempSensor, Temperature,
 };
 
 /// Command-line configuration parameters.
@@ -213,8 +213,22 @@ fn handle_sensor_iteration(
     stats: &mut Statistics,
 ) {
     for dev in devices {
-        match sensor.read_sensor(dev) {
-            Ok(reading) => {
+        let read_result = if opts.show_raw && opts.common.format == OutputFormat::Human {
+            sensor.read_diagnostics(dev).map(|diag| {
+                (
+                    SensorReading {
+                        sensor_id: diag.sensor_id,
+                        temperature: diag.temperature,
+                    },
+                    Some(diag.raw_payload),
+                )
+            })
+        } else {
+            sensor.read_sensor(dev).map(|reading| (reading, None))
+        };
+
+        match read_result {
+            Ok((reading, raw_payload)) => {
                 stats.record_success(reading.temperature);
                 match opts.common.format {
                     OutputFormat::Json => {
@@ -231,15 +245,8 @@ fn handle_sensor_iteration(
                         });
                         println!("[{timestamp}] {reading}{soc_info}");
 
-                        if opts.show_raw {
-                            if let Ok(SensorDiagnostics { raw_payload, .. }) =
-                                sensor.read_diagnostics(dev)
-                            {
-                                println!(
-                                    "    [Raw Payload]: {}",
-                                    raw_payload.trim_end().replace('\n', " | ")
-                                );
-                            }
+                        if let Some(raw) = raw_payload {
+                            println!("    [Raw Payload]: {}", raw.trim_end().replace('\n', " | "));
                         }
                     }
                 }
@@ -490,6 +497,11 @@ mod tests {
             },
             ..CliOptions::default()
         };
+        assert_eq!(run_app(&sensor, &opts_run), ExitCode::SUCCESS);
+
+        // Test multi-sensor sweep: with 2 discovered sensors and max_count = 2, terminates after reading both sensors
+        let id2 = SensorId::parse("28-000000000002").unwrap();
+        mock.set_temperature(id2, Temperature::from_celsius(28.0).unwrap());
         assert_eq!(run_app(&sensor, &opts_run), ExitCode::SUCCESS);
 
         // Test run_app in JSON mode

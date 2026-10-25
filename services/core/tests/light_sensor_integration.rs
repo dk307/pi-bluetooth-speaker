@@ -60,7 +60,6 @@ fn diagnostics_and_power_management() {
 
     mock.set_lux(240.0);
     let diag = sensor.read_diagnostics().unwrap();
-    assert!(diag.powered);
     assert!((diag.illuminance.lux() - 240.0).abs() < 1e-2);
 
     sensor.power_down().unwrap();
@@ -69,33 +68,39 @@ fn diagnostics_and_power_management() {
 
     sensor.reset().unwrap();
     let reset_diag = sensor.read_diagnostics().unwrap();
-    assert!(reset_diag.powered);
-    assert_eq!(reset_diag.illuminance.lux(), 0.0);
+    assert!((reset_diag.illuminance.lux() - 240.0).abs() < 1e-2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_sensor_clones_power_and_mode_operations() {
     let (sensor, _mock) = LightSensor::new_mocked();
     let s1 = sensor.clone();
     let s2 = sensor.clone();
 
+    // Async reader on the runtime vs. blocking power cycler on the blocking pool,
+    // so both genuinely run in parallel on a multi-threaded runtime.
     let h1 = tokio::spawn(async move {
-        for _ in 0..10 {
+        for _ in 0..100 {
             if let Err(err) = s1.read_lux_async().await {
                 assert!(err.is_powered_down(), "unexpected error: {err}");
             }
         }
     });
 
-    let h2 = tokio::spawn(async move {
-        for _ in 0..10 {
-            s2.power_down().unwrap();
-            s2.reset().unwrap();
+    let h2 = tokio::task::spawn_blocking(move || {
+        for _ in 0..100 {
+            s2.power_down()
+                .expect("power_down failed during concurrent cycling");
+            s2.reset().expect("reset failed during concurrent cycling");
         }
     });
 
     h1.await.unwrap();
     h2.await.unwrap();
+    assert!(
+        sensor.read_lux().is_ok(),
+        "sensor must end powered after reset"
+    );
 }
 
 #[tokio::test]

@@ -1,0 +1,62 @@
+[config]
+model = "openrouter/@preset/code-review"
+fallback_models = []
+reasoning_effort = "high"
+max_model_tokens = 512000
+custom_model_max_tokens = 512000
+max_output_tokens = 128000
+max_tokens = 128000
+enable_large_pr_handling = true
+repo_context_files = ["AGENTS.md", "services/core/AGENTS.md", "services/.guidelines/microsoft-rust-guidelines.md"]
+repo_context_max_lines = 10000
+repo_context_from_default_branch = false
+
+[openrouter]
+reasoning_effort = "high"
+reasoning_max_tokens = 12000
+
+[pr_reviewer]
+require_tests_review = true
+require_security_review = true
+require_estimate_effort_to_review = true
+enable_review_labels_effort = true
+enable_review_labels_security = true
+persistent_comment = false
+extra_instructions = """
+Perform a high-effort, rigorous, and thorough code review for a Raspberry Pi 3 embedded audio/DSP appliance.
+Evaluate every file, hunk, and line against the Microsoft Pragmatic Rust Guidelines (services/.guidelines/microsoft-rust-guidelines.md, services/core/AGENTS.md, AGENTS.md):
+1. Mockable I/O (M-MOCKABLE-SYSCALLS, M-DI-HIERARCHY): Verify hardware I/O and peripherals are isolated behind inherent mocks (new_mocked()) rather than unmockable syscalls or leaky traits.
+2. Strong Typing & Invariants (M-STRONG-TYPES, M-STRONG-TYPES-GUARD): Verify domain newtypes validate invariants at construction time (SensorId, I2cAddress) and reject signed/invalid inputs at boundaries. Guard float types against NaN via .is_finite().
+3. Canonical Errors & Clean Propagation (M-ERRORS-CANONICAL-STRUCTS, M-FROM-ERROR): Verify error types are canonical structs with captured backtraces and query predicates (is_*), propagating errors via ? through From<ForeignError> rather than manual .map_err(). Flag any .unwrap() or .expect() on fallible paths.
+4. Panic Discipline (M-PANIC-IS-STOP, M-PANIC-ON-BUG): Panics must represent bugs or unrecoverable termination, never expected hardware/runtime I/O failures. Thread worker panics must unwind with resume_unwind.
+5. Surface & Documentation (M-SINGLE-ITEM-PATH, M-NO-GLOB-REEXPORTS, M-MODULE-DOCS, M-CANONICAL-DOCS, M-FIRST-DOC-SENTENCE): Verify single canonical item paths, no glob re-exports, //! module docs, ~15-word concise doc summaries, and canonical # Examples/# Errors/# Panics sections.
+6. Lints (M-LINT-OVERRIDE-EXPECT): Verify #[expect(..., reason = "...")] is used instead of #[allow].
+7. Memory & Types (M-BOX-DST, M-AVOID-WRAPPERS, M-SIMPLE-ABSTRACTIONS): Verify Box<str> / Box<[T]> for immutable owned strings and paths; flag redundant nested smart pointers or multi-layered locks.
+
+Adhere strictly to repository review triage rules (AGENTS.md Section 4.1):
+- Report Tier 1 (correctness, physical hardware protocol bugs, safety) and Tier 2 (build, clippy warnings, test failures, coverage < 90%) issues.
+- Do NOT report subjective Tier 3 style nitpicks or suggest speculative abstractions.
+- Include a dedicated "How Code Can Be Simplified" evaluation identifying duplicated logic to unify, over-engineered abstractions to flatten, and lines of code that can be removed while preserving safety and domain invariants.
+"""
+
+[pr_code_suggestions]
+focus_only_on_problems = false
+committable_code_suggestions = true
+num_code_suggestions_per_chunk = 4
+publish_output_no_suggestions = false
+persistent_comment = false
+extra_instructions = """
+Suggest concrete, committable code improvements adhering to the Microsoft Pragmatic Rust Guidelines (services/.guidelines/microsoft-rust-guidelines.md, services/core/AGENTS.md):
+1. Error Simplification (M-FROM-ERROR): Replace verbose .map_err(DomainError::from) with idiomatic ? via From<ForeignError>.
+2. Memory Efficiency (M-BOX-DST): Replace unnecessary String / Vec<T> with Box<str> / Box<[T]> for immutable owned buffers and paths.
+3. Abstraction Flattening (M-AVOID-WRAPPERS, M-SIMPLE-ABSTRACTIONS): Flatten over-engineered wrapper layers, redundant mutex locks, and dead trait bounds.
+4. Lint Hygiene (M-LINT-OVERRIDE-EXPECT): Convert any #[allow(...)] to #[expect(..., reason = "...")].
+5. Code Deduplication: Unify duplicated scaffolding across binaries or tests into shared modules (crate::diag, crate::runtime), and eliminate dead code while maintaining domain invariants and safety.
+"""
+
+[github_action_config]
+auto_review = true
+auto_describe = false
+auto_improve = false
+handle_push_trigger = true
+push_commands = ["/review"]
