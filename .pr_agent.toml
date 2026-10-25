@@ -1,10 +1,10 @@
 [config]
 model = "openrouter/@preset/code-review"
 fallback_models = []
-custom_model_max_tokens = 128000
-max_output_tokens = 16384
-repo_context_files = ["AGENTS.md", "services/core/AGENTS.md", "best_practices.md"]
-repo_context_max_lines = 1500
+custom_model_max_tokens = 256000
+max_output_tokens = 32768
+repo_context_files = ["AGENTS.md", "services/core/AGENTS.md", "services/.guidelines/microsoft-rust-guidelines.md", "best_practices.md"]
+repo_context_max_lines = 10000
 repo_context_from_default_branch = false
 
 [pr_reviewer]

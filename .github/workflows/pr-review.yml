@@ -53,10 +53,10 @@ jobs:
           OPENROUTER__KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CONFIG__MODEL: ${{ matrix.model }}
           CONFIG__FALLBACK_MODELS: '[]'
-          CONFIG__CUSTOM_MODEL_MAX_TOKENS: "128000"
-          CONFIG__MAX_OUTPUT_TOKENS: "16384"
-          CONFIG__REPO_CONTEXT_FILES: '["AGENTS.md", "services/core/AGENTS.md", "best_practices.md"]'
-          CONFIG__REPO_CONTEXT_MAX_LINES: '1500'
+          CONFIG__CUSTOM_MODEL_MAX_TOKENS: "256000"
+          CONFIG__MAX_OUTPUT_TOKENS: "32768"
+          CONFIG__REPO_CONTEXT_FILES: '["AGENTS.md", "services/core/AGENTS.md", "services/.guidelines/microsoft-rust-guidelines.md", "best_practices.md"]'
+          CONFIG__REPO_CONTEXT_MAX_LINES: '10000'
           CONFIG__REPO_CONTEXT_FROM_DEFAULT_BRANCH: "false"
           GITHUB_ACTION_CONFIG__AUTO_REVIEW: "true"
           GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: "false"
