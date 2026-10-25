@@ -20,9 +20,9 @@ from pathlib import Path
 
 # Prompt file output path at repo root
 PROMPT_OUTPUT_FILENAME = "review_prompt.txt"
-# Maximum prompt byte budget (~500 KB ≈ 125k–150k tokens at ~3.5–4 bytes/token),
-# leaving extensive headroom inside a 256k+ context window for PR diffs and model output.
-MAX_PROMPT_BYTES = 500_000
+# Maximum prompt byte budget (~200 KB ≈ 50k–60k tokens at ~3.5–4 bytes/token),
+# leaving >68k tokens of headroom inside the 128k context window for PR diffs and model output.
+MAX_PROMPT_BYTES = 200_000
 # CommonMark §4.5: code fences may be indented by at most 3 leading spaces (4+ spaces is indented code).
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 

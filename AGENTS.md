@@ -23,37 +23,9 @@ This document defines the behavioral, architectural, and engineering rules for A
 
 All Rust code in this repository **MUST** strictly adhere to the **Microsoft Pragmatic Rust Guidelines** already downloaded in this repository:
 * **Local Reference:** [`services/.guidelines/microsoft-rust-guidelines.md`](services/.guidelines/microsoft-rust-guidelines.md)
-* **Service Instructions:** [`services/core/AGENTS.md`](services/core/AGENTS.md)
+* **Service Instructions & Canonical Checklist:** [`services/core/AGENTS.md`](services/core/AGENTS.md#2-primary-engineering-rule-microsoft-pragmatic-rust-guidelines)
 
-Before designing types, writing modules, implementing error handling, or writing tests, consult [`services/.guidelines/microsoft-rust-guidelines.md`](services/.guidelines/microsoft-rust-guidelines.md) and ensure all newly created or modified code complies with its rules.
-
-### Key Guidelines Checklist
-1. **Mockable Hardware & I/O (`M-MOCKABLE-SYSCALLS`, `M-DI-HIERARCHY`):**
-   * Hardware drivers and peripheral I/O types must never perform unmockable ad-hoc syscalls or offer default constructors that touch physical hardware (`#[expect(clippy::new_without_default, reason = "...")]`).
-   * Provide inherent mocking via `new_mocked() -> (Self, MockCtrl)` using internal backend enums (`Backend::Hardware` vs. `Backend::Mock`) so tests, CI, and CLI utilities execute deterministically on any host without physical hardware.
-2. **Strong Typing & Invariant Guards (`M-STRONG-TYPES`, `M-STRONG-TYPES-GUARD`, `C-NEWTYPE`):**
-   * Avoid primitive obsession. Wrap domain concepts in dedicated newtypes (`BcmPin`, `PhysicalPin`, `SensorId`, `I2cAddress`, `Temperature`, `Illuminance`).
-   * Guard invariants strictly at construction time via fallible constructors (`parse`, `TryFrom`, `from_*`), rejecting invalid, signed (`+`, `-`), or out-of-bounds inputs at the domain boundary.
-   * Use `Path` / `PathBuf` for filesystem paths and guard float types against `NaN` and `Infinity` via `.is_finite()`.
-3. **Canonical Error Structs & Clean Propagation (`M-ERRORS-CANONICAL-STRUCTS`, `M-FROM-ERROR`):**
-   * Subsystem errors must be canonical structs (`TempError`, `LightError`) wrapping a non-public `ErrorKind` and captured `std::backtrace::Backtrace`, exposing `is_*()` query predicates.
-   * Implement `From<ForeignError>` and propagate errors with the idiomatic `?` operator directly; never use verbose `.map_err(DomainError::from)`.
-   * Never use `.unwrap()` or `.expect()` on fallible runtime I/O paths, and eliminate dead/speculative error variants.
-4. **Panic Discipline (`M-PANIC-IS-STOP`, `M-PANIC-ON-BUG`):**
-   * Panics mean "stop the program" or indicate programmer bugs; never use panics for expected runtime or hardware I/O failures.
-   * Re-raise thread panics with `std::panic::resume_unwind(err.into_panic())` rather than converting worker crashes into recoverable I/O errors.
-5. **Clean Public Surface & Path Canonicality (`M-SINGLE-ITEM-PATH`, `M-NO-GLOB-REEXPORTS`, `M-DOC-INLINE`):**
-   * Every public item must be reachable through a single canonical path. Use `pub(crate) mod` with explicit `#[doc(inline)] pub use` re-exports rather than wildcard globs (`pub use foo::*`).
-6. **Documentation, Lints & Static Verification (`M-MODULE-DOCS`, `M-CANONICAL-DOCS`, `M-FIRST-DOC-SENTENCE`, `M-LINT-OVERRIDE-EXPECT`, `M-STATIC-VERIFICATION`):**
-   * Every module starts with `//!` module documentation; public items have `///` documentation with a ~15-word first sentence followed by canonical `# Examples`, `# Errors`, and `# Panics` sections.
-   * Use `#[expect(..., reason = "...")]` instead of `#[allow(...)]` for lint overrides.
-   * Use compile-time `const _: () = { assert!(...); }` proofs for mathematical type bounds where possible.
-7. **Memory & Performance Optimization (`M-BOX-DST`, `M-AVOID-WRAPPERS`, `M-SIMPLE-ABSTRACTIONS`):**
-   * Use `Box<str>` / `Box<[T]>` for immutable owned strings and paths instead of `String` or `Vec<T>`.
-   * Flatten nested wrappers, unnecessary smart pointers, and multi-layered locks; consolidate co-mutated driver state into a single `Mutex<HwState>` or `Mutex<HardwareDevice>`.
-8. **Concurrency & Thread Safety (`M-SERVICES-CLONE`, `M-TYPES-SEND`):**
-   * Core service and driver types must be cheaply cloneable (`Arc`-backed) and `Send + Sync`.
-   * Slow/blocking hardware operations must be offloaded to `tokio::task::spawn_blocking` (via `crate::runtime::run_blocking`).
+Before designing types, writing modules, implementing error handling, or writing tests, consult [`services/.guidelines/microsoft-rust-guidelines.md`](services/.guidelines/microsoft-rust-guidelines.md) and the canonical checklist in [`services/core/AGENTS.md`](services/core/AGENTS.md) to ensure all newly created or modified code complies with its rules.
 
 ---
 
