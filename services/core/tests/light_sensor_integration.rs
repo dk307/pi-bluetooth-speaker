@@ -89,8 +89,9 @@ async fn concurrent_sensor_clones_power_and_mode_operations() {
 
     let h2 = tokio::task::spawn_blocking(move || {
         for _ in 0..100 {
-            s2.power_down().unwrap();
-            s2.reset().unwrap();
+            s2.power_down()
+                .expect("power_down failed during concurrent cycling");
+            s2.reset().expect("reset failed during concurrent cycling");
         }
     });
 
