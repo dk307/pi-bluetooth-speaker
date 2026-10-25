@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for CI support scripts (generate_review_prompt.py and patch_diffguard.py).
+"""Unit tests for CI support scripts (generate_review_prompt.py).
 
 Requires Python >= 3.10.
 """
@@ -8,7 +8,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,7 +16,6 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import generate_review_prompt as grp  # noqa: E402
-import patch_diffguard as pdg  # noqa: E402
 
 
 @contextmanager
@@ -123,91 +121,6 @@ class TestGenerateReviewPrompt(unittest.TestCase):
                 grp.main()
                 self.assertTrue(prompt_path.is_file())
                 self.assertGreater(prompt_path.stat().st_size, 0)
-
-
-class TestPatchDiffguard(unittest.TestCase):
-    """Tests idempotent action-bundle patching, syntax checks, and failure modes."""
-
-    def _create_bundle(self, root: Path, content: str, sha: str = pdg.PINNED_SHA) -> Path:
-        bundle = root / "jonit-dev" / "diffguard" / sha / "dist" / "index.js"
-        bundle.parent.mkdir(parents=True, exist_ok=True)
-        bundle.write_text(content, encoding="utf-8")
-        return bundle
-
-    def test_patches_unpatched_bundle_and_is_idempotent(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bundle = self._create_bundle(
-                root,
-                "const core = { getInput: () => '', setFailed: () => {} };\n"
-                "const customPrompt = core.getInput('custom_prompt');\n",
-            )
-            with patch("patch_diffguard.subprocess.run") as mock_run:
-                pdg.patch_bundle_in_roots([str(root)])
-                patched_text = bundle.read_text(encoding="utf-8")
-                self.assertIn(pdg.PATCH_MARKER, patched_text)
-                self.assertNotIn(pdg.TARGET_LINE, patched_text)
-                mock_run.assert_called_with(
-                    ["node", "--check", str(bundle)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-
-                # Second run succeeds idempotently
-                pdg.patch_bundle_in_roots([str(root)])
-                self.assertEqual(mock_run.call_count, 2)
-
-    def test_rejects_mismatched_sha_half_patched_zero_or_multi_target(self) -> None:
-        # Mismatched SHA path
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self._create_bundle(root, pdg.TARGET_LINE, sha="deadbeef")
-            with self.assertRaises(SystemExit) as ctx:
-                pdg.patch_bundle_in_roots([str(root)])
-            self.assertEqual(ctx.exception.code, 1)
-
-        # Half-patched bundle
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self._create_bundle(root, f"{pdg.TARGET_LINE}\n// {pdg.PATCH_MARKER}\n")
-            with self.assertRaises(SystemExit) as ctx:
-                pdg.patch_bundle_in_roots([str(root)])
-            self.assertEqual(ctx.exception.code, 1)
-
-        # Zero occurrences of target in matched bundle
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self._create_bundle(root, "console.log('unrelated bundle');\n")
-            with self.assertRaises(SystemExit) as ctx:
-                pdg.patch_bundle_in_roots([str(root)])
-            self.assertEqual(ctx.exception.code, 1)
-
-        # Multiple occurrences of target in matched bundle
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self._create_bundle(root, f"{pdg.TARGET_LINE}\n{pdg.TARGET_LINE}\n")
-            with self.assertRaises(SystemExit) as ctx:
-                pdg.patch_bundle_in_roots([str(root)])
-            self.assertEqual(ctx.exception.code, 1)
-
-    def test_rejects_missing_bundle(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(SystemExit) as ctx:
-                pdg.patch_bundle_in_roots([tmp])
-            self.assertEqual(ctx.exception.code, 1)
-
-    def test_verify_js_syntax_handles_timeout_and_errors(self) -> None:
-        for side_effect in (
-            subprocess.TimeoutExpired(cmd=["node", "--check"], timeout=10),
-            FileNotFoundError(),
-            subprocess.CalledProcessError(returncode=1, cmd=["node", "--check"], stderr="SyntaxError"),
-        ):
-            with patch("patch_diffguard.subprocess.run", side_effect=side_effect):
-                with self.assertRaises(SystemExit) as ctx:
-                    pdg.verify_js_syntax("dummy.js")
-                self.assertEqual(ctx.exception.code, 1)
 
 
 if __name__ == "__main__":

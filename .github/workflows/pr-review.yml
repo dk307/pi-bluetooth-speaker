@@ -1,60 +1,60 @@
-name: DiffGuard AI PR Review
+name: PR-Agent AI PR Review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read
+  issues: write
   pull-requests: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: pr-agent-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
-  review:
-    name: DiffGuard AI Code Review
+  pr_agent:
+    name: PR-Agent AI Code Review
+    if: >-
+      github.event.sender.type != 'Bot' &&
+      (
+        (github.event_name == 'pull_request' && !github.event.pull_request.draft) ||
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/'))
+      )
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false
+    timeout-minutes: 15
     steps:
       - name: Verify OpenRouter API Key
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           if [ -z "$OPENROUTER_API_KEY" ]; then
-            echo "ERROR: OPENROUTER_API_KEY secret is required for DiffGuard AI code review." >&2
+            echo "ERROR: OPENROUTER_API_KEY secret is required for PR-Agent code review." >&2
             exit 1
           fi
 
-      - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Set up Python
-        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
-        with:
-          python-version: "3.x"
-
-      - name: Run CI Script Unit Tests
-        run: python3 -m unittest discover -s .github/scripts -p "test_*.py" -v
-
-      - name: Build custom review prompt from guidelines
-        id: build-prompt
-        run: python3 .github/scripts/generate_review_prompt.py
-
-      # GitHub Actions Runner downloads all referenced `uses:` action bundles into
-      # `/home/runner/work/_actions/jonit-dev/diffguard/<sha>/` during the initial
-      # `Set up job` phase before step 1 executes. This step patches `dist/index.js`
-      # in place and verifies syntax with `node --check` before the action runs.
-      - name: Enable file-based custom_prompt in DiffGuard
-        run: python3 .github/scripts/patch_diffguard.py
-
-      - name: Run DiffGuard AI PR Review
-        uses: jonit-dev/diffguard@88f63615c769f8db6031973503c2c40a9a3f4feb # v1.0.0
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          open_router_key: ${{ secrets.OPENROUTER_API_KEY }}
-          model_id: "@preset/code-review"
-          max_tokens: "8192"
-          custom_prompt: ${{ steps.build-prompt.outputs.prompt_file }}
+      - name: Run PR-Agent
+        uses: the-pr-agent/pr-agent@981344be2755e303df501e18e3f60b848a188a80 # v0.48.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER__KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          CONFIG__MODEL: "openrouter/anthropic/claude-3.5-sonnet"
+          CONFIG__FALLBACK_MODELS: '["openrouter/openai/gpt-4o"]'
+          CONFIG__REPO_CONTEXT_FILES: '["AGENTS.md", "services/core/AGENTS.md"]'
+          CONFIG__REPO_CONTEXT_MAX_LINES: '1000'
+          GITHUB_ACTION_CONFIG__AUTO_REVIEW: "true"
+          GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: "false"
+          GITHUB_ACTION_CONFIG__AUTO_IMPROVE: "false"
+          GITHUB_ACTION_CONFIG__HANDLE_PUSH_TRIGGER: "true"
+          GITHUB_ACTION_CONFIG__PUSH_COMMANDS: '["/review"]'
+          PR_REVIEWER__REQUIRE_TESTS_REVIEW: "true"
+          PR_REVIEWER__REQUIRE_SECURITY_REVIEW: "true"
+          PR_REVIEWER__REQUIRE_ESTIMATE_EFFORT_TO_REVIEW: "true"
+          PR_REVIEWER__EXTRA_INSTRUCTIONS: >-
+            Strictly adhere to the Microsoft Pragmatic Rust Guidelines and the repository review-triage rules in AGENTS.md.
+            Only report Tier 1 (correctness, physical hardware protocol bugs, safety) and Tier 2 (build, clippy warnings, test failures, coverage < 90%) issues.
+            Do not recommend subjective style refactorings, speculative abstractions, or out-of-scope changes.

@@ -1,0 +1,24 @@
+[config]
+model = "openrouter/anthropic/claude-3.5-sonnet"
+fallback_models = ["openrouter/openai/gpt-4o"]
+repo_context_files = ["AGENTS.md", "services/core/AGENTS.md"]
+repo_context_max_lines = 1000
+
+[pr_reviewer]
+require_tests_review = true
+require_security_review = true
+require_estimate_effort_to_review = true
+enable_review_labels_effort = true
+enable_review_labels_security = true
+extra_instructions = """
+Strictly adhere to the Microsoft Pragmatic Rust Guidelines and the repository review-triage rules in AGENTS.md.
+Only report Tier 1 (correctness, physical hardware protocol bugs, safety) and Tier 2 (build, clippy warnings, test failures, coverage < 90%) issues.
+Do not recommend subjective style refactorings, speculative abstractions, or out-of-scope changes.
+"""
+
+[github_action_config]
+auto_review = true
+auto_describe = false
+auto_improve = false
+handle_push_trigger = true
+push_commands = ["/review"]
