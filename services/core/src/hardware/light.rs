@@ -232,12 +232,13 @@ impl Display for Illuminance {
 }
 
 /// Extended diagnostic report for the BH1750 ambient light sensor.
+///
+/// A report is only produced for an active sensor; a powered-down sensor yields
+/// a [`LightError`] with [`LightError::is_powered_down`] instead.
 #[derive(Debug, Clone)]
 pub struct LightDiagnostics {
     /// Measured illuminance.
     pub illuminance: Illuminance,
-    /// Sensor power state (true = active, false = powered down).
-    pub powered: bool,
     /// I2C slave address.
     pub address: I2cAddress,
     /// I2C bus number.
@@ -257,15 +258,7 @@ impl Display for LightDiagnostics {
             self.illuminance,
             self.illuminance.foot_candles()
         )?;
-        writeln!(
-            f,
-            "  • Power State    : {}",
-            if self.powered {
-                "Active"
-            } else {
-                "Powered Down"
-            }
-        )?;
+        writeln!(f, "  • Power State    : Active")?;
         write!(
             f,
             "  • Operating Mode : Continuous High-Resolution (1 lx, ~120 ms)"
@@ -594,7 +587,8 @@ impl LightSensorMock {
         if let Some(ref fault) = state.fault {
             return Err(LightError::mock_fault(fault.clone()));
         }
-        state.lux = 0.0;
+        // Mirrors hardware: reset re-arms continuous conversion, so subsequent reads
+        // return the current ambient level rather than a cleared data register.
         state.powered = true;
         Ok(())
     }
@@ -799,8 +793,8 @@ impl LightSensor {
     /// Resets the sensor measurement data register, awakens the sensor if sleeping,
     /// and restarts continuous high-resolution measurement.
     ///
-    /// In mock mode, `reset()` zeroes the simulated illuminance until the next
-    /// [`LightSensorMock::set_lux()`] call.
+    /// In mock mode, `reset()` re-powers the simulated sensor and preserves the
+    /// illuminance configured via [`LightSensorMock::set_lux()`].
     ///
     /// # Errors
     /// Returns [`LightError`] if communication fails.
@@ -842,33 +836,11 @@ impl LightSensor {
     /// # Panics
     /// Panics if an internal mutex lock is poisoned.
     pub fn read_diagnostics(&self) -> Result<LightDiagnostics, LightError> {
-        match self.inner.as_ref() {
-            Backend::Hardware {
-                device,
-                bus,
-                address,
-            } => {
-                let mut guard = device.lock().expect("hardware device lock poisoned");
-                let powered = guard.state.powered;
-                let illuminance = guard.read_lux()?;
-                Ok(LightDiagnostics {
-                    illuminance,
-                    powered,
-                    address: *address,
-                    bus: *bus,
-                })
-            }
-            Backend::Mock(mock) => {
-                let powered = mock.is_powered();
-                let illuminance = mock.read_lux()?;
-                Ok(LightDiagnostics {
-                    illuminance,
-                    powered,
-                    address: self.i2c_address(),
-                    bus: self.i2c_bus(),
-                })
-            }
-        }
+        Ok(LightDiagnostics {
+            illuminance: self.read_lux()?,
+            address: self.i2c_address(),
+            bus: self.i2c_bus(),
+        })
     }
 
     /// Asynchronously reads illuminance from the sensor without blocking the async runtime.
@@ -995,18 +967,18 @@ mod tests {
         let diag = sensor.read_diagnostics().unwrap();
         assert_eq!(diag.bus, BH1750_DEFAULT_I2C_BUS);
         assert_eq!(diag.address.as_u8(), BH1750_DEFAULT_I2C_ADDR);
-        assert!(diag.powered);
         assert!(diag.to_string().contains("Continuous High-Resolution"));
 
         // Power down
         sensor.power_down().unwrap();
         assert!(!mock.is_powered());
         assert!(sensor.read_lux().unwrap_err().is_powered_down());
+        assert!(sensor.read_diagnostics().unwrap_err().is_powered_down());
 
-        // Reset re-awakens
+        // Reset re-awakens and preserves the simulated ambient level
         sensor.reset().unwrap();
         assert!(mock.is_powered());
-        assert_eq!(sensor.read_lux().unwrap().lux(), 0.0);
+        assert!((sensor.read_lux().unwrap().lux() - 500.0).abs() < 1e-1);
 
         // Fault injection
         mock.set_fault(Some("bus arbitration lost".into()));
@@ -1130,7 +1102,6 @@ mod tests {
 
         let diag = sensor.read_diagnostics_async().await.unwrap();
         assert!((diag.illuminance.lux() - 350.0).abs() < 1e-1);
-        assert!(diag.powered);
     }
 
     #[tokio::test]
@@ -1141,8 +1112,10 @@ mod tests {
     }
 
     #[test]
-    fn sensor_new_and_debug_formatting() {
-        let _ = LightSensor::new();
+    fn sensor_bus_validation_and_debug_formatting() {
+        // Hermetic: invalid bus is rejected before any `/dev/i2c-*` device is opened.
+        let err = LightSensor::with_bus_and_address(99, I2cAddress::default()).unwrap_err();
+        assert!(err.summary().contains("unsupported I2C bus 99"));
         let (sensor, _) = LightSensor::new_mocked();
         let debug = format!("{sensor:?}");
         assert!(debug.contains("Mock"));
@@ -1159,6 +1132,9 @@ mod tests {
         assert_eq!(alt.as_u8(), 0x5C);
         assert_eq!(alt.as_u16(), 0x005C);
         assert_eq!(alt.to_string(), "0x5C");
+
+        assert_eq!(BhAddress::from(addr), BhAddress::Low);
+        assert_eq!(BhAddress::from(alt), BhAddress::High);
 
         let default_hw = I2cHardwareInfo::rpi3_default(addr);
         assert_eq!(default_hw.bus, 1);
