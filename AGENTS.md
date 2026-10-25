@@ -24,7 +24,6 @@ This document defines the behavioral, architectural, and engineering rules for A
 All Rust code in this repository **MUST** strictly adhere to the **Microsoft Pragmatic Rust Guidelines** already downloaded in this repository:
 * **Local Reference:** [`services/.guidelines/microsoft-rust-guidelines.md`](services/.guidelines/microsoft-rust-guidelines.md)
 * **Service Instructions:** [`services/core/AGENTS.md`](services/core/AGENTS.md)
-* **Best Practices & Review Rules:** [`best_practices.md`](best_practices.md)
 
 Before designing types, writing modules, implementing error handling, or writing tests, consult [`services/.guidelines/microsoft-rust-guidelines.md`](services/.guidelines/microsoft-rust-guidelines.md) and ensure all newly created or modified code complies with its rules.
 
