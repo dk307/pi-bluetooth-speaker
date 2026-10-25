@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use speaker_core::diag::{
     CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads, fahrenheit,
-    format_timestamp, next_arg_value, parse_args_with_common, resolve_cli_opts, run_poll_loop,
-    should_print_summary,
+    format_timestamp, next_arg_value, parse_args_with_common, print_min_max_avg, resolve_cli_opts,
+    run_poll_loop, should_print_summary,
 };
 use speaker_core::hardware::{
     SensorDiagnostics, SensorId, SocThermal, TempError, TempSensor, Temperature,
@@ -165,11 +165,7 @@ fn print_session_summary(stats: &Statistics) {
             s.fraction_of_reads_percent(stats.other_errors)
         );
     }
-    if let (Some(min_c), Some(max_c), Some(avg)) = (s.min(), s.max(), s.average()) {
-        println!("Chassis Min : {min_c:.2}°C ({:.2}°F)", fahrenheit(min_c));
-        println!("Chassis Max : {max_c:.2}°C ({:.2}°F)", fahrenheit(max_c));
-        println!("Chassis Avg : {avg:.2}°C");
-    }
+    print_min_max_avg(s, "Chassis", "°C", Some((fahrenheit, "°F")));
 }
 
 fn output_json_reading(
@@ -380,6 +376,17 @@ mod tests {
         assert_eq!(stats.samples.min(), Some(20.0));
         assert_eq!(stats.samples.max(), Some(30.0));
         assert!((stats.samples.average().unwrap() - 25.0).abs() < 1e-4);
+
+        let lines = speaker_core::diag::format_min_max_avg(
+            &stats.samples,
+            "Chassis",
+            "°C",
+            Some((fahrenheit, "°F")),
+        )
+        .unwrap();
+        assert_eq!(lines[0], "Chassis Min :   20.00 °C ( 68.00 °F)");
+        assert_eq!(lines[1], "Chassis Max :   30.00 °C ( 86.00 °F)");
+        assert_eq!(lines[2], "Chassis Avg :   25.00 °C ( 77.00 °F)");
 
         print_session_summary(&stats);
 

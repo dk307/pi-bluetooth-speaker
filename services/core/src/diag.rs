@@ -324,6 +324,16 @@ impl NumericStats {
         (self.successful_reads > 0).then(|| self.sum / self.successful_reads as f64)
     }
 
+    /// Returns the arithmetic mean of all successful samples as `f32`, if any read succeeded.
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "sensor sample domain is f32; average fits in f32"
+    )]
+    pub fn average_f32(&self) -> Option<f32> {
+        self.average().map(|avg| avg as f32)
+    }
+
     /// Returns the session error percentage `(errors() / total_reads) * 100.0`, or `0.0` if `total_reads == 0`.
     #[must_use]
     pub fn error_rate_percent(&self) -> f32 {
@@ -341,6 +351,48 @@ impl NumericStats {
             0.0
         } else {
             (count as f32 / self.total_reads as f32) * 100.0
+        }
+    }
+}
+
+/// Secondary unit converter function and unit label (e.g. `(foot_candles, "fc")`).
+pub type SecondaryUnit = (fn(f32) -> f32, &'static str);
+
+/// Builds formatted min, max, and average summary lines for a numeric sample set.
+///
+/// Returns `None` if no successful samples have been recorded. Pads label and stat keys
+/// to 11 characters to align vertically with standard session summary headers, and formats
+/// values with fixed column widths (`{val:7.2}`) for consistent table layout.
+#[must_use]
+pub fn format_min_max_avg(
+    stats: &NumericStats,
+    label: &str,
+    unit: &str,
+    to_secondary: Option<SecondaryUnit>,
+) -> Option<[String; 3]> {
+    let (min, max, avg) = (stats.min()?, stats.max()?, stats.average_f32()?);
+    let entries = [("Min", min), ("Max", max), ("Avg", avg)];
+    Some(entries.map(|(stat_name, val)| {
+        let key = format!("{label} {stat_name}");
+        let tail = to_secondary.map_or_else(String::new, |(conv, sec_unit)| {
+            format!(" ({:6.2} {sec_unit})", conv(val))
+        });
+        format!("{key:<11} : {val:7.2} {unit}{tail}")
+    }))
+}
+
+/// Prints min, max, and average bounds for a numeric sample set.
+///
+/// If a secondary conversion function and unit are provided, prints secondary values in parentheses.
+pub fn print_min_max_avg(
+    stats: &NumericStats,
+    label: &str,
+    unit: &str,
+    to_secondary: Option<SecondaryUnit>,
+) {
+    if let Some(lines) = format_min_max_avg(stats, label, unit, to_secondary) {
+        for line in lines {
+            println!("{line}");
         }
     }
 }
@@ -492,6 +544,7 @@ mod tests {
         assert_eq!(stats.min(), Some(10.0));
         assert_eq!(stats.max(), Some(30.0));
         assert!((stats.average().unwrap() - 20.0).abs() < 1e-6);
+        assert!((stats.average_f32().unwrap() - 20.0).abs() < 1e-6);
         assert!((stats.error_rate_percent() - (100.0 / 3.0)).abs() < 1e-4);
         assert!((stats.fraction_of_reads_percent(1) - (100.0 / 3.0)).abs() < 1e-4);
 
@@ -613,5 +666,35 @@ mod tests {
             count >= 3
         });
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn format_min_max_avg_formatting_and_bounds() {
+        let mut stats = NumericStats::default();
+        stats.record_success(10.0);
+        stats.record_success(30.0);
+        let formatted_light =
+            format_min_max_avg(&stats, "Light", "lx", Some((foot_candles, "fc"))).unwrap();
+        assert_eq!(formatted_light[0], "Light Min   :   10.00 lx (  0.93 fc)");
+        assert_eq!(formatted_light[1], "Light Max   :   30.00 lx (  2.79 fc)");
+        assert_eq!(formatted_light[2], "Light Avg   :   20.00 lx (  1.86 fc)");
+
+        let formatted_temp =
+            format_min_max_avg(&stats, "Chassis", "°C", Some((fahrenheit, "°F"))).unwrap();
+        assert_eq!(formatted_temp[0], "Chassis Min :   10.00 °C ( 50.00 °F)");
+        assert_eq!(formatted_temp[1], "Chassis Max :   30.00 °C ( 86.00 °F)");
+        assert_eq!(formatted_temp[2], "Chassis Avg :   20.00 °C ( 68.00 °F)");
+
+        let formatted_plain = format_min_max_avg(&stats, "Chassis", "°C", None).unwrap();
+        assert_eq!(formatted_plain[0], "Chassis Min :   10.00 °C");
+        assert_eq!(formatted_plain[1], "Chassis Max :   30.00 °C");
+        assert_eq!(formatted_plain[2], "Chassis Avg :   20.00 °C");
+
+        let empty_stats = NumericStats::default();
+        assert_eq!(format_min_max_avg(&empty_stats, "Test", "lx", None), None);
+
+        // Exercise print_min_max_avg to cover stdout rendering for both Some and None paths
+        print_min_max_avg(&stats, "Light", "lx", Some((foot_candles, "fc")));
+        print_min_max_avg(&empty_stats, "Empty", "lx", None);
     }
 }

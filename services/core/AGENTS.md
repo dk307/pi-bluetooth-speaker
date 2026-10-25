@@ -77,16 +77,13 @@ Before designing types, writing modules, implementing error handling, or writing
 
 ---
 
-## 3. Zero-Retry Pre-Push Gate, Simplification Review & Continuous Learning
+## 3. Zero-Retry Pre-Push Gate & Continuous Learning
 
-AI agents working on `speaker-core` **MUST** follow the repository-wide **First-Pass PR Quality, Code Simplification & Continuous Learning Protocol** in [root `AGENTS.md` (§4)](../../AGENTS.md):
-* **Mandatory Local Pre-Push Gate:** Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo llvm-cov --fail-under-lines 90 --fail-under-functions 90`, and the `aarch64-unknown-linux-gnu` release build locally before *every* commit/push. Never rely on CI or AI review to catch compile, lint, or test failures.
-* **Review Triage Classification (The 3-Tier Rule):**
-  - **Tier 1 (Correctness/Protocol/Safety):** Must fix in a single batched commit.
-  - **Tier 2 (Hard Gates):** Compile errors, clippy warnings, test failures, coverage `< 90%`. Must fix.
-  - **Tier 3 (Advisory Simplifications/Refactoring Suggestions):** Do NOT touch in active feature PR.
-* **Strict PR Scope Boundaries:** Feature PRs must strictly touch only their declared files. Never refactor already-merged, working sibling drivers or CLI utilities (e.g. modifying `read_temp` during a `read_light` PR).
-* **Zero-Trust on External AI Suggestions:** Never copy-paste action SHAs, crate versions, or URLs suggested by AI review bots without verifying them via live CLI queries (`git ls-remote`, `cargo search`) first.
-* **Batch Fixes & Class-of-Bug Sweeps:** Resolve 100% of review findings in a single commit and sweep within the PR's own files, binaries, and tests for the same class of defect before pushing.
-* **Mandatory Code Simplification Review:** Every self-review and PR review must evaluate how the code can be simplified — identifying duplicated code to unify, over-engineered abstractions to flatten, and unnecessary complexity to remove.
-* **Continuous Post-Review Distillation:** Record all newly discovered anti-patterns or review learnings into [root `AGENTS.md` (§4.3)](../../AGENTS.md) and this file before completing the task.
+AI agents working on `speaker-core` **MUST** follow the repository-wide **First-Pass PR Quality, Code Simplification & Continuous Learning Protocol** defined canonically in [root `AGENTS.md` (§4)](../../AGENTS.md).
+
+* **Service-Specific Gate Sequence:** Before every push, execute in order:
+  1. `cargo fmt --manifest-path services/core/Cargo.toml -- --check`
+  2. `cargo clippy --manifest-path services/core/Cargo.toml --all-targets -- -D warnings`
+  3. `cargo llvm-cov --manifest-path services/core/Cargo.toml --fail-under-lines 90 --fail-under-functions 90`
+  4. `cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins`
+* **Protocol & Review Rules:** Consult [root `AGENTS.md` (§4.1–§4.3)](../../AGENTS.md) for the 3-Tier review triage classification, strict PR blast radius containment, code anti-bloat mandate, and continuous post-review distillation requirements.

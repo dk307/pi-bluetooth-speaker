@@ -111,6 +111,18 @@ mod tests {
         }
     }
 
+    type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
+
+    struct PanicHookGuard(Option<PanicHook>);
+
+    impl Drop for PanicHookGuard {
+        fn drop(&mut self) {
+            if let Some(h) = self.0.take() {
+                std::panic::set_hook(h);
+            }
+        }
+    }
+
     #[test]
     fn map_join_result_ok_and_err() {
         let ok_join: Result<Result<u32, DummyError>, tokio::task::JoinError> = Ok(Ok(42));
@@ -135,6 +147,11 @@ mod tests {
 
     #[tokio::test]
     async fn map_join_result_propagates_panic_payloads() {
+        // Mutates the process-global panic hook for the duration of this test to silence
+        // intentional worker crashes in test logs; scoped via PanicHookGuard (RAII restore).
+        let _hook_guard = PanicHookGuard(Some(std::panic::take_hook()));
+        std::panic::set_hook(Box::new(|_| {}));
+
         // Table-driven verification of panic unwinding without unreachable post-panic code
         let cases = [
             (
@@ -161,11 +178,13 @@ mod tests {
 
             assert!(panic_result.is_err());
             let panic_payload = panic_result.unwrap_err();
-            let msg = panic_payload
-                .downcast_ref::<&'static str>()
-                .copied()
-                .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or_default();
+            let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                panic!("unexpected panic payload type: {panic_payload:?}");
+            };
             assert!(
                 msg.contains(expected_substr),
                 "expected panic message to contain '{expected_substr}', got '{msg}'"
