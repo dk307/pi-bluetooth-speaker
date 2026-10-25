@@ -336,6 +336,24 @@ impl Display for SensorDiagnostics {
     }
 }
 
+impl From<SensorDiagnostics> for SensorReading {
+    fn from(diag: SensorDiagnostics) -> Self {
+        Self {
+            sensor_id: diag.sensor_id,
+            temperature: diag.temperature,
+        }
+    }
+}
+
+impl From<&SensorDiagnostics> for SensorReading {
+    fn from(diag: &SensorDiagnostics) -> Self {
+        Self {
+            sensor_id: diag.sensor_id.clone(),
+            temperature: diag.temperature,
+        }
+    }
+}
+
 /// Broadcom `SoC` core temperature reading from Linux thermal zone 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SocThermal {

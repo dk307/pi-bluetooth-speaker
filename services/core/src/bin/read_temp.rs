@@ -45,7 +45,7 @@ fn print_usage(bin_name: &str) {
     println!();
     println!("Options:");
     println!("  -1, --once               Read once and exit");
-    println!("  -n, --count <COUNT>      Read COUNT times and exit");
+    println!("  -n, --count <COUNT>      Read at most COUNT device samples and exit");
     println!("  -i, --interval <SECS>    Polling interval in seconds (default: 1.0)");
     println!(
         "  -v, --verbose            Show detailed sensor registers & diagnostics (human format only)"
@@ -213,15 +213,10 @@ fn handle_sensor_iteration(
     stats: &mut Statistics,
 ) {
     for dev in devices {
-        let read_result = if opts.show_raw {
+        let read_result = if opts.show_raw && opts.common.format == OutputFormat::Human {
             sensor.read_diagnostics(dev).map(|diag| {
-                (
-                    SensorReading {
-                        sensor_id: diag.sensor_id,
-                        temperature: diag.temperature,
-                    },
-                    Some(diag.raw_payload),
-                )
+                let raw = diag.raw_payload.clone();
+                (SensorReading::from(diag), Some(raw))
             })
         } else {
             sensor.read_sensor(dev).map(|reading| (reading, None))
@@ -317,7 +312,6 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
     }
 
     let mut stats = Statistics::default();
-    let mut iterations: usize = 0;
 
     run_poll_loop(opts.common.interval, |timestamp| {
         let soc = if opts.include_soc {
@@ -326,8 +320,9 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
             None
         };
         handle_sensor_iteration(sensor, &target_devices, opts, timestamp, soc, &mut stats);
-        iterations += 1;
-        opts.common.max_count.is_some_and(|m| iterations >= m)
+        opts.common
+            .max_count
+            .is_some_and(|m| stats.samples.total_reads() >= m)
     });
 
     if should_print_summary(
