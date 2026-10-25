@@ -303,17 +303,7 @@ fn validate_rpi3_bus(bus: u8) -> Result<(), LightError> {
 }
 
 impl I2cHardwareInfo {
-    /// Returns the standard Raspberry Pi 3 I2C-1 pinout for the BH1750 sensor.
-    #[must_use]
-    pub fn rpi3_default(address: I2cAddress) -> Self {
-        Self::rpi3_with_bus_and_address(BH1750_DEFAULT_I2C_BUS, address)
-    }
-
-    /// Returns Raspberry Pi 3 I2C pinout metadata for `bus` and `address`.
-    ///
-    /// # Errors
-    /// Returns [`LightError`] if `bus` is not [`BH1750_DEFAULT_I2C_BUS`] (`1`).
-    pub fn try_rpi3_with_bus_and_address(bus: u8, address: I2cAddress) -> Result<Self, LightError> {
+    fn new_rpi3_validated(bus: u8, address: I2cAddress) -> Self {
         const SDA_BCM: BcmPin = BcmPin::new(2);
         const SDA_PHYS: PhysicalPin = PhysicalPin::new(3);
         const SCL_BCM: BcmPin = BcmPin::new(3);
@@ -321,11 +311,9 @@ impl I2cHardwareInfo {
         const VCC_PHYS: PhysicalPin = PhysicalPin::new(1);
         const GND_PHYS: PhysicalPin = PhysicalPin::new(9);
 
-        validate_rpi3_bus(bus)?;
-
         let device_path = format!("/dev/i2c-{bus}").into_boxed_str();
 
-        Ok(Self {
+        Self {
             bus,
             address,
             device_path,
@@ -345,18 +333,22 @@ impl I2cHardwareInfo {
             },
             vcc_pin: VCC_PHYS,
             gnd_pin: GND_PHYS,
-        })
+        }
     }
 
-    /// Returns the Raspberry Pi 3 pinout for the specified I2C bus and address.
-    ///
-    /// # Panics
-    /// Panics if `bus` is not [`BH1750_DEFAULT_I2C_BUS`] (`1`), as the modeled GPIO
-    /// metadata corresponds strictly to Broadcom BSC1 controller pins (SDA BCM 2 / SCL BCM 3).
+    /// Returns the standard Raspberry Pi 3 I2C-1 pinout for the BH1750 sensor.
     #[must_use]
-    pub fn rpi3_with_bus_and_address(bus: u8, address: I2cAddress) -> Self {
-        Self::try_rpi3_with_bus_and_address(bus, address)
-            .unwrap_or_else(|e| panic!("rpi3 pinout metadata: {e}"))
+    pub fn rpi3_default(address: I2cAddress) -> Self {
+        Self::new_rpi3_validated(BH1750_DEFAULT_I2C_BUS, address)
+    }
+
+    /// Returns Raspberry Pi 3 I2C pinout metadata for `bus` and `address`.
+    ///
+    /// # Errors
+    /// Returns [`LightError`] if `bus` is not [`BH1750_DEFAULT_I2C_BUS`] (`1`).
+    pub fn try_rpi3_with_bus_and_address(bus: u8, address: I2cAddress) -> Result<Self, LightError> {
+        validate_rpi3_bus(bus)?;
+        Ok(Self::new_rpi3_validated(bus, address))
     }
 }
 
@@ -778,7 +770,7 @@ impl LightSensor {
     /// Returns hardware and GPIO pinout metadata for this sensor.
     #[must_use]
     pub fn hardware_info(&self) -> I2cHardwareInfo {
-        I2cHardwareInfo::rpi3_with_bus_and_address(self.i2c_bus(), self.i2c_address())
+        I2cHardwareInfo::new_rpi3_validated(self.i2c_bus(), self.i2c_address())
     }
 
     /// Powers down the sensor to enter sleep mode (<1 µA current consumption).
@@ -1195,11 +1187,5 @@ mod tests {
             I2cHardwareInfo::try_rpi3_with_bus_and_address(2, I2cAddress::default()).unwrap_err();
         assert!(err.is_i2c());
         assert!(err.summary().contains("unsupported I2C bus 2"));
-    }
-
-    #[test]
-    #[should_panic(expected = "rpi3 pinout metadata:")]
-    fn rpi3_hardware_info_panics_on_non_default_bus() {
-        let _ = I2cHardwareInfo::rpi3_with_bus_and_address(2, I2cAddress::default());
     }
 }

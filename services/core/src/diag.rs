@@ -360,8 +360,9 @@ pub type SecondaryUnit = (fn(f32) -> f32, &'static str);
 
 /// Builds formatted min, max, and average summary lines for a numeric sample set.
 ///
-/// Returns `None` if no successful samples have been recorded. If secondary conversion
-/// is provided, appends formatted secondary values in parentheses.
+/// Returns `None` if no successful samples have been recorded. Pads label and stat keys
+/// to 11 characters to align vertically with standard session summary headers, and formats
+/// values with fixed column widths (`{val:7.2}`) for consistent table layout.
 #[must_use]
 pub fn format_min_max_avg(
     stats: &NumericStats,
@@ -371,12 +372,15 @@ pub fn format_min_max_avg(
 ) -> Option<[String; 3]> {
     let (min, max, avg) = (stats.min()?, stats.max()?, stats.average_f32()?);
     let entries = [("Min", min), ("Max", max), ("Avg", avg)];
-    Some(entries.map(|(stat_name, val)| match to_secondary {
-        Some((conv, sec_unit)) => format!(
-            "{label} {stat_name} : {val:.2} {unit} ({:.2} {sec_unit})",
-            conv(val)
-        ),
-        None => format!("{label} {stat_name} : {val:.2} {unit}"),
+    Some(entries.map(|(stat_name, val)| {
+        let key = format!("{label} {stat_name}");
+        match to_secondary {
+            Some((conv, sec_unit)) => format!(
+                "{key:<11} : {val:7.2} {unit} ({:6.2} {sec_unit})",
+                conv(val)
+            ),
+            None => format!("{key:<11} : {val:7.2} {unit}"),
+        }
     }))
 }
 
@@ -674,20 +678,20 @@ mod tests {
         stats.record_success(30.0);
         let formatted_light =
             format_min_max_avg(&stats, "Light", "lx", Some((foot_candles, "fc"))).unwrap();
-        assert_eq!(formatted_light[0], "Light Min : 10.00 lx (0.93 fc)");
-        assert_eq!(formatted_light[1], "Light Max : 30.00 lx (2.79 fc)");
-        assert_eq!(formatted_light[2], "Light Avg : 20.00 lx (1.86 fc)");
+        assert_eq!(formatted_light[0], "Light Min   :   10.00 lx (  0.93 fc)");
+        assert_eq!(formatted_light[1], "Light Max   :   30.00 lx (  2.79 fc)");
+        assert_eq!(formatted_light[2], "Light Avg   :   20.00 lx (  1.86 fc)");
 
         let formatted_temp =
             format_min_max_avg(&stats, "Chassis", "°C", Some((fahrenheit, "°F"))).unwrap();
-        assert_eq!(formatted_temp[0], "Chassis Min : 10.00 °C (50.00 °F)");
-        assert_eq!(formatted_temp[1], "Chassis Max : 30.00 °C (86.00 °F)");
-        assert_eq!(formatted_temp[2], "Chassis Avg : 20.00 °C (68.00 °F)");
+        assert_eq!(formatted_temp[0], "Chassis Min :   10.00 °C ( 50.00 °F)");
+        assert_eq!(formatted_temp[1], "Chassis Max :   30.00 °C ( 86.00 °F)");
+        assert_eq!(formatted_temp[2], "Chassis Avg :   20.00 °C ( 68.00 °F)");
 
         let formatted_plain = format_min_max_avg(&stats, "Chassis", "°C", None).unwrap();
-        assert_eq!(formatted_plain[0], "Chassis Min : 10.00 °C");
-        assert_eq!(formatted_plain[1], "Chassis Max : 30.00 °C");
-        assert_eq!(formatted_plain[2], "Chassis Avg : 20.00 °C");
+        assert_eq!(formatted_plain[0], "Chassis Min :   10.00 °C");
+        assert_eq!(formatted_plain[1], "Chassis Max :   30.00 °C");
+        assert_eq!(formatted_plain[2], "Chassis Avg :   20.00 °C");
 
         let empty_stats = NumericStats::default();
         assert_eq!(format_min_max_avg(&empty_stats, "Test", "lx", None), None);
