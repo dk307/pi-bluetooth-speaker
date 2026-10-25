@@ -56,3 +56,5 @@ jobs:
           OPENROUTER__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
           CONFIG__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
           CONFIG__MODEL: ${{ matrix.model }}
+          PR_AGENT_CONFIG_BRANCH: ${{ github.head_ref || github.ref_name }}
+          CONFIG__CONFIG_BRANCH: ${{ github.head_ref || github.ref_name }}
