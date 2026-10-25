@@ -22,7 +22,8 @@ jobs:
       github.event.sender.type != 'Bot' &&
       (
         (github.event_name == 'pull_request' && !github.event.pull_request.draft) ||
-        (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/'))
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/') &&
+         (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'COLLABORATOR' || github.event.comment.author_association == 'MEMBER'))
       )
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -43,7 +44,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER__KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CONFIG__MODEL: "openrouter/@preset/code-review"
-          CONFIG__CUSTOM_MODEL_MAX_TOKENS: "32000"
+          CONFIG__CUSTOM_MODEL_MAX_TOKENS: "128000"
           CONFIG__MAX_OUTPUT_TOKENS: "8192"
           CONFIG__REPO_CONTEXT_FILES: '["AGENTS.md", "services/core/AGENTS.md", "best_practices.md"]'
           CONFIG__REPO_CONTEXT_MAX_LINES: '1500'
