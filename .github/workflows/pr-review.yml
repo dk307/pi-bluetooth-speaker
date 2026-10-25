@@ -37,7 +37,7 @@ jobs:
             reasoning_effort: "high"
           - name: "Alt-1"
             model: "openrouter/@preset/code-review-alt-1"
-            reasoning_effort: "low"
+            reasoning_effort: "high"
     steps:
       - name: Verify OpenRouter API Key
         env:
