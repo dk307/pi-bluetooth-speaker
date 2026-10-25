@@ -258,7 +258,6 @@ impl Display for LightDiagnostics {
             self.illuminance,
             self.illuminance.foot_candles()
         )?;
-        writeln!(f, "  • Power State    : Active")?;
         write!(
             f,
             "  • Operating Mode : Continuous High-Resolution (1 lx, ~120 ms)"
@@ -1044,7 +1043,6 @@ mod tests {
         let diag_str = diag.to_string();
         assert!(diag_str.contains("BH1750 Light Diagnostics: Bus 1, Addr 0x23"));
         assert!(diag_str.contains("Illuminance"));
-        assert!(diag_str.contains("Power State    : Active"));
 
         let hw = sensor.hardware_info();
         assert_eq!(hw.bus, 1);
