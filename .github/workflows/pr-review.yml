@@ -37,7 +37,7 @@ jobs:
             reasoning_effort: "high"
           - name: "Alt-1"
             model: "openrouter/@preset/code-review-alt-1"
-            reasoning_effort: "high"
+            reasoning_effort: "low"
     steps:
       - name: Verify OpenRouter API Key
         env:
@@ -57,5 +57,9 @@ jobs:
           OPENROUTER__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
           CONFIG__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
           CONFIG__MODEL: ${{ matrix.model }}
+          # PR_AGENT_CONFIG_BRANCH points to the PR branch so that configuration changes
+          # in .pr_agent.toml can be evaluated during PR review. The head ref is safe here
+          # because the job is strictly gated above against fork PRs (head.repo.fork == false)
+          # and comment triggers are restricted to repository maintainers.
           PR_AGENT_CONFIG_BRANCH: ${{ github.head_ref || github.ref_name }}
           CONFIG__CONFIG_BRANCH: ${{ github.head_ref || github.ref_name }}
