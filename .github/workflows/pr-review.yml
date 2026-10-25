@@ -22,7 +22,8 @@ jobs:
       github.event.sender.type != 'Bot' &&
       (
         (github.event_name == 'pull_request' && !github.event.pull_request.draft && github.event.pull_request.head.repo.fork == false) ||
-        (github.event_name == 'issue_comment' && github.event.issue.pull_request && github.event.issue.state == 'open' && startsWith(github.event.comment.body, '/') &&
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request && github.event.issue.state == 'open' &&
+         (startsWith(github.event.comment.body, '/review') || startsWith(github.event.comment.body, '/improve') || startsWith(github.event.comment.body, '/ask') || startsWith(github.event.comment.body, '/describe')) &&
          (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'COLLABORATOR' || github.event.comment.author_association == 'MEMBER'))
       )
     runs-on: ubuntu-latest
@@ -31,10 +32,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: "GLM 5.3 (Primary)"
+          - name: "Primary"
             model: "openrouter/@preset/code-review"
             reasoning_effort: "high"
-          - name: "DeepSeek (Alt-1)"
+          - name: "Alt-1"
             model: "openrouter/@preset/code-review-alt-1"
             reasoning_effort: "high"
     steps:
