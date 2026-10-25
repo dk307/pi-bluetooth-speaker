@@ -57,9 +57,10 @@ jobs:
           OPENROUTER__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
           CONFIG__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
           CONFIG__MODEL: ${{ matrix.model }}
-          # PR_AGENT_CONFIG_BRANCH points to the PR branch so that configuration changes
-          # in .pr_agent.toml can be evaluated during PR review. The head ref is safe here
-          # because the job is strictly gated above against fork PRs (head.repo.fork == false)
-          # and comment triggers are restricted to repository maintainers.
+          # PR_AGENT_CONFIG_BRANCH points to the PR branch for pull_request events
+          # (where github.head_ref is available), allowing .pr_agent.toml changes to be
+          # tested before merging. For issue_comment triggers, github.head_ref is empty
+          # and falls back to github.ref_name (the default branch where .pr_agent.toml lives once merged).
+          # The PR head ref is safe because the job is strictly gated above against fork PRs.
           PR_AGENT_CONFIG_BRANCH: ${{ github.head_ref || github.ref_name }}
           CONFIG__CONFIG_BRANCH: ${{ github.head_ref || github.ref_name }}
