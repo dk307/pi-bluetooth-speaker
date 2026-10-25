@@ -374,13 +374,10 @@ pub fn format_min_max_avg(
     let entries = [("Min", min), ("Max", max), ("Avg", avg)];
     Some(entries.map(|(stat_name, val)| {
         let key = format!("{label} {stat_name}");
-        match to_secondary {
-            Some((conv, sec_unit)) => format!(
-                "{key:<11} : {val:7.2} {unit} ({:6.2} {sec_unit})",
-                conv(val)
-            ),
-            None => format!("{key:<11} : {val:7.2} {unit}"),
-        }
+        let tail = to_secondary.map_or_else(String::new, |(conv, sec_unit)| {
+            format!(" ({:6.2} {sec_unit})", conv(val))
+        });
+        format!("{key:<11} : {val:7.2} {unit}{tail}")
     }))
 }
 

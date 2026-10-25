@@ -178,12 +178,13 @@ mod tests {
 
             assert!(panic_result.is_err());
             let panic_payload = panic_result.unwrap_err();
-            let msg = panic_payload
-                .downcast_ref::<&'static str>()
-                .copied()
-                .map(str::to_owned)
-                .or_else(|| panic_payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| panic!("unexpected panic payload type"));
+            let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                panic!("unexpected panic payload type: {panic_payload:?}");
+            };
             assert!(
                 msg.contains(expected_substr),
                 "expected panic message to contain '{expected_substr}', got '{msg}'"

@@ -303,7 +303,7 @@ fn validate_rpi3_bus(bus: u8) -> Result<(), LightError> {
 }
 
 impl I2cHardwareInfo {
-    fn new_rpi3_validated(bus: u8, address: I2cAddress) -> Self {
+    fn new_rpi3_unchecked(bus: u8, address: I2cAddress) -> Self {
         const SDA_BCM: BcmPin = BcmPin::new(2);
         const SDA_PHYS: PhysicalPin = PhysicalPin::new(3);
         const SCL_BCM: BcmPin = BcmPin::new(3);
@@ -339,7 +339,7 @@ impl I2cHardwareInfo {
     /// Returns the standard Raspberry Pi 3 I2C-1 pinout for the BH1750 sensor.
     #[must_use]
     pub fn rpi3_default(address: I2cAddress) -> Self {
-        Self::new_rpi3_validated(BH1750_DEFAULT_I2C_BUS, address)
+        Self::new_rpi3_unchecked(BH1750_DEFAULT_I2C_BUS, address)
     }
 
     /// Returns Raspberry Pi 3 I2C pinout metadata for `bus` and `address`.
@@ -348,7 +348,7 @@ impl I2cHardwareInfo {
     /// Returns [`LightError`] if `bus` is not [`BH1750_DEFAULT_I2C_BUS`] (`1`).
     pub fn try_rpi3_with_bus_and_address(bus: u8, address: I2cAddress) -> Result<Self, LightError> {
         validate_rpi3_bus(bus)?;
-        Ok(Self::new_rpi3_validated(bus, address))
+        Ok(Self::new_rpi3_unchecked(bus, address))
     }
 }
 
@@ -768,9 +768,13 @@ impl LightSensor {
     }
 
     /// Returns hardware and GPIO pinout metadata for this sensor.
+    ///
+    /// # Invariant
+    /// The sensor bus is guaranteed to be validated as Raspberry Pi 3 BSC1 (I2C-1)
+    /// at sensor construction time (`with_bus_and_address` or `new_mocked`).
     #[must_use]
     pub fn hardware_info(&self) -> I2cHardwareInfo {
-        I2cHardwareInfo::new_rpi3_validated(self.i2c_bus(), self.i2c_address())
+        I2cHardwareInfo::new_rpi3_unchecked(self.i2c_bus(), self.i2c_address())
     }
 
     /// Powers down the sensor to enter sleep mode (<1 µA current consumption).
@@ -1187,5 +1191,13 @@ mod tests {
             I2cHardwareInfo::try_rpi3_with_bus_and_address(2, I2cAddress::default()).unwrap_err();
         assert!(err.is_i2c());
         assert!(err.summary().contains("unsupported I2C bus 2"));
+    }
+
+    #[test]
+    fn mock_sensor_bus_matches_rpi3_default() {
+        let (sensor, _) = LightSensor::new_mocked();
+        assert_eq!(sensor.i2c_bus(), BH1750_DEFAULT_I2C_BUS);
+        let info = sensor.hardware_info();
+        assert_eq!(info.bus, BH1750_DEFAULT_I2C_BUS);
     }
 }

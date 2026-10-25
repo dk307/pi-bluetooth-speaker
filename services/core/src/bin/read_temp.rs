@@ -377,6 +377,17 @@ mod tests {
         assert_eq!(stats.samples.max(), Some(30.0));
         assert!((stats.samples.average().unwrap() - 25.0).abs() < 1e-4);
 
+        let lines = speaker_core::diag::format_min_max_avg(
+            &stats.samples,
+            "Chassis",
+            "°C",
+            Some((fahrenheit, "°F")),
+        )
+        .unwrap();
+        assert_eq!(lines[0], "Chassis Min :   20.00 °C ( 68.00 °F)");
+        assert_eq!(lines[1], "Chassis Max :   30.00 °C ( 86.00 °F)");
+        assert_eq!(lines[2], "Chassis Avg :   25.00 °C ( 77.00 °F)");
+
         print_session_summary(&stats);
 
         let empty_stats = Statistics::default();

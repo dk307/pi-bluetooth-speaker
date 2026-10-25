@@ -105,7 +105,7 @@ const HELP_CASES: &[(&str, &str, &str)] = &[
 
 #[test]
 fn diagnostic_utilities_help_display() {
-    for (bin_path, expected_title, expected_flag) in HELP_CASES {
+    for &(bin_path, expected_title, expected_flag) in HELP_CASES {
         for flag in ["--help", "-h"] {
             let (status, stdout, _) = run_cli(bin_path, &[flag]);
             assert!(status.success(), "expected success for '{bin_path} {flag}'");

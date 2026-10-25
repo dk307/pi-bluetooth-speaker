@@ -266,6 +266,17 @@ mod tests {
         assert_eq!(stats.max(), Some(200.0));
         assert!((stats.average().unwrap() - 150.0).abs() < 1e-4);
 
+        let lines = speaker_core::diag::format_min_max_avg(
+            &stats,
+            "Light",
+            "lx",
+            Some((foot_candles, "fc")),
+        )
+        .unwrap();
+        assert_eq!(lines[0], "Light Min   :  100.00 lx (  9.29 fc)");
+        assert_eq!(lines[1], "Light Max   :  200.00 lx ( 18.58 fc)");
+        assert_eq!(lines[2], "Light Avg   :  150.00 lx ( 13.94 fc)");
+
         print_session_summary(&stats);
 
         let empty_stats = NumericStats::default();
