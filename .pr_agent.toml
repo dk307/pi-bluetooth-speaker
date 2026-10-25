@@ -1,6 +1,6 @@
 [config]
 model = "openrouter/@preset/code-review"
-fallback_models = []
+fallback_models = ["openrouter/@preset/code-review-alt-1"]
 custom_model_max_tokens = 128000
 max_output_tokens = 8192
 repo_context_files = ["AGENTS.md", "services/core/AGENTS.md", "best_practices.md"]
@@ -13,6 +13,7 @@ require_security_review = true
 require_estimate_effort_to_review = true
 enable_review_labels_effort = true
 enable_review_labels_security = true
+persistent_comment = false
 extra_instructions = """
 You are reviewing Rust code for a Raspberry Pi 3 embedded audio/DSP appliance.
 Verify that the pull request strictly adheres to the Microsoft Pragmatic Rust Guidelines (services/.guidelines/microsoft-rust-guidelines.md, AGENTS.md, best_practices.md):
@@ -35,6 +36,7 @@ focus_only_on_problems = false
 committable_code_suggestions = true
 num_code_suggestions_per_chunk = 4
 publish_output_no_suggestions = false
+persistent_comment = false
 extra_instructions = """
 Suggest concrete, committable code improvements adhering to the Microsoft Pragmatic Rust Guidelines (AGENTS.md, best_practices.md):
 1. Error Simplification (M-FROM-ERROR): Replace verbose .map_err(DomainError::from) with idiomatic ? via From<ForeignError>.

@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   pr_agent:
-    name: PR-Agent AI Code Review
+    name: PR-Agent AI Review (${{ matrix.name }})
     if: >-
       github.event.sender.type != 'Bot' &&
       (
@@ -27,6 +27,14 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Preset Primary"
+            model: "openrouter/@preset/code-review"
+          - name: "Preset Alt-1"
+            model: "openrouter/@preset/code-review-alt-1"
     steps:
       - name: Verify OpenRouter API Key
         env:
@@ -37,13 +45,13 @@ jobs:
             exit 1
           fi
 
-      - name: Run PR-Agent
+      - name: Run PR-Agent (${{ matrix.name }})
         uses: the-pr-agent/pr-agent@981344be2755e303df501e18e3f60b848a188a80 # v0.48.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER__KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          CONFIG__MODEL: "openrouter/@preset/code-review"
+          CONFIG__MODEL: ${{ matrix.model }}
           CONFIG__CUSTOM_MODEL_MAX_TOKENS: "128000"
           CONFIG__MAX_OUTPUT_TOKENS: "8192"
           CONFIG__REPO_CONTEXT_FILES: '["AGENTS.md", "services/core/AGENTS.md", "best_practices.md"]'
@@ -57,7 +65,9 @@ jobs:
           PR_REVIEWER__REQUIRE_TESTS_REVIEW: "true"
           PR_REVIEWER__REQUIRE_SECURITY_REVIEW: "true"
           PR_REVIEWER__REQUIRE_ESTIMATE_EFFORT_TO_REVIEW: "true"
+          PR_REVIEWER__PERSISTENT_COMMENT: "false"
           PR_REVIEWER__EXTRA_INSTRUCTIONS: >-
+            Reviewing with Model: ${{ matrix.name }} (${{ matrix.model }}).
             You are reviewing Rust code for a Raspberry Pi 3 embedded audio/DSP appliance.
             Verify that the pull request strictly adheres to the Microsoft Pragmatic Rust Guidelines (services/.guidelines/microsoft-rust-guidelines.md, AGENTS.md, best_practices.md):
             1. Mockable I/O (M-MOCKABLE-SYSCALLS, M-DI-HIERARCHY): Verify hardware I/O and peripherals are isolated behind inherent mocks (new_mocked()) rather than unmockable syscalls or leaky traits.
@@ -76,7 +86,9 @@ jobs:
           PR_CODE_SUGGESTIONS__COMMITTABLE_CODE_SUGGESTIONS: "true"
           PR_CODE_SUGGESTIONS__NUM_CODE_SUGGESTIONS_PER_CHUNK: "4"
           PR_CODE_SUGGESTIONS__PUBLISH_OUTPUT_NO_SUGGESTIONS: "false"
+          PR_CODE_SUGGESTIONS__PERSISTENT_COMMENT: "false"
           PR_CODE_SUGGESTIONS__EXTRA_INSTRUCTIONS: >-
+            Suggestions generated with Model: ${{ matrix.name }} (${{ matrix.model }}).
             Suggest concrete, committable code improvements adhering to the Microsoft Pragmatic Rust Guidelines (AGENTS.md, best_practices.md):
             1. Error Simplification (M-FROM-ERROR): Replace verbose .map_err(DomainError::from) with idiomatic ? via From<ForeignError>.
             2. Memory Efficiency (M-BOX-DST): Replace unnecessary String / Vec<T> with Box<str> / Box<[T]> for immutable owned buffers and paths.
