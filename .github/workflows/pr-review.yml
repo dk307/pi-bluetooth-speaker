@@ -42,8 +42,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER__KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          CONFIG__MODEL: "openrouter/anthropic/claude-3.5-sonnet"
-          CONFIG__FALLBACK_MODELS: '["openrouter/openai/gpt-4o"]'
+          CONFIG__MODEL: "openrouter/@preset/code-review"
+          CONFIG__CUSTOM_MODEL_MAX_TOKENS: "32000"
+          CONFIG__MAX_OUTPUT_TOKENS: "8192"
           CONFIG__REPO_CONTEXT_FILES: '["AGENTS.md", "services/core/AGENTS.md"]'
           CONFIG__REPO_CONTEXT_MAX_LINES: '1000'
           GITHUB_ACTION_CONFIG__AUTO_REVIEW: "true"
