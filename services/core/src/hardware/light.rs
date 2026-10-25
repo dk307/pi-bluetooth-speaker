@@ -587,8 +587,9 @@ impl LightSensorMock {
         if let Some(ref fault) = state.fault {
             return Err(LightError::mock_fault(fault.clone()));
         }
-        // Mirrors hardware: reset re-arms continuous conversion, so subsequent reads
-        // return the current ambient level rather than a cleared data register.
+        // Mirrors hardware: reset re-arms continuous conversion, and HardwareDevice::read_lux()
+        // enforces any remaining settle time via HwState before reading the bus. In mock mode,
+        // subsequent reads return the current ambient level immediately without synthetic host sleep.
         state.powered = true;
         Ok(())
     }
@@ -793,8 +794,11 @@ impl LightSensor {
     /// Resets the sensor measurement data register, awakens the sensor if sleeping,
     /// and restarts continuous high-resolution measurement.
     ///
-    /// In mock mode, `reset()` re-powers the simulated sensor and preserves the
-    /// illuminance configured via [`LightSensorMock::set_lux()`].
+    /// On hardware, `reset()` re-arms continuous conversion and records the transition
+    /// in [`HwState`], guaranteeing that subsequent `read_lux()` calls transparently
+    /// enforce any remaining datasheet settle duration (~180 ms) before reading the register.
+    /// In mock mode, `reset()` re-powers the simulated sensor and preserves the configured
+    /// illuminance without introducing synthetic wall-clock sleeps into test suites.
     ///
     /// # Errors
     /// Returns [`LightError`] if communication fails.

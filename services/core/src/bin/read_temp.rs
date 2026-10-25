@@ -215,8 +215,13 @@ fn handle_sensor_iteration(
     for dev in devices {
         let read_result = if opts.show_raw && opts.common.format == OutputFormat::Human {
             sensor.read_diagnostics(dev).map(|diag| {
-                let raw = diag.raw_payload.clone();
-                (SensorReading::from(diag), Some(raw))
+                (
+                    SensorReading {
+                        sensor_id: diag.sensor_id,
+                        temperature: diag.temperature,
+                    },
+                    Some(diag.raw_payload),
+                )
             })
         } else {
             sensor.read_sensor(dev).map(|reading| (reading, None))
@@ -494,7 +499,7 @@ mod tests {
         };
         assert_eq!(run_app(&sensor, &opts_run), ExitCode::SUCCESS);
 
-        // Test multi-sensor sweep termination
+        // Test multi-sensor sweep: with 2 discovered sensors and max_count = 2, terminates after reading both sensors
         let id2 = SensorId::parse("28-000000000002").unwrap();
         mock.set_temperature(id2, Temperature::from_celsius(28.0).unwrap());
         assert_eq!(run_app(&sensor, &opts_run), ExitCode::SUCCESS);
