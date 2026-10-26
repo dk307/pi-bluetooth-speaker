@@ -1,7 +1,6 @@
 [config]
 model = "openrouter/@preset/code-review"
 fallback_models = []
-reasoning_effort = "high"
 max_model_tokens = 512000
 custom_model_max_tokens = 512000
 max_output_tokens = 128000
@@ -12,7 +11,6 @@ repo_context_max_lines = 10000
 repo_context_from_default_branch = false
 
 [openrouter]
-reasoning_effort = "high"
 reasoning_max_tokens = 12000
 
 [pr_reviewer]
