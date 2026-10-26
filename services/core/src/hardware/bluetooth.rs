@@ -638,6 +638,21 @@ fn get_str_array(props: &HashMap<String, OwnedValue>, key: &str) -> Box<[Box<str
     Box::default()
 }
 
+pub(crate) fn is_no_such_unit_error(err: &zbus::Error) -> bool {
+    match err {
+        zbus::Error::MethodError(name, _, _) => {
+            name.as_str().ends_with("NoSuchUnit")
+                || name.as_str().ends_with("UnknownUnit")
+                || name.as_str().ends_with("NotFound")
+        }
+        zbus::Error::FDO(fdo_err) => matches!(**fdo_err, zbus::fdo::Error::UnknownObject(_)),
+        other => {
+            let s = other.to_string();
+            s.contains("NoSuchUnit") || s.contains("UnknownUnit") || s.contains("not loaded")
+        }
+    }
+}
+
 /// D-Bus client executing direct queries against systemd, `BlueZ`, and `BlueALSA`.
 #[derive(Clone)]
 pub(crate) struct DbusClient {
@@ -652,27 +667,34 @@ impl DbusClient {
     pub(crate) fn check_services(&self) -> Result<BluetoothServices, BtError> {
         let manager = SystemdManagerProxyBlocking::new(&self.conn)?;
         Ok(BluetoothServices {
-            bluetoothd: self.check_service(&manager, "bluetooth.service"),
-            bluealsa: self.check_service(&manager, "bluealsa.service"),
-            bluealsa_aplay: self.check_service(&manager, "bluealsa-aplay.service"),
-            bt_agent: self.check_service(&manager, "bt-agent.service"),
+            bluetoothd: self.check_service(&manager, "bluetooth.service")?,
+            bluealsa: self.check_service(&manager, "bluealsa.service")?,
+            bluealsa_aplay: self.check_service(&manager, "bluealsa-aplay.service")?,
+            bt_agent: self.check_service(&manager, "bt-agent.service")?,
         })
     }
 
-    fn check_service(&self, manager: &SystemdManagerProxyBlocking<'_>, name: &str) -> ServiceState {
+    fn check_service(
+        &self,
+        manager: &SystemdManagerProxyBlocking<'_>,
+        name: &str,
+    ) -> Result<ServiceState, BtError> {
         match manager.get_unit(name) {
             Ok(path) => {
-                let Ok(unit) = SystemdUnitProxyBlocking::builder(&self.conn)
+                let unit = match SystemdUnitProxyBlocking::builder(&self.conn)
                     .path(path)
                     .and_then(zbus::blocking::proxy::Builder::build)
-                else {
-                    return ServiceState::Inactive;
+                {
+                    Ok(u) => u,
+                    Err(e) if is_no_such_unit_error(&e) => return Ok(ServiceState::NotFound),
+                    Err(e) => return Err(BtError::from(e)),
                 };
-                let active = unit.active_state().unwrap_or_default();
-                let load = unit.load_state().unwrap_or_default();
-                Self::parse_systemd_state(&active, &load)
+                let active = unit.active_state().map_err(BtError::from)?;
+                let load = unit.load_state().map_err(BtError::from)?;
+                Ok(Self::parse_systemd_state(&active, &load))
             }
-            Err(_) => ServiceState::NotFound,
+            Err(e) if is_no_such_unit_error(&e) => Ok(ServiceState::NotFound),
+            Err(e) => Err(BtError::from(e)),
         }
     }
 
@@ -1141,21 +1163,29 @@ impl BluetoothDeviceMock {
         }
     }
 
+    fn get_adapter_mut<'a>(
+        state: &'a mut MockState,
+        target_adapter: Option<&str>,
+    ) -> Result<&'a mut BtAdapter, BtError> {
+        let adapter = state.adapter.as_mut().ok_or_else(|| {
+            BtError::adapter_not_found(target_adapter.unwrap_or(DEFAULT_BT_ADAPTER))
+        })?;
+        if let Some(target) = target_adapter {
+            if adapter.id.as_ref() != target {
+                return Err(BtError::adapter_not_found(target));
+            }
+        }
+        Ok(adapter)
+    }
+
     fn set_powered_for_adapter(
         &self,
         target_adapter: Option<&str>,
         powered: bool,
     ) -> Result<(), BtError> {
         let mut state = self.state.write().expect("mock lock poisoned");
-        if let Some(target) = target_adapter {
-            match &state.adapter {
-                Some(a) if a.id.as_ref() == target => {}
-                _ => return Err(BtError::adapter_not_found(target)),
-            }
-        }
-        if let Some(ref mut adapter) = state.adapter {
-            adapter.powered = powered;
-        }
+        let adapter = Self::get_adapter_mut(&mut state, target_adapter)?;
+        adapter.powered = powered;
         Ok(())
     }
 
@@ -1165,15 +1195,8 @@ impl BluetoothDeviceMock {
         discoverable: bool,
     ) -> Result<(), BtError> {
         let mut state = self.state.write().expect("mock lock poisoned");
-        if let Some(target) = target_adapter {
-            match &state.adapter {
-                Some(a) if a.id.as_ref() == target => {}
-                _ => return Err(BtError::adapter_not_found(target)),
-            }
-        }
-        if let Some(ref mut adapter) = state.adapter {
-            adapter.discoverable = discoverable;
-        }
+        let adapter = Self::get_adapter_mut(&mut state, target_adapter)?;
+        adapter.discoverable = discoverable;
         Ok(())
     }
 
@@ -1183,15 +1206,8 @@ impl BluetoothDeviceMock {
         pairable: bool,
     ) -> Result<(), BtError> {
         let mut state = self.state.write().expect("mock lock poisoned");
-        if let Some(target) = target_adapter {
-            match &state.adapter {
-                Some(a) if a.id.as_ref() == target => {}
-                _ => return Err(BtError::adapter_not_found(target)),
-            }
-        }
-        if let Some(ref mut adapter) = state.adapter {
-            adapter.pairable = pairable;
-        }
+        let adapter = Self::get_adapter_mut(&mut state, target_adapter)?;
+        adapter.pairable = pairable;
         Ok(())
     }
 
@@ -1749,6 +1765,15 @@ mod tests {
             .set_pairable_for_adapter(Some("hci99"), true)
             .unwrap_err();
 
+        // Target adapter missing on mock when adapter is cleared
+        mock.set_adapter(None);
+        let err_p = device.set_powered(true).unwrap_err();
+        assert!(err_p.is_adapter_not_found());
+        let err_d = device.set_discoverable(true).unwrap_err();
+        assert!(err_d.is_adapter_not_found());
+        let err_pair = device.set_pairable(true).unwrap_err();
+        assert!(err_pair.is_adapter_not_found());
+
         // Fault injection
         mock.set_fault(Some("D-Bus daemon stopped".into()));
         let err = device.status().unwrap_err();
@@ -2124,5 +2149,61 @@ mod tests {
             None
         );
         assert_eq!(DbusClient::extract_mac_from_pcm_path("/invalid/path"), None);
+    }
+
+    #[test]
+    fn unit_not_found_error_matching() {
+        use zbus::fdo;
+        use zbus::names::OwnedErrorName;
+
+        let dummy_msg = zbus::message::Message::method_call("/org/test", "Test")
+            .unwrap()
+            .build(&())
+            .unwrap();
+
+        let err_no_such = zbus::Error::MethodError(
+            OwnedErrorName::try_from("org.freedesktop.systemd1.NoSuchUnit").unwrap(),
+            Some("Unit not loaded".into()),
+            dummy_msg.clone(),
+        );
+        assert!(is_no_such_unit_error(&err_no_such));
+
+        let err_unknown_unit = zbus::Error::MethodError(
+            OwnedErrorName::try_from("org.freedesktop.systemd1.UnknownUnit").unwrap(),
+            None,
+            dummy_msg.clone(),
+        );
+        assert!(is_no_such_unit_error(&err_unknown_unit));
+
+        let err_not_found = zbus::Error::MethodError(
+            OwnedErrorName::try_from("org.freedesktop.DBus.Error.NotFound").unwrap(),
+            None,
+            dummy_msg.clone(),
+        );
+        assert!(is_no_such_unit_error(&err_not_found));
+
+        let err_denied = zbus::Error::MethodError(
+            OwnedErrorName::try_from("org.freedesktop.DBus.Error.AccessDenied").unwrap(),
+            None,
+            dummy_msg,
+        );
+        assert!(!is_no_such_unit_error(&err_denied));
+
+        let err_fdo_unknown =
+            zbus::Error::FDO(Box::new(fdo::Error::UnknownObject("test".to_string())));
+        assert!(is_no_such_unit_error(&err_fdo_unknown));
+
+        let err_fdo_failed = zbus::Error::FDO(Box::new(fdo::Error::Failed("failed".to_string())));
+        assert!(!is_no_such_unit_error(&err_fdo_failed));
+
+        let err_string_fallback =
+            zbus::Error::Failure("Unit bluetooth.service not loaded.".to_string());
+        assert!(is_no_such_unit_error(&err_string_fallback));
+
+        let err_io = zbus::Error::InputOutput(std::sync::Arc::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "refused",
+        )));
+        assert!(!is_no_such_unit_error(&err_io));
     }
 }
