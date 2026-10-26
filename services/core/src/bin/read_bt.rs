@@ -435,7 +435,7 @@ fn handle_bt_iteration(
     timestamp: &str,
     session_stats: &mut BtStats,
 ) {
-    match device.status() {
+    match device.status_for_adapter(opts.adapter.as_deref()) {
         Ok(status) => {
             session_stats.record_success(&status);
             match opts.common.format {
@@ -547,18 +547,7 @@ fn main() -> ExitCode {
         Err(code) => return code,
     };
 
-    let device = match BluetoothDevice::new() {
-        Ok(d) => d,
-        Err(err) => {
-            if opts.common.format == OutputFormat::Json {
-                output_json_error(&format_timestamp(), &err);
-            } else {
-                eprintln!("Failed to initialize Bluetooth subsystem client: {err}");
-            }
-            return ExitCode::FAILURE;
-        }
-    };
-
+    let device = BluetoothDevice::new();
     run_app(&device, &opts)
 }
 
@@ -776,5 +765,20 @@ mod tests {
         opts.common.format = OutputFormat::Json;
         let code_json = run_app(&device, &opts);
         assert_eq!(code_json, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_app_adapter_targeting() {
+        let (device, _) = BluetoothDevice::new_mocked();
+        let mut opts = CliOptions::default();
+        opts.common.max_count = Some(1);
+        opts.adapter = Some("hci0".into());
+        let code = run_app(&device, &opts);
+        assert_eq!(code, ExitCode::SUCCESS);
+
+        opts.adapter = Some("hci1".into());
+        let mut stats = BtStats::default();
+        handle_bt_iteration(&device, &opts, "12:00:00", &mut stats);
+        assert_eq!(stats.samples.errors(), 1);
     }
 }

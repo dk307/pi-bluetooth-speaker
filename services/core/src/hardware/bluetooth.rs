@@ -15,8 +15,9 @@ use std::backtrace::Backtrace;
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 use std::io;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -616,16 +617,61 @@ pub struct CommandOutput {
     pub exit_code: i32,
 }
 
-struct OsCommandRunner;
+/// Default timeout for individual Bluetooth subprocess queries (5 seconds).
+pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OsCommandRunner {
+    timeout: Duration,
+}
+
+impl Default for OsCommandRunner {
+    fn default() -> Self {
+        Self {
+            timeout: DEFAULT_COMMAND_TIMEOUT,
+        }
+    }
+}
+
+impl OsCommandRunner {
+    #[cfg(test)]
+    pub(crate) const fn with_timeout(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+}
 
 impl CommandRunner for OsCommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
-        let output = Command::new(program).args(args).output()?;
-        Ok(CommandOutput {
-            stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            exit_code: output.status.code().unwrap_or(-1),
-        })
+        let mut child = Command::new(program)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            match child.try_wait()? {
+                Some(_) => {
+                    let output = child.wait_with_output()?;
+                    return Ok(CommandOutput {
+                        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                        exit_code: output.status.code().unwrap_or(-1),
+                    });
+                }
+                None if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("command '{program}' timed out after {:?}", self.timeout),
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -645,15 +691,14 @@ impl SystemInspector {
             Ok(out) => {
                 if out.exit_code == 0 && out.stdout == "active" {
                     ServiceState::Active
-                } else if out.stdout == "inactive" || out.stdout == "deactivating" {
-                    ServiceState::Inactive
-                } else if out.stdout == "failed" {
-                    ServiceState::Failed
                 } else if out.exit_code == 4
                     || out.stderr.contains("not-found")
                     || out.stdout.contains("could not be found")
+                    || out.stdout.contains("not-found")
                 {
                     ServiceState::NotFound
+                } else if out.stdout == "failed" {
+                    ServiceState::Failed
                 } else {
                     ServiceState::Inactive
                 }
@@ -970,9 +1015,11 @@ impl SystemInspector {
 
         let available_codecs = props
             .get("available codecs")
+            .filter(|s| s.trim() != "[ Unknown ]")
             .map(|s| {
-                s.split(',')
-                    .map(|c| c.trim().into())
+                s.split(|c: char| c == ',' || c.is_whitespace())
+                    .filter(|c| !c.is_empty())
+                    .map(Into::into)
                     .collect::<Vec<Box<str>>>()
                     .into_boxed_slice()
             })
@@ -1206,10 +1253,19 @@ impl BluetoothDeviceMock {
         }
     }
 
-    fn read_status(&self) -> Result<BluetoothStatus, BtError> {
+    fn read_status_for_adapter(
+        &self,
+        target_adapter: Option<&str>,
+    ) -> Result<BluetoothStatus, BtError> {
         let state = self.state.read().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(BtError::mock_fault(fault.clone()));
+        }
+        if let Some(target) = target_adapter {
+            match &state.adapter {
+                Some(adapter) if adapter.id.as_ref() == target => {}
+                _ => return Err(BtError::adapter_not_found(target)),
+            }
         }
         Ok(BluetoothStatus {
             services: state.services.clone(),
@@ -1218,6 +1274,14 @@ impl BluetoothDeviceMock {
             pcms: state.pcms.clone().into_boxed_slice(),
             hardware: BluetoothHardwareInfo::rpi3(),
         })
+    }
+
+    /// Returns the current simulated Bluetooth status for the default adapter.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if a mock fault is injected.
+    pub fn read_status(&self) -> Result<BluetoothStatus, BtError> {
+        self.read_status_for_adapter(None)
     }
 }
 
@@ -1244,16 +1308,20 @@ impl fmt::Debug for BluetoothDevice {
     }
 }
 
+impl Default for BluetoothDevice {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BluetoothDevice {
     /// Connects to the host Linux Bluetooth subsystem using standard OS commands.
-    ///
-    /// # Errors
-    /// Returns [`BtError`] if `bluetoothctl` is missing from the system.
-    pub fn new() -> Result<Self, BtError> {
-        let inspector = SystemInspector::new(Arc::new(OsCommandRunner));
-        Ok(Self {
+    #[must_use]
+    pub fn new() -> Self {
+        let inspector = SystemInspector::new(Arc::new(OsCommandRunner::default()));
+        Self {
             backend: Arc::new(Backend::System(inspector)),
-        })
+        }
     }
 
     /// Creates an inherent mock device and companion mock controller for testing.
@@ -1277,16 +1345,19 @@ impl BluetoothDevice {
         }
     }
 
-    /// Inspects the complete Bluetooth subsystem status synchronously.
+    /// Inspects the status for a specific adapter (or default if `None`) synchronously.
     ///
     /// # Errors
-    /// Returns [`BtError`] if system commands fail or a mock fault is injected.
-    pub fn status(&self) -> Result<BluetoothStatus, BtError> {
+    /// Returns [`BtError`] if system commands fail, the adapter is not found, or a mock fault is injected.
+    pub fn status_for_adapter(
+        &self,
+        target_adapter: Option<&str>,
+    ) -> Result<BluetoothStatus, BtError> {
         match &*self.backend {
-            Backend::Mock(mock) => mock.read_status(),
+            Backend::Mock(mock) => mock.read_status_for_adapter(target_adapter),
             Backend::System(inspector) => {
                 let services = inspector.check_services();
-                let adapter = inspector.parse_adapter(None)?;
+                let adapter = inspector.parse_adapter(target_adapter)?;
                 let devices = inspector.get_devices()?;
                 let pcms = inspector.get_bluealsa_pcms(&devices);
                 Ok(BluetoothStatus {
@@ -1300,13 +1371,35 @@ impl BluetoothDevice {
         }
     }
 
+    /// Inspects the status for a specific adapter asynchronously without blocking Tokio.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if reading fails, the adapter is not found, or the task is cancelled.
+    pub async fn status_for_adapter_async(
+        &self,
+        target_adapter: Option<Box<str>>,
+    ) -> Result<BluetoothStatus, BtError> {
+        let dev = self.clone();
+        crate::runtime::run_blocking("bluetooth status read", move || {
+            dev.status_for_adapter(target_adapter.as_deref())
+        })
+        .await
+    }
+
+    /// Inspects the complete Bluetooth subsystem status synchronously.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if system commands fail or a mock fault is injected.
+    pub fn status(&self) -> Result<BluetoothStatus, BtError> {
+        self.status_for_adapter(None)
+    }
+
     /// Inspects the complete Bluetooth subsystem status asynchronously without blocking Tokio.
     ///
     /// # Errors
     /// Returns [`BtError`] if reading fails or task is cancelled.
     pub async fn status_async(&self) -> Result<BluetoothStatus, BtError> {
-        let dev = self.clone();
-        crate::runtime::run_blocking("bluetooth status read", move || dev.status()).await
+        self.status_for_adapter_async(None).await
     }
 
     /// Inspects Bluetooth system service states.
@@ -1317,12 +1410,23 @@ impl BluetoothDevice {
         Ok(self.status()?.services)
     }
 
+    /// Returns local controller adapter information for a specific adapter (or default if `None`).
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if querying fails or the adapter is not found.
+    pub fn adapter_info_for(
+        &self,
+        target_adapter: Option<&str>,
+    ) -> Result<Option<BtAdapter>, BtError> {
+        Ok(self.status_for_adapter(target_adapter)?.adapter)
+    }
+
     /// Returns local controller adapter information.
     ///
     /// # Errors
     /// Returns [`BtError`] if querying fails.
     pub fn adapter_info(&self) -> Result<Option<BtAdapter>, BtError> {
-        Ok(self.status()?.adapter)
+        self.adapter_info_for(None)
     }
 
     /// Returns all connected Bluetooth devices.
@@ -2110,5 +2214,68 @@ Muted: false
         assert_eq!(pcms.len(), 1);
         assert_eq!(pcms[0].selected_codec.as_ref(), "AAC");
         assert_eq!(pcms[0].available_codecs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn status_for_adapter_queries() {
+        let (device, mock) = BluetoothDevice::new_mocked();
+        let status = device.status_for_adapter(Some("hci0")).unwrap();
+        assert_eq!(status.adapter.as_ref().unwrap().id.as_ref(), "hci0");
+
+        let err = device.status_for_adapter(Some("hci1")).unwrap_err();
+        assert!(err.is_adapter_not_found());
+        assert!(err.to_string().contains("hci1"));
+
+        let async_status = device
+            .status_for_adapter_async(Some("hci0".into()))
+            .await
+            .unwrap();
+        assert_eq!(async_status.adapter.as_ref().unwrap().id.as_ref(), "hci0");
+
+        let async_err = device
+            .status_for_adapter_async(Some("hci1".into()))
+            .await
+            .unwrap_err();
+        assert!(async_err.is_adapter_not_found());
+
+        assert!(device.adapter_info_for(Some("hci0")).unwrap().is_some());
+        device.adapter_info_for(Some("hci1")).unwrap_err();
+        mock.read_status().unwrap();
+
+        mock.set_adapter(None);
+        let none_err = device.status_for_adapter(Some("hci0")).unwrap_err();
+        assert!(none_err.is_adapter_not_found());
+    }
+
+    #[test]
+    fn os_command_runner_execution_and_timeout() {
+        let runner = OsCommandRunner::default();
+        let out = runner.run("sh", &["-c", "echo hello_os_runner"]).unwrap();
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, "hello_os_runner");
+
+        let fast_timeout_runner = OsCommandRunner::with_timeout(Duration::from_millis(50));
+        let err = fast_timeout_runner
+            .run("sh", &["-c", "sleep 1"])
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+
+        let default_device = BluetoothDevice::default();
+        assert!(format!("{default_device:?}").contains("BluetoothDevice::System"));
+    }
+
+    #[test]
+    fn parse_pcm_info_codec_variations() {
+        let path = "/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/a2dpsnk/source";
+        let name_map = HashMap::new();
+
+        let space_codecs_out = "Transport: A2DP-sink\nAvailable codecs: SBC AAC\n";
+        let pcm = SystemInspector::parse_pcm_info(space_codecs_out, path, &name_map).unwrap();
+        assert_eq!(pcm.available_codecs.as_ref(), &["SBC".into(), "AAC".into()]);
+
+        let unknown_codecs_out = "Transport: A2DP-sink\nAvailable codecs: [ Unknown ]\n";
+        let pcm_unknown =
+            SystemInspector::parse_pcm_info(unknown_codecs_out, path, &name_map).unwrap();
+        assert!(pcm_unknown.available_codecs.is_empty());
     }
 }
