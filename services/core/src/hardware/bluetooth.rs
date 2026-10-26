@@ -770,9 +770,22 @@ impl DbusClient {
             }
         }
 
-        // 2. Search for Device1 interfaces
-        for ifaces in objects.values() {
+        let selected_adapter_id = adapter.as_ref().map(|a| a.id.as_ref());
+
+        // 2. Search for Device1 interfaces belonging to the selected adapter
+        for (path, ifaces) in objects {
             if let Some(props) = find_iface(ifaces, "org.bluez.Device1") {
+                if let Some(adapter_id) = selected_adapter_id {
+                    let matches_adapter = path
+                        .as_str()
+                        .strip_prefix("/org/bluez/")
+                        .and_then(|p| p.split('/').next())
+                        .is_some_and(|id| id == adapter_id);
+                    if !matches_adapter {
+                        continue;
+                    }
+                }
+
                 let Some(addr_str) = get_str(props, "Address") else {
                     continue;
                 };
@@ -1968,6 +1981,52 @@ mod tests {
         // Parse with non-existent target adapter
         let not_found = DbusClient::parse_bluez_objects(&objects, Some("hci99")).unwrap_err();
         assert!(not_found.is_adapter_not_found());
+    }
+
+    #[test]
+    fn parse_bluez_objects_filters_devices_by_target_adapter() {
+        let mut objects: ManagedObjects = HashMap::new();
+
+        let adapter0_path = OwnedObjectPath::try_from("/org/bluez/hci0").unwrap();
+        let mut adapter0_ifaces = HashMap::new();
+        let mut adapter0_props = HashMap::new();
+        adapter0_props.insert("Address".to_string(), to_val("DC:A6:32:00:00:00"));
+        adapter0_ifaces.insert(iface("org.bluez.Adapter1"), adapter0_props);
+        objects.insert(adapter0_path, adapter0_ifaces);
+
+        let dev0_path = OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_00_00_00_00_00").unwrap();
+        let mut dev0_ifaces = HashMap::new();
+        let mut dev0_props = HashMap::new();
+        dev0_props.insert("Address".to_string(), to_val("AA:00:00:00:00:00"));
+        dev0_ifaces.insert(iface("org.bluez.Device1"), dev0_props);
+        objects.insert(dev0_path, dev0_ifaces);
+
+        let adapter1_path = OwnedObjectPath::try_from("/org/bluez/hci1").unwrap();
+        let mut adapter1_ifaces = HashMap::new();
+        let mut adapter1_props = HashMap::new();
+        adapter1_props.insert("Address".to_string(), to_val("DC:A6:32:11:11:11"));
+        adapter1_ifaces.insert(iface("org.bluez.Adapter1"), adapter1_props);
+        objects.insert(adapter1_path, adapter1_ifaces);
+
+        let dev1_path = OwnedObjectPath::try_from("/org/bluez/hci1/dev_BB_11_11_11_11_11").unwrap();
+        let mut dev1_ifaces = HashMap::new();
+        let mut dev1_props = HashMap::new();
+        dev1_props.insert("Address".to_string(), to_val("BB:11:11:11:11:11"));
+        dev1_ifaces.insert(iface("org.bluez.Device1"), dev1_props);
+        objects.insert(dev1_path, dev1_ifaces);
+
+        let (a0, d0) = DbusClient::parse_bluez_objects(&objects, Some("hci0")).unwrap();
+        assert_eq!(a0.unwrap().id.as_ref(), "hci0");
+        assert_eq!(d0.len(), 1);
+        assert_eq!(d0[0].address, BtAddress::new([0xAA, 0, 0, 0, 0, 0]));
+
+        let (a1, d1) = DbusClient::parse_bluez_objects(&objects, Some("hci1")).unwrap();
+        assert_eq!(a1.unwrap().id.as_ref(), "hci1");
+        assert_eq!(d1.len(), 1);
+        assert_eq!(
+            d1[0].address,
+            BtAddress::new([0xBB, 0x11, 0x11, 0x11, 0x11, 0x11])
+        );
     }
 
     #[test]
