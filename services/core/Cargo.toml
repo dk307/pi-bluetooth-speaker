@@ -24,6 +24,10 @@ path = "src/bin/read_temp.rs"
 name = "read_light"
 path = "src/bin/read_light.rs"
 
+[[bin]]
+name = "read_amp"
+path = "src/bin/read_amp.rs"
+
 [dependencies]
 # UI Framework (Slint with Linux Framebuffer & KMS/DRM backends)
 slint = { version = "=1.9.2", default-features = false, features = ["compat-1-2", "backend-linuxkms", "renderer-software"], optional = true }
