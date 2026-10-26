@@ -11,14 +11,13 @@ permissions:
   issues: write
   pull-requests: write
 
-concurrency:
-  group: pr-agent-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
-
 jobs:
   pr_agent:
     name: PR-Agent AI Review (${{ matrix.name }})
     continue-on-error: ${{ matrix.optional || false }}
+    concurrency:
+      group: pr-agent-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}-${{ matrix.name }}
+      cancel-in-progress: true
     if: >-
       github.event.sender.type != 'Bot' &&
       (
