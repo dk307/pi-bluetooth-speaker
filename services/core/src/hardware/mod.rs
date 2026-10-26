@@ -49,8 +49,17 @@ macro_rules! impl_canonical_error_display {
 pub(crate) use impl_canonical_error_display;
 
 pub(crate) mod amp;
+pub(crate) mod bluetooth;
 pub(crate) mod light;
 pub(crate) mod temp;
+
+#[doc(inline)]
+pub use bluetooth::{
+    BCM43438_FIRMWARE_PATH, BCM43438_UART_BAUD_RATE, BT_ADDRESS_OCTETS, BlueAlsaPcm,
+    BluetoothDevice, BluetoothDeviceMock, BluetoothHardwareInfo, BluetoothServices,
+    BluetoothStatus, BtAdapter, BtAddress, BtDevice, BtError, CommandOutput, CommandRunner,
+    DEFAULT_BT_ADAPTER, ServiceState,
+};
 
 #[doc(inline)]
 pub use amp::{
