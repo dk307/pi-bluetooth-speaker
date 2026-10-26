@@ -641,14 +641,47 @@ fn get_str_array(props: &HashMap<String, OwnedValue>, key: &str) -> Box<[Box<str
 pub(crate) fn is_no_such_unit_error(err: &zbus::Error) -> bool {
     match err {
         zbus::Error::MethodError(name, _, _) => {
-            name.as_str().ends_with("NoSuchUnit")
-                || name.as_str().ends_with("UnknownUnit")
-                || name.as_str().ends_with("NotFound")
+            let s = name.as_str();
+            s == "org.freedesktop.systemd1.NoSuchUnit"
+                || s == "org.freedesktop.systemd1.UnknownUnit"
+                || s.ends_with(".NoSuchUnit")
+                || s.ends_with(".UnknownUnit")
         }
         zbus::Error::FDO(fdo_err) => matches!(**fdo_err, zbus::fdo::Error::UnknownObject(_)),
         other => {
             let s = other.to_string();
-            s.contains("NoSuchUnit") || s.contains("UnknownUnit") || s.contains("not loaded")
+            s.contains("NoSuchUnit") || s.contains("UnknownUnit")
+        }
+    }
+}
+
+pub(crate) fn is_service_absent_error(err: &zbus::Error) -> bool {
+    match err {
+        zbus::Error::MethodError(name, _, _) => {
+            let s = name.as_str();
+            s == "org.freedesktop.DBus.Error.ServiceUnknown"
+                || s == "org.freedesktop.DBus.Error.NameHasNoOwner"
+                || s.ends_with(".ServiceUnknown")
+                || s.ends_with(".NameHasNoOwner")
+        }
+        zbus::Error::FDO(fdo_err) => is_service_absent_fdo_error(fdo_err),
+        other => {
+            let s = other.to_string();
+            s.contains("ServiceUnknown") || s.contains("NameHasNoOwner")
+        }
+    }
+}
+
+pub(crate) fn is_service_absent_fdo_error(err: &zbus::fdo::Error) -> bool {
+    match err {
+        zbus::fdo::Error::ServiceUnknown(_)
+        | zbus::fdo::Error::NameHasNoOwner(_)
+        | zbus::fdo::Error::UnknownObject(_)
+        | zbus::fdo::Error::UnknownInterface(_) => true,
+        zbus::fdo::Error::ZBus(e) => is_service_absent_error(e),
+        _ => {
+            let s = err.to_string();
+            s.contains("ServiceUnknown") || s.contains("NameHasNoOwner")
         }
     }
 }
@@ -689,8 +722,8 @@ impl DbusClient {
                     Err(e) if is_no_such_unit_error(&e) => return Ok(ServiceState::NotFound),
                     Err(e) => return Err(BtError::from(e)),
                 };
-                let active = unit.active_state().map_err(BtError::from)?;
-                let load = unit.load_state().map_err(BtError::from)?;
+                let active = unit.active_state()?;
+                let load = unit.load_state()?;
                 Ok(Self::parse_systemd_state(&active, &load))
             }
             Err(e) if is_no_such_unit_error(&e) => Ok(ServiceState::NotFound),
@@ -827,20 +860,27 @@ impl DbusClient {
         Ok((adapter, devices.into_boxed_slice()))
     }
 
-    pub(crate) fn query_bluealsa(&self, devices: &[BtDevice]) -> Box<[BlueAlsaPcm]> {
-        let Ok(proxy) = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+    pub(crate) fn query_bluealsa(
+        &self,
+        devices: &[BtDevice],
+    ) -> Result<Box<[BlueAlsaPcm]>, BtError> {
+        let proxy = match zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
             .destination("org.bluealsa")
             .and_then(|b| b.path("/org/bluealsa"))
             .and_then(zbus::blocking::proxy::Builder::build)
-        else {
-            return Box::default();
+        {
+            Ok(p) => p,
+            Err(e) if is_service_absent_error(&e) => return Ok(Box::default()),
+            Err(e) => return Err(BtError::from(e)),
         };
 
-        let Ok(objects) = proxy.get_managed_objects() else {
-            return Box::default();
+        let objects = match proxy.get_managed_objects() {
+            Ok(objs) => objs,
+            Err(e) if is_service_absent_fdo_error(&e) => return Ok(Box::default()),
+            Err(e) => return Err(BtError::from(e)),
         };
 
-        Self::parse_bluealsa_objects(&objects, devices)
+        Ok(Self::parse_bluealsa_objects(&objects, devices))
     }
 
     pub(crate) fn parse_bluealsa_objects(
@@ -1309,7 +1349,7 @@ impl BluetoothDevice {
             Backend::Dbus(dbus) => {
                 let services = dbus.check_services()?;
                 let (adapter, devices) = dbus.query_bluez(target_adapter)?;
-                let pcms = dbus.query_bluealsa(&devices);
+                let pcms = dbus.query_bluealsa(&devices)?;
                 Ok(BluetoothStatus {
                     services,
                     adapter,
@@ -2180,12 +2220,12 @@ mod tests {
             None,
             dummy_msg.clone(),
         );
-        assert!(is_no_such_unit_error(&err_not_found));
+        assert!(!is_no_such_unit_error(&err_not_found));
 
         let err_denied = zbus::Error::MethodError(
             OwnedErrorName::try_from("org.freedesktop.DBus.Error.AccessDenied").unwrap(),
             None,
-            dummy_msg,
+            dummy_msg.clone(),
         );
         assert!(!is_no_such_unit_error(&err_denied));
 
@@ -2197,7 +2237,7 @@ mod tests {
         assert!(!is_no_such_unit_error(&err_fdo_failed));
 
         let err_string_fallback =
-            zbus::Error::Failure("Unit bluetooth.service not loaded.".to_string());
+            zbus::Error::Failure("org.freedesktop.systemd1.NoSuchUnit".to_string());
         assert!(is_no_such_unit_error(&err_string_fallback));
 
         let err_io = zbus::Error::InputOutput(std::sync::Arc::new(std::io::Error::new(
@@ -2205,5 +2245,70 @@ mod tests {
             "refused",
         )));
         assert!(!is_no_such_unit_error(&err_io));
+    }
+
+    #[test]
+    fn service_absent_error_matching() {
+        use zbus::fdo;
+        use zbus::names::OwnedErrorName;
+
+        let dummy_msg = zbus::message::Message::method_call("/org/test", "Test")
+            .unwrap()
+            .build(&())
+            .unwrap();
+
+        let err_svc_unknown = zbus::Error::MethodError(
+            OwnedErrorName::try_from("org.freedesktop.DBus.Error.ServiceUnknown").unwrap(),
+            None,
+            dummy_msg.clone(),
+        );
+        assert!(is_service_absent_error(&err_svc_unknown));
+
+        let err_no_owner = zbus::Error::MethodError(
+            OwnedErrorName::try_from("org.freedesktop.DBus.Error.NameHasNoOwner").unwrap(),
+            None,
+            dummy_msg.clone(),
+        );
+        assert!(is_service_absent_error(&err_no_owner));
+
+        let err_fdo_iface =
+            zbus::Error::FDO(Box::new(fdo::Error::UnknownInterface("test".to_string())));
+        assert!(is_service_absent_error(&err_fdo_iface));
+
+        let err_fdo_obj = zbus::Error::FDO(Box::new(fdo::Error::UnknownObject("test".to_string())));
+        assert!(is_service_absent_error(&err_fdo_obj));
+
+        assert!(is_service_absent_fdo_error(&fdo::Error::ServiceUnknown(
+            "not found".into()
+        )));
+        assert!(is_service_absent_fdo_error(&fdo::Error::NameHasNoOwner(
+            "no owner".into()
+        )));
+        assert!(is_service_absent_fdo_error(&fdo::Error::UnknownInterface(
+            "unknown".into()
+        )));
+        assert!(is_service_absent_fdo_error(&fdo::Error::UnknownObject(
+            "unknown".into()
+        )));
+        assert!(!is_service_absent_fdo_error(&fdo::Error::AccessDenied(
+            "denied".into()
+        )));
+
+        let err_denied = zbus::Error::MethodError(
+            OwnedErrorName::try_from("org.freedesktop.DBus.Error.AccessDenied").unwrap(),
+            None,
+            dummy_msg,
+        );
+        assert!(!is_service_absent_error(&err_denied));
+
+        let err_string_fallback =
+            zbus::Error::Failure("The name org.bluealsa was not provided (ServiceUnknown)".into());
+        assert!(is_service_absent_error(&err_string_fallback));
+
+        let err_io = zbus::Error::InputOutput(std::sync::Arc::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        )));
+        assert!(!is_service_absent_error(&err_io));
     }
 }
