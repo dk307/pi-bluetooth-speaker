@@ -31,6 +31,10 @@ fn address_validation_and_hardware_metadata() {
     assert_eq!(hw.scl_pin.bcm_pin.as_u8(), 3);
     assert_eq!(hw.vcc_pin.as_u8(), 1);
     assert_eq!(hw.gnd_pin.as_u8(), 9);
+
+    let bus_err = AmpDevice::with_bus_and_address(99, addr).unwrap_err();
+    assert!(bus_err.is_unsupported_bus());
+    assert!(!bus_err.is_i2c());
 }
 
 #[tokio::test]
@@ -78,10 +82,15 @@ fn diagnostics_and_fault_clearing() {
     let status = amp.read_status().unwrap();
     assert!(status.latched_errors.pll_clock_loss());
     assert!(status.latched_errors.undervoltage_pvdd());
+    assert_eq!(
+        status.latched_errors.names_joined(),
+        "PLL_CLOCK_LOSS, UNDERVOLTAGE_PVDD"
+    );
 
     amp.clear_latched_errors().unwrap();
     let reset_status = amp.read_status().unwrap();
     assert!(reset_status.latched_errors.is_clear());
+    assert_eq!(reset_status.latched_errors.names_joined(), "None");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

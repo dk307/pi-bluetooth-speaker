@@ -72,7 +72,7 @@ pub const REG_ERROR_LIVE: u8 = 0x7C;
 /// assert_eq!(addr.as_u8(), 0x20);
 /// # Ok::<(), speaker_core::hardware::AmpError>(())
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AmpI2cAddress(u8);
 
 impl AmpI2cAddress {
@@ -380,6 +380,21 @@ impl AmpErrorFlags {
             .copied()
             .filter(|&f| self.has_fault(f))
             .collect()
+    }
+
+    /// Returns comma-separated active fault names, or `"None"` if no faults are present.
+    #[must_use]
+    pub fn names_joined(self) -> String {
+        let faults = self.faults();
+        if faults.is_empty() {
+            "None".to_string()
+        } else {
+            faults
+                .iter()
+                .map(|f| f.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
     }
 }
 
@@ -729,9 +744,7 @@ pub struct AmpHardwareInfo {
 /// Validates that `bus` corresponds to the Raspberry Pi 3 BSC1 controller (I2C-1).
 fn validate_rpi3_bus(bus: u8) -> Result<(), AmpError> {
     if bus != MA12070P_DEFAULT_I2C_BUS {
-        return Err(AmpError::i2c(format!(
-            "unsupported I2C bus {bus}: hardware driver models Raspberry Pi 3 BSC1 (i2c-{MA12070P_DEFAULT_I2C_BUS}) only"
-        )));
+        return Err(AmpError::unsupported_bus(bus));
     }
     Ok(())
 }
@@ -789,19 +802,13 @@ impl AmpHardwareInfo {
     }
 }
 
-/// Underlying detail for an I2C bus failure.
-#[derive(Debug)]
-pub(crate) enum I2cDetail {
-    Message(Box<str>),
-    Source(rppal::i2c::Error),
-}
-
 /// Categorized failure kinds for amplifier hardware operations.
 #[derive(Debug)]
 pub(crate) enum AmpErrorKind {
-    I2c(I2cDetail),
+    I2c(rppal::i2c::Error),
     Cancelled { message: Box<str> },
     InvalidAddress { address: u8 },
+    UnsupportedBus { bus: u8 },
     MockFault { message: Box<str> },
 }
 
@@ -820,12 +827,8 @@ impl AmpError {
         }
     }
 
-    pub(crate) fn i2c(message: impl Into<Box<str>>) -> Self {
-        Self::new(AmpErrorKind::I2c(I2cDetail::Message(message.into())))
-    }
-
-    pub(crate) fn from_i2c_err(err: rppal::i2c::Error) -> Self {
-        Self::new(AmpErrorKind::I2c(I2cDetail::Source(err)))
+    pub(crate) fn i2c(err: rppal::i2c::Error) -> Self {
+        Self::new(AmpErrorKind::I2c(err))
     }
 
     pub(crate) fn cancelled(message: impl Into<Box<str>>) -> Self {
@@ -836,6 +839,10 @@ impl AmpError {
 
     pub(crate) fn invalid_address(address: u8) -> Self {
         Self::new(AmpErrorKind::InvalidAddress { address })
+    }
+
+    pub(crate) fn unsupported_bus(bus: u8) -> Self {
+        Self::new(AmpErrorKind::UnsupportedBus { bus })
     }
 
     pub(crate) fn mock_fault(message: impl Into<Box<str>>) -> Self {
@@ -862,6 +869,12 @@ impl AmpError {
         matches!(self.kind, AmpErrorKind::InvalidAddress { .. })
     }
 
+    /// Returns `true` if this error was caused by an unsupported I2C bus number.
+    #[must_use]
+    pub const fn is_unsupported_bus(&self) -> bool {
+        matches!(self.kind, AmpErrorKind::UnsupportedBus { .. })
+    }
+
     /// Returns `true` if this error was caused by an injected mock fault.
     #[must_use]
     pub const fn is_mock_fault(&self) -> bool {
@@ -876,13 +889,18 @@ impl AmpError {
 
     fn fmt_kind(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            AmpErrorKind::I2c(I2cDetail::Message(msg)) => write!(f, "I2C bus error: {msg}"),
-            AmpErrorKind::I2c(I2cDetail::Source(err)) => write!(f, "I2C bus error: {err}"),
+            AmpErrorKind::I2c(err) => write!(f, "I2C bus error: {err}"),
             AmpErrorKind::Cancelled { message } => write!(f, "task cancelled: {message}"),
             AmpErrorKind::InvalidAddress { address } => {
                 write!(
                     f,
                     "invalid MA12070P I2C address: 0x{address:02X} (expected 0x{MA12070P_MIN_I2C_ADDR:02X}..=0x{MA12070P_MAX_I2C_ADDR:02X})"
+                )
+            }
+            AmpErrorKind::UnsupportedBus { bus } => {
+                write!(
+                    f,
+                    "unsupported I2C bus {bus}: hardware driver models Raspberry Pi 3 BSC1 (i2c-{MA12070P_DEFAULT_I2C_BUS}) only"
                 )
             }
             AmpErrorKind::MockFault { message } => write!(f, "injected mock fault: {message}"),
@@ -895,7 +913,7 @@ super::impl_canonical_error_display!(AmpError);
 impl std::error::Error for AmpError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.kind {
-            AmpErrorKind::I2c(I2cDetail::Source(err)) => Some(err),
+            AmpErrorKind::I2c(err) => Some(err),
             _ => None,
         }
     }
@@ -903,7 +921,7 @@ impl std::error::Error for AmpError {
 
 impl From<rppal::i2c::Error> for AmpError {
     fn from(err: rppal::i2c::Error) -> Self {
-        Self::from_i2c_err(err)
+        Self::i2c(err)
     }
 }
 
@@ -1086,6 +1104,9 @@ impl HardwareDevice {
 
     fn clear_latched_errors(&mut self) -> Result<(), AmpError> {
         let cur = self.read_reg(REG_EH_CLEAR)?;
+        // Drive clear bit low first, then high, then low to guarantee a rising edge transition
+        // regardless of initial bit state.
+        self.write_reg(REG_EH_CLEAR, cur & !0x04)?;
         self.write_reg(REG_EH_CLEAR, cur | 0x04)?;
         self.write_reg(REG_EH_CLEAR, cur & !0x04)?;
         Ok(())
@@ -1140,12 +1161,6 @@ impl fmt::Debug for Backend {
 pub struct AmpDevice {
     inner: Arc<Backend>,
 }
-
-/// Alias for [`AmpDevice`] matching the MA12070P IC designation.
-pub type Ma12070p = AmpDevice;
-
-/// Alias for [`AmpDeviceMock`] matching the MA12070P IC designation.
-pub type Ma12070pMock = AmpDeviceMock;
 
 impl AmpDevice {
     /// Creates a new [`AmpDevice`] using the default Raspberry Pi I2C-1 bus and address `0x20`.
@@ -1610,18 +1625,21 @@ mod tests {
         let invalid_bus =
             AmpHardwareInfo::try_rpi3_with_bus_and_address(2, AmpI2cAddress::default());
         assert!(invalid_bus.is_err());
-        assert!(invalid_bus.unwrap_err().is_i2c());
+        assert!(invalid_bus.unwrap_err().is_unsupported_bus());
     }
 
     #[test]
     fn amp_error_predicates_and_conversions() {
-        let i2c_err = AmpError::i2c("failed to write register");
+        let io_err = rppal::i2c::Error::Io(std::io::Error::other("arbitration lost"));
+        let i2c_err = AmpError::from(io_err);
         assert!(i2c_err.is_i2c());
         assert!(!i2c_err.is_cancelled());
         assert!(!i2c_err.is_invalid_address());
+        assert!(!i2c_err.is_unsupported_bus());
         assert!(!i2c_err.is_mock_fault());
-        assert_eq!(i2c_err.summary(), "I2C bus error: failed to write register");
+        assert!(i2c_err.summary().contains("I2C bus error"));
         assert!(i2c_err.to_string().contains("I2C bus error"));
+        assert!(std::error::Error::source(&i2c_err).is_some());
         let _ = i2c_err.backtrace();
 
         let canc_err = AmpError::cancelled("runtime task aborted");
@@ -1631,6 +1649,14 @@ mod tests {
         let addr_err = AmpError::invalid_address(0x50);
         assert!(addr_err.is_invalid_address());
         assert!(addr_err.summary().contains("0x50"));
+
+        let bus_err = AmpError::unsupported_bus(5);
+        assert!(bus_err.is_unsupported_bus());
+        assert!(!bus_err.is_i2c());
+        assert_eq!(
+            bus_err.summary(),
+            "unsupported I2C bus 5: hardware driver models Raspberry Pi 3 BSC1 (i2c-1) only"
+        );
 
         let mock_err = AmpError::mock_fault("simulated bus hang");
         assert!(mock_err.is_mock_fault());
@@ -1734,12 +1760,20 @@ mod tests {
     #[test]
     fn amp_device_with_bus_validates_rpi3() {
         let err = AmpDevice::with_bus_and_address(99, AmpI2cAddress::default()).unwrap_err();
-        assert!(err.is_i2c());
+        assert!(err.is_unsupported_bus());
+        assert!(!err.is_i2c());
         assert!(err.summary().contains("unsupported I2C bus 99"));
     }
 
     #[test]
     fn amp_error_flags_all_predicates() {
+        let empty_flags = AmpErrorFlags::NONE;
+        assert_eq!(empty_flags.names_joined(), "None");
+        let multi_flags = AmpErrorFlags::from_bits((1 << 0) | (1 << 2));
+        assert_eq!(
+            multi_flags.names_joined(),
+            "FLYING_CAP_OVERVOLTAGE, PLL_CLOCK_LOSS"
+        );
         for fault in AmpFault::ALL {
             let flags = AmpErrorFlags::from_bits(fault.mask());
             assert_eq!(

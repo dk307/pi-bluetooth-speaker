@@ -10,11 +10,11 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use speaker_core::diag::{
-    CommonCliOptions, OutputFormat, env_args, exit_code_for_reads, format_timestamp,
+    CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads, format_timestamp,
     next_arg_value, parse_args_with_common, resolve_cli_opts, run_poll_loop, should_print_summary,
 };
 use speaker_core::hardware::{
-    AmpDevice, AmpError, AmpI2cAddress, AmpStatus, MA12070P_DEFAULT_I2C_BUS,
+    AmpDevice, AmpError, AmpErrorFlags, AmpI2cAddress, AmpStatus, MA12070P_DEFAULT_I2C_BUS,
 };
 
 /// Default polling interval between amplifier status checks (1.0 second).
@@ -85,17 +85,14 @@ fn parse_cli_args() -> Result<Option<CliOptions>, String> {
 /// Diagnostic session statistics for amplifier status readings.
 #[derive(Debug, Default)]
 struct AmpStats {
-    total_reads: usize,
-    successful_reads: usize,
-    errors: usize,
+    samples: NumericStats,
     live_fault_reads: usize,
     latched_fault_reads: usize,
 }
 
 impl AmpStats {
     fn record_success(&mut self, status: &AmpStatus) {
-        self.total_reads += 1;
-        self.successful_reads += 1;
+        self.samples.record_success(0.0);
         if !status.live_errors.is_clear() {
             self.live_fault_reads += 1;
         }
@@ -105,32 +102,7 @@ impl AmpStats {
     }
 
     fn record_error(&mut self) {
-        self.total_reads += 1;
-        self.errors += 1;
-    }
-
-    const fn total_reads(&self) -> usize {
-        self.total_reads
-    }
-
-    const fn successful_reads(&self) -> usize {
-        self.successful_reads
-    }
-
-    const fn errors(&self) -> usize {
-        self.errors
-    }
-
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "read counts are small diagnostic iterations safely represented as f64"
-    )]
-    fn error_rate_percent(&self) -> f64 {
-        if self.total_reads == 0 {
-            0.0
-        } else {
-            (self.errors as f64 / self.total_reads as f64) * 100.0
-        }
+        self.samples.record_error();
     }
 }
 
@@ -159,47 +131,42 @@ fn print_header(amp: &AmpDevice) {
 }
 
 fn print_session_summary(stats: &AmpStats) {
+    let s = &stats.samples;
     println!("\n--- Amplifier Diagnostic Session Summary ---");
-    println!("Total reads : {}", stats.total_reads());
-    println!("Successful  : {}", stats.successful_reads());
-    if stats.total_reads() > 0 {
-        let errors = stats.errors();
+    println!("Total reads : {}", s.total_reads());
+    println!("Successful  : {}", s.successful_reads());
+    if s.total_reads() > 0 {
+        let errors = s.errors();
         println!(
             "Read errors : {errors} ({:.2}% error rate)",
-            stats.error_rate_percent()
+            s.error_rate_percent()
         );
     }
     println!("Live faults detected    : {}", stats.live_fault_reads);
     println!("Latched faults detected : {}", stats.latched_fault_reads);
 }
 
+fn faults_json(flags: AmpErrorFlags) -> serde_json::Value {
+    let faults: Vec<_> = flags
+        .faults()
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "name": f.name(),
+                "description": f.description(),
+                "bit": f.bit(),
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "raw": flags.as_u8(),
+        "is_ok": flags.is_clear(),
+        "faults": faults,
+    })
+}
+
 fn output_json_status(timestamp: &str, amp: &AmpDevice, status: &AmpStatus) {
-    let live_faults: Vec<_> = status
-        .live_errors
-        .faults()
-        .iter()
-        .map(|f| {
-            serde_json::json!({
-                "name": f.name(),
-                "description": f.description(),
-                "bit": f.bit(),
-            })
-        })
-        .collect();
-
-    let latched_faults: Vec<_> = status
-        .latched_errors
-        .faults()
-        .iter()
-        .map(|f| {
-            serde_json::json!({
-                "name": f.name(),
-                "description": f.description(),
-                "bit": f.bit(),
-            })
-        })
-        .collect();
-
     let obj = serde_json::json!({
         "timestamp": timestamp,
         "i2c_bus": amp.i2c_bus(),
@@ -216,16 +183,8 @@ fn output_json_status(timestamp: &str, amp: &AmpDevice, status: &AmpStatus) {
             "ch0_active": status.dcu_monitor.ch0.is_active(),
             "ch1_active": status.dcu_monitor.ch1.is_active(),
         },
-        "live_errors": {
-            "raw": status.live_errors.as_u8(),
-            "is_ok": status.live_errors.is_clear(),
-            "faults": live_faults,
-        },
-        "latched_errors": {
-            "raw": status.latched_errors.as_u8(),
-            "is_ok": status.latched_errors.is_clear(),
-            "faults": latched_faults,
-        }
+        "live_errors": faults_json(status.live_errors),
+        "latched_errors": faults_json(status.latched_errors),
     });
     println!("{obj}");
 }
@@ -303,28 +262,8 @@ fn handle_amp_iteration(
                         }
                         println!("=========================================================");
                     } else {
-                        let live_str = if status.live_errors.is_clear() {
-                            "None".to_string()
-                        } else {
-                            status
-                                .live_errors
-                                .faults()
-                                .iter()
-                                .map(|f| f.name())
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        };
-                        let latched_str = if status.latched_errors.is_clear() {
-                            "None".to_string()
-                        } else {
-                            status
-                                .latched_errors
-                                .faults()
-                                .iter()
-                                .map(|f| f.name())
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        };
+                        let live_str = status.live_errors.names_joined();
+                        let latched_str = status.latched_errors.names_joined();
                         println!(
                             "[{timestamp}] Status: {:5} | Mode: {:4} | DCU: Ch0 {:7}, Ch1 {:7} | Live: {live_str} | Latched: {latched_str}",
                             if status.live_errors.is_clear() {
@@ -376,18 +315,21 @@ fn run_app(amp: &AmpDevice, opts: &CliOptions) -> ExitCode {
         handle_amp_iteration(amp, opts, timestamp, &mut stats);
         opts.common
             .max_count
-            .is_some_and(|m| stats.total_reads() >= m)
+            .is_some_and(|m| stats.samples.total_reads() >= m)
     });
 
     if should_print_summary(
         opts.common.format,
         opts.common.max_count,
-        stats.total_reads(),
+        stats.samples.total_reads(),
     ) {
         print_session_summary(&stats);
     }
 
-    exit_code_for_reads(stats.total_reads(), stats.successful_reads())
+    exit_code_for_reads(
+        stats.samples.total_reads(),
+        stats.samples.successful_reads(),
+    )
 }
 
 fn main() -> ExitCode {
@@ -420,8 +362,7 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use speaker_core::hardware::{
-        AmpErrorFlags, AudioInConfig, AudioInputFormat, ClockRatio, DcuChannelStatus, DcuMonitor,
-        PowerModeProfile,
+        AudioInConfig, AudioInputFormat, ClockRatio, DcuChannelStatus, DcuMonitor, PowerModeProfile,
     };
 
     #[test]
@@ -467,10 +408,10 @@ mod tests {
     #[test]
     fn statistics_computations_and_summary() {
         let mut stats = AmpStats::default();
-        assert_eq!(stats.total_reads(), 0);
-        assert_eq!(stats.successful_reads(), 0);
-        assert_eq!(stats.errors(), 0);
-        assert_eq!(stats.error_rate_percent(), 0.0);
+        assert_eq!(stats.samples.total_reads(), 0);
+        assert_eq!(stats.samples.successful_reads(), 0);
+        assert_eq!(stats.samples.errors(), 0);
+        assert_eq!(stats.samples.error_rate_percent(), 0.0);
 
         let ok_status = AmpStatus {
             power_mode: PowerModeProfile::Pmp2,
@@ -487,8 +428,8 @@ mod tests {
         };
 
         stats.record_success(&ok_status);
-        assert_eq!(stats.total_reads(), 1);
-        assert_eq!(stats.successful_reads(), 1);
+        assert_eq!(stats.samples.total_reads(), 1);
+        assert_eq!(stats.samples.successful_reads(), 1);
         assert_eq!(stats.live_fault_reads, 0);
 
         let fault_status = AmpStatus {
@@ -501,9 +442,9 @@ mod tests {
         assert_eq!(stats.latched_fault_reads, 1);
 
         stats.record_error();
-        assert_eq!(stats.total_reads(), 3);
-        assert_eq!(stats.errors(), 1);
-        assert!((stats.error_rate_percent() - 33.333).abs() < 0.1);
+        assert_eq!(stats.samples.total_reads(), 3);
+        assert_eq!(stats.samples.errors(), 1);
+        assert!((stats.samples.error_rate_percent() - 33.333).abs() < 0.1);
 
         print_session_summary(&stats);
 
@@ -598,6 +539,6 @@ mod tests {
         let mut err_stats = AmpStats::default();
         handle_amp_iteration(&amp, &once_opts, "12:00:00", &mut err_stats);
         handle_amp_iteration(&amp, &json_opts, "12:00:00", &mut err_stats);
-        assert_eq!(err_stats.errors(), 2);
+        assert_eq!(err_stats.samples.errors(), 2);
     }
 }
