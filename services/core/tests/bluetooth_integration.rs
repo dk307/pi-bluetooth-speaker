@@ -1,12 +1,7 @@
 //! Integration tests for the Bluetooth and `BlueALSA` hardware driver.
 
-use std::collections::HashMap;
-use std::io;
-use std::sync::Arc;
-
 use speaker_core::hardware::{
-    BluetoothDevice, BluetoothHardwareInfo, BtAddress, BtDevice, BtError, CommandOutput,
-    CommandRunner, ServiceState,
+    BluetoothDevice, BluetoothHardwareInfo, BtAddress, BtDevice, BtError,
 };
 
 #[test]
@@ -109,128 +104,29 @@ async fn runtime_task_cancellation_mapping() {
     assert!(err.summary().contains("bluetooth integration task"));
 }
 
-struct MockRunner {
-    responses: HashMap<(String, String), CommandOutput>,
-}
-
-impl CommandRunner for MockRunner {
-    fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
-        let key = (program.to_string(), args.join(" "));
-        if let Some(out) = self.responses.get(&key) {
-            Ok(out.clone())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("command not mocked: {program} {args:?}"),
-            ))
-        }
-    }
-}
-
 #[test]
-fn system_inspector_with_custom_runner() {
-    let mut responses = HashMap::new();
-    responses.insert(
-        ("systemctl".into(), "is-active bluetooth".into()),
-        CommandOutput {
-            stdout: "active".into(),
-            stderr: String::new(),
-            exit_code: 0,
-        },
-    );
-    responses.insert(
-        ("systemctl".into(), "is-active bluealsa".into()),
-        CommandOutput {
-            stdout: "active".into(),
-            stderr: String::new(),
-            exit_code: 0,
-        },
-    );
-    responses.insert(
-        ("systemctl".into(), "is-active bluealsa-aplay".into()),
-        CommandOutput {
-            stdout: "active".into(),
-            stderr: String::new(),
-            exit_code: 0,
-        },
-    );
-    responses.insert(
-        ("systemctl".into(), "is-active bt-agent".into()),
-        CommandOutput {
-            stdout: "active".into(),
-            stderr: String::new(),
-            exit_code: 0,
-        },
-    );
-    responses.insert(
-        ("bluetoothctl".into(), "show".into()),
-        CommandOutput {
-            stdout: "Controller AA:BB:CC:DD:EE:00 (public)\nName: Speaker-Pi\nPowered: yes\nPairable: yes\nDiscoverable: yes\n".into(),
-            stderr: String::new(),
-            exit_code: 0,
-        },
-    );
-    responses.insert(
-        ("bluetoothctl".into(), "devices Connected".into()),
-        CommandOutput {
-            stdout: "Device 11:22:33:44:55:66 Phone\n".into(),
-            stderr: String::new(),
-            exit_code: 0,
-        },
-    );
-    responses.insert(
-        ("bluetoothctl".into(), "devices".into()),
-        CommandOutput {
-            stdout: "Device 11:22:33:44:55:66 Phone\n".into(),
-            stderr: String::new(),
-            exit_code: 0,
-        },
-    );
-    responses.insert(
-        ("bluetoothctl".into(), "info 11:22:33:44:55:66".into()),
-        CommandOutput {
-            stdout: "Device 11:22:33:44:55:66\nName: Phone\nConnected: yes\nPaired: yes\nTrusted: yes\nRSSI: -55 dBm\nBattery Percentage: 92%\nUUID: Audio Sink (0000110b-0000-1000-8000-00805f9b34fb)\n".into(),
-            stderr: String::new(),
-            exit_code: 0,
-        },
-    );
-    responses.insert(
-        ("bluealsa-cli".into(), "list-pcms".into()),
-        CommandOutput {
-            stdout: "/org/bluealsa/hci0/dev_11_22_33_44_55_66/a2dpsnk/source\n".into(),
-            stderr: String::new(),
-            exit_code: 0,
-        },
-    );
-    responses.insert(
-        ("bluealsa-cli".into(), "info /org/bluealsa/hci0/dev_11_22_33_44_55_66/a2dpsnk/source".into()),
-        CommandOutput {
-            stdout: "Transport: A2DP-sink\nRunning: true\nSelected codec: LDAC\nSampling: 96000\nChannels: 2\nFormat: S32_LE\nVolume: L: 90 R: 90\nDelay: 1500\n".into(),
-            stderr: String::new(),
-            exit_code: 0,
-        },
-    );
-
-    let runner = MockRunner { responses };
-    let bt = BluetoothDevice::with_runner(Arc::new(runner));
+fn bluetooth_status_and_predicates_integration() {
+    let (bt, mock) = BluetoothDevice::new_mocked();
     let status = bt.status().unwrap();
+    assert!(status.is_operational());
+    assert_eq!(status.connected_count(), 1);
+    assert!(status.is_streaming());
+    assert!(status.active_pcm().is_some());
+    assert_eq!(status.connected_devices().len(), 1);
+    assert_eq!(status.paired_devices().len(), 1);
 
-    assert_eq!(status.services.bluetoothd, ServiceState::Active);
-    assert!(status.services.all_active());
-    let adapter = status.adapter.unwrap();
-    assert_eq!(adapter.name.as_ref(), "Speaker-Pi");
-    assert!(adapter.powered);
+    mock.set_powered(false);
+    let off_status = bt.status().unwrap();
+    assert!(!off_status.is_operational());
 
-    assert_eq!(status.devices.len(), 1);
-    let dev = &status.devices[0];
-    assert_eq!(dev.name.as_ref(), "Phone");
-    assert_eq!(dev.rssi, Some(-55));
-    assert_eq!(dev.battery_percentage, Some(92));
+    mock.clear_devices();
+    assert_eq!(bt.status().unwrap().connected_count(), 0);
 
-    assert_eq!(status.pcms.len(), 1);
-    let pcm = &status.pcms[0];
-    assert_eq!(pcm.selected_codec.as_ref(), "LDAC");
-    assert_eq!(pcm.sampling_rate, 96_000);
-    assert_eq!(pcm.format.as_ref(), "S32_LE");
-    assert!(pcm.running);
+    mock.clear_pcms();
+    assert!(!bt.status().unwrap().is_streaming());
+
+    mock.set_fault(Some("dbus connection dropped".into()));
+    let fault_err = bt.status().unwrap_err();
+    assert!(fault_err.is_mock_fault());
+    assert!(fault_err.to_string().contains("dbus connection dropped"));
 }

@@ -57,8 +57,7 @@ pub(crate) mod temp;
 pub use bluetooth::{
     BCM43438_FIRMWARE_PATH, BCM43438_UART_BAUD_RATE, BT_ADDRESS_OCTETS, BlueAlsaPcm,
     BluetoothDevice, BluetoothDeviceMock, BluetoothHardwareInfo, BluetoothServices,
-    BluetoothStatus, BtAdapter, BtAddress, BtDevice, BtError, CommandOutput, CommandRunner,
-    DEFAULT_BT_ADAPTER, ServiceState,
+    BluetoothStatus, BtAdapter, BtAddress, BtDevice, BtError, DEFAULT_BT_ADAPTER, ServiceState,
 };
 
 #[doc(inline)]

@@ -1,25 +1,27 @@
-//! Bluetooth and `BlueALSA` hardware subsystem abstraction.
+//! Bluetooth and `BlueALSA` hardware subsystem abstraction via D-Bus.
 //!
 //! Provides strongly-typed, mockable interfaces for the Broadcom BCM43438 Bluetooth
 //! controller and the `BlueALSA` audio streaming pipeline on the Raspberry Pi 3 Model B.
+//! Connects directly to the Linux system bus via `zbus` for `BlueZ` 5 (`org.bluez`),
+//! `BlueALSA` (`org.bluealsa`), and systemd (`org.freedesktop.systemd1`).
 //! Supports adapter status inspection, remote device discovery, connection state,
-//! and real-time `BlueALSA` PCM audio stream telemetry.
+//! real-time `BlueALSA` PCM audio stream telemetry, and radio controls.
 //!
 //! Conforms to Microsoft Pragmatic Rust Guidelines:
-//! - Mockable external I/O via inherent [`BluetoothDevice::new_mocked`]
-//! - Strongly typed invariants via [`BtAddress`] and [`ServiceState`]
-//! - Canonical error reporting via [`BtError`]
-//! - Non-blocking async queries via [`crate::runtime::run_blocking`]
+//! - Mockable external I/O via inherent [`BluetoothDevice::new_mocked`] (`M-MOCKABLE-SYSCALLS`)
+//! - Strongly typed invariants via [`BtAddress`] and [`ServiceState`] (`M-STRONG-TYPES-GUARD`)
+//! - Canonical error reporting via [`BtError`] (`M-ERRORS-CANONICAL-STRUCTS`)
+//! - Non-blocking async queries via [`crate::runtime::run_blocking`] (`M-SERVICES-CLONE`)
 
 use std::backtrace::Backtrace;
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
-use std::io;
-use std::process::{Command, Stdio};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use zbus::blocking::Connection;
+use zbus::names::OwnedInterfaceName;
+use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use crate::runtime::FromJoinError;
 
@@ -52,65 +54,55 @@ impl BtAddress {
         &self.0
     }
 
-    /// Soft user-facing parser validating Bluetooth address format without backtrace capture.
-    ///
-    /// Accepts 6 hexadecimal octets delimited by colons (`:`) or hyphens (`-`).
-    /// Rejects sign characters (`+`, `-`) as prefix or infix to comply with repository rules.
+    /// Parses a colon- or hyphen-separated hex string into a [`BtAddress`].
     ///
     /// # Errors
-    /// Returns a descriptive user-facing error message if `s` is signed, has invalid octet count,
-    /// or contains non-hexadecimal characters.
+    /// Returns [`BtError`] if string format or octet values are invalid.
+    pub fn parse(s: &str) -> Result<Self, BtError> {
+        Self::parse_str(s).map_err(|reason| BtError::invalid_address(s, reason))
+    }
+
+    /// Soft user-input string parser returning a readable error message without backtrace.
+    ///
+    /// # Errors
+    /// Returns a descriptive error string if the address is malformed.
     pub fn parse_str(s: &str) -> Result<Self, String> {
-        let clean = s.trim();
-        if clean.starts_with('+') {
-            return Err(format!(
-                "invalid Bluetooth address '{s}': sign characters are not allowed"
-            ));
+        let trimmed = s.trim();
+        if trimmed.starts_with('+') || trimmed.starts_with('-') {
+            return Err("sign characters are not allowed in Bluetooth addresses".to_string());
         }
 
-        let delimiter = if clean.contains(':') {
+        let delimiter = if trimmed.contains(':') {
             ':'
-        } else if clean.contains('-') {
+        } else if trimmed.contains('-') {
             '-'
         } else {
-            return Err(format!(
-                "invalid Bluetooth address '{s}': expected 6 colon- or hyphen-separated hex octets"
-            ));
+            return Err("expected 6 colon- or hyphen-separated hex octets".to_string());
         };
 
-        let parts: Vec<&str> = clean.split(delimiter).collect();
+        let parts: Vec<&str> = trimmed.split(delimiter).collect();
         if parts.len() != BT_ADDRESS_OCTETS {
             return Err(format!(
-                "invalid Bluetooth address '{s}': expected 6 hex octets, found {}",
+                "expected {BT_ADDRESS_OCTETS} hex octets, found {}",
                 parts.len()
             ));
         }
 
         let mut octets = [0u8; BT_ADDRESS_OCTETS];
         for (i, part) in parts.iter().enumerate() {
-            if part.starts_with(['+', '-']) {
-                return Err(format!(
-                    "invalid Bluetooth address '{s}': sign characters are not allowed"
-                ));
+            if part.starts_with('+') || part.starts_with('-') {
+                return Err("sign characters are not allowed in Bluetooth addresses".to_string());
             }
-            if part.len() != 2 || !part.bytes().all(|b| b.is_ascii_hexdigit()) {
+            if part.len() != 2 || !part.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err(format!(
-                    "invalid Bluetooth address octet '{part}' in '{s}': expected 2 hex digits"
+                    "octet {i} ('{part}') is not a valid 2-digit hex byte"
                 ));
             }
             octets[i] = u8::from_str_radix(part, 16)
-                .map_err(|e| format!("invalid hex octet '{part}' in '{s}': {e}"))?;
+                .map_err(|e| format!("failed to parse octet {i}: {e}"))?;
         }
 
         Ok(Self(octets))
-    }
-
-    /// Programmatic constructor parsing a Bluetooth address string into a [`BtAddress`].
-    ///
-    /// # Errors
-    /// Returns [`BtError`] if string validation fails.
-    pub fn parse(s: &str) -> Result<Self, BtError> {
-        Self::parse_str(s).map_err(|err| BtError::invalid_address(s, err))
     }
 }
 
@@ -140,27 +132,28 @@ impl std::str::FromStr for BtAddress {
     }
 }
 
-/// Operational state of a systemd daemon service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Linux system service execution state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ServiceState {
-    /// Service unit is running and healthy (`active`).
+    /// Service unit is running and operational.
     Active,
-    /// Service unit is stopped or inactive (`inactive`).
+    /// Service unit is loaded but currently inactive or stopped.
     Inactive,
-    /// Service unit exited with an error (`failed`).
+    /// Service unit entered a failed or crashed state.
     Failed,
-    /// Service unit is not installed on the host (`not-found`).
+    /// Service unit file was not found on the host system.
     NotFound,
 }
 
 impl ServiceState {
-    /// Returns `true` if the service is currently running.
+    /// Returns `true` if the service is actively running.
     #[must_use]
     pub const fn is_active(self) -> bool {
         matches!(self, Self::Active)
     }
 
-    /// Returns a human-readable display string for this service state.
+    /// Returns a human-readable state description matching `bt_status.py`.
     #[must_use]
     pub const fn description(self) -> &'static str {
         match self {
@@ -174,32 +167,32 @@ impl ServiceState {
 
 impl Display for ServiceState {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.description())
+        f.write_str(self.description())
     }
 }
 
-/// Status snapshot of Bluetooth-related systemd daemons.
+/// Operational status of required Bluetooth daemon services.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BluetoothServices {
-    /// `BlueZ` daemon (`bluetooth.service`).
+    /// Core `BlueZ` 5 Bluetooth daemon (`bluetooth.service`).
     pub bluetoothd: ServiceState,
     /// `BlueALSA` audio proxy daemon (`bluealsa.service`).
     pub bluealsa: ServiceState,
-    /// `BlueALSA` ALSA playback forwarder (`bluealsa-aplay.service`).
+    /// `BlueALSA` ALSA audio forwarder (`bluealsa-aplay.service`).
     pub bluealsa_aplay: ServiceState,
-    /// Bluetooth pairing agent (`bt-agent.service`).
+    /// Auto-trust pairing agent (`bt-agent.service`).
     pub bt_agent: ServiceState,
 }
 
 impl BluetoothServices {
-    /// Returns `true` if primary Bluetooth and `BlueALSA` services are running.
+    /// Returns `true` if the core Bluetooth daemon and at least one `BlueALSA` component are active.
     #[must_use]
     pub fn is_operational(&self) -> bool {
         self.bluetoothd.is_active()
             && (self.bluealsa.is_active() || self.bluealsa_aplay.is_active())
     }
 
-    /// Returns `true` if all Bluetooth appliance daemons are active.
+    /// Returns `true` if all 4 services are actively running.
     #[must_use]
     pub fn all_active(&self) -> bool {
         self.bluetoothd.is_active()
@@ -209,153 +202,144 @@ impl BluetoothServices {
     }
 }
 
-/// Local Bluetooth adapter (controller) properties.
+/// Local Bluetooth adapter hardware interface information.
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "Bluetooth adapter capabilities map directly to BlueZ boolean flags"
+    reason = "direct reflection of BlueZ D-Bus Adapter1 properties"
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BtAdapter {
-    /// Controller interface identifier (e.g. `hci0`).
+    /// Interface identifier (e.g. `hci0`).
     pub id: Box<str>,
-    /// Controller hardware MAC address.
+    /// Controller MAC address.
     pub address: BtAddress,
-    /// Broadcast controller name.
+    /// User-friendly name advertised by the controller.
     pub name: Box<str>,
-    /// Local alias name.
+    /// Controller alias name.
     pub alias: Box<str>,
-    /// Whether the radio transmitter is powered on.
+    /// Whether radio power is turned on.
     pub powered: bool,
-    /// Whether the adapter is discoverable to nearby devices.
+    /// Whether controller is discoverable by other devices.
     pub discoverable: bool,
-    /// Whether the adapter accepts pairing requests.
+    /// Whether controller accepts pairing requests.
     pub pairable: bool,
-    /// Whether background device discovery (scanning) is active.
+    /// Whether controller is actively performing device discovery.
     pub discovering: bool,
-    /// Bluetooth device class bitfield (e.g. `0x0024_0404`).
+    /// Bluetooth Device Class value, if available.
     pub class: Option<u32>,
-    /// Device modalias identifier (vendor/product ID string).
+    /// USB/UART modalias hardware identification string.
     pub modalias: Option<Box<str>>,
 }
 
-/// Remote paired or connected Bluetooth device descriptor.
+/// Remote Bluetooth paired or connected device.
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "remote device state maps directly to BlueZ Device1 boolean flags"
+    reason = "direct reflection of BlueZ D-Bus Device1 properties"
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BtDevice {
-    /// Device hardware MAC address.
+    /// Remote device MAC address.
     pub address: BtAddress,
-    /// Broadcast device name.
+    /// Remote advertised device name.
     pub name: Box<str>,
-    /// Local device alias.
+    /// User or system alias.
     pub alias: Box<str>,
-    /// Whether the device is actively connected.
+    /// Whether device is actively connected.
     pub connected: bool,
-    /// Whether the device is paired.
+    /// Whether device is paired with the controller.
     pub paired: bool,
-    /// Whether the device is marked trusted for auto-reconnection.
+    /// Whether device is trusted.
     pub trusted: bool,
-    /// Whether the device is blocked.
+    /// Whether device is blocked.
     pub blocked: bool,
-    /// Received signal strength indication (RSSI) in dBm, if available.
+    /// Received Signal Strength Indicator (RSSI) in dBm, if available.
     pub rssi: Option<i16>,
-    /// Remote battery percentage (`0..=100`), if reported via HFP or GATT.
+    /// Remote battery percentage (0–100), if reported via `org.bluez.Battery1`.
     pub battery_percentage: Option<u8>,
-    /// Device icon theme name (e.g. `phone`, `audio-card`).
+    /// Device icon name (e.g. `phone`, `audio-card`).
     pub icon: Option<Box<str>>,
-    /// Advertised service UUID strings.
+    /// Advertised Bluetooth service UUIDs.
     pub uuids: Box<[Box<str>]>,
 }
 
 impl BtDevice {
-    /// Returns the friendly display name (preferring alias over broadcast name).
+    /// Returns the most descriptive name available (`alias` if customized, else `name`).
     #[must_use]
     pub fn display_name(&self) -> &str {
-        if !self.alias.is_empty() {
-            &self.alias
-        } else if !self.name.is_empty() {
-            &self.name
+        if self.alias.is_empty() || self.alias.as_ref() == "Unknown" {
+            if self.name.is_empty() {
+                "Unknown Device"
+            } else {
+                &self.name
+            }
         } else {
-            "Unknown Device"
+            &self.alias
         }
-    }
-
-    /// Returns `true` if this device advertises A2DP audio sink or source profiles.
-    #[must_use]
-    pub fn is_audio_capable(&self) -> bool {
-        self.uuids.iter().any(|u| {
-            let u_lower = u.to_ascii_lowercase();
-            u_lower.contains("0000110b")
-                || u_lower.contains("0000110a")
-                || u_lower.contains("0000110e")
-        })
     }
 }
 
-/// Active `BlueALSA` audio PCM transport stream descriptor.
+/// Active `BlueALSA` audio transport PCM stream information.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlueAlsaPcm {
-    /// `BlueALSA` D-Bus PCM object path.
+    /// D-Bus object path for this audio PCM stream.
     pub pcm_path: Box<str>,
-    /// Remote device MAC address associated with this PCM stream.
+    /// Associated remote device MAC address.
     pub device_address: BtAddress,
-    /// Resolved human-readable name of the audio source device.
+    /// Human-readable device name resolved from connected device map.
     pub resolved_name: Box<str>,
-    /// Audio transport mode (e.g. `A2DP-sink`, `A2DP-source`, `SCO`).
+    /// Audio transport mode (e.g. `A2DP-sink`, `A2DP-source`, `HFP-AG`).
     pub transport: Box<str>,
-    /// Whether audio data is actively flowing through the transport pipeline.
+    /// Whether audio is actively streaming across the transport.
     pub running: bool,
-    /// Currently negotiated audio codec (e.g. `AAC`, `SBC`, `LDAC`, `LC3plus`).
+    /// Bluetooth audio codec negotiated for this stream (e.g. `AAC`, `SBC`, `aptX`, `LDAC`).
     pub selected_codec: Box<str>,
-    /// List of codecs supported and allowed for this stream.
+    /// Available codecs supported by this PCM stream.
     pub available_codecs: Box<[Box<str>]>,
-    /// Negotiated sampling rate in Hertz (e.g. `44100`, `48000`, `96000`).
+    /// Sampling rate in Hz (e.g. 44100, 48000).
     pub sampling_rate: u32,
-    /// Number of audio channels (e.g. 1 for mono, 2 for stereo).
+    /// Number of audio channels (e.g. 2 for stereo).
     pub channels: u8,
-    /// Sample format (e.g. `S16_LE`, `S24_LE`, `S32_LE`).
+    /// PCM sample format (e.g. `S16_LE`).
     pub format: Box<str>,
-    /// Hardware/software volume level string (e.g. `L: 100 R: 100` or percentage).
+    /// Hardware volume level, if reported.
     pub volume: Option<Box<str>>,
     /// Whether audio output is muted.
     pub muted: bool,
-    /// Estimated audio pipeline latency or delay description.
+    /// Audio transmission latency delay, if reported.
     pub delay: Option<Box<str>>,
 }
 
 impl BlueAlsaPcm {
-    /// Returns a human-readable description of current audio streaming state.
+    /// Returns a human-readable stream state description.
     #[must_use]
-    pub const fn stream_state_description(&self) -> &'static str {
+    pub fn stream_state_description(&self) -> &'static str {
         if self.running {
-            "STREAMING (Active Audio Flow)"
+            "STREAMING (Active)"
         } else {
-            "IDLE / PAUSED (Stream Established)"
+            "STANDBY / PAUSED (Connected)"
         }
     }
 }
 
-/// Physical Broadcom BCM43438 Bluetooth controller metadata for Raspberry Pi 3.
+/// Raspberry Pi 3 hardware controller specifications.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BluetoothHardwareInfo {
-    /// Integrated wireless/Bluetooth `SoC` model.
+    /// Controller chip model.
     pub chip: Box<str>,
-    /// Internal host controller transport bus.
+    /// Physical transport bus.
     pub bus: Box<str>,
-    /// Operational UART communication baud rate.
+    /// Operating UART baud rate in bps.
     pub baud_rate: u32,
-    /// Firmware patchfile path on Linux filesystem.
+    /// Firmware patch file location.
     pub firmware: Box<str>,
-    /// Linux kernel driver module name.
+    /// Kernel subsystem driver.
     pub driver: Box<str>,
-    /// Default kernel HCI device interface.
+    /// Default hardware interface identifier.
     pub default_controller: Box<str>,
 }
 
 impl BluetoothHardwareInfo {
-    /// Returns the standard hardware specification for the Raspberry Pi 3 appliance.
+    /// Returns static hardware information for the Raspberry Pi 3 Model B.
     #[must_use]
     pub fn rpi3() -> Self {
         Self {
@@ -363,20 +347,20 @@ impl BluetoothHardwareInfo {
             bus: "UART (PL011 / /dev/ttyAMA0)".into(),
             baud_rate: BCM43438_UART_BAUD_RATE,
             firmware: BCM43438_FIRMWARE_PATH.into(),
-            driver: "hci_uart (bcm43xx)".into(),
+            driver: "hci_uart (bcm)".into(),
             default_controller: DEFAULT_BT_ADAPTER.into(),
         }
     }
 }
 
-/// Holistic snapshot of Bluetooth services, controller, devices, and audio streams.
+/// Comprehensive point-in-time snapshot of the Bluetooth subsystem.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BluetoothStatus {
-    /// Systemd service status for Bluetooth daemons.
+    /// Daemon services status.
     pub services: BluetoothServices,
-    /// Local adapter controller properties (if detected).
+    /// Active local controller adapter, if detected.
     pub adapter: Option<BtAdapter>,
-    /// Known remote devices (connected or paired).
+    /// Discovered or connected remote devices.
     pub devices: Box<[BtDevice]>,
     /// Active `BlueALSA` audio PCM streams.
     pub pcms: Box<[BlueAlsaPcm]>,
@@ -424,27 +408,11 @@ impl BluetoothStatus {
 
 #[derive(Debug)]
 pub(crate) enum BtErrorKind {
-    CommandFailed {
-        command: Box<str>,
-        details: Box<str>,
-    },
-    ToolNotFound {
-        tool: Box<str>,
-    },
-    AdapterNotFound {
-        adapter: Box<str>,
-    },
-    InvalidAddress {
-        raw: Box<str>,
-        reason: Box<str>,
-    },
-    Io(io::Error),
-    Cancelled {
-        message: Box<str>,
-    },
-    MockFault {
-        message: Box<str>,
-    },
+    Dbus { details: Box<str> },
+    AdapterNotFound { adapter: Box<str> },
+    InvalidAddress { raw: Box<str>, reason: Box<str> },
+    Cancelled { message: Box<str> },
+    MockFault { message: Box<str> },
 }
 
 /// Subsystem error type for Bluetooth driver and diagnostic operations.
@@ -462,18 +430,10 @@ impl BtError {
         }
     }
 
-    pub(crate) fn command_failed(
-        command: impl Into<Box<str>>,
-        details: impl Into<Box<str>>,
-    ) -> Self {
-        Self::new(BtErrorKind::CommandFailed {
-            command: command.into(),
+    pub(crate) fn dbus(details: impl Into<Box<str>>) -> Self {
+        Self::new(BtErrorKind::Dbus {
             details: details.into(),
         })
-    }
-
-    pub(crate) fn tool_not_found(tool: impl Into<Box<str>>) -> Self {
-        Self::new(BtErrorKind::ToolNotFound { tool: tool.into() })
     }
 
     pub(crate) fn adapter_not_found(adapter: impl Into<Box<str>>) -> Self {
@@ -489,10 +449,6 @@ impl BtError {
         })
     }
 
-    pub(crate) fn io(err: io::Error) -> Self {
-        Self::new(BtErrorKind::Io(err))
-    }
-
     pub(crate) fn cancelled(message: impl Into<Box<str>>) -> Self {
         Self::new(BtErrorKind::Cancelled {
             message: message.into(),
@@ -505,16 +461,10 @@ impl BtError {
         })
     }
 
-    /// Returns `true` if this error was caused by a command execution failure.
+    /// Returns `true` if this error represents a D-Bus communication error.
     #[must_use]
-    pub const fn is_command_failed(&self) -> bool {
-        matches!(self.kind, BtErrorKind::CommandFailed { .. })
-    }
-
-    /// Returns `true` if an external system tool was missing.
-    #[must_use]
-    pub const fn is_tool_not_found(&self) -> bool {
-        matches!(self.kind, BtErrorKind::ToolNotFound { .. })
+    pub const fn is_dbus(&self) -> bool {
+        matches!(self.kind, BtErrorKind::Dbus { .. })
     }
 
     /// Returns `true` if the requested Bluetooth adapter was not found.
@@ -527,12 +477,6 @@ impl BtError {
     #[must_use]
     pub const fn is_invalid_address(&self) -> bool {
         matches!(self.kind, BtErrorKind::InvalidAddress { .. })
-    }
-
-    /// Returns `true` if this error represents an underlying I/O error.
-    #[must_use]
-    pub const fn is_io(&self) -> bool {
-        matches!(self.kind, BtErrorKind::Io(_))
     }
 
     /// Returns `true` if this error represents an asynchronous task cancellation.
@@ -555,11 +499,8 @@ impl BtError {
 
     fn fmt_kind(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            BtErrorKind::CommandFailed { command, details } => {
-                write!(f, "command '{command}' failed: {details}")
-            }
-            BtErrorKind::ToolNotFound { tool } => {
-                write!(f, "required tool '{tool}' not found on system")
+            BtErrorKind::Dbus { details } => {
+                write!(f, "D-Bus communication error: {details}")
             }
             BtErrorKind::AdapterNotFound { adapter } => {
                 write!(f, "Bluetooth adapter '{adapter}' not detected")
@@ -567,7 +508,6 @@ impl BtError {
             BtErrorKind::InvalidAddress { raw, reason } => {
                 write!(f, "invalid Bluetooth address '{raw}': {reason}")
             }
-            BtErrorKind::Io(err) => write!(f, "I/O error: {err}"),
             BtErrorKind::Cancelled { message } => write!(f, "task cancelled: {message}"),
             BtErrorKind::MockFault { message } => write!(f, "injected mock fault: {message}"),
         }
@@ -576,18 +516,11 @@ impl BtError {
 
 super::impl_canonical_error_display!(BtError);
 
-impl std::error::Error for BtError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.kind {
-            BtErrorKind::Io(err) => Some(err),
-            _ => None,
-        }
-    }
-}
+impl std::error::Error for BtError {}
 
-impl From<io::Error> for BtError {
-    fn from(err: io::Error) -> Self {
-        Self::io(err)
+impl From<zbus::Error> for BtError {
+    fn from(err: zbus::Error) -> Self {
+        Self::dbus(err.to_string())
     }
 }
 
@@ -597,269 +530,283 @@ impl FromJoinError for BtError {
     }
 }
 
-/// Abstract runner for executing system inspection commands.
-pub trait CommandRunner: Send + Sync {
-    /// Executes `program` with `args`, returning [`CommandOutput`] or an I/O error.
-    ///
-    /// # Errors
-    /// Returns [`io::Error`] if spawning or collecting output fails.
-    fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput>;
+// ============================================================================
+// D-Bus Proxies (zbus)
+// ============================================================================
+
+#[zbus::proxy(
+    default_service = "org.freedesktop.systemd1",
+    default_path = "/org/freedesktop/systemd1",
+    interface = "org.freedesktop.systemd1.Manager",
+    gen_async = false,
+    blocking_name = "SystemdManagerProxyBlocking"
+)]
+trait SystemdManager {
+    fn get_unit(&self, name: &str) -> zbus::Result<OwnedObjectPath>;
 }
 
-/// Output captured from a system command execution.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandOutput {
-    /// Standard output text stream.
-    pub stdout: String,
-    /// Standard error text stream.
-    pub stderr: String,
-    /// Process exit code.
-    pub exit_code: i32,
+#[zbus::proxy(
+    default_service = "org.freedesktop.systemd1",
+    interface = "org.freedesktop.systemd1.Unit",
+    gen_async = false,
+    blocking_name = "SystemdUnitProxyBlocking"
+)]
+trait SystemdUnit {
+    #[zbus(property)]
+    fn active_state(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn load_state(&self) -> zbus::Result<String>;
 }
 
-/// Default timeout for individual Bluetooth subprocess queries (5 seconds).
-pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct OsCommandRunner {
-    timeout: Duration,
+#[zbus::proxy(
+    default_service = "org.bluez",
+    interface = "org.bluez.Adapter1",
+    gen_async = false,
+    blocking_name = "BlueZAdapter1ProxyBlocking"
+)]
+pub(crate) trait BlueZAdapter1 {
+    #[zbus(property)]
+    fn powered(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_powered(&self, value: bool) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn discoverable(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_discoverable(&self, value: bool) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn pairable(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_pairable(&self, value: bool) -> zbus::Result<()>;
 }
 
-impl Default for OsCommandRunner {
-    fn default() -> Self {
-        Self {
-            timeout: DEFAULT_COMMAND_TIMEOUT,
+/// Type alias for D-Bus `ObjectManager` `GetManagedObjects` map.
+pub type ManagedObjects =
+    HashMap<OwnedObjectPath, HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>>;
+
+fn find_iface<'a>(
+    ifaces: &'a HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>,
+    target: &str,
+) -> Option<&'a HashMap<String, OwnedValue>> {
+    ifaces
+        .iter()
+        .find(|(k, _)| k.as_str() == target)
+        .map(|(_, v)| v)
+}
+
+fn get_str<'a>(props: &'a HashMap<String, OwnedValue>, key: &str) -> Option<&'a str> {
+    props.get(key).and_then(|v| v.downcast_ref::<&str>().ok())
+}
+
+fn get_bool(props: &HashMap<String, OwnedValue>, key: &str) -> bool {
+    props
+        .get(key)
+        .and_then(|v| v.downcast_ref::<bool>().ok())
+        .unwrap_or(false)
+}
+
+fn get_u32(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u32> {
+    props.get(key).and_then(|v| v.downcast_ref::<u32>().ok())
+}
+
+fn get_u16(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u16> {
+    props.get(key).and_then(|v| v.downcast_ref::<u16>().ok())
+}
+
+fn get_i16(props: &HashMap<String, OwnedValue>, key: &str) -> Option<i16> {
+    props.get(key).and_then(|v| v.downcast_ref::<i16>().ok())
+}
+
+fn get_u8(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u8> {
+    props.get(key).and_then(|v| v.downcast_ref::<u8>().ok())
+}
+
+fn get_str_array(props: &HashMap<String, OwnedValue>, key: &str) -> Box<[Box<str>]> {
+    if let Some(val) = props.get(key) {
+        if let Value::Array(arr) = &**val {
+            return arr
+                .iter()
+                .filter_map(|v| v.downcast_ref::<&str>().ok().map(Into::into))
+                .collect();
         }
     }
+    Box::default()
 }
 
-impl OsCommandRunner {
-    #[cfg(test)]
-    pub(crate) const fn with_timeout(timeout: Duration) -> Self {
-        Self { timeout }
-    }
-}
-
-impl CommandRunner for OsCommandRunner {
-    fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
-        let mut child = Command::new(program)
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-
-        let deadline = Instant::now() + self.timeout;
-        loop {
-            match child.try_wait()? {
-                Some(_) => {
-                    let output = child.wait_with_output()?;
-                    return Ok(CommandOutput {
-                        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
-                        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                        exit_code: output.status.code().unwrap_or(-1),
-                    });
-                }
-                None if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                None => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!("command '{program}' timed out after {:?}", self.timeout),
-                    ));
-                }
-            }
-        }
-    }
-}
-
-/// Hardware backend inspector executing system CLI queries (`bluetoothctl`, `systemctl`, `bluealsa-cli`).
+/// D-Bus client executing direct queries against systemd, `BlueZ`, and `BlueALSA`.
 #[derive(Clone)]
-pub(crate) struct SystemInspector {
-    runner: Arc<dyn CommandRunner>,
+pub(crate) struct DbusClient {
+    conn: Connection,
 }
 
-impl SystemInspector {
-    fn new(runner: Arc<dyn CommandRunner>) -> Self {
-        Self { runner }
+impl DbusClient {
+    pub(crate) fn new(conn: Connection) -> Self {
+        Self { conn }
     }
 
-    fn check_service(&self, name: &str) -> ServiceState {
-        match self.runner.run("systemctl", &["is-active", name]) {
-            Ok(out) => {
-                if out.exit_code == 0 && out.stdout == "active" {
-                    ServiceState::Active
-                } else if out.exit_code == 4
-                    || out.stderr.contains("not-found")
-                    || out.stdout.contains("could not be found")
-                    || out.stdout.contains("not-found")
-                {
-                    ServiceState::NotFound
-                } else if out.stdout == "failed" {
-                    ServiceState::Failed
-                } else {
-                    ServiceState::Inactive
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => ServiceState::NotFound,
-            Err(_) => ServiceState::Inactive,
-        }
-    }
-
-    fn check_services(&self) -> BluetoothServices {
+    pub(crate) fn check_services(&self) -> BluetoothServices {
+        let manager = SystemdManagerProxyBlocking::new(&self.conn).ok();
         BluetoothServices {
-            bluetoothd: self.check_service("bluetooth"),
-            bluealsa: self.check_service("bluealsa"),
-            bluealsa_aplay: self.check_service("bluealsa-aplay"),
-            bt_agent: self.check_service("bt-agent"),
+            bluetoothd: self.check_service(manager.as_ref(), "bluetooth.service"),
+            bluealsa: self.check_service(manager.as_ref(), "bluealsa.service"),
+            bluealsa_aplay: self.check_service(manager.as_ref(), "bluealsa-aplay.service"),
+            bt_agent: self.check_service(manager.as_ref(), "bt-agent.service"),
         }
     }
 
-    fn parse_adapter(&self, target_adapter: Option<&str>) -> Result<Option<BtAdapter>, BtError> {
-        let args = if let Some(a) = target_adapter {
-            vec!["show", a]
+    fn check_service(
+        &self,
+        manager: Option<&SystemdManagerProxyBlocking<'_>>,
+        name: &str,
+    ) -> ServiceState {
+        let Some(mgr) = manager else {
+            return ServiceState::NotFound;
+        };
+        match mgr.get_unit(name) {
+            Ok(path) => {
+                let unit = match SystemdUnitProxyBlocking::builder(&self.conn).path(path) {
+                    Ok(builder) => match builder.build() {
+                        Ok(u) => u,
+                        Err(_) => return ServiceState::Inactive,
+                    },
+                    Err(_) => return ServiceState::Inactive,
+                };
+                let active = unit.active_state().unwrap_or_default();
+                let load = unit.load_state().unwrap_or_default();
+                Self::parse_systemd_state(&active, &load)
+            }
+            Err(_) => ServiceState::NotFound,
+        }
+    }
+
+    pub(crate) fn parse_systemd_state(active: &str, load: &str) -> ServiceState {
+        if active == "active" {
+            ServiceState::Active
+        } else if load == "not-found" || active == "not-found" {
+            ServiceState::NotFound
+        } else if active == "failed" {
+            ServiceState::Failed
         } else {
-            vec!["show"]
-        };
-
-        let out = match self.runner.run("bluetoothctl", &args) {
-            Ok(o) => o,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(BtError::tool_not_found("bluetoothctl"));
-            }
-            Err(e) => return Err(BtError::io(e)),
-        };
-
-        if out.exit_code != 0 || out.stdout.is_empty() {
-            if let Some(target) = target_adapter {
-                return Err(BtError::adapter_not_found(target));
-            }
-            return Ok(None);
+            ServiceState::Inactive
         }
-
-        let parsed = Self::parse_adapter_output(&out.stdout, target_adapter);
-        if parsed.is_none() {
-            if let Some(target) = target_adapter {
-                return Err(BtError::adapter_not_found(target));
-            }
-        }
-        Ok(parsed)
     }
 
-    pub(crate) fn parse_adapter_output(
-        stdout: &str,
+    pub(crate) fn query_bluez(
+        &self,
         target_adapter: Option<&str>,
-    ) -> Option<BtAdapter> {
-        let mut addr = None;
-        let mut name = String::from("Unknown");
-        let mut alias = String::from("Unknown");
-        let mut powered = false;
-        let mut discoverable = false;
-        let mut pairable = false;
-        let mut discovering = false;
-        let mut class = None;
-        let mut modalias = None;
-
-        for line in stdout.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("Controller") {
-                let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    if let Ok(parsed_addr) = BtAddress::parse_str(parts[1]) {
-                        addr = Some(parsed_addr);
-                    }
-                }
-            } else if let Some(val) = trimmed.strip_prefix("Name:") {
-                name = val.trim().to_string();
-            } else if let Some(val) = trimmed.strip_prefix("Alias:") {
-                alias = val.trim().to_string();
-            } else if let Some(val) = trimmed.strip_prefix("Powered:") {
-                powered = val.trim().eq_ignore_ascii_case("yes");
-            } else if let Some(val) = trimmed.strip_prefix("Discoverable:") {
-                discoverable = val.trim().eq_ignore_ascii_case("yes");
-            } else if let Some(val) = trimmed.strip_prefix("Pairable:") {
-                pairable = val.trim().eq_ignore_ascii_case("yes");
-            } else if let Some(val) = trimmed.strip_prefix("Discovering:") {
-                discovering = val.trim().eq_ignore_ascii_case("yes");
-            } else if let Some(val) = trimmed.strip_prefix("Class:") {
-                let hex_str = val.trim().trim_start_matches("0x").trim_start_matches("0X");
-                class = u32::from_str_radix(hex_str, 16).ok();
-            } else if let Some(val) = trimmed.strip_prefix("Modalias:") {
-                modalias = Some(val.trim().into());
-            }
-        }
-
-        let address = addr?;
-
-        let id = target_adapter.unwrap_or(DEFAULT_BT_ADAPTER).into();
-
-        Some(BtAdapter {
-            id,
-            address,
-            name: name.into_boxed_str(),
-            alias: alias.into_boxed_str(),
-            powered,
-            discoverable,
-            pairable,
-            discovering,
-            class,
-            modalias,
-        })
-    }
-
-    fn get_devices(&self) -> Result<Box<[BtDevice]>, BtError> {
-        let connected_out = match self.runner.run("bluetoothctl", &["devices", "Connected"]) {
-            Ok(o) => o,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(BtError::tool_not_found("bluetoothctl"));
-            }
-            Err(e) => return Err(BtError::io(e)),
+    ) -> Result<(Option<BtAdapter>, Box<[BtDevice]>), BtError> {
+        let proxy = match zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+            .destination("org.bluez")
+            .and_then(|b| b.path("/"))
+            .and_then(zbus::blocking::proxy::Builder::build)
+        {
+            Ok(p) => p,
+            Err(e) => return Err(BtError::from(e)),
         };
 
-        let all_out = self.runner.run("bluetoothctl", &["devices"]).ok();
+        let Ok(objects) = proxy.get_managed_objects() else {
+            return Ok((None, Box::default()));
+        };
 
-        let mut device_map: HashMap<BtAddress, (String, bool)> = HashMap::new();
+        Self::parse_bluez_objects(&objects, target_adapter)
+    }
 
-        if all_out.as_ref().is_some_and(|o| o.exit_code == 0) {
-            for line in all_out.as_ref().unwrap().stdout.lines() {
-                if let Some((addr, name)) = Self::parse_device_line(line) {
-                    device_map.insert(addr, (name, false));
+    pub(crate) fn parse_bluez_objects(
+        objects: &ManagedObjects,
+        target_adapter: Option<&str>,
+    ) -> Result<(Option<BtAdapter>, Box<[BtDevice]>), BtError> {
+        let mut adapter = None;
+        let mut devices = Vec::new();
+
+        // 1. Search for Adapter1 interfaces
+        for (path, ifaces) in objects {
+            if let Some(props) = find_iface(ifaces, "org.bluez.Adapter1") {
+                let id = path
+                    .as_str()
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(DEFAULT_BT_ADAPTER);
+                let Some(addr_str) = get_str(props, "Address") else {
+                    continue;
+                };
+                let Ok(address) = BtAddress::parse_str(addr_str) else {
+                    continue;
+                };
+
+                let name = get_str(props, "Name").unwrap_or("Unknown").into();
+                let alias = get_str(props, "Alias").unwrap_or("Unknown").into();
+                let powered = get_bool(props, "Powered");
+                let discoverable = get_bool(props, "Discoverable");
+                let pairable = get_bool(props, "Pairable");
+                let discovering = get_bool(props, "Discovering");
+                let class = get_u32(props, "Class");
+                let modalias = get_str(props, "Modalias").map(Into::into);
+
+                let parsed_adapter = BtAdapter {
+                    id: id.into(),
+                    address,
+                    name,
+                    alias,
+                    powered,
+                    discoverable,
+                    pairable,
+                    discovering,
+                    class,
+                    modalias,
+                };
+
+                if let Some(target) = target_adapter {
+                    if parsed_adapter.id.as_ref() == target {
+                        adapter = Some(parsed_adapter);
+                    }
+                } else if adapter.is_none() || parsed_adapter.id.as_ref() == DEFAULT_BT_ADAPTER {
+                    adapter = Some(parsed_adapter);
                 }
             }
         }
 
-        if connected_out.exit_code == 0 {
-            for line in connected_out.stdout.lines() {
-                if let Some((addr, name)) = Self::parse_device_line(line) {
-                    device_map.insert(addr, (name, true));
-                }
+        if let Some(target) = target_adapter {
+            if adapter.is_none() {
+                return Err(BtError::adapter_not_found(target));
             }
         }
 
-        let mut devices = Vec::with_capacity(device_map.len());
-        for (addr, (default_name, connected)) in device_map {
-            let addr_str = addr.to_string();
-            let info = self.runner.run("bluetoothctl", &["info", &addr_str]).ok();
-            let dev = if let Some(info_out) = info.filter(|o| o.exit_code == 0) {
-                Self::parse_device_info(&info_out.stdout, addr, &default_name, connected)
-            } else {
-                BtDevice {
-                    address: addr,
-                    name: default_name.clone().into_boxed_str(),
-                    alias: default_name.into_boxed_str(),
+        // 2. Search for Device1 interfaces
+        for ifaces in objects.values() {
+            if let Some(props) = find_iface(ifaces, "org.bluez.Device1") {
+                let Some(addr_str) = get_str(props, "Address") else {
+                    continue;
+                };
+                let Ok(address) = BtAddress::parse_str(addr_str) else {
+                    continue;
+                };
+
+                let name = get_str(props, "Name").unwrap_or(addr_str).into();
+                let alias = get_str(props, "Alias").unwrap_or(addr_str).into();
+                let connected = get_bool(props, "Connected");
+                let paired = get_bool(props, "Paired");
+                let trusted = get_bool(props, "Trusted");
+                let blocked = get_bool(props, "Blocked");
+                let rssi = get_i16(props, "RSSI");
+                let icon = get_str(props, "Icon").map(Into::into);
+                let uuids = get_str_array(props, "UUIDs");
+
+                let battery_percentage = find_iface(ifaces, "org.bluez.Battery1")
+                    .and_then(|b_props| get_u8(b_props, "Percentage"));
+
+                devices.push(BtDevice {
+                    address,
+                    name,
+                    alias,
                     connected,
-                    paired: false,
-                    trusted: false,
-                    blocked: false,
-                    rssi: None,
-                    battery_percentage: None,
-                    icon: None,
-                    uuids: Box::default(),
-                }
-            };
-            devices.push(dev);
+                    paired,
+                    trusted,
+                    blocked,
+                    rssi,
+                    battery_percentage,
+                    icon,
+                    uuids,
+                });
+            }
         }
 
         devices.sort_by(|a, b| {
@@ -867,199 +814,145 @@ impl SystemInspector {
                 .cmp(&a.connected)
                 .then_with(|| a.address.cmp(&b.address))
         });
-        Ok(devices.into_boxed_slice())
+
+        Ok((adapter, devices.into_boxed_slice()))
     }
 
-    pub(crate) fn parse_device_line(line: &str) -> Option<(BtAddress, String)> {
-        let trimmed = line.trim();
-        let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
-        if parts.len() >= 3 && parts[0] == "Device" {
-            if let Ok(addr) = BtAddress::parse_str(parts[1]) {
-                return Some((addr, parts[2].trim().to_string()));
-            }
-        }
-        None
-    }
-
-    pub(crate) fn parse_device_info(
-        stdout: &str,
-        addr: BtAddress,
-        fallback_name: &str,
-        default_connected: bool,
-    ) -> BtDevice {
-        let mut name = fallback_name.to_string();
-        let mut alias = fallback_name.to_string();
-        let mut connected = default_connected;
-        let mut paired = false;
-        let mut trusted = false;
-        let mut blocked = false;
-        let mut rssi = None;
-        let mut battery = None;
-        let mut icon = None;
-        let mut uuids = Vec::new();
-
-        for line in stdout.lines() {
-            let trimmed = line.trim();
-            if let Some(val) = trimmed.strip_prefix("Name:") {
-                name = val.trim().to_string();
-            } else if let Some(val) = trimmed.strip_prefix("Alias:") {
-                alias = val.trim().to_string();
-            } else if let Some(val) = trimmed.strip_prefix("Connected:") {
-                connected = val.trim().eq_ignore_ascii_case("yes");
-            } else if let Some(val) = trimmed.strip_prefix("Paired:") {
-                paired = val.trim().eq_ignore_ascii_case("yes");
-            } else if let Some(val) = trimmed.strip_prefix("Trusted:") {
-                trusted = val.trim().eq_ignore_ascii_case("yes");
-            } else if let Some(val) = trimmed.strip_prefix("Blocked:") {
-                blocked = val.trim().eq_ignore_ascii_case("yes");
-            } else if let Some(val) = trimmed.strip_prefix("RSSI:") {
-                let clean_rssi = val.split_whitespace().next().unwrap_or("");
-                rssi = clean_rssi.parse::<i16>().ok();
-            } else if let Some(val) = trimmed.strip_prefix("Battery Percentage:") {
-                let clean_bat = val.trim().trim_end_matches('%').trim();
-                battery = clean_bat.parse::<u8>().ok();
-            } else if let Some(val) = trimmed.strip_prefix("Icon:") {
-                icon = Some(val.trim().into());
-            } else if let Some(val) = trimmed.strip_prefix("UUID:") {
-                uuids.push(val.trim().into());
-            }
-        }
-
-        BtDevice {
-            address: addr,
-            name: name.into_boxed_str(),
-            alias: alias.into_boxed_str(),
-            connected,
-            paired,
-            trusted,
-            blocked,
-            rssi,
-            battery_percentage: battery,
-            icon,
-            uuids: uuids.into_boxed_slice(),
-        }
-    }
-
-    fn get_bluealsa_pcms(&self, devices: &[BtDevice]) -> Box<[BlueAlsaPcm]> {
-        let (cli_tool, list_out) = match self.runner.run("bluealsa-cli", &["list-pcms"]) {
-            Ok(o) if o.exit_code == 0 => ("bluealsa-cli", o),
-            _ => match self.runner.run("bluealsactl", &["list-pcms"]) {
-                Ok(o) if o.exit_code == 0 => ("bluealsactl", o),
-                _ => return Box::default(),
-            },
+    pub(crate) fn query_bluealsa(&self, devices: &[BtDevice]) -> Box<[BlueAlsaPcm]> {
+        let Ok(proxy) = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+            .destination("org.bluealsa")
+            .and_then(|b| b.path("/org/bluealsa"))
+            .and_then(zbus::blocking::proxy::Builder::build)
+        else {
+            return Box::default();
         };
 
+        let Ok(objects) = proxy.get_managed_objects() else {
+            return Box::default();
+        };
+
+        Self::parse_bluealsa_objects(&objects, devices)
+    }
+
+    pub(crate) fn parse_bluealsa_objects(
+        objects: &ManagedObjects,
+        devices: &[BtDevice],
+    ) -> Box<[BlueAlsaPcm]> {
         let mut name_map: HashMap<BtAddress, &str> = HashMap::new();
         for dev in devices {
             name_map.insert(dev.address, dev.display_name());
         }
 
-        let pcm_paths: Vec<&str> = list_out
-            .stdout
-            .lines()
-            .map(str::trim)
-            .filter(|l| l.starts_with("/org/bluealsa/"))
-            .collect();
+        let mut pcms = Vec::new();
 
-        let mut pcms = Vec::with_capacity(pcm_paths.len());
-        for path in pcm_paths {
-            if let Ok(info_out) = self.runner.run(cli_tool, &["info", path]) {
-                if info_out.exit_code == 0 {
-                    if let Some(pcm) = Self::parse_pcm_info(&info_out.stdout, path, &name_map) {
-                        pcms.push(pcm);
+        for (path, ifaces) in objects {
+            if let Some(props) = find_iface(ifaces, "org.bluealsa.PCM1") {
+                let pcm_path = path.as_str().into();
+                let device_address = get_str(props, "Device")
+                    .and_then(Self::extract_mac_from_pcm_path)
+                    .or_else(|| Self::extract_mac_from_pcm_path(path.as_str()))
+                    .and_then(|s| BtAddress::parse_str(&s).ok());
+
+                let Some(device_address) = device_address else {
+                    continue;
+                };
+
+                let resolved_name = name_map
+                    .get(&device_address)
+                    .copied()
+                    .unwrap_or("Unknown Device")
+                    .into();
+
+                let transport = get_str(props, "Transport").unwrap_or("A2DP-sink").into();
+                let running = get_bool(props, "Running");
+                let selected_codec = get_str(props, "Codec").unwrap_or("Unknown").into();
+
+                let available_codecs = if let Some(codecs_val) =
+                    props.get("AvailableCodecs").or_else(|| props.get("Codecs"))
+                {
+                    match &**codecs_val {
+                        Value::Array(arr) => arr
+                            .iter()
+                            .filter_map(|v| v.downcast_ref::<&str>().ok().map(Into::into))
+                            .collect(),
+                        _ => match codecs_val.downcast_ref::<&str>().ok() {
+                            Some(s) if s.trim() != "[ Unknown ]" => s
+                                .split(|c: char| c == ',' || c.is_whitespace())
+                                .filter(|c| !c.is_empty())
+                                .map(Into::into)
+                                .collect(),
+                            _ => Box::default(),
+                        },
                     }
-                }
+                } else {
+                    Box::default()
+                };
+
+                let sampling_rate = get_u32(props, "Sampling")
+                    .or_else(|| get_u32(props, "Rate"))
+                    .unwrap_or(44_100);
+
+                let channels = get_u8(props, "Channels")
+                    .or_else(|| get_u16(props, "Channels").and_then(|c| u8::try_from(c).ok()))
+                    .unwrap_or(2);
+
+                let format = get_str(props, "Format").unwrap_or("S16_LE").into();
+                let volume = get_str(props, "Volume")
+                    .map(Into::into)
+                    .or_else(|| get_u16(props, "Volume").map(|v| v.to_string().into_boxed_str()));
+                let muted = get_bool(props, "Mute") || get_bool(props, "Muted");
+                let delay = get_u32(props, "Delay")
+                    .map(|d| d.to_string().into_boxed_str())
+                    .or_else(|| get_str(props, "Delay").map(Into::into));
+
+                pcms.push(BlueAlsaPcm {
+                    pcm_path,
+                    device_address,
+                    resolved_name,
+                    transport,
+                    running,
+                    selected_codec,
+                    available_codecs,
+                    sampling_rate,
+                    channels,
+                    format,
+                    volume,
+                    muted,
+                    delay,
+                });
             }
         }
+
+        pcms.sort_by(|a, b| a.pcm_path.cmp(&b.pcm_path));
 
         pcms.into_boxed_slice()
     }
 
-    pub(crate) fn parse_pcm_info(
-        stdout: &str,
-        path: &str,
-        name_map: &HashMap<BtAddress, &str>,
-    ) -> Option<BlueAlsaPcm> {
-        let mut props: HashMap<String, String> = HashMap::new();
-        for line in stdout.lines() {
-            if let Some((k, v)) = line.split_once(':') {
-                props.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+    pub(crate) fn set_adapter_property<F>(
+        &self,
+        target_adapter: Option<&str>,
+        action: F,
+    ) -> Result<(), BtError>
+    where
+        F: FnOnce(&BlueZAdapter1ProxyBlocking<'_>) -> zbus::Result<()>,
+    {
+        let adapter_id = target_adapter.unwrap_or(DEFAULT_BT_ADAPTER);
+        let path = format!("/org/bluez/{adapter_id}");
+        let proxy = match BlueZAdapter1ProxyBlocking::builder(&self.conn)
+            .path(path.as_str())
+            .and_then(zbus::blocking::proxy::Builder::build)
+        {
+            Ok(p) => p,
+            Err(e) => return Err(BtError::from(e)),
+        };
+
+        action(&proxy).map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("UnknownObject") || msg.contains("does not exist") {
+                BtError::adapter_not_found(adapter_id)
+            } else {
+                BtError::from(e)
             }
-        }
-
-        let mac_str = Self::extract_mac_from_pcm_path(path).or_else(|| {
-            props
-                .get("device")
-                .and_then(|d| Self::extract_mac_from_pcm_path(d))
-        })?;
-
-        let device_address = BtAddress::parse_str(&mac_str).ok()?;
-        let resolved_name = name_map
-            .get(&device_address)
-            .copied()
-            .unwrap_or("Unknown Device")
-            .into();
-
-        let transport = props
-            .get("transport")
-            .cloned()
-            .unwrap_or_else(|| "A2DP".into());
-        let running = props
-            .get("running")
-            .is_some_and(|r| r.eq_ignore_ascii_case("true"));
-        let selected_codec = props
-            .get("selected codec")
-            .or_else(|| props.get("codec"))
-            .cloned()
-            .unwrap_or_else(|| "Unknown".into());
-
-        let available_codecs = props
-            .get("available codecs")
-            .filter(|s| s.trim() != "[ Unknown ]")
-            .map(|s| {
-                s.split(|c: char| c == ',' || c.is_whitespace())
-                    .filter(|c| !c.is_empty())
-                    .map(Into::into)
-                    .collect::<Vec<Box<str>>>()
-                    .into_boxed_slice()
-            })
-            .unwrap_or_default();
-
-        let sampling_rate = props
-            .get("sampling")
-            .and_then(|s| s.split_whitespace().next())
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(44_100);
-
-        let channels = props
-            .get("channels")
-            .and_then(|s| s.parse::<u8>().ok())
-            .unwrap_or(2);
-
-        let format = props
-            .get("format")
-            .cloned()
-            .unwrap_or_else(|| "S16_LE".into());
-        let volume = props.get("volume").cloned().map(Into::into);
-        let muted = props
-            .get("muted")
-            .is_some_and(|m| m.eq_ignore_ascii_case("true"));
-        let delay = props.get("delay").cloned().map(Into::into);
-
-        Some(BlueAlsaPcm {
-            pcm_path: path.into(),
-            device_address,
-            resolved_name,
-            transport: transport.into_boxed_str(),
-            running,
-            selected_codec: selected_codec.into_boxed_str(),
-            available_codecs,
-            sampling_rate,
-            channels,
-            format: format.into_boxed_str(),
-            volume,
-            muted,
-            delay,
         })
     }
 
@@ -1072,6 +965,10 @@ impl SystemInspector {
         (mac_part.len() == 17).then(|| mac_part.replace('_', ":"))
     }
 }
+
+// ============================================================================
+// In-Memory Mock Controller (M-MOCKABLE-SYSCALLS)
+// ============================================================================
 
 /// Controllable in-memory mock for [`BluetoothDevice`].
 #[derive(Debug, Clone)]
@@ -1253,6 +1150,60 @@ impl BluetoothDeviceMock {
         }
     }
 
+    fn set_powered_for_adapter(
+        &self,
+        target_adapter: Option<&str>,
+        powered: bool,
+    ) -> Result<(), BtError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(target) = target_adapter {
+            match &state.adapter {
+                Some(a) if a.id.as_ref() == target => {}
+                _ => return Err(BtError::adapter_not_found(target)),
+            }
+        }
+        if let Some(ref mut adapter) = state.adapter {
+            adapter.powered = powered;
+        }
+        Ok(())
+    }
+
+    fn set_discoverable_for_adapter(
+        &self,
+        target_adapter: Option<&str>,
+        discoverable: bool,
+    ) -> Result<(), BtError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(target) = target_adapter {
+            match &state.adapter {
+                Some(a) if a.id.as_ref() == target => {}
+                _ => return Err(BtError::adapter_not_found(target)),
+            }
+        }
+        if let Some(ref mut adapter) = state.adapter {
+            adapter.discoverable = discoverable;
+        }
+        Ok(())
+    }
+
+    fn set_pairable_for_adapter(
+        &self,
+        target_adapter: Option<&str>,
+        pairable: bool,
+    ) -> Result<(), BtError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(target) = target_adapter {
+            match &state.adapter {
+                Some(a) if a.id.as_ref() == target => {}
+                _ => return Err(BtError::adapter_not_found(target)),
+            }
+        }
+        if let Some(ref mut adapter) = state.adapter {
+            adapter.pairable = pairable;
+        }
+        Ok(())
+    }
+
     fn read_status_for_adapter(
         &self,
         target_adapter: Option<&str>,
@@ -1286,14 +1237,14 @@ impl BluetoothDeviceMock {
 }
 
 enum Backend {
-    System(SystemInspector),
+    Dbus(DbusClient),
     Mock(BluetoothDeviceMock),
 }
 
 /// Raspberry Pi Bluetooth controller and `BlueALSA` audio subsystem client.
 ///
 /// Thread-safe, cheaply cloneable (`Arc`-backed handle per `M-SERVICES-CLONE`),
-/// providing non-blocking asynchronous inspection and control methods.
+/// providing native D-Bus inspection and control methods over `zbus`.
 #[derive(Clone)]
 pub struct BluetoothDevice {
     backend: Arc<Backend>,
@@ -1303,25 +1254,21 @@ impl fmt::Debug for BluetoothDevice {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &*self.backend {
             Backend::Mock(mock) => f.debug_tuple("BluetoothDevice::Mock").field(mock).finish(),
-            Backend::System(_) => f.debug_tuple("BluetoothDevice::System").finish(),
+            Backend::Dbus(_) => f.debug_tuple("BluetoothDevice::Dbus").finish(),
         }
-    }
-}
-
-impl Default for BluetoothDevice {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
 impl BluetoothDevice {
-    /// Connects to the host Linux Bluetooth subsystem using standard OS commands.
-    #[must_use]
-    pub fn new() -> Self {
-        let inspector = SystemInspector::new(Arc::new(OsCommandRunner::default()));
-        Self {
-            backend: Arc::new(Backend::System(inspector)),
-        }
+    /// Connects to the Linux system D-Bus and initializes the Bluetooth driver.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if connecting to the system D-Bus fails.
+    pub fn new() -> Result<Self, BtError> {
+        let conn = Connection::system()?;
+        Ok(Self {
+            backend: Arc::new(Backend::Dbus(DbusClient::new(conn))),
+        })
     }
 
     /// Creates an inherent mock device and companion mock controller for testing.
@@ -1334,32 +1281,28 @@ impl BluetoothDevice {
         (device, mock)
     }
 
-    /// Creates a device instance backed by a custom command runner.
-    ///
-    /// Intended for testing system command parsing and error handling deterministically.
+    /// Creates a device instance backed by an established D-Bus connection.
     #[must_use]
-    pub fn with_runner(runner: Arc<dyn CommandRunner>) -> Self {
-        let inspector = SystemInspector::new(runner);
+    pub fn with_connection(conn: Connection) -> Self {
         Self {
-            backend: Arc::new(Backend::System(inspector)),
+            backend: Arc::new(Backend::Dbus(DbusClient::new(conn))),
         }
     }
 
     /// Inspects the status for a specific adapter (or default if `None`) synchronously.
     ///
     /// # Errors
-    /// Returns [`BtError`] if system commands fail, the adapter is not found, or a mock fault is injected.
+    /// Returns [`BtError`] if D-Bus communication fails, the adapter is not found, or a mock fault is injected.
     pub fn status_for_adapter(
         &self,
         target_adapter: Option<&str>,
     ) -> Result<BluetoothStatus, BtError> {
         match &*self.backend {
             Backend::Mock(mock) => mock.read_status_for_adapter(target_adapter),
-            Backend::System(inspector) => {
-                let services = inspector.check_services();
-                let adapter = inspector.parse_adapter(target_adapter)?;
-                let devices = inspector.get_devices()?;
-                let pcms = inspector.get_bluealsa_pcms(&devices);
+            Backend::Dbus(dbus) => {
+                let services = dbus.check_services();
+                let (adapter, devices) = dbus.query_bluez(target_adapter)?;
+                let pcms = dbus.query_bluealsa(&devices);
                 Ok(BluetoothStatus {
                     services,
                     adapter,
@@ -1389,7 +1332,7 @@ impl BluetoothDevice {
     /// Inspects the complete Bluetooth subsystem status synchronously.
     ///
     /// # Errors
-    /// Returns [`BtError`] if system commands fail or a mock fault is injected.
+    /// Returns [`BtError`] if D-Bus communication fails or a mock fault is injected.
     pub fn status(&self) -> Result<BluetoothStatus, BtError> {
         self.status_for_adapter(None)
     }
@@ -1452,126 +1395,94 @@ impl BluetoothDevice {
         Ok(self.status()?.pcms)
     }
 
-    /// Powers on or off the local Bluetooth radio.
+    /// Powers on or off the local Bluetooth radio for a specific adapter.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if the D-Bus power property call fails.
+    ///
+    /// # Panics
+    /// Panics if the mock backend lock is poisoned.
+    pub fn set_powered_for_adapter(
+        &self,
+        target_adapter: Option<&str>,
+        powered: bool,
+    ) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.set_powered_for_adapter(target_adapter, powered),
+            Backend::Dbus(dbus) => {
+                dbus.set_adapter_property(target_adapter, |p| p.set_powered(powered))
+            }
+        }
+    }
+
+    /// Powers on or off the default local Bluetooth radio.
     ///
     /// # Errors
     /// Returns [`BtError`] if the power command fails.
     pub fn set_powered(&self, powered: bool) -> Result<(), BtError> {
+        self.set_powered_for_adapter(None, powered)
+    }
+
+    /// Enables or disables discoverable mode for a specific adapter.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if the discoverable property call fails.
+    ///
+    /// # Panics
+    /// Panics if the mock backend lock is poisoned.
+    pub fn set_discoverable_for_adapter(
+        &self,
+        target_adapter: Option<&str>,
+        discoverable: bool,
+    ) -> Result<(), BtError> {
         match &*self.backend {
-            Backend::Mock(mock) => {
-                mock.set_powered(powered);
-                Ok(())
-            }
-            Backend::System(inspector) => {
-                let val = if powered { "on" } else { "off" };
-                let out = inspector
-                    .runner
-                    .run("bluetoothctl", &["power", val])
-                    .map_err(BtError::io)?;
-                if out.exit_code != 0 {
-                    return Err(BtError::command_failed("bluetoothctl power", out.stderr));
-                }
-                Ok(())
+            Backend::Mock(mock) => mock.set_discoverable_for_adapter(target_adapter, discoverable),
+            Backend::Dbus(dbus) => {
+                dbus.set_adapter_property(target_adapter, |p| p.set_discoverable(discoverable))
             }
         }
     }
 
-    /// Enables or disables discoverable mode on the local Bluetooth radio.
+    /// Enables or disables discoverable mode on the default Bluetooth radio.
     ///
     /// # Errors
     /// Returns [`BtError`] if the discoverable command fails.
     pub fn set_discoverable(&self, discoverable: bool) -> Result<(), BtError> {
+        self.set_discoverable_for_adapter(None, discoverable)
+    }
+
+    /// Enables or disables pairable mode for a specific adapter.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if the pairable property call fails.
+    ///
+    /// # Panics
+    /// Panics if the mock backend lock is poisoned.
+    pub fn set_pairable_for_adapter(
+        &self,
+        target_adapter: Option<&str>,
+        pairable: bool,
+    ) -> Result<(), BtError> {
         match &*self.backend {
-            Backend::Mock(mock) => {
-                mock.set_discoverable(discoverable);
-                Ok(())
-            }
-            Backend::System(inspector) => {
-                let val = if discoverable { "on" } else { "off" };
-                let out = inspector
-                    .runner
-                    .run("bluetoothctl", &["discoverable", val])
-                    .map_err(BtError::io)?;
-                if out.exit_code != 0 {
-                    return Err(BtError::command_failed(
-                        "bluetoothctl discoverable",
-                        out.stderr,
-                    ));
-                }
-                Ok(())
+            Backend::Mock(mock) => mock.set_pairable_for_adapter(target_adapter, pairable),
+            Backend::Dbus(dbus) => {
+                dbus.set_adapter_property(target_adapter, |p| p.set_pairable(pairable))
             }
         }
     }
 
-    /// Enables or disables pairable mode on the local Bluetooth radio.
+    /// Enables or disables pairable mode on the default Bluetooth radio.
     ///
     /// # Errors
     /// Returns [`BtError`] if the pairable command fails.
     pub fn set_pairable(&self, pairable: bool) -> Result<(), BtError> {
-        match &*self.backend {
-            Backend::Mock(mock) => {
-                mock.set_pairable(pairable);
-                Ok(())
-            }
-            Backend::System(inspector) => {
-                let val = if pairable { "on" } else { "off" };
-                let out = inspector
-                    .runner
-                    .run("bluetoothctl", &["pairable", val])
-                    .map_err(BtError::io)?;
-                if out.exit_code != 0 {
-                    return Err(BtError::command_failed("bluetoothctl pairable", out.stderr));
-                }
-                Ok(())
-            }
-        }
+        self.set_pairable_for_adapter(None, pairable)
     }
 }
-
-const _: () = {
-    const fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<BluetoothDevice>();
-    assert_send_sync::<BluetoothDeviceMock>();
-    assert_send_sync::<BluetoothStatus>();
-    assert_send_sync::<BtAddress>();
-    assert_send_sync::<BtError>();
-};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct TestRunner {
-        responses: HashMap<(String, String), CommandOutput>,
-    }
-
-    impl TestRunner {
-        fn new() -> Self {
-            Self {
-                responses: HashMap::new(),
-            }
-        }
-
-        fn with_cmd(mut self, program: &str, args: &[&str], out: CommandOutput) -> Self {
-            self.responses
-                .insert((program.to_string(), args.join(" ")), out);
-            self
-        }
-    }
-
-    impl CommandRunner for TestRunner {
-        fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
-            let key = (program.to_string(), args.join(" "));
-            if let Some(out) = self.responses.get(&key) {
-                Ok(out.clone())
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("mock command not registered: {program} {args:?}"),
-                ))
-            }
-        }
-    }
 
     #[test]
     fn address_validation_and_parsing() {
@@ -1655,14 +1566,28 @@ mod tests {
             rssi: Some(-50),
             battery_percentage: Some(90),
             icon: Some("phone".into()),
-            uuids: vec!["0000110b-0000-1000-8000-00805f9b34fb".into()].into_boxed_slice(),
+            uuids: Box::default(),
         };
         assert_eq!(dev1.display_name(), "Custom Alias");
-        assert!(dev1.is_audio_capable());
 
         let dev2 = BtDevice {
             address: addr,
-            name: "Original".into(),
+            name: "Fallback Name".into(),
+            alias: "Unknown".into(),
+            connected: false,
+            paired: false,
+            trusted: false,
+            blocked: false,
+            rssi: None,
+            battery_percentage: None,
+            icon: None,
+            uuids: Box::default(),
+        };
+        assert_eq!(dev2.display_name(), "Fallback Name");
+
+        let dev3 = BtDevice {
+            address: addr,
+            name: "".into(),
             alias: "".into(),
             connected: false,
             paired: false,
@@ -1673,36 +1598,33 @@ mod tests {
             icon: None,
             uuids: Box::default(),
         };
-        assert_eq!(dev2.display_name(), "Original");
-        assert!(!dev2.is_audio_capable());
+        assert_eq!(dev3.display_name(), "Unknown Device");
     }
 
     #[test]
     fn bluealsa_pcm_stream_state_description() {
-        let addr = BtAddress::new([1, 2, 3, 4, 5, 6]);
-        let mut pcm = BlueAlsaPcm {
-            pcm_path: "/org/bluealsa/pcm0".into(),
-            device_address: addr,
-            resolved_name: "Phone".into(),
+        let pcm = BlueAlsaPcm {
+            pcm_path: "/org/bluealsa/hci0/dev_00_11_22_33_44_55/a2dpsnk/source".into(),
+            device_address: BtAddress::new([0, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            resolved_name: "Pixel 8".into(),
             transport: "A2DP-sink".into(),
             running: true,
             selected_codec: "AAC".into(),
-            available_codecs: Box::default(),
-            sampling_rate: 48_000,
+            available_codecs: vec!["SBC".into(), "AAC".into()].into_boxed_slice(),
+            sampling_rate: 44_100,
             channels: 2,
             format: "S16_LE".into(),
-            volume: None,
+            volume: Some("100%".into()),
             muted: false,
             delay: None,
         };
+        assert_eq!(pcm.stream_state_description(), "STREAMING (Active)");
+
+        let mut paused = pcm.clone();
+        paused.running = false;
         assert_eq!(
-            pcm.stream_state_description(),
-            "STREAMING (Active Audio Flow)"
-        );
-        pcm.running = false;
-        assert_eq!(
-            pcm.stream_state_description(),
-            "IDLE / PAUSED (Stream Established)"
+            paused.stream_state_description(),
+            "STANDBY / PAUSED (Connected)"
         );
     }
 
@@ -1712,508 +1634,142 @@ mod tests {
         assert_eq!(&*hw.chip, "Broadcom BCM43438 (Bluetooth 4.1 + BLE)");
         assert_eq!(&*hw.bus, "UART (PL011 / /dev/ttyAMA0)");
         assert_eq!(hw.baud_rate, 921_600);
+        assert_eq!(&*hw.firmware, "/lib/firmware/brcm/BCM43430A1.hcd");
+        assert_eq!(&*hw.driver, "hci_uart (bcm)");
         assert_eq!(&*hw.default_controller, "hci0");
     }
 
     #[test]
     fn bt_error_predicates_and_conversions() {
-        let err_cmd = BtError::command_failed("btctl", "failed to run");
-        assert!(err_cmd.is_command_failed());
-        assert_eq!(err_cmd.summary(), "command 'btctl' failed: failed to run");
-        assert!(err_cmd.to_string().contains("btctl"));
-
-        let err_tool = BtError::tool_not_found("bluealsa-cli");
-        assert!(err_tool.is_tool_not_found());
-
-        let err_adapter = BtError::adapter_not_found("hci0");
-        assert!(err_adapter.is_adapter_not_found());
-
-        let err_addr = BtError::invalid_address("invalid", "bad chars");
-        assert!(err_addr.is_invalid_address());
-
-        let err_io = BtError::io(io::Error::new(io::ErrorKind::PermissionDenied, "denied"));
-        assert!(err_io.is_io());
-        assert!(std::error::Error::source(&err_io).is_some());
-
-        let err_canc = BtError::cancelled("shutdown");
-        assert!(err_canc.is_cancelled());
-
-        let from_canc = BtError::from_cancelled("aborted");
-        assert!(from_canc.is_cancelled());
-
-        let from_io: BtError = io::Error::other("test io").into();
-        assert!(from_io.is_io());
-
-        let err_mock = BtError::mock_fault("fault injected");
-        assert!(err_mock.is_mock_fault());
-        assert!(
-            err_mock.backtrace().status() == std::backtrace::BacktraceStatus::Captured
-                || err_mock.backtrace().status() == std::backtrace::BacktraceStatus::Disabled
-                || err_mock.backtrace().status() == std::backtrace::BacktraceStatus::Unsupported
+        let dbus_err = BtError::dbus("connection refused");
+        assert!(dbus_err.is_dbus());
+        assert!(!dbus_err.is_adapter_not_found());
+        assert!(!dbus_err.is_invalid_address());
+        assert!(!dbus_err.is_cancelled());
+        assert!(!dbus_err.is_mock_fault());
+        assert_eq!(
+            dbus_err.summary(),
+            "D-Bus communication error: connection refused"
         );
+
+        let adapter_err = BtError::adapter_not_found("hci1");
+        assert!(adapter_err.is_adapter_not_found());
+        assert_eq!(
+            adapter_err.summary(),
+            "Bluetooth adapter 'hci1' not detected"
+        );
+
+        let inv_err = BtError::invalid_address("abc", "too short");
+        assert!(inv_err.is_invalid_address());
+        assert_eq!(
+            inv_err.summary(),
+            "invalid Bluetooth address 'abc': too short"
+        );
+
+        let cancel_err = BtError::cancelled("aborted");
+        assert!(cancel_err.is_cancelled());
+        assert_eq!(cancel_err.summary(), "task cancelled: aborted");
+
+        let mock_err = BtError::mock_fault("simulated error");
+        assert!(mock_err.is_mock_fault());
+        assert_eq!(mock_err.summary(), "injected mock fault: simulated error");
+
+        let from_join = BtError::from_cancelled("timeout");
+        assert!(from_join.is_cancelled());
+
+        let _bt = dbus_err.backtrace();
     }
 
     #[test]
     fn mock_device_operations_and_fault_injection() {
         let (device, mock) = BluetoothDevice::new_mocked();
-        let initial = device.status().unwrap();
-        assert!(initial.is_operational());
-        assert_eq!(initial.connected_count(), 1);
-        assert!(initial.is_streaming());
-        assert!(initial.active_pcm().is_some());
-        assert_eq!(initial.connected_devices().len(), 1);
-        assert_eq!(initial.paired_devices().len(), 1);
 
-        mock.set_powered(false);
-        let updated = device.status().unwrap();
-        assert!(!updated.is_operational());
+        // Initial happy path
+        let status = device.status().unwrap();
+        assert!(status.is_operational());
+        assert_eq!(status.connected_count(), 1);
+        assert_eq!(status.connected_devices().len(), 1);
+        assert_eq!(status.paired_devices().len(), 1);
+        assert!(status.is_streaming());
+        assert!(status.active_pcm().is_some());
 
-        mock.set_discoverable(true);
-        mock.set_pairable(false);
-        let adapter = device.adapter_info().unwrap().unwrap();
-        assert!(adapter.discoverable);
-        assert!(!adapter.pairable);
-
+        // Test clear devices and add device
         mock.clear_devices();
-        assert_eq!(device.connected_devices().unwrap().len(), 0);
+        assert_eq!(device.status().unwrap().connected_count(), 0);
 
+        let new_dev = BtDevice {
+            address: BtAddress::new([1, 2, 3, 4, 5, 6]),
+            name: "Headphones".into(),
+            alias: "WH-1000XM4".into(),
+            connected: true,
+            paired: true,
+            trusted: true,
+            blocked: false,
+            rssi: Some(-65),
+            battery_percentage: Some(60),
+            icon: Some("audio-headphones".into()),
+            uuids: Box::default(),
+        };
+        mock.add_device(new_dev.clone());
+        mock.add_device(new_dev); // updates existing
+        assert_eq!(device.status().unwrap().connected_count(), 1);
+
+        // Test PCMs
         mock.clear_pcms();
-        assert_eq!(device.audio_pcms().unwrap().len(), 0);
+        assert!(!device.status().unwrap().is_streaming());
+        assert!(device.status().unwrap().active_pcm().is_none());
 
-        mock.set_fault(Some("D-Bus connection lost".into()));
+        let new_pcm = BlueAlsaPcm {
+            pcm_path: "/org/bluealsa/hci0/dev_01_02_03_04_05_06/a2dpsnk/source".into(),
+            device_address: BtAddress::new([1, 2, 3, 4, 5, 6]),
+            resolved_name: "WH-1000XM4".into(),
+            transport: "A2DP-sink".into(),
+            running: true,
+            selected_codec: "LDAC".into(),
+            available_codecs: vec!["SBC".into(), "LDAC".into()].into_boxed_slice(),
+            sampling_rate: 96_000,
+            channels: 2,
+            format: "S32_LE".into(),
+            volume: Some("80".into()),
+            muted: false,
+            delay: None,
+        };
+        mock.add_pcm(new_pcm);
+        assert!(device.status().unwrap().is_streaming());
+
+        // Test adapter controls on mock
+        device.set_powered(false).unwrap();
+        device.set_powered_for_adapter(Some("hci0"), true).unwrap();
+        device
+            .set_powered_for_adapter(Some("hci99"), true)
+            .unwrap_err();
+
+        device.set_discoverable(true).unwrap();
+        device
+            .set_discoverable_for_adapter(Some("hci0"), false)
+            .unwrap();
+        device
+            .set_discoverable_for_adapter(Some("hci99"), false)
+            .unwrap_err();
+
+        device.set_pairable(false).unwrap();
+        device.set_pairable_for_adapter(Some("hci0"), true).unwrap();
+        device
+            .set_pairable_for_adapter(Some("hci99"), true)
+            .unwrap_err();
+
+        // Fault injection
+        mock.set_fault(Some("D-Bus daemon stopped".into()));
         let err = device.status().unwrap_err();
         assert!(err.is_mock_fault());
-        assert!(err.summary().contains("D-Bus connection lost"));
-
-        mock.set_fault(None);
-        device.status().unwrap();
-
-        device.set_powered(true).unwrap();
-        device.set_discoverable(false).unwrap();
-        device.set_pairable(true).unwrap();
+        assert!(err.to_string().contains("D-Bus daemon stopped"));
     }
 
     #[tokio::test]
     async fn async_methods_read_from_mock_device() {
-        let (device, mock) = BluetoothDevice::new_mocked();
+        let (device, _) = BluetoothDevice::new_mocked();
         let status = device.status_async().await.unwrap();
         assert!(status.is_operational());
-
-        mock.set_fault(Some("async fault".into()));
-        device.status_async().await.unwrap_err();
-    }
-
-    #[test]
-    fn system_inspector_parsers() {
-        let show_out = r"
-Controller DC:A6:32:11:22:33 (public)
-	Name: Test-Speaker
-	Alias: Custom-Alias
-	Class: 0x00240404
-	Powered: yes
-	PowerState: on
-	Discoverable: yes
-	Pairable: yes
-	Discovering: no
-	Modalias: usb:v1D6Bp0246d0537
-";
-        let adapter = SystemInspector::parse_adapter_output(show_out, Some("hci0")).unwrap();
-        assert_eq!(adapter.id.as_ref(), "hci0");
-        assert_eq!(adapter.name.as_ref(), "Test-Speaker");
-        assert_eq!(adapter.alias.as_ref(), "Custom-Alias");
-        assert!(adapter.powered);
-        assert!(adapter.discoverable);
-        assert!(adapter.pairable);
-        assert!(!adapter.discovering);
-        assert_eq!(adapter.class, Some(0x0024_0404));
-        assert_eq!(adapter.modalias.as_deref(), Some("usb:v1D6Bp0246d0537"));
-
-        let empty = SystemInspector::parse_adapter_output("", None);
-        assert!(empty.is_none());
-
-        let line = "Device AA:BB:CC:DD:EE:FF My Phone";
-        let (addr, name) = SystemInspector::parse_device_line(line).unwrap();
-        assert_eq!(addr.to_string(), "AA:BB:CC:DD:EE:FF");
-        assert_eq!(name, "My Phone");
-        assert!(SystemInspector::parse_device_line("Invalid").is_none());
-
-        let dev_info = r"
-Device AA:BB:CC:DD:EE:FF (public)
-	Name: Remote Phone
-	Alias: Favorite Phone
-	Connected: yes
-	Paired: yes
-	Trusted: yes
-	Blocked: no
-	RSSI: -45 dBm
-	Battery Percentage: 95%
-	Icon: phone
-	UUID: Audio Sink (0000110b-0000-1000-8000-00805f9b34fb)
-";
-        let dev = SystemInspector::parse_device_info(dev_info, addr, "Default", false);
-        assert_eq!(dev.name.as_ref(), "Remote Phone");
-        assert_eq!(dev.alias.as_ref(), "Favorite Phone");
-        assert!(dev.connected);
-        assert!(dev.paired);
-        assert!(dev.trusted);
-        assert!(!dev.blocked);
-        assert_eq!(dev.rssi, Some(-45));
-        assert_eq!(dev.battery_percentage, Some(95));
-        assert_eq!(dev.icon.as_deref(), Some("phone"));
-        assert_eq!(dev.uuids.len(), 1);
-
-        let pcm_path = "/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/a2dpsnk/source";
-        assert_eq!(
-            SystemInspector::extract_mac_from_pcm_path(pcm_path),
-            Some("AA:BB:CC:DD:EE:FF".to_string())
-        );
-        assert!(SystemInspector::extract_mac_from_pcm_path("/invalid/path").is_none());
-
-        let pcm_info = r"
-Device: /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF
-Sequence: 0
-Transport: A2DP-sink
-Mode: source
-Running: true
-Format: S16_LE
-Channels: 2
-Sampling: 48000
-Selected codec: AAC
-Available codecs: SBC, AAC, LDAC
-Delay: 2000
-Volume: L: 100 R: 100
-Muted: false
-";
-        let mut name_map = HashMap::new();
-        name_map.insert(addr, "Favorite Phone");
-        let pcm = SystemInspector::parse_pcm_info(pcm_info, pcm_path, &name_map).unwrap();
-        assert_eq!(pcm.device_address, addr);
-        assert_eq!(pcm.resolved_name.as_ref(), "Favorite Phone");
-        assert_eq!(pcm.transport.as_ref(), "A2DP-sink");
-        assert!(pcm.running);
-        assert_eq!(pcm.selected_codec.as_ref(), "AAC");
-        assert_eq!(pcm.sampling_rate, 48_000);
-        assert_eq!(pcm.channels, 2);
-        assert_eq!(pcm.format.as_ref(), "S16_LE");
-        assert_eq!(pcm.volume.as_deref(), Some("L: 100 R: 100"));
-        assert!(!pcm.muted);
-        assert_eq!(pcm.delay.as_deref(), Some("2000"));
-    }
-
-    #[expect(
-        clippy::too_many_lines,
-        reason = "comprehensive command output mocking and verification table"
-    )]
-    #[test]
-    fn system_inspector_with_runner_integration() {
-        let runner = TestRunner::new()
-            .with_cmd(
-                "systemctl",
-                &["is-active", "bluetooth"],
-                CommandOutput {
-                    stdout: "active".into(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                },
-            )
-            .with_cmd(
-                "systemctl",
-                &["is-active", "bluealsa"],
-                CommandOutput {
-                    stdout: "inactive".into(),
-                    stderr: String::new(),
-                    exit_code: 3,
-                },
-            )
-            .with_cmd(
-                "systemctl",
-                &["is-active", "bluealsa-aplay"],
-                CommandOutput {
-                    stdout: "failed".into(),
-                    stderr: String::new(),
-                    exit_code: 1,
-                },
-            )
-            .with_cmd(
-                "systemctl",
-                &["is-active", "bt-agent"],
-                CommandOutput {
-                    stdout: "could not be found".into(),
-                    stderr: "Unit bt-agent.service not-found".into(),
-                    exit_code: 4,
-                },
-            )
-            .with_cmd(
-                "bluetoothctl",
-                &["show"],
-                CommandOutput {
-                    stdout: "Controller DC:A6:32:11:22:33 (public)\nName: Pi-BT\nPowered: yes\nPairable: yes\nDiscoverable: no\n".into(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                },
-            )
-            .with_cmd(
-                "bluetoothctl",
-                &["devices", "Connected"],
-                CommandOutput {
-                    stdout: "Device AA:BB:CC:DD:EE:FF Phone 1\n".into(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                },
-            )
-            .with_cmd(
-                "bluetoothctl",
-                &["devices"],
-                CommandOutput {
-                    stdout: "Device AA:BB:CC:DD:EE:FF Phone 1\nDevice 11:22:33:44:55:66 Headset\n".into(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                },
-            )
-            .with_cmd(
-                "bluetoothctl",
-                &["info", "AA:BB:CC:DD:EE:FF"],
-                CommandOutput {
-                    stdout: "Device AA:BB:CC:DD:EE:FF\nName: Phone 1\nConnected: yes\nPaired: yes\n".into(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                },
-            )
-            .with_cmd(
-                "bluetoothctl",
-                &["info", "11:22:33:44:55:66"],
-                CommandOutput {
-                    stdout: "Device 11:22:33:44:55:66\nName: Headset\nConnected: no\nPaired: yes\n".into(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                },
-            )
-            .with_cmd(
-                "bluealsa-cli",
-                &["list-pcms"],
-                CommandOutput {
-                    stdout: "/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/a2dpsnk/source\n".into(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                },
-            )
-            .with_cmd(
-                "bluealsa-cli",
-                &["info", "/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/a2dpsnk/source"],
-                CommandOutput {
-                    stdout: "Transport: A2DP-sink\nRunning: true\nSelected codec: SBC\nSampling: 44100\nChannels: 2\nFormat: S16_LE\n".into(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                },
-            );
-
-        let device = BluetoothDevice::with_runner(Arc::new(runner));
-        let status = device.status().unwrap();
-        assert_eq!(status.services.bluetoothd, ServiceState::Active);
-        assert_eq!(status.services.bluealsa, ServiceState::Inactive);
-        assert_eq!(status.services.bluealsa_aplay, ServiceState::Failed);
-        assert_eq!(status.services.bt_agent, ServiceState::NotFound);
-
-        let adapter = status.adapter.as_ref().unwrap();
-        assert_eq!(adapter.name.as_ref(), "Pi-BT");
-        assert!(adapter.powered);
-
-        assert_eq!(status.devices.len(), 2);
-        assert_eq!(status.connected_count(), 1);
-
-        assert_eq!(status.pcms.len(), 1);
-        assert!(status.is_streaming());
-    }
-
-    #[test]
-    fn system_inspector_control_commands() {
-        let runner = TestRunner::new()
-            .with_cmd(
-                "bluetoothctl",
-                &["power", "on"],
-                CommandOutput {
-                    stdout: "Changing power on succeeded".into(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                },
-            )
-            .with_cmd(
-                "bluetoothctl",
-                &["discoverable", "off"],
-                CommandOutput {
-                    stdout: "Changing discoverable off succeeded".into(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                },
-            )
-            .with_cmd(
-                "bluetoothctl",
-                &["pairable", "on"],
-                CommandOutput {
-                    stdout: "Changing pairable on succeeded".into(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                },
-            );
-
-        let device = BluetoothDevice::with_runner(Arc::new(runner));
-        device.set_powered(true).unwrap();
-        device.set_discoverable(false).unwrap();
-        device.set_pairable(true).unwrap();
-
-        let failing_runner = TestRunner::new().with_cmd(
-            "bluetoothctl",
-            &["power", "off"],
-            CommandOutput {
-                stdout: String::new(),
-                stderr: "Failed to set power off: org.bluez.Error.Failed".into(),
-                exit_code: 1,
-            },
-        );
-        let failing_dev = BluetoothDevice::with_runner(Arc::new(failing_runner));
-        let err = failing_dev.set_powered(false).unwrap_err();
-        assert!(err.is_command_failed());
-
-        let disc_fail_runner = TestRunner::new().with_cmd(
-            "bluetoothctl",
-            &["discoverable", "on"],
-            CommandOutput {
-                stdout: String::new(),
-                stderr: "Failed: org.bluez.Error.Failed".into(),
-                exit_code: 1,
-            },
-        );
-        let disc_dev = BluetoothDevice::with_runner(Arc::new(disc_fail_runner));
-        assert!(
-            disc_dev
-                .set_discoverable(true)
-                .unwrap_err()
-                .is_command_failed()
-        );
-
-        let pair_fail_runner = TestRunner::new().with_cmd(
-            "bluetoothctl",
-            &["pairable", "off"],
-            CommandOutput {
-                stdout: String::new(),
-                stderr: "Failed: org.bluez.Error.Failed".into(),
-                exit_code: 1,
-            },
-        );
-        let pair_dev = BluetoothDevice::with_runner(Arc::new(pair_fail_runner));
-        assert!(
-            pair_dev
-                .set_pairable(false)
-                .unwrap_err()
-                .is_command_failed()
-        );
-    }
-
-    #[test]
-    fn bluetooth_device_convenience_methods_and_debug() {
-        let (device, mock) = BluetoothDevice::new_mocked();
-        assert!(format!("{device:?}").contains("BluetoothDevice::Mock"));
-
-        device.services_status().unwrap();
-        device.adapter_info().unwrap();
-        device.connected_devices().unwrap();
-        device.audio_pcms().unwrap();
-
-        let _ = BluetoothDevice::new();
-
-        let sys_dev = BluetoothDevice::with_runner(Arc::new(TestRunner::new()));
-        assert!(format!("{sys_dev:?}").contains("BluetoothDevice::System"));
-
-        let new_services = BluetoothServices {
-            bluetoothd: ServiceState::Active,
-            bluealsa: ServiceState::Active,
-            bluealsa_aplay: ServiceState::Inactive,
-            bt_agent: ServiceState::Inactive,
-        };
-        mock.set_services(new_services.clone());
-        assert_eq!(device.services_status().unwrap(), new_services);
-    }
-
-    #[test]
-    fn system_inspector_fallback_and_error_paths() {
-        let runner = TestRunner::new()
-            .with_cmd(
-                "systemctl",
-                &["is-active", "svc-deactivating"],
-                CommandOutput {
-                    stdout: "deactivating".into(),
-                    stderr: String::new(),
-                    exit_code: 3,
-                },
-            )
-            .with_cmd(
-                "systemctl",
-                &["is-active", "svc-failed"],
-                CommandOutput {
-                    stdout: "failed".into(),
-                    stderr: String::new(),
-                    exit_code: 1,
-                },
-            )
-            .with_cmd(
-                "bluetoothctl",
-                &["show", "hci99"],
-                CommandOutput {
-                    stdout: String::new(),
-                    stderr: "No controller available".into(),
-                    exit_code: 1,
-                },
-            );
-
-        let inspector = SystemInspector::new(Arc::new(runner));
-        assert_eq!(
-            inspector.check_service("svc-deactivating"),
-            ServiceState::Inactive
-        );
-        assert_eq!(inspector.check_service("svc-failed"), ServiceState::Failed);
-        assert_eq!(
-            inspector.check_service("svc-missing"),
-            ServiceState::NotFound
-        );
-
-        let err = inspector.parse_adapter(Some("hci99")).unwrap_err();
-        assert!(err.is_adapter_not_found());
-
-        let dev_err = inspector.get_devices().unwrap_err();
-        assert!(dev_err.is_tool_not_found());
-
-        let pcms = inspector.get_bluealsa_pcms(&[]);
-        assert!(pcms.is_empty());
-    }
-
-    #[test]
-    fn bluealsactl_fallback_resolution() {
-        let pcm_path = "/org/bluealsa/hci0/dev_22_33_44_55_66_77/a2dpsnk/source";
-        let runner = TestRunner::new()
-            .with_cmd(
-                "bluealsactl",
-                &["list-pcms"],
-                CommandOutput {
-                    stdout: format!("{pcm_path}\n"),
-                    stderr: String::new(),
-                    exit_code: 0,
-                },
-            )
-            .with_cmd(
-                "bluealsactl",
-                &["info", pcm_path],
-                CommandOutput {
-                    stdout: "Transport: A2DP-sink\nRunning: false\nCodec: AAC\nSampling: 44100\nChannels: 2\nFormat: S16_LE\nAvailable codecs: SBC, AAC\n".into(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                },
-            );
-
-        let inspector = SystemInspector::new(Arc::new(runner));
-        let pcms = inspector.get_bluealsa_pcms(&[]);
-        assert_eq!(pcms.len(), 1);
-        assert_eq!(pcms[0].selected_codec.as_ref(), "AAC");
-        assert_eq!(pcms[0].available_codecs.len(), 2);
     }
 
     #[tokio::test]
@@ -2248,34 +1804,277 @@ Muted: false
     }
 
     #[test]
-    fn os_command_runner_execution_and_timeout() {
-        let runner = OsCommandRunner::default();
-        let out = runner.run("sh", &["-c", "echo hello_os_runner"]).unwrap();
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, "hello_os_runner");
+    fn bluetooth_device_convenience_methods_and_debug() {
+        let (device, mock) = BluetoothDevice::new_mocked();
+        assert!(format!("{device:?}").contains("BluetoothDevice::Mock"));
 
-        let fast_timeout_runner = OsCommandRunner::with_timeout(Duration::from_millis(50));
-        let err = fast_timeout_runner
-            .run("sh", &["-c", "sleep 1"])
-            .unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        let _ = BluetoothDevice::new();
+        let zerr = BtError::from(zbus::Error::Address("test address".into()));
+        assert!(zerr.is_dbus());
+        assert_eq!(
+            zerr.summary(),
+            "D-Bus communication error: address error: test address"
+        );
 
-        let default_device = BluetoothDevice::default();
-        assert!(format!("{default_device:?}").contains("BluetoothDevice::System"));
+        device.services_status().unwrap();
+        device.adapter_info().unwrap();
+        device.connected_devices().unwrap();
+        device.audio_pcms().unwrap();
+
+        let new_services = BluetoothServices {
+            bluetoothd: ServiceState::Active,
+            bluealsa: ServiceState::Active,
+            bluealsa_aplay: ServiceState::Inactive,
+            bt_agent: ServiceState::Inactive,
+        };
+        mock.set_services(new_services.clone());
+        assert_eq!(device.services_status().unwrap(), new_services);
     }
 
     #[test]
-    fn parse_pcm_info_codec_variations() {
-        let path = "/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/a2dpsnk/source";
-        let name_map = HashMap::new();
+    fn parse_systemd_state_all_combinations() {
+        assert_eq!(
+            DbusClient::parse_systemd_state("active", "loaded"),
+            ServiceState::Active
+        );
+        assert_eq!(
+            DbusClient::parse_systemd_state("inactive", "not-found"),
+            ServiceState::NotFound
+        );
+        assert_eq!(
+            DbusClient::parse_systemd_state("not-found", "loaded"),
+            ServiceState::NotFound
+        );
+        assert_eq!(
+            DbusClient::parse_systemd_state("failed", "loaded"),
+            ServiceState::Failed
+        );
+        assert_eq!(
+            DbusClient::parse_systemd_state("inactive", "loaded"),
+            ServiceState::Inactive
+        );
+        assert_eq!(
+            DbusClient::parse_systemd_state("deactivating", "loaded"),
+            ServiceState::Inactive
+        );
+    }
 
-        let space_codecs_out = "Transport: A2DP-sink\nAvailable codecs: SBC AAC\n";
-        let pcm = SystemInspector::parse_pcm_info(space_codecs_out, path, &name_map).unwrap();
-        assert_eq!(pcm.available_codecs.as_ref(), &["SBC".into(), "AAC".into()]);
+    fn to_val<T: Into<Value<'static>>>(v: T) -> OwnedValue {
+        OwnedValue::try_from(v.into()).unwrap()
+    }
 
-        let unknown_codecs_out = "Transport: A2DP-sink\nAvailable codecs: [ Unknown ]\n";
-        let pcm_unknown =
-            SystemInspector::parse_pcm_info(unknown_codecs_out, path, &name_map).unwrap();
-        assert!(pcm_unknown.available_codecs.is_empty());
+    fn iface(name: &'static str) -> OwnedInterfaceName {
+        OwnedInterfaceName::try_from(name).unwrap()
+    }
+
+    #[test]
+    fn parse_bluez_objects_adapter_and_devices() {
+        let mut objects: ManagedObjects = HashMap::new();
+
+        // 1. Adapter object
+        let adapter_path = OwnedObjectPath::try_from("/org/bluez/hci0").unwrap();
+        let mut adapter_ifaces = HashMap::new();
+        let mut adapter_props = HashMap::new();
+        adapter_props.insert("Address".to_string(), to_val("DC:A6:32:11:22:33"));
+        adapter_props.insert("Name".to_string(), to_val("RaspberryPi"));
+        adapter_props.insert("Alias".to_string(), to_val("Speaker-Pi"));
+        adapter_props.insert("Powered".to_string(), to_val(true));
+        adapter_props.insert("Discoverable".to_string(), to_val(false));
+        adapter_props.insert("Pairable".to_string(), to_val(true));
+        adapter_props.insert("Discovering".to_string(), to_val(false));
+        adapter_props.insert("Class".to_string(), to_val(0x0024_0404_u32));
+        adapter_props.insert("Modalias".to_string(), to_val("usb:v1D6Bp0246"));
+        adapter_ifaces.insert(iface("org.bluez.Adapter1"), adapter_props);
+        objects.insert(adapter_path, adapter_ifaces);
+
+        // 2. Device object with Battery1
+        let dev_path = OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF").unwrap();
+        let mut dev_ifaces = HashMap::new();
+        let mut dev_props = HashMap::new();
+        dev_props.insert("Address".to_string(), to_val("AA:BB:CC:DD:EE:FF"));
+        dev_props.insert("Name".to_string(), to_val("Pixel 8"));
+        dev_props.insert("Alias".to_string(), to_val("Deepak's Phone"));
+        dev_props.insert("Connected".to_string(), to_val(true));
+        dev_props.insert("Paired".to_string(), to_val(true));
+        dev_props.insert("Trusted".to_string(), to_val(true));
+        dev_props.insert("Blocked".to_string(), to_val(false));
+        dev_props.insert("RSSI".to_string(), to_val(-48i16));
+        dev_props.insert("Icon".to_string(), to_val("phone"));
+        dev_props.insert(
+            "UUIDs".to_string(),
+            to_val(vec!["0000110b-0000-1000-8000-00805f9b34fb"]),
+        );
+        dev_ifaces.insert(iface("org.bluez.Device1"), dev_props);
+
+        let mut bat_props = HashMap::new();
+        bat_props.insert("Percentage".to_string(), to_val(88u8));
+        dev_ifaces.insert(iface("org.bluez.Battery1"), bat_props);
+        objects.insert(dev_path, dev_ifaces);
+
+        // 3. Invalid adapter without Address and with invalid Address
+        let bad_adapter_path = OwnedObjectPath::try_from("/org/bluez/bad").unwrap();
+        let mut bad_adapter_props = HashMap::new();
+        bad_adapter_props.insert("Name".to_string(), to_val("BadAdapter"));
+        let mut bad_adapter_ifaces = HashMap::new();
+        bad_adapter_ifaces.insert(iface("org.bluez.Adapter1"), bad_adapter_props);
+        objects.insert(bad_adapter_path, bad_adapter_ifaces);
+
+        let bad_addr_adapter_path = OwnedObjectPath::try_from("/org/bluez/bad2").unwrap();
+        let mut bad_addr_props = HashMap::new();
+        bad_addr_props.insert("Address".to_string(), to_val("not-an-address"));
+        let mut bad_addr_ifaces = HashMap::new();
+        bad_addr_ifaces.insert(iface("org.bluez.Adapter1"), bad_addr_props);
+        objects.insert(bad_addr_adapter_path, bad_addr_ifaces);
+
+        // 4. Invalid device without Address and with invalid Address
+        let bad_dev_path = OwnedObjectPath::try_from("/org/bluez/hci0/bad_dev").unwrap();
+        let mut bad_dev_props = HashMap::new();
+        bad_dev_props.insert("Name".to_string(), to_val("NoAddressDev"));
+        let mut bad_dev_ifaces = HashMap::new();
+        bad_dev_ifaces.insert(iface("org.bluez.Device1"), bad_dev_props);
+        objects.insert(bad_dev_path, bad_dev_ifaces);
+
+        let bad_addr_dev_path = OwnedObjectPath::try_from("/org/bluez/hci0/bad_dev2").unwrap();
+        let mut bad_addr_dev_props = HashMap::new();
+        bad_addr_dev_props.insert("Address".to_string(), to_val("bad-mac"));
+        let mut bad_addr_dev_ifaces = HashMap::new();
+        bad_addr_dev_ifaces.insert(iface("org.bluez.Device1"), bad_addr_dev_props);
+        objects.insert(bad_addr_dev_path, bad_addr_dev_ifaces);
+
+        // Parse with default adapter
+        let (adapter, devices) = DbusClient::parse_bluez_objects(&objects, None).unwrap();
+        let adapter = adapter.unwrap();
+        assert_eq!(adapter.id.as_ref(), "hci0");
+        assert_eq!(adapter.name.as_ref(), "RaspberryPi");
+        assert_eq!(adapter.alias.as_ref(), "Speaker-Pi");
+        assert!(adapter.powered);
+        assert_eq!(adapter.class, Some(0x0024_0404));
+
+        assert_eq!(devices.len(), 1);
+        let dev = &devices[0];
+        assert_eq!(dev.display_name(), "Deepak's Phone");
+        assert!(dev.connected);
+        assert_eq!(dev.battery_percentage, Some(88));
+        assert_eq!(dev.rssi, Some(-48));
+        assert_eq!(dev.uuids.len(), 1);
+
+        // Parse with target adapter
+        let (targeted, _) = DbusClient::parse_bluez_objects(&objects, Some("hci0")).unwrap();
+        assert_eq!(targeted.unwrap().id.as_ref(), "hci0");
+
+        // Parse with non-existent target adapter
+        let not_found = DbusClient::parse_bluez_objects(&objects, Some("hci99")).unwrap_err();
+        assert!(not_found.is_adapter_not_found());
+    }
+
+    #[test]
+    fn parse_bluealsa_objects_streams() {
+        let mut objects: ManagedObjects = HashMap::new();
+
+        let pcm_path =
+            OwnedObjectPath::try_from("/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/a2dpsnk/source")
+                .unwrap();
+        let mut pcm_ifaces = HashMap::new();
+        let mut pcm_props = HashMap::new();
+        pcm_props.insert(
+            "Device".to_string(),
+            to_val("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"),
+        );
+        pcm_props.insert("Transport".to_string(), to_val("A2DP-sink"));
+        pcm_props.insert("Running".to_string(), to_val(true));
+        pcm_props.insert("Codec".to_string(), to_val("AAC"));
+        pcm_props.insert("AvailableCodecs".to_string(), to_val(vec!["SBC", "AAC"]));
+        pcm_props.insert("Sampling".to_string(), to_val(48000u32));
+        pcm_props.insert("Channels".to_string(), to_val(2u8));
+        pcm_props.insert("Format".to_string(), to_val("S16_LE"));
+        pcm_props.insert("Volume".to_string(), to_val("L: 127 R: 127"));
+        pcm_props.insert("Mute".to_string(), to_val(false));
+        pcm_props.insert("Delay".to_string(), to_val(1500u32));
+
+        pcm_ifaces.insert(iface("org.bluealsa.PCM1"), pcm_props);
+        objects.insert(pcm_path, pcm_ifaces);
+
+        // Stream 2 with string codecs, Rate, u16 channels, u16 volume, Muted, string delay
+        let pcm_path2 =
+            OwnedObjectPath::try_from("/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/a2dpsnk/sink")
+                .unwrap();
+        let mut pcm_ifaces2 = HashMap::new();
+        let mut pcm_props2 = HashMap::new();
+        pcm_props2.insert(
+            "Device".to_string(),
+            to_val("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"),
+        );
+        pcm_props2.insert("Transport".to_string(), to_val("A2DP-sink"));
+        pcm_props2.insert("Running".to_string(), to_val(false));
+        pcm_props2.insert("Codec".to_string(), to_val("SBC"));
+        pcm_props2.insert("AvailableCodecs".to_string(), to_val("SBC, AAC, LDAC"));
+        pcm_props2.insert("Rate".to_string(), to_val(44100u32));
+        pcm_props2.insert("Channels".to_string(), to_val(2u16));
+        pcm_props2.insert("Volume".to_string(), to_val(100u16));
+        pcm_props2.insert("Muted".to_string(), to_val(true));
+        pcm_props2.insert("Delay".to_string(), to_val("1200"));
+        pcm_ifaces2.insert(iface("org.bluealsa.PCM1"), pcm_props2);
+        objects.insert(pcm_path2, pcm_ifaces2);
+
+        // Stream 3 with [ Unknown ] codecs and no Device (skipped)
+        let pcm_path3 =
+            OwnedObjectPath::try_from("/org/bluealsa/hci0/dev_unknown/sco/source").unwrap();
+        let mut pcm_ifaces3 = HashMap::new();
+        let mut pcm_props3 = HashMap::new();
+        pcm_props3.insert("Codecs".to_string(), to_val("[ Unknown ]"));
+        pcm_ifaces3.insert(iface("org.bluealsa.PCM1"), pcm_props3);
+        objects.insert(pcm_path3, pcm_ifaces3);
+
+        let devices = vec![BtDevice {
+            address: BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]),
+            name: "Phone".into(),
+            alias: "Pixel Phone".into(),
+            connected: true,
+            paired: true,
+            trusted: true,
+            blocked: false,
+            rssi: None,
+            battery_percentage: None,
+            icon: None,
+            uuids: Box::default(),
+        }];
+
+        let pcms = DbusClient::parse_bluealsa_objects(&objects, &devices);
+        assert_eq!(pcms.len(), 2);
+
+        // Sorted by pcm_path: .../sink comes before .../source
+        let sink_pcm = &pcms[0];
+        assert_eq!(sink_pcm.selected_codec.as_ref(), "SBC");
+        assert_eq!(
+            sink_pcm.available_codecs.as_ref(),
+            &["SBC".into(), "AAC".into(), "LDAC".into()]
+        );
+        assert_eq!(sink_pcm.sampling_rate, 44100);
+        assert_eq!(sink_pcm.channels, 2);
+        assert!(!sink_pcm.running);
+        assert!(sink_pcm.muted);
+        assert_eq!(sink_pcm.delay.as_deref(), Some("1200"));
+
+        let source_pcm = &pcms[1];
+        assert_eq!(source_pcm.resolved_name.as_ref(), "Pixel Phone");
+        assert_eq!(source_pcm.selected_codec.as_ref(), "AAC");
+        assert_eq!(
+            source_pcm.available_codecs.as_ref(),
+            &["SBC".into(), "AAC".into()]
+        );
+        assert_eq!(source_pcm.sampling_rate, 48000);
+        assert_eq!(source_pcm.channels, 2);
+        assert!(source_pcm.running);
+        assert_eq!(source_pcm.delay.as_deref(), Some("1500"));
+
+        // Extract MAC test
+        assert_eq!(
+            DbusClient::extract_mac_from_pcm_path(
+                "/org/bluealsa/hci0/dev_11_22_33_44_55_66/a2dpsnk/source"
+            )
+            .as_deref(),
+            Some("11:22:33:44:55:66")
+        );
+        assert_eq!(DbusClient::extract_mac_from_pcm_path("/invalid/path"), None);
     }
 }

@@ -488,13 +488,13 @@ fn handle_bt_iteration(
 
 fn apply_controls(device: &BluetoothDevice, opts: &CliOptions) -> Result<(), BtError> {
     if let Some(pwr) = opts.power {
-        device.set_powered(pwr)?;
+        device.set_powered_for_adapter(opts.adapter.as_deref(), pwr)?;
     }
     if let Some(disc) = opts.discoverable {
-        device.set_discoverable(disc)?;
+        device.set_discoverable_for_adapter(opts.adapter.as_deref(), disc)?;
     }
     if let Some(pair) = opts.pairable {
-        device.set_pairable(pair)?;
+        device.set_pairable_for_adapter(opts.adapter.as_deref(), pair)?;
     }
     Ok(())
 }
@@ -547,7 +547,18 @@ fn main() -> ExitCode {
         Err(code) => return code,
     };
 
-    let device = BluetoothDevice::new();
+    let device = match BluetoothDevice::new() {
+        Ok(d) => d,
+        Err(err) => {
+            if opts.common.format == OutputFormat::Json {
+                output_json_error(&format_timestamp(), &err);
+            } else {
+                eprintln!("Failed to initialize Bluetooth D-Bus subsystem client: {err}");
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+
     run_app(&device, &opts)
 }
 

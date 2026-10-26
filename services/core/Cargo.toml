@@ -42,7 +42,7 @@ tokio-tungstenite = { version = "=0.30.0", features = ["connect"] }
 futures-util = "=0.3.34"
 
 # D-Bus Engine for BlueZ 5 & BlueALSA
-zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio", "blocking-api"] }
 
 # Serialization & JSON-RPC
 serde = { version = "=1.0.229", features = ["derive"] }
