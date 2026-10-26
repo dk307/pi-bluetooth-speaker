@@ -524,6 +524,12 @@ impl From<zbus::Error> for BtError {
     }
 }
 
+impl From<zbus::fdo::Error> for BtError {
+    fn from(err: zbus::fdo::Error) -> Self {
+        Self::dbus(err.to_string())
+    }
+}
+
 impl FromJoinError for BtError {
     fn from_cancelled(message: impl Into<Box<str>>) -> Self {
         Self::cancelled(message)
@@ -694,18 +700,12 @@ impl DbusClient {
         &self,
         target_adapter: Option<&str>,
     ) -> Result<(Option<BtAdapter>, Box<[BtDevice]>), BtError> {
-        let proxy = match zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
             .destination("org.bluez")
             .and_then(|b| b.path("/"))
-            .and_then(zbus::blocking::proxy::Builder::build)
-        {
-            Ok(p) => p,
-            Err(e) => return Err(BtError::from(e)),
-        };
+            .and_then(zbus::blocking::proxy::Builder::build)?;
 
-        let Ok(objects) = proxy.get_managed_objects() else {
-            return Ok((None, Box::default()));
-        };
+        let objects = proxy.get_managed_objects()?;
 
         Self::parse_bluez_objects(&objects, target_adapter)
     }
@@ -962,7 +962,11 @@ impl DbusClient {
         let start = idx + dev_prefix.len();
         let candidate = &path[start..];
         let mac_part = candidate.split('/').next()?;
-        (mac_part.len() == 17).then(|| mac_part.replace('_', ":"))
+        if mac_part.len() != 17 {
+            return None;
+        }
+        let formatted = mac_part.replace('_', ":");
+        BtAddress::parse_str(&formatted).ok().map(|_| formatted)
     }
 }
 
@@ -1808,7 +1812,6 @@ mod tests {
         let (device, mock) = BluetoothDevice::new_mocked();
         assert!(format!("{device:?}").contains("BluetoothDevice::Mock"));
 
-        let _ = BluetoothDevice::new();
         let zerr = BtError::from(zbus::Error::Address("test address".into()));
         assert!(zerr.is_dbus());
         assert_eq!(
@@ -2066,14 +2069,26 @@ mod tests {
         assert_eq!(source_pcm.channels, 2);
         assert!(source_pcm.running);
         assert_eq!(source_pcm.delay.as_deref(), Some("1500"));
+    }
 
-        // Extract MAC test
+    #[test]
+    fn extract_mac_from_pcm_path_validation() {
         assert_eq!(
             DbusClient::extract_mac_from_pcm_path(
                 "/org/bluealsa/hci0/dev_11_22_33_44_55_66/a2dpsnk/source"
             )
             .as_deref(),
             Some("11:22:33:44:55:66")
+        );
+        assert_eq!(
+            DbusClient::extract_mac_from_pcm_path(
+                "/org/bluealsa/hci0/dev_GG_GG_GG_GG_GG_GG/a2dpsnk/source"
+            ),
+            None
+        );
+        assert_eq!(
+            DbusClient::extract_mac_from_pcm_path("/org/bluealsa/hci0/dev_11_22_33/a2dpsnk/source"),
+            None
         );
         assert_eq!(DbusClient::extract_mac_from_pcm_path("/invalid/path"), None);
     }
