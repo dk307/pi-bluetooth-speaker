@@ -649,32 +649,24 @@ impl DbusClient {
         Self { conn }
     }
 
-    pub(crate) fn check_services(&self) -> BluetoothServices {
-        let manager = SystemdManagerProxyBlocking::new(&self.conn).ok();
-        BluetoothServices {
-            bluetoothd: self.check_service(manager.as_ref(), "bluetooth.service"),
-            bluealsa: self.check_service(manager.as_ref(), "bluealsa.service"),
-            bluealsa_aplay: self.check_service(manager.as_ref(), "bluealsa-aplay.service"),
-            bt_agent: self.check_service(manager.as_ref(), "bt-agent.service"),
-        }
+    pub(crate) fn check_services(&self) -> Result<BluetoothServices, BtError> {
+        let manager = SystemdManagerProxyBlocking::new(&self.conn)?;
+        Ok(BluetoothServices {
+            bluetoothd: self.check_service(&manager, "bluetooth.service"),
+            bluealsa: self.check_service(&manager, "bluealsa.service"),
+            bluealsa_aplay: self.check_service(&manager, "bluealsa-aplay.service"),
+            bt_agent: self.check_service(&manager, "bt-agent.service"),
+        })
     }
 
-    fn check_service(
-        &self,
-        manager: Option<&SystemdManagerProxyBlocking<'_>>,
-        name: &str,
-    ) -> ServiceState {
-        let Some(mgr) = manager else {
-            return ServiceState::NotFound;
-        };
-        match mgr.get_unit(name) {
+    fn check_service(&self, manager: &SystemdManagerProxyBlocking<'_>, name: &str) -> ServiceState {
+        match manager.get_unit(name) {
             Ok(path) => {
-                let unit = match SystemdUnitProxyBlocking::builder(&self.conn).path(path) {
-                    Ok(builder) => match builder.build() {
-                        Ok(u) => u,
-                        Err(_) => return ServiceState::Inactive,
-                    },
-                    Err(_) => return ServiceState::Inactive,
+                let Ok(unit) = SystemdUnitProxyBlocking::builder(&self.conn)
+                    .path(path)
+                    .and_then(zbus::blocking::proxy::Builder::build)
+                else {
+                    return ServiceState::Inactive;
                 };
                 let active = unit.active_state().unwrap_or_default();
                 let load = unit.load_state().unwrap_or_default();
@@ -696,6 +688,47 @@ impl DbusClient {
         }
     }
 
+    fn parse_adapter_props(path: &str, props: &HashMap<String, OwnedValue>) -> Option<BtAdapter> {
+        let id = path.rsplit('/').next().unwrap_or(DEFAULT_BT_ADAPTER);
+        let address = BtAddress::parse_str(get_str(props, "Address")?).ok()?;
+        Some(BtAdapter {
+            id: id.into(),
+            address,
+            name: get_str(props, "Name").unwrap_or("Unknown").into(),
+            alias: get_str(props, "Alias").unwrap_or("Unknown").into(),
+            powered: get_bool(props, "Powered"),
+            discoverable: get_bool(props, "Discoverable"),
+            pairable: get_bool(props, "Pairable"),
+            discovering: get_bool(props, "Discovering"),
+            class: get_u32(props, "Class"),
+            modalias: get_str(props, "Modalias").map(Into::into),
+        })
+    }
+
+    fn parse_device_props(
+        props: &HashMap<String, OwnedValue>,
+        ifaces: &HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>,
+    ) -> Option<BtDevice> {
+        let addr_str = get_str(props, "Address")?;
+        let address = BtAddress::parse_str(addr_str).ok()?;
+        let battery_percentage = find_iface(ifaces, "org.bluez.Battery1")
+            .and_then(|b_props| get_u8(b_props, "Percentage"));
+
+        Some(BtDevice {
+            address,
+            name: get_str(props, "Name").unwrap_or(addr_str).into(),
+            alias: get_str(props, "Alias").unwrap_or(addr_str).into(),
+            connected: get_bool(props, "Connected"),
+            paired: get_bool(props, "Paired"),
+            trusted: get_bool(props, "Trusted"),
+            blocked: get_bool(props, "Blocked"),
+            rssi: get_i16(props, "RSSI"),
+            battery_percentage,
+            icon: get_str(props, "Icon").map(Into::into),
+            uuids: get_str_array(props, "UUIDs"),
+        })
+    }
+
     pub(crate) fn query_bluez(
         &self,
         target_adapter: Option<&str>,
@@ -714,61 +747,32 @@ impl DbusClient {
         objects: &ManagedObjects,
         target_adapter: Option<&str>,
     ) -> Result<(Option<BtAdapter>, Box<[BtDevice]>), BtError> {
-        let mut adapter = None;
+        let mut adapters = Vec::new();
         let mut devices = Vec::new();
 
         // 1. Search for Adapter1 interfaces
         for (path, ifaces) in objects {
             if let Some(props) = find_iface(ifaces, "org.bluez.Adapter1") {
-                let id = path
-                    .as_str()
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(DEFAULT_BT_ADAPTER);
-                let Some(addr_str) = get_str(props, "Address") else {
-                    continue;
-                };
-                let Ok(address) = BtAddress::parse_str(addr_str) else {
-                    continue;
-                };
-
-                let name = get_str(props, "Name").unwrap_or("Unknown").into();
-                let alias = get_str(props, "Alias").unwrap_or("Unknown").into();
-                let powered = get_bool(props, "Powered");
-                let discoverable = get_bool(props, "Discoverable");
-                let pairable = get_bool(props, "Pairable");
-                let discovering = get_bool(props, "Discovering");
-                let class = get_u32(props, "Class");
-                let modalias = get_str(props, "Modalias").map(Into::into);
-
-                let parsed_adapter = BtAdapter {
-                    id: id.into(),
-                    address,
-                    name,
-                    alias,
-                    powered,
-                    discoverable,
-                    pairable,
-                    discovering,
-                    class,
-                    modalias,
-                };
-
-                if let Some(target) = target_adapter {
-                    if parsed_adapter.id.as_ref() == target {
-                        adapter = Some(parsed_adapter);
-                    }
-                } else if adapter.is_none() || parsed_adapter.id.as_ref() == DEFAULT_BT_ADAPTER {
-                    adapter = Some(parsed_adapter);
+                if let Some(adapter) = Self::parse_adapter_props(path.as_str(), props) {
+                    adapters.push(adapter);
                 }
             }
         }
 
-        if let Some(target) = target_adapter {
-            if adapter.is_none() {
-                return Err(BtError::adapter_not_found(target));
+        adapters.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let adapter = if let Some(target) = target_adapter {
+            match adapters.into_iter().find(|a| a.id.as_ref() == target) {
+                Some(a) => Some(a),
+                None => return Err(BtError::adapter_not_found(target)),
             }
-        }
+        } else {
+            adapters
+                .iter()
+                .position(|a| a.id.as_ref() == DEFAULT_BT_ADAPTER)
+                .map(|idx| adapters.swap_remove(idx))
+                .or_else(|| adapters.into_iter().next())
+        };
 
         let selected_adapter_id = adapter.as_ref().map(|a| a.id.as_ref());
 
@@ -786,39 +790,9 @@ impl DbusClient {
                     }
                 }
 
-                let Some(addr_str) = get_str(props, "Address") else {
-                    continue;
-                };
-                let Ok(address) = BtAddress::parse_str(addr_str) else {
-                    continue;
-                };
-
-                let name = get_str(props, "Name").unwrap_or(addr_str).into();
-                let alias = get_str(props, "Alias").unwrap_or(addr_str).into();
-                let connected = get_bool(props, "Connected");
-                let paired = get_bool(props, "Paired");
-                let trusted = get_bool(props, "Trusted");
-                let blocked = get_bool(props, "Blocked");
-                let rssi = get_i16(props, "RSSI");
-                let icon = get_str(props, "Icon").map(Into::into);
-                let uuids = get_str_array(props, "UUIDs");
-
-                let battery_percentage = find_iface(ifaces, "org.bluez.Battery1")
-                    .and_then(|b_props| get_u8(b_props, "Percentage"));
-
-                devices.push(BtDevice {
-                    address,
-                    name,
-                    alias,
-                    connected,
-                    paired,
-                    trusted,
-                    blocked,
-                    rssi,
-                    battery_percentage,
-                    icon,
-                    uuids,
-                });
+                if let Some(device) = Self::parse_device_props(props, ifaces) {
+                    devices.push(device);
+                }
             }
         }
 
@@ -1317,7 +1291,7 @@ impl BluetoothDevice {
         match &*self.backend {
             Backend::Mock(mock) => mock.read_status_for_adapter(target_adapter),
             Backend::Dbus(dbus) => {
-                let services = dbus.check_services();
+                let services = dbus.check_services()?;
                 let (adapter, devices) = dbus.query_bluez(target_adapter)?;
                 let pcms = dbus.query_bluealsa(&devices);
                 Ok(BluetoothStatus {
