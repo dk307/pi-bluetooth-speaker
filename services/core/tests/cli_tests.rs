@@ -101,6 +101,11 @@ const HELP_CASES: &[(&str, &str, &str)] = &[
         "BH1750 Ambient Light Diagnostic Utility",
         "--address",
     ),
+    (
+        env!("CARGO_BIN_EXE_read_amp"),
+        "MA12070P Amplifier Diagnostic Utility",
+        "--address",
+    ),
 ];
 
 #[test]
@@ -201,6 +206,29 @@ fn read_light_cli_argument_validation() {
             (&["--address", "0x42"], "invalid BH1750 I2C address"),
             (&["--address", "0x77"], "invalid BH1750 I2C address"),
             (&["--address", "0x80"], "invalid BH1750 I2C address"),
+        ],
+    );
+}
+
+#[test]
+fn read_amp_cli_argument_validation() {
+    let bin_path = env!("CARGO_BIN_EXE_read_amp");
+    assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
+    assert_cli_rejects(
+        bin_path,
+        &[
+            (&["--address"], "missing value for --address"),
+            (&["--address", "+0x20"], "sign characters are not allowed"),
+            (&["--address", "-0x20"], "sign characters are not allowed"),
+            (&["--address", "0x+20"], "sign characters are not allowed"),
+            (&["--address", "0x-20"], "sign characters are not allowed"),
+            (&["--address", "0X+21"], "sign characters are not allowed"),
+            (&["--address", "not-hex"], "invalid hex address"),
+            (&["--address", "0xzz"], "invalid hex address"),
+            (&["--address", "0x00"], "invalid MA12070P I2C address"),
+            (&["--address", "0x19"], "invalid MA12070P I2C address"),
+            (&["--address", "0x24"], "invalid MA12070P I2C address"),
+            (&["--address", "0x5C"], "invalid MA12070P I2C address"),
         ],
     );
 }

@@ -35,18 +35,12 @@ jobs:
         include:
           - name: "Primary"
             model: "openrouter/@preset/code-review"
-            reasoning_effort: "high"
-            reasoning_max_tokens: "12000"
             optional: false
           - name: "Alt-1"
             model: "openrouter/@preset/code-review-alt-1"
-            reasoning_effort: "high"
-            reasoning_max_tokens: "12000"
             optional: false
           - name: "Free"
             model: "openrouter/@preset/code-review-free"
-            reasoning_effort: "high"
-            reasoning_max_tokens: "12000"
             optional: true
     steps:
       - name: Verify OpenRouter API Key
@@ -65,9 +59,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER__KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENROUTER__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
-          OPENROUTER__REASONING_MAX_TOKENS: ${{ matrix.reasoning_max_tokens }}
-          CONFIG__REASONING_EFFORT: ${{ matrix.reasoning_effort }}
           CONFIG__MODEL: ${{ matrix.model }}
           # PR_AGENT_CONFIG_BRANCH points to the PR branch for pull_request events
           # (where github.head_ref is available), allowing .pr_agent.toml changes to be

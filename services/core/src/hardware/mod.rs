@@ -48,8 +48,18 @@ macro_rules! impl_canonical_error_display {
 }
 pub(crate) use impl_canonical_error_display;
 
+pub(crate) mod amp;
 pub(crate) mod light;
 pub(crate) mod temp;
+
+#[doc(inline)]
+pub use amp::{
+    AmpDevice, AmpDeviceMock, AmpError, AmpErrorFlags, AmpFault, AmpHardwareInfo, AmpI2cAddress,
+    AmpStatus, AudioInConfig, AudioInputFormat, ClockRatio, DcuChannelStatus, DcuMonitor,
+    MA12070P_DEFAULT_I2C_ADDR, MA12070P_DEFAULT_I2C_BUS, MA12070P_MAX_I2C_ADDR,
+    MA12070P_MIN_I2C_ADDR, PowerModeProfile, REG_AUDIO_IN, REG_DCU_MON0, REG_DCU_MON1,
+    REG_EH_CLEAR, REG_ERROR_ACC, REG_ERROR_LIVE, REG_POWER_MODE,
+};
 
 #[doc(inline)]
 pub use light::{
