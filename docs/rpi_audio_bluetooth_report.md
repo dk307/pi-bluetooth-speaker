@@ -14,7 +14,7 @@ The target machine is a **Raspberry Pi 3 Model B** running **DietPi (Debian 13 T
 The system features:
 - **Audio Output:** High-resolution digital I2S connected directly to an **InnoMaker Merus MA12070P Class-D Amplifier HAT**, actively managed and crossover-filtered via **CamillaDSP**.
 - **Custom Device Tree Overlay:** Uses a custom-compiled `merus-amp-custom.dtbo` with stripped `pinctrl` properties to prevent pin-mux conflicts with other GPIO peripherals.
-- **Bluetooth Stack:** High-quality external **TP-Link UB500 (Bluetooth 5.0)** USB adapter with onboard Wi-Fi and Bluetooth disabled in hardware/device-tree. Custom-compiled **BlueALSA v5.0.0** optimized for the Raspberry Pi 3's **Cortex-A53** CPU with hardware **ARM NEON SIMD** vectorization (`-O2 -mcpu=cortex-a53+crc+simd -ftree-vectorize`), featuring high-resolution codec support (aptX-HD, aptX, AAC, LC3plus, Opus, MP3, SBC-XQ+) and `libsamplerate` adaptive resampling. (Proprietary/transmit-only Sony LDAC removed).
+- **Bluetooth Stack:** High-quality external **TP-Link UB500 (Bluetooth 5.0)** USB adapter with onboard Wi-Fi and Bluetooth disabled in hardware/device-tree. Custom-compiled **BlueALSA v5.0.0** optimized for the Raspberry Pi 3's **Cortex-A53** CPU with hardware **ARM NEON SIMD** vectorization (`-O2 -mcpu=cortex-a53+crc+simd -ftree-vectorize`), featuring high-resolution codec support (aptX-HD, aptX, AAC, LC3plus, MP3, SBC-XQ+) and `libsamplerate` adaptive resampling. (Proprietary/transmit-only Sony LDAC removed; experimental non-standard A2DP Opus excluded — see §7.1).
 - **Display & Touch:** **Freenove 4.3" MIPI DSI Display (800x480 IPS)** with native capacitive touch powered via the dedicated Raspberry Pi DSI ribbon cable (`raspberrypi-ts` / `/dev/fb0`).
 - **Physical Controls & Sensors:** 4-pin PWM cooling fan with tachometer feedback, 1-Wire DS18B20 digital temperature sensor, BH1750 ambient light sensor over I2C, and a TOP-UP EC12 rotary encoder with an integrated RGB LED and push button.
 - **Hardware Telemetry Suites:** Python utilities in `/root/amp/` for real-time monitoring of amplifier I2C registers, CamillaDSP DSP load and buffer stats, and Bluetooth connectivity.
@@ -116,7 +116,7 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 ```
 [Smartphone / Client (e.g. Pixel 10 Pro XL)]
                      │
-                     ▼ (Bluetooth A2DP: aptX-HD / LC3plus / AAC / Opus / SBC-XQ+)
+                     ▼ (Bluetooth A2DP: aptX-HD / LC3plus / AAC / SBC-XQ+)
        [TP-Link UB500 BT Controller]
                      │
                      ▼
@@ -157,7 +157,7 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 | :--- | :--- | :--- | :--- | :--- |
 | **`bluetooth.service`** | `active (running)` | System | `/usr/libexec/bluetooth/bluetoothd` | Official BlueZ daemon managing HCI controller and A2DP profile. |
 | **`bt-agent.service`** | `active (running)` | Custom | `/usr/local/bin/bt-auto-trust-agent.py` | Python D-Bus agent providing headless auto-pairing and auto-trusting of incoming Bluetooth connections without PIN prompts. |
-| **`bluealsa.service`** | `active (running)` | Custom/System | `/usr/bin/bluealsad -S -p a2dp-sink --all-codecs --sbc-quality=xq+` | BlueALSA v5.0.0 daemon acting as an A2DP sink supporting all high-resolution codecs and native AVRCP volume. |
+| **`bluealsa.service`** | `active (running)` | Custom/System | `/usr/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+` | BlueALSA v5.0.0 daemon acting as an A2DP sink supporting all high-resolution codecs except Opus, with native AVRCP volume. |
 | **`bluealsa-aplay.service`**| `active (running)` | Custom/System | `/usr/bin/bluealsa-aplay -S -D default --mixer-control="A.Mstr Vol"` | Pipes incoming decoded audio stream from BlueALSA to ALSA `default` (`dsp_dmix` -> `Loopback,0,0` -> CamillaDSP) with hardware volume auto-sync to the Merus MA12070P chip. |
 | **`camilladsp.service`** | `active (running)` | Custom | `/usr/local/bin/camilladsp -p 1234 -o /var/log/camilladsp/camilladsp.log /etc/camilladsp/crossover.yml` | CamillaDSP v4.1.3 crossover and filter engine with WebSocket control API on port 1234. |
 
@@ -260,8 +260,9 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 - **Version:** BlueALSA v5.0.0 (`/usr/bin/bluealsad`)
 - **Command Line:**
   ```bash
-  /usr/bin/bluealsad -S -p a2dp-sink --all-codecs --sbc-quality=xq+
+  /usr/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+
   ```
+- **Opus Exclusion (mandatory):** The non-standard A2DP Opus codec (Google vendor ID `0x00E0`, codec ID `0x0001`) MUST be excluded with `-c-opus`. Pixel/Android phones prefer Opus when it is advertised, but their A2DP stack wedges during Opus negotiation (endless SetConfiguration → START → abort probe loop alternating with aptX-HD, zero media packets transmitted, no audio output). With Opus absent from the endpoint list, clients fall through to aptX-HD and stream stably. Do not re-enable Opus.
 
 ### 7.2. BlueALSA Playback Forwarder (`bluealsa-aplay.service`)
 - **File:** `/etc/systemd/system/bluealsa-aplay.service`
@@ -518,7 +519,7 @@ Custom build targeting the Raspberry Pi 3's ARM Cortex-A53 CPU with hardware ARM
 apt update && apt install -y \
   cmake git build-essential autoconf automake libtool pkg-config \
   libasound2-dev libbluetooth-dev libglib2.0-dev libsbc-dev libdbus-1-dev \
-  libfreeaptx-dev libfdk-aac-dev libopus-dev libmp3lame-dev libmpg123-dev \
+  libfreeaptx-dev libfdk-aac-dev libmp3lame-dev libmpg123-dev \
   libspandsp-dev liblc3-dev libsamplerate0-dev systemd-dev
 
 # 2. Build and install Fraunhofer / ETSI LC3plus library (Hi-Res Audio Wireless with NEON)
@@ -561,7 +562,7 @@ CFLAGS="-O2 -mcpu=cortex-a53+crc+simd -ftree-vectorize" ../configure \
   --disable-ldac \
   --enable-lc3plus \
   --enable-faststream \
-  --enable-opus \
+  --disable-opus \
   --enable-mp3lame \
   --enable-mpg123 \
   --enable-aptx \
@@ -596,7 +597,7 @@ Requires=bluetooth.service
 Type=simple
 User=root
 StateDirectory=bluealsa
-ExecStart=/usr/bin/bluealsad -S -p a2dp-sink --all-codecs --sbc-quality=xq+
+ExecStart=/usr/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+
 Restart=always
 RestartSec=2
 
