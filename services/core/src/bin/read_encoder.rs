@@ -24,6 +24,13 @@ use speaker_core::hardware::{
 /// cumulative counts are observed and reported.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// Dwell time each color is held during the `--verify-leds` channel sweep.
+///
+/// Without a dwell the entire eight-color sweep completes in microseconds and a
+/// human observer cannot visually confirm any channel; the pause makes each
+/// color observable before the sweep advances to the next one.
+const LED_SWEEP_DWELL: Duration = Duration::from_millis(300);
+
 /// Command-line configuration parameters.
 #[derive(Debug, Clone, Copy)]
 struct CliOptions {
@@ -255,7 +262,11 @@ fn handle_encoder_iteration(
     }
 }
 
-fn run_led_sweep(device: &EncoderDevice, format: OutputFormat) -> Result<(), EncoderError> {
+fn run_led_sweep(
+    device: &EncoderDevice,
+    format: OutputFormat,
+    dwell: Duration,
+) -> Result<(), EncoderError> {
     for color in [
         RgbColor::RED,
         RgbColor::GREEN,
@@ -278,6 +289,7 @@ fn run_led_sweep(device: &EncoderDevice, format: OutputFormat) -> Result<(), Enc
             ),
             OutputFormat::Human => println!("LED: {color}"),
         }
+        std::thread::sleep(dwell);
     }
     Ok(())
 }
@@ -346,7 +358,7 @@ fn main() -> ExitCode {
         if opts.common.format == OutputFormat::Human {
             println!("RGB indicator channel sweep (common anode, active-LOW):\n");
         }
-        return match run_led_sweep(&device, opts.common.format) {
+        return match run_led_sweep(&device, opts.common.format, LED_SWEEP_DWELL) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 if opts.common.format == OutputFormat::Json {
@@ -479,10 +491,66 @@ mod tests {
     #[test]
     fn led_sweep_runs_on_mock() {
         let (device, mock) = EncoderDevice::new_mocked();
-        run_led_sweep(&device, OutputFormat::Human).unwrap();
+        run_led_sweep(&device, OutputFormat::Human, Duration::ZERO).unwrap();
         assert_eq!(mock.led_color(), RgbColor::OFF);
 
         let (device, _mock) = EncoderDevice::new_mocked();
-        run_led_sweep(&device, OutputFormat::Json).unwrap();
+        run_led_sweep(&device, OutputFormat::Json, Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn led_sweep_fault_propagates_before_trailing_colors() {
+        let (device, mock) = EncoderDevice::new_mocked();
+        mock.set_fault(Some("GPIO simulated bus fault".into()));
+        let err = run_led_sweep(&device, OutputFormat::Human, Duration::ZERO).unwrap_err();
+        assert!(err.is_mock_fault());
+        assert_eq!(mock.led_color(), RgbColor::OFF);
+    }
+
+    #[test]
+    fn rotation_and_switch_events_render_in_human_and_json() {
+        let (device, mock) = EncoderDevice::new_mocked();
+        let opts = CliOptions {
+            common: CommonCliOptions {
+                max_count: None,
+                interval: Duration::from_millis(1),
+                verbose: false,
+                format: OutputFormat::Human,
+            },
+            verify_leds: false,
+        };
+        let mut stats = EncoderStats::default();
+
+        mock.simulate_rotation(RotationDirection::Clockwise, 2);
+        mock.simulate_rotation(RotationDirection::CounterClockwise, 1);
+        mock.set_switch_pressed(true);
+        handle_encoder_iteration(&device, &opts, "12:00:00", &mut stats);
+        // Clockwise wins the diff when both counters advanced in one sample.
+        assert_eq!(stats.cw_events, 2);
+        assert_eq!(stats.ccw_events, 1);
+
+        mock.simulate_rotation(RotationDirection::CounterClockwise, 1);
+        handle_encoder_iteration(&device, &opts, "12:00:01", &mut stats);
+        assert_eq!(stats.ccw_events, 2);
+
+        mock.set_switch_pressed(false);
+        handle_encoder_iteration(&device, &opts, "12:00:02", &mut stats);
+        assert_eq!(stats.release_events, 1);
+
+        // Quiet sample: no new events, no released switch, no event suffix.
+        handle_encoder_iteration(&device, &opts, "12:00:03", &mut stats);
+        assert_eq!(stats.samples.successful_reads(), 4);
+
+        let json_opts = CliOptions {
+            common: CommonCliOptions {
+                max_count: None,
+                interval: Duration::from_millis(1),
+                verbose: false,
+                format: OutputFormat::Json,
+            },
+            verify_leds: false,
+        };
+        handle_encoder_iteration(&device, &json_opts, "12:00:04", &mut stats);
+        assert_eq!(stats.samples.successful_reads(), 5);
     }
 }
