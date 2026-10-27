@@ -814,11 +814,12 @@ impl HardwareDevice {
             .get(ENCODER_PUSH_SW_BCM_GPIO_PIN)?
             .into_input_pulldown();
 
-        // Seed the initial switch level through the transition counter so a
-        // switch held at initialization records a matching press_count instead
-        // of leaving the cumulative press/release totals offset by one.
-        apply_switch_level(&shared, push_switch.is_high());
-
+        // Register the interrupt BEFORE seeding: rppal only reports edges
+        // that occur after registration, so seeding first would silently
+        // drop any press actuated inside the registration window (the
+        // release edge would dedupe against the stale seeded level).
+        // apply_switch_level dedupes, so a callback event that lands before
+        // the seed makes the seed a harmless no-op.
         let switch_shared = Arc::clone(&shared);
         push_switch.set_async_interrupt(
             Trigger::Both,
@@ -827,6 +828,11 @@ impl HardwareDevice {
                 apply_switch_level(&switch_shared, matches!(event.trigger, Trigger::RisingEdge));
             },
         )?;
+
+        // Seed the initial switch level through the transition counter so a
+        // switch held at initialization records a matching press_count instead
+        // of leaving the cumulative press/release totals offset by one.
+        apply_switch_level(&shared, push_switch.is_high());
 
         Ok(Self {
             shared,
