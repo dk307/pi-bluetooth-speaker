@@ -111,6 +111,11 @@ const HELP_CASES: &[(&str, &str, &str)] = &[
         "Bluetooth & BlueALSA Diagnostic Utility",
         "--adapter",
     ),
+    (
+        env!("CARGO_BIN_EXE_read_encoder"),
+        "EC12 Rotary Encoder Diagnostic Utility",
+        "--verify-leds",
+    ),
 ];
 
 #[test]
@@ -273,4 +278,10 @@ fn read_bt_cli_argument_validation() {
             (&["--pairable", "invalid"], "expected 'on' or 'off'"),
         ],
     );
+}
+
+#[test]
+fn read_encoder_cli_argument_validation() {
+    let bin_path = env!("CARGO_BIN_EXE_read_encoder");
+    assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
 }

@@ -31,6 +31,7 @@ Before designing types, writing modules, implementing error handling, or writing
    * Never implement raw register/byte-level hardware protocols from scratch without evaluating existing solutions:
      1. **Linux Kernel Subsystems First:** Check if Linux has a kernel driver (e.g., Industrial I/O `IIO` for ambient light/IMUs, `hwmon` for thermals, ALSA for audio DACs, `w1-gpio`/`w1_therm` for 1-Wire). Consuming sysfs/devfs is preferred over bit-banging raw bus transactions in user space.
      2. **Crates.io & `embedded-hal` Drivers Second:** If user-space I2C/SPI is required (via `rppal`), search `crates.io` for existing drivers.
+   * **Crates.io Search Is Mandatory (Pre-Implementation Gate):** Before writing ANY driver, state machine, protocol parser, decoder, or debouncer, run concrete `cargo search` queries covering the functionality (e.g., "quadrature", "debounce", "rgb led") and read the vendored source of top candidates in `~/.cargo/registry/src/`. Hand-rolling logic a published crate already implements is a process violation even if trivially correct; document rejection reasons (license, maintenance, hardware mismatch) before hand-rolling any remainder.
    * **Interactive User Decision Mandate:**
      - When multiple options exist, research each (maintenance, license, dependencies, `embedded-hal` compatibility, async support) and present a structured trade-off comparison to the user to choose.
      - When a single option exists, explicitly inform and prompt the user before adding a new crate to `Cargo.toml`.

@@ -50,6 +50,7 @@ pub(crate) use impl_canonical_error_display;
 
 pub(crate) mod amp;
 pub(crate) mod bluetooth;
+pub(crate) mod encoder;
 pub(crate) mod light;
 pub(crate) mod temp;
 
@@ -74,6 +75,14 @@ pub use light::{
     BH1750_ACCURACY_FACTOR, BH1750_ALT_I2C_ADDR, BH1750_DEFAULT_I2C_ADDR, BH1750_DEFAULT_I2C_BUS,
     I2cAddress, I2cHardwareInfo, Illuminance, LightDiagnostics, LightError, LightSensor,
     LightSensorMock,
+};
+
+#[doc(inline)]
+pub use encoder::{
+    ENCODER_LED_BLUE_BCM_GPIO_PIN, ENCODER_LED_GREEN_BCM_GPIO_PIN, ENCODER_LED_RED_BCM_GPIO_PIN,
+    ENCODER_PHASE_A_BCM_GPIO_PIN, ENCODER_PHASE_B_BCM_GPIO_PIN, ENCODER_PUSH_SW_BCM_GPIO_PIN,
+    EncoderDevice, EncoderDeviceMock, EncoderError, EncoderHardwareInfo, EncoderStatus, RgbColor,
+    RotationDirection,
 };
 
 #[doc(inline)]
