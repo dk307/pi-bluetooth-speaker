@@ -49,7 +49,7 @@ fn print_usage(bin_name: &str) {
     println!("Options:");
     println!("  -1, --once               Sample once and exit");
     println!("  -n, --count <COUNT>      Sample COUNT times and exit");
-    println!("  -i, --interval <SECS>    Polling interval in seconds (default: 0.1)");
+    println!("  -i, --interval <SECS>    Polling interval in seconds (default: 0.01)");
     println!("  -l, --verify-leds        Run the RGB channel color sweep and exit");
     println!(
         "  -v, --verbose            Display extended hardware diagnostics (human format only)"
@@ -164,8 +164,8 @@ fn print_session_summary(stats: &EncoderStats) {
             s.error_rate_percent()
         );
     }
-    println!("CW detents   : {}", stats.cw_events);
-    println!("CCW detents  : {}", stats.ccw_events);
+    println!("CW transitions  : {}", stats.cw_events);
+    println!("CCW transitions : {}", stats.ccw_events);
     println!("Switch press : {}", stats.press_events);
     println!("Switch release: {}", stats.release_events);
 }
