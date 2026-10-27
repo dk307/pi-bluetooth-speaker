@@ -15,7 +15,7 @@ Repository: [https://github.com/dk307/pi-bluetooth-speaker](https://github.com/d
 
 ```text
 [Phone / Bluetooth Client]
-         │ (A2DP: aptX-HD / AAC / Opus / SBC-XQ)
+         │ (A2DP: aptX-HD / AAC / SBC-XQ)
          ▼
   [TP-Link UB500 USB BT Adapter]
          │
