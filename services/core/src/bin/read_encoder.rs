@@ -17,9 +17,12 @@ use speaker_core::hardware::{
 
 /// Default polling interval between encoder state samples.
 ///
-/// Set to 100 ms so detent transitions between detents (typically > 20 ms apart)
-/// are never missed while keeping idle CPU usage negligible.
-const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Set to 10 ms to closely match the baseline's continuous polling cadence (~2 ms
+/// inter-transition sleeps). The baseline decode table only counts transitions
+/// originating from rest states 00/11, so a fast flick can skip intermediate states
+/// between polls and drop detents; use shorter intervals or interrupt-driven decoding
+/// for high-rate rotation capture.
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Command-line configuration parameters.
 #[derive(Debug, Clone, Copy)]
@@ -254,7 +257,7 @@ fn handle_encoder_iteration(
     }
 }
 
-fn run_led_sweep(device: &EncoderDevice) -> Result<(), EncoderError> {
+fn run_led_sweep(device: &EncoderDevice, format: OutputFormat) -> Result<(), EncoderError> {
     for color in [
         RgbColor::RED,
         RgbColor::GREEN,
@@ -266,7 +269,17 @@ fn run_led_sweep(device: &EncoderDevice) -> Result<(), EncoderError> {
         RgbColor::OFF,
     ] {
         device.set_leds(color)?;
-        println!("LED: {color}");
+        match format {
+            OutputFormat::Json => println!(
+                "{}",
+                serde_json::json!({
+                    "timestamp": format_timestamp(),
+                    "event": "led_sweep",
+                    "color": color.to_string(),
+                })
+            ),
+            OutputFormat::Human => println!("LED: {color}"),
+        }
     }
     Ok(())
 }
@@ -335,10 +348,14 @@ fn main() -> ExitCode {
         if opts.common.format == OutputFormat::Human {
             println!("RGB indicator channel sweep (common anode, active-LOW):\n");
         }
-        return match run_led_sweep(&device) {
+        return match run_led_sweep(&device, opts.common.format) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
-                eprintln!("LED sweep failed: {err}");
+                if opts.common.format == OutputFormat::Json {
+                    output_json_error(&format_timestamp(), &err);
+                } else {
+                    eprintln!("LED sweep failed: {err}");
+                }
                 ExitCode::FAILURE
             }
         };
@@ -466,7 +483,10 @@ mod tests {
     #[test]
     fn led_sweep_runs_on_mock() {
         let (device, mock) = EncoderDevice::new_mocked();
-        run_led_sweep(&device).unwrap();
+        run_led_sweep(&device, OutputFormat::Human).unwrap();
         assert_eq!(mock.led_color(), RgbColor::OFF);
+
+        let (device, _mock) = EncoderDevice::new_mocked();
+        run_led_sweep(&device, OutputFormat::Json).unwrap();
     }
 }
