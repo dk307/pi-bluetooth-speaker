@@ -314,19 +314,19 @@ impl NumericStats {
         self.total_reads - self.successful_reads
     }
 
-    /// Returns the minimum observed sample value, if any read succeeded.
+    /// Returns the minimum observed sample value, if any numeric sample was recorded.
     #[must_use]
     pub const fn min(&self) -> Option<f32> {
         self.min
     }
 
-    /// Returns the maximum observed sample value, if any read succeeded.
+    /// Returns the maximum observed sample value, if any numeric sample was recorded.
     #[must_use]
     pub const fn max(&self) -> Option<f32> {
         self.max
     }
 
-    /// Returns the arithmetic mean of all successful samples, if any read succeeded.
+    /// Returns the arithmetic mean of all numeric samples, if any sample was recorded.
     #[must_use]
     #[expect(
         clippy::cast_precision_loss,
@@ -336,7 +336,7 @@ impl NumericStats {
         (self.numeric_samples > 0).then(|| self.sum / self.numeric_samples as f64)
     }
 
-    /// Returns the arithmetic mean of all successful samples as `f32`, if any read succeeded.
+    /// Returns the arithmetic mean of all numeric samples as `f32`, if any sample was recorded.
     #[must_use]
     #[expect(
         clippy::cast_possible_truncation,
@@ -492,20 +492,26 @@ mod tests {
     fn parse_count_and_interval_validate_bounds() {
         assert_eq!(parse_count_arg(Some("5".into())).unwrap(), 5);
         assert!(parse_count_arg(None).unwrap_err().contains("missing value"));
-        assert!(parse_count_arg(Some("0".into()))
-            .unwrap_err()
-            .contains("at least 1"));
-        assert!(parse_count_arg(Some("abc".into()))
-            .unwrap_err()
-            .contains("invalid count"));
+        assert!(
+            parse_count_arg(Some("0".into()))
+                .unwrap_err()
+                .contains("at least 1")
+        );
+        assert!(
+            parse_count_arg(Some("abc".into()))
+                .unwrap_err()
+                .contains("invalid count")
+        );
 
         assert_eq!(
             parse_interval_arg(Some("0.5".into())).unwrap(),
             Duration::from_millis(500)
         );
-        assert!(parse_interval_arg(None)
-            .unwrap_err()
-            .contains("missing value"));
+        assert!(
+            parse_interval_arg(None)
+                .unwrap_err()
+                .contains("missing value")
+        );
         for bad in ["0", "-1.0", "nan", "inf", "1e400", "abc"] {
             assert!(
                 parse_interval_arg(Some(bad.into())).is_err(),
@@ -571,9 +577,11 @@ mod tests {
 
         let mut args = ["val".to_string()].into_iter();
         assert_eq!(next_arg_value(&mut args, "--flag").unwrap(), "val");
-        assert!(next_arg_value(&mut args, "--flag")
-            .unwrap_err()
-            .contains("missing value for --flag"));
+        assert!(
+            next_arg_value(&mut args, "--flag")
+                .unwrap_err()
+                .contains("missing value for --flag")
+        );
 
         assert_eq!(
             resolve_cli_opts(Ok(Some(42)), "bin", noop_usage).unwrap(),
