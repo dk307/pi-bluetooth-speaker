@@ -2,7 +2,9 @@
 //!
 //! Provides CLI diagnostics for the quadrature encoder subsystem on the Raspberry
 //! Pi 3 appliance. Displays hardware GPIO pin mappings, verifies the RGB indicator
-//! channels, and continuously reports live rotation, switch, and LED state.
+//! channels, and continuously reports live rotation, switch, and LED state. Rotation
+//! decoding is interrupt-driven (once per detent) and switch edges are debounced,
+//! so polls only observe already-accumulated counters.
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -17,11 +19,9 @@ use speaker_core::hardware::{
 
 /// Default polling interval between encoder state samples.
 ///
-/// Set to 10 ms to closely match the baseline's continuous polling cadence (~2 ms
-/// inter-transition sleeps). The baseline decode table only counts transitions
-/// originating from rest states 00/11, so a fast flick can skip intermediate states
-/// between polls and drop detents; use shorter intervals or interrupt-driven decoding
-/// for high-rate rotation capture.
+/// Rotation and switch counters are maintained by dedicated interrupt threads, so
+/// polls never miss transitions; the 10 ms interval only governs how quickly new
+/// cumulative counts are observed and reported.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Command-line configuration parameters.
@@ -173,8 +173,6 @@ fn print_session_summary(stats: &EncoderStats) {
 fn output_json_status(timestamp: &str, status: &EncoderStatus) {
     let obj = serde_json::json!({
         "timestamp": timestamp,
-        "phase_a": status.phase_a,
-        "phase_b": status.phase_b,
         "switch_pressed": status.switch_pressed,
         "cw_count": status.cw_count,
         "ccw_count": status.ccw_count,
@@ -373,8 +371,6 @@ mod tests {
         let mut stats = EncoderStats::default();
 
         let baseline = EncoderStatus {
-            phase_a: true,
-            phase_b: true,
             switch_pressed: false,
             cw_count: 0,
             ccw_count: 0,

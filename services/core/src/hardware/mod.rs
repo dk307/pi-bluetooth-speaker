@@ -82,7 +82,7 @@ pub use encoder::{
     ENCODER_LED_BLUE_BCM_GPIO_PIN, ENCODER_LED_GREEN_BCM_GPIO_PIN, ENCODER_LED_RED_BCM_GPIO_PIN,
     ENCODER_PHASE_A_BCM_GPIO_PIN, ENCODER_PHASE_B_BCM_GPIO_PIN, ENCODER_PUSH_SW_BCM_GPIO_PIN,
     EncoderDevice, EncoderDeviceMock, EncoderError, EncoderHardwareInfo, EncoderStatus, RgbColor,
-    RotationDirection, quadrature_direction,
+    RotationDirection,
 };
 
 #[doc(inline)]

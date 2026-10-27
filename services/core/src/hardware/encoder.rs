@@ -1,4 +1,4 @@
-//! TOP-UP EC12 quadrature rotary encoder driver with typed domain models and inherent mocking.
+//! EC12 quadrature rotary encoder driver with interrupt-driven decoding and inherent mocking.
 //!
 //! Provides strongly-typed, non-blocking interfaces for the EC12 rotary encoder, push
 //! switch, and common-anode RGB status LED ring on the Raspberry Pi 3 GPIO header.
@@ -15,14 +15,30 @@
 //! # Architecture
 //! - [`EncoderDevice`] is cheaply cloneable (`Arc`-backed handle) and `Send + Sync`,
 //!   providing non-blocking asynchronous APIs.
+//! - Quadrature decoding is interrupt-driven via the `rotary-switch-helper` crate,
+//!   firing once per detent into process-global cumulative counters with no idle
+//!   polling cost. The decoder's `Clockwise`/`CounterClockwise` labels match the
+//!   baseline EC12 transition table for `dt` = Phase A, `clk` = Phase B.
+//! - The push switch is debounced over a 50 ms window with an rppal asynchronous
+//!   interrupt on both edges (active-HIGH: `RisingEdge` = press, `FallingEdge` =
+//!   release).
+//! - The RGB indicator is driven through the `led` crate's `CommonAnodeLED` using a
+//!   host-testable embedded-hal output adapter.
 //! - Companion [`EncoderDeviceMock`] enables deterministic testing without physical hardware.
 //! - Strongly typed domain models [`RotationDirection`], [`RgbColor`], and [`EncoderStatus`].
 
 use std::backtrace::Backtrace;
 use std::fmt::{self, Display, Formatter};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::Duration;
 
-use rppal::gpio::{Gpio, InputPin, OutputPin};
+use embedded_hal::digital::v2::OutputPin as HalOutputPin;
+use led::rgb::{Color as LedColor, CommonAnodeLED};
+use rotary_switch_helper::rotary_encoder::{
+    Direction as DecoderDirection, Encoder as QuadratureDecoder, EncoderConfig, Resistor,
+};
+use rppal::gpio::{Event, Gpio, InputPin, OutputPin, Trigger};
 
 use crate::runtime::{FromJoinError, run_blocking};
 
@@ -45,6 +61,9 @@ pub const ENCODER_LED_GREEN_BCM_GPIO_PIN: u8 = 16;
 
 /// BCM GPIO pin for the common-anode RGB indicator blue channel.
 pub const ENCODER_LED_BLUE_BCM_GPIO_PIN: u8 = 12;
+
+/// Debounce window applied to push switch interrupt edges.
+const SWITCH_DEBOUNCE: Duration = Duration::from_millis(50);
 
 /// Rotational direction decoded from EC12 quadrature phase transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -194,34 +213,47 @@ impl RgbColor {
     }
 }
 
+impl RgbColor {
+    /// Returns the [`RgbColor`] matching this [`LedColor`] variant.
+    #[must_use]
+    pub const fn from_led_color(color: LedColor) -> Self {
+        match color {
+            LedColor::Black => Self::OFF,
+            LedColor::Red => Self::RED,
+            LedColor::Green => Self::GREEN,
+            LedColor::Blue => Self::BLUE,
+            LedColor::Yellow => Self::YELLOW,
+            LedColor::Cyan => Self::CYAN,
+            LedColor::Magenta => Self::MAGENTA,
+            LedColor::White => Self::WHITE,
+        }
+    }
+
+    /// Returns the [`LedColor`] matching this [`RgbColor`] combination.
+    #[must_use]
+    pub const fn to_led_color(self) -> LedColor {
+        match (self.red, self.green, self.blue) {
+            (false, false, false) => LedColor::Black,
+            (true, false, false) => LedColor::Red,
+            (false, true, false) => LedColor::Green,
+            (false, false, true) => LedColor::Blue,
+            (true, true, false) => LedColor::Yellow,
+            (false, true, true) => LedColor::Cyan,
+            (true, false, true) => LedColor::Magenta,
+            (true, true, true) => LedColor::White,
+        }
+    }
+}
+
 impl Display for RgbColor {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
     }
 }
 
-/// Decodes a quadrature phase transition into a rotation direction.
-///
-/// Replicates the EC12 baseline logic: CW for `(00 -> 01)` or `(11 -> 10)`,
-/// CCW for `(00 -> 10)` or `(11 -> 01)`; all other transitions are ignored.
-///
-/// States are encoded as `(phase_a << 1) | phase_b` using raw pin levels.
-#[must_use]
-pub fn quadrature_direction(prev: u8, curr: u8) -> Option<RotationDirection> {
-    match (prev, curr) {
-        (0b00, 0b01) | (0b11, 0b10) => Some(RotationDirection::Clockwise),
-        (0b00, 0b10) | (0b11, 0b01) => Some(RotationDirection::CounterClockwise),
-        _ => None,
-    }
-}
-
-/// Point-in-time snapshot of encoder quadrature, switch, and LED state.
+/// Point-in-time snapshot of encoder rotation, switch, and LED state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderStatus {
-    /// Raw Phase A pin level (`true` = high).
-    pub phase_a: bool,
-    /// Raw Phase B pin level (`true` = high).
-    pub phase_b: bool,
     /// Push switch state (`true` = pressed).
     pub switch_pressed: bool,
     /// Cumulative clockwise detent count.
@@ -236,27 +268,12 @@ pub struct EncoderStatus {
     pub led_color: RgbColor,
 }
 
-impl EncoderStatus {
-    /// Returns the packed quadrature state byte (`(phase_a << 1) | phase_b`).
-    #[must_use]
-    pub fn quadrature_state(&self) -> u8 {
-        (u8::from(self.phase_a) << 1) | u8::from(self.phase_b)
-    }
-}
-
 impl Display for EncoderStatus {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
             "[EC12 Encoder Status: CW {} | CCW {} | Press {} / Release {}]",
             self.cw_count, self.ccw_count, self.press_count, self.release_count
-        )?;
-        writeln!(
-            f,
-            "  • Quadrature     : A={} B={} (state 0b{:02b})",
-            u8::from(self.phase_a),
-            u8::from(self.phase_b),
-            self.quadrature_state()
         )?;
         writeln!(
             f,
@@ -360,6 +377,7 @@ impl EncoderHardwareInfo {
 #[derive(Debug)]
 pub(crate) enum EncoderErrorKind {
     Gpio(rppal::gpio::Error),
+    EncoderInit { message: Box<str> },
     Cancelled { message: Box<str> },
     MockFault { message: Box<str> },
 }
@@ -401,6 +419,12 @@ impl EncoderError {
         matches!(self.kind, EncoderErrorKind::Gpio(_))
     }
 
+    /// Returns `true` if this error was caused by a quadrature decoder initialization failure.
+    #[must_use]
+    pub const fn is_encoder_init(&self) -> bool {
+        matches!(self.kind, EncoderErrorKind::EncoderInit { .. })
+    }
+
     /// Returns `true` if this error was caused by task cancellation or runtime shutdown.
     #[must_use]
     pub const fn is_cancelled(&self) -> bool {
@@ -422,6 +446,9 @@ impl EncoderError {
     fn fmt_kind(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
             EncoderErrorKind::Gpio(err) => write!(f, "GPIO error: {err}"),
+            EncoderErrorKind::EncoderInit { message, .. } => {
+                write!(f, "encoder initialization failed: {message}")
+            }
             EncoderErrorKind::Cancelled { message } => write!(f, "task cancelled: {message}"),
             EncoderErrorKind::MockFault { message } => write!(f, "injected mock fault: {message}"),
         }
@@ -445,11 +472,138 @@ impl From<rppal::gpio::Error> for EncoderError {
     }
 }
 
+impl From<anyhow::Error> for EncoderError {
+    fn from(err: anyhow::Error) -> Self {
+        Self::new(EncoderErrorKind::EncoderInit {
+            message: err.to_string().into(),
+        })
+    }
+}
+
 impl FromJoinError for EncoderError {
     fn from_cancelled(message: impl Into<Box<str>>) -> Self {
         Self::cancelled(message)
     }
 }
+
+/// Cumulative rotation and switch counters shared with the interrupt threads.
+///
+/// The quadrature decoder and the switch debounce handler run on dedicated
+/// interrupt threads and must publish their events into atomics that synchronous
+/// status reads can observe without locks.
+#[derive(Debug, Default)]
+struct SharedEncoderState {
+    cw_count: AtomicU64,
+    ccw_count: AtomicU64,
+    press_count: AtomicU64,
+    release_count: AtomicU64,
+    switch_pressed: AtomicBool,
+}
+
+impl SharedEncoderState {
+    fn snapshot(&self, led_color: RgbColor) -> EncoderStatus {
+        EncoderStatus {
+            switch_pressed: self.switch_pressed.load(Ordering::Relaxed),
+            cw_count: self.cw_count.load(Ordering::Relaxed),
+            ccw_count: self.ccw_count.load(Ordering::Relaxed),
+            press_count: self.press_count.load(Ordering::Relaxed),
+            release_count: self.release_count.load(Ordering::Relaxed),
+            led_color,
+        }
+    }
+}
+
+/// Process-global slot that the decoder's `fn`-pointer callback can reach.
+///
+/// `rotary-switch-helper` invokes rotation callbacks through plain function
+/// pointers, which cannot capture per-device state, so the cumulative counters
+/// must be reachable through a process-global slot. The appliance exposes exactly
+/// one physical EC12 encoder, so every hardware [`EncoderDevice`] shares the same
+/// cumulative counters.
+static SHARED_ENCODER_STATE: OnceLock<Arc<SharedEncoderState>> = OnceLock::new();
+
+/// Installs `shared` into the process-global slot, reusing any existing entry.
+fn install_or_reuse_shared(shared: Arc<SharedEncoderState>) -> Arc<SharedEncoderState> {
+    let _ = SHARED_ENCODER_STATE.set(Arc::clone(&shared));
+    match SHARED_ENCODER_STATE.get() {
+        Some(existing) => Arc::clone(existing),
+        None => shared,
+    }
+}
+
+/// Applies one decoded detent to the cumulative shared counters.
+fn apply_rotation(shared: &SharedEncoderState, direction: DecoderDirection) {
+    match direction {
+        DecoderDirection::Clockwise => {
+            shared.cw_count.fetch_add(1, Ordering::Relaxed);
+        }
+        DecoderDirection::CounterClockwise => {
+            shared.ccw_count.fetch_add(1, Ordering::Relaxed);
+        }
+        DecoderDirection::None => {}
+    }
+}
+
+/// Rotation callback invoked by the quadrature decoder's interrupt thread.
+fn rotation_interrupt_callback(_name: &str, direction: DecoderDirection) {
+    if let Some(shared) = SHARED_ENCODER_STATE.get() {
+        apply_rotation(shared, direction);
+    }
+}
+
+/// Applies one debounced switch level transition to the shared counters.
+fn apply_switch_level(shared: &SharedEncoderState, pressed: bool) {
+    let was_pressed = shared.switch_pressed.swap(pressed, Ordering::Relaxed);
+    if pressed && !was_pressed {
+        shared.press_count.fetch_add(1, Ordering::Relaxed);
+    } else if !pressed && was_pressed {
+        shared.release_count.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Minimal channel-driving surface shared by rppal outputs and host test fakes.
+trait ChannelPin: Send {
+    /// Sets the channel's logical load state (`true` = LED channel lit).
+    fn set_channel(&mut self, on: bool);
+}
+
+impl ChannelPin for OutputPin {
+    fn set_channel(&mut self, on: bool) {
+        if on {
+            self.set_low();
+        } else {
+            self.set_high();
+        }
+    }
+}
+
+/// Adapter bridging a [`ChannelPin`] to the `led` crate's embedded-hal interface.
+struct HalOutputPinAdapter<P>(P);
+
+impl<P> HalOutputPin for HalOutputPinAdapter<P>
+where
+    P: ChannelPin,
+{
+    type Error = rppal::gpio::Error;
+
+    fn set_low(&mut self) -> Result<(), Self::Error> {
+        self.0.set_channel(true);
+        Ok(())
+    }
+
+    fn set_high(&mut self) -> Result<(), Self::Error> {
+        self.0.set_channel(false);
+        Ok(())
+    }
+}
+
+/// Common-anode RGB indicator driven through the embedded-hal adapter layer.
+type RgbIndicatorLed = CommonAnodeLED<
+    HalOutputPinAdapter<OutputPin>,
+    HalOutputPinAdapter<OutputPin>,
+    HalOutputPinAdapter<OutputPin>,
+    rppal::gpio::Error,
+>;
 
 /// Controllable in-memory mock for [`EncoderDevice`].
 #[derive(Debug, Clone)]
@@ -459,8 +613,6 @@ pub struct EncoderDeviceMock {
 
 #[derive(Debug)]
 struct MockState {
-    phase_a: bool,
-    phase_b: bool,
     switch_pressed: bool,
     led_color: RgbColor,
     cw_count: u64,
@@ -474,8 +626,6 @@ impl EncoderDeviceMock {
     fn new() -> Self {
         Self {
             state: Arc::new(RwLock::new(MockState {
-                phase_a: true,
-                phase_b: true,
                 switch_pressed: false,
                 led_color: RgbColor::OFF,
                 cw_count: 0,
@@ -487,24 +637,20 @@ impl EncoderDeviceMock {
         }
     }
 
-    /// Sets the simulated quadrature Phase A pin level and decodes the transition.
+    /// Simulates `detents` complete detent rotations in `direction`.
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
-    pub fn set_phase_a(&self, high: bool) {
+    pub fn simulate_rotation(&self, direction: RotationDirection, detents: u64) {
         let mut state = self.state.write().expect("mock lock poisoned");
-        let phase_b = state.phase_b;
-        apply_phase_transition(&mut state, high, phase_b);
-    }
-
-    /// Sets the simulated quadrature Phase B pin level and decodes the transition.
-    ///
-    /// # Panics
-    /// Panics if the mock state lock is poisoned.
-    pub fn set_phase_b(&self, high: bool) {
-        let mut state = self.state.write().expect("mock lock poisoned");
-        let phase_a = state.phase_a;
-        apply_phase_transition(&mut state, phase_a, high);
+        match direction {
+            RotationDirection::Clockwise => {
+                state.cw_count = state.cw_count.saturating_add(detents);
+            }
+            RotationDirection::CounterClockwise => {
+                state.ccw_count = state.ccw_count.saturating_add(detents);
+            }
+        }
     }
 
     /// Sets the simulated push switch state, counting press and release transitions.
@@ -555,8 +701,6 @@ impl EncoderDeviceMock {
             return Err(EncoderError::mock_fault(fault.clone()));
         }
         Ok(EncoderStatus {
-            phase_a: state.phase_a,
-            phase_b: state.phase_b,
             switch_pressed: state.switch_pressed,
             cw_count: state.cw_count,
             ccw_count: state.ccw_count,
@@ -576,45 +720,21 @@ impl EncoderDeviceMock {
     }
 }
 
-/// Applies a quadrature phase transition to the shared mock state.
-fn apply_phase_transition(state: &mut MockState, phase_a: bool, phase_b: bool) {
-    let prev = (u8::from(state.phase_a) << 1) | u8::from(state.phase_b);
-    let curr = (u8::from(phase_a) << 1) | u8::from(phase_b);
-    if let Some(direction) = quadrature_direction(prev, curr) {
-        match direction {
-            RotationDirection::Clockwise => state.cw_count += 1,
-            RotationDirection::CounterClockwise => state.ccw_count += 1,
-        }
-    }
-    state.phase_a = phase_a;
-    state.phase_b = phase_b;
-}
-
 /// Internal hardware peripheral device wrapping the Raspberry Pi GPIO pins.
 struct HardwareDevice {
-    phase_a: InputPin,
-    phase_b: InputPin,
-    push_switch: InputPin,
-    led_red: OutputPin,
-    led_green: OutputPin,
-    led_blue: OutputPin,
-    last_quadrature: u8,
-    last_switch: bool,
-    cw_count: u64,
-    ccw_count: u64,
-    press_count: u64,
-    release_count: u64,
+    shared: Arc<SharedEncoderState>,
+    /// Keep-alive handle: dropping the pin cancels the debounced switch interrupt.
+    _push_switch: InputPin,
+    led: RgbIndicatorLed,
     led_color: RgbColor,
+    /// Keep-alive handle: dropping the decoder cancels the quadrature interrupts.
+    _quadrature_decoder: QuadratureDecoder,
 }
 
 impl HardwareDevice {
     fn new() -> Result<Self, EncoderError> {
         let gpio = Gpio::new()?;
-        let phase_a = gpio.get(ENCODER_PHASE_A_BCM_GPIO_PIN)?.into_input_pullup();
-        let phase_b = gpio.get(ENCODER_PHASE_B_BCM_GPIO_PIN)?.into_input_pullup();
-        let push_switch = gpio
-            .get(ENCODER_PUSH_SW_BCM_GPIO_PIN)?
-            .into_input_pulldown();
+
         let mut led_red = gpio.get(ENCODER_LED_RED_BCM_GPIO_PIN)?.into_output();
         let mut led_green = gpio.get(ENCODER_LED_GREEN_BCM_GPIO_PIN)?.into_output();
         let mut led_blue = gpio.get(ENCODER_LED_BLUE_BCM_GPIO_PIN)?.into_output();
@@ -624,24 +744,50 @@ impl HardwareDevice {
         led_green.set_high();
         led_blue.set_high();
 
-        let level_a = phase_a.is_high();
-        let level_b = phase_b.is_high();
-        let switch_level = push_switch.is_high();
+        let led = CommonAnodeLED::new(
+            HalOutputPinAdapter(led_red),
+            HalOutputPinAdapter(led_green),
+            HalOutputPinAdapter(led_blue),
+        );
+
+        let shared = install_or_reuse_shared(Arc::new(SharedEncoderState::default()));
+
+        let quadrature_decoder = QuadratureDecoder::new(
+            "ec12",
+            None,
+            &gpio,
+            EncoderConfig::new(
+                ENCODER_PHASE_A_BCM_GPIO_PIN,
+                ENCODER_PHASE_B_BCM_GPIO_PIN,
+                Resistor::PullUp,
+            ),
+            rotation_interrupt_callback,
+        )?;
+
+        let mut push_switch = gpio
+            .get(ENCODER_PUSH_SW_BCM_GPIO_PIN)?
+            .into_input_pulldown();
+
+        // Snapshot the initial switch level (rest = released) before arming interrupts.
+        shared
+            .switch_pressed
+            .store(push_switch.is_high(), Ordering::Relaxed);
+
+        let switch_shared = Arc::clone(&shared);
+        push_switch.set_async_interrupt(
+            Trigger::Both,
+            Some(SWITCH_DEBOUNCE),
+            move |event: Event| {
+                apply_switch_level(&switch_shared, matches!(event.trigger, Trigger::RisingEdge));
+            },
+        )?;
 
         Ok(Self {
-            phase_a,
-            phase_b,
-            push_switch,
-            led_red,
-            led_green,
-            led_blue,
-            last_quadrature: (u8::from(level_a) << 1) | u8::from(level_b),
-            last_switch: switch_level,
-            cw_count: 0,
-            ccw_count: 0,
-            press_count: 0,
-            release_count: 0,
+            shared,
+            _push_switch: push_switch,
+            led,
             led_color: RgbColor::OFF,
+            _quadrature_decoder: quadrature_decoder,
         })
     }
 
@@ -649,60 +795,12 @@ impl HardwareDevice {
         clippy::unnecessary_wraps,
         reason = "keeps the internal op signature aligned with the fallible mock and backend dispatch"
     )]
-    fn read_status(&mut self) -> Result<EncoderStatus, EncoderError> {
-        let phase_a = self.phase_a.is_high();
-        let phase_b = self.phase_b.is_high();
-        let switch_pressed = self.push_switch.is_high();
-
-        let curr = (u8::from(phase_a) << 1) | u8::from(phase_b);
-        if let Some(direction) = quadrature_direction(self.last_quadrature, curr) {
-            match direction {
-                RotationDirection::Clockwise => self.cw_count += 1,
-                RotationDirection::CounterClockwise => self.ccw_count += 1,
-            }
-        }
-        self.last_quadrature = curr;
-
-        if switch_pressed && !self.last_switch {
-            self.press_count += 1;
-        } else if !switch_pressed && self.last_switch {
-            self.release_count += 1;
-        }
-        self.last_switch = switch_pressed;
-
-        Ok(EncoderStatus {
-            phase_a,
-            phase_b,
-            switch_pressed,
-            cw_count: self.cw_count,
-            ccw_count: self.ccw_count,
-            press_count: self.press_count,
-            release_count: self.release_count,
-            led_color: self.led_color,
-        })
+    fn read_status(&self) -> Result<EncoderStatus, EncoderError> {
+        Ok(self.shared.snapshot(self.led_color))
     }
 
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "keeps the internal op signature aligned with the fallible mock and backend dispatch"
-    )]
     fn set_led_color(&mut self, color: RgbColor) -> Result<(), EncoderError> {
-        // Common-anode ring: channels are active-LOW (set_low = ON).
-        if color.red {
-            self.led_red.set_low();
-        } else {
-            self.led_red.set_high();
-        }
-        if color.green {
-            self.led_green.set_low();
-        } else {
-            self.led_green.set_high();
-        }
-        if color.blue {
-            self.led_blue.set_low();
-        } else {
-            self.led_blue.set_high();
-        }
+        self.led.set(color.to_led_color())?;
         self.led_color = color;
         Ok(())
     }
@@ -732,8 +830,13 @@ pub struct EncoderDevice {
 impl EncoderDevice {
     /// Creates a new [`EncoderDevice`] using the standard Raspberry Pi 3 GPIO pinout.
     ///
+    /// Quadrature rotation decoding and push switch debouncing run on dedicated
+    /// interrupt threads publishing into process-global cumulative counters; only
+    /// one hardware device should exist per process.
+    ///
     /// # Errors
-    /// Returns [`EncoderError`] if the GPIO peripheral cannot be opened or a pin claim fails.
+    /// Returns [`EncoderError`] if the GPIO peripheral cannot be opened, a pin claim
+    /// fails, or the external quadrature decoder cannot be initialized.
     pub fn new() -> Result<Self, EncoderError> {
         let device = HardwareDevice::new()?;
         Ok(Self {
@@ -759,15 +862,14 @@ impl EncoderDevice {
         EncoderHardwareInfo::new_rpi3_unchecked()
     }
 
-    /// Samples quadrature phases and the push switch, updating cumulative counters.
+    /// Returns a snapshot of cumulative rotation, switch, and LED state.
     ///
-    /// Quadrature transitions are decoded per the EC12 baseline table; push switch
-    /// press and release transitions increment their respective counters. Press and
-    /// release follow raw sampled transitions without debouncing, matching the
-    /// baseline Python script.
+    /// Rotation and switch counters are maintained by dedicated interrupt threads
+    /// (quadrature decoding fires once per detent; switch edges are debounced over
+    /// a 50 ms window), so reads never miss transitions between polls.
     ///
     /// # Errors
-    /// Returns [`EncoderError`] if GPIO reads fail.
+    /// Returns [`EncoderError`] if an injected mock fault is active.
     ///
     /// # Panics
     /// Panics if an internal mutex lock is poisoned.
@@ -801,7 +903,7 @@ impl EncoderDevice {
     /// Asynchronously samples encoder state without blocking the async runtime.
     ///
     /// # Errors
-    /// Returns [`EncoderError`] if GPIO reads fail.
+    /// Returns [`EncoderError`] if an injected mock fault is active.
     ///
     /// # Panics
     /// Panics if the underlying blocking task panics, resuming unwinding to propagate
@@ -888,38 +990,103 @@ mod tests {
     }
 
     #[test]
-    fn quadrature_direction_matches_baseline_table() {
-        assert_eq!(
-            quadrature_direction(0b00, 0b01),
-            Some(RotationDirection::Clockwise)
-        );
-        assert_eq!(
-            quadrature_direction(0b11, 0b10),
-            Some(RotationDirection::Clockwise)
-        );
-        assert_eq!(
-            quadrature_direction(0b00, 0b10),
-            Some(RotationDirection::CounterClockwise)
-        );
-        assert_eq!(
-            quadrature_direction(0b11, 0b01),
-            Some(RotationDirection::CounterClockwise)
-        );
-        assert_eq!(quadrature_direction(0b01, 0b11), None);
-        assert_eq!(quadrature_direction(0b10, 0b00), None);
-        assert_eq!(quadrature_direction(0b01, 0b10), None);
-        assert_eq!(quadrature_direction(0b10, 0b01), None);
-        assert_eq!(quadrature_direction(0b00, 0b00), None);
-        assert_eq!(quadrature_direction(0b01, 0b01), None);
-        assert_eq!(quadrature_direction(0b11, 0b11), None);
-        assert_eq!(quadrature_direction(0b10, 0b10), None);
+    fn rgb_color_maps_to_led_crate_colors_and_back() {
+        for (rgb, led) in [
+            (RgbColor::OFF, LedColor::Black),
+            (RgbColor::RED, LedColor::Red),
+            (RgbColor::GREEN, LedColor::Green),
+            (RgbColor::BLUE, LedColor::Blue),
+            (RgbColor::YELLOW, LedColor::Yellow),
+            (RgbColor::CYAN, LedColor::Cyan),
+            (RgbColor::MAGENTA, LedColor::Magenta),
+            (RgbColor::WHITE, LedColor::White),
+        ] {
+            assert_eq!(rgb.to_led_color(), led);
+            assert_eq!(RgbColor::from_led_color(led), rgb);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedFakeChannel(Arc<Mutex<bool>>);
+
+    impl ChannelPin for SharedFakeChannel {
+        fn set_channel(&mut self, on: bool) {
+            *self.0.lock().expect("test channel lock poisoned") = on;
+        }
+    }
+
+    fn channel_lit(channel: &SharedFakeChannel) -> bool {
+        *channel.0.lock().expect("test channel lock poisoned")
     }
 
     #[test]
-    fn encoder_status_display_and_quadrature_state() {
+    fn common_anode_led_drives_channels_per_color() {
+        let (red, green, blue) = (
+            SharedFakeChannel::default(),
+            SharedFakeChannel::default(),
+            SharedFakeChannel::default(),
+        );
+        let mut led = CommonAnodeLED::new(
+            HalOutputPinAdapter(red.clone()),
+            HalOutputPinAdapter(green.clone()),
+            HalOutputPinAdapter(blue.clone()),
+        );
+
+        for (color, r, g, b) in [
+            (LedColor::Red, true, false, false),
+            (LedColor::Green, false, true, false),
+            (LedColor::Blue, false, false, true),
+            (LedColor::Yellow, true, true, false),
+            (LedColor::Cyan, false, true, true),
+            (LedColor::Magenta, true, false, true),
+            (LedColor::White, true, true, true),
+            (LedColor::Black, false, false, false),
+        ] {
+            led.set(color).unwrap();
+            assert_eq!(channel_lit(&red), r, "red channel for {color:?}");
+            assert_eq!(channel_lit(&green), g, "green channel for {color:?}");
+            assert_eq!(channel_lit(&blue), b, "blue channel for {color:?}");
+        }
+    }
+
+    #[test]
+    fn apply_rotation_counts_detents_per_direction() {
+        let shared = SharedEncoderState::default();
+        apply_rotation(&shared, DecoderDirection::Clockwise);
+        apply_rotation(&shared, DecoderDirection::Clockwise);
+        apply_rotation(&shared, DecoderDirection::CounterClockwise);
+        apply_rotation(&shared, DecoderDirection::None);
+
+        let status = shared.snapshot(RgbColor::GREEN);
+        assert_eq!(status.cw_count, 2);
+        assert_eq!(status.ccw_count, 1);
+        assert_eq!(status.led_color, RgbColor::GREEN);
+    }
+
+    #[test]
+    fn rotation_interrupt_callback_without_installed_state_is_noop() {
+        rotation_interrupt_callback("ec12", DecoderDirection::Clockwise);
+        rotation_interrupt_callback("ec12", DecoderDirection::None);
+    }
+
+    #[test]
+    fn apply_switch_level_counts_transitions_only() {
+        let shared = SharedEncoderState::default();
+        apply_switch_level(&shared, true);
+        apply_switch_level(&shared, true);
+        apply_switch_level(&shared, false);
+        apply_switch_level(&shared, false);
+        apply_switch_level(&shared, true);
+
+        let status = shared.snapshot(RgbColor::OFF);
+        assert!(status.switch_pressed);
+        assert_eq!(status.press_count, 2);
+        assert_eq!(status.release_count, 1);
+    }
+
+    #[test]
+    fn encoder_status_display() {
         let status = EncoderStatus {
-            phase_a: true,
-            phase_b: false,
             switch_pressed: true,
             cw_count: 3,
             ccw_count: 2,
@@ -927,11 +1094,9 @@ mod tests {
             release_count: 0,
             led_color: RgbColor::GREEN,
         };
-        assert_eq!(status.quadrature_state(), 0b10);
         let text = status.to_string();
         assert!(text.contains("CW 3 | CCW 2"));
         assert!(text.contains("Press 1 / Release 0"));
-        assert!(text.contains("state 0b10"));
         assert!(text.contains("pressed"));
         assert!(text.contains("RGB Indicator  : green"));
     }
@@ -962,9 +1127,18 @@ mod tests {
     fn error_predicates_and_summary() {
         let gpio_err = EncoderError::from(rppal::gpio::Error::PinUsed(25));
         assert!(gpio_err.is_gpio());
+        assert!(!gpio_err.is_encoder_init());
         assert!(!gpio_err.is_cancelled());
         assert!(!gpio_err.is_mock_fault());
         assert!(gpio_err.summary().contains("GPIO error:"));
+
+        let init_err = EncoderError::from(anyhow::Error::msg("decoder wiring failed"));
+        assert!(init_err.is_encoder_init());
+        assert!(
+            init_err
+                .summary()
+                .contains("encoder initialization failed: decoder wiring failed")
+        );
 
         let cancelled = EncoderError::cancelled("task went away");
         assert!(cancelled.is_cancelled());
@@ -992,30 +1166,31 @@ mod tests {
     }
 
     #[test]
-    fn mock_quadrature_transitions_count_detents() {
+    fn encoder_init_error_flattens_anyhow_message() {
+        let err = EncoderError::from(anyhow::Error::msg("decoder init boom"));
+        assert!(err.is_encoder_init());
+        assert!(
+            err.summary()
+                .contains("encoder initialization failed: decoder init boom")
+        );
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn mock_simulate_rotation_counts_detents() {
         let (device, mock) = EncoderDevice::new_mocked();
 
         let status = device.read_status().unwrap();
-        assert!(status.phase_a && status.phase_b);
+        assert!(!status.switch_pressed);
         assert_eq!(status.cw_count, 0);
         assert_eq!(status.ccw_count, 0);
-        assert!(!status.switch_pressed);
         assert_eq!(status.led_color, RgbColor::OFF);
 
-        // 11 -> 01 is CCW per the baseline table.
-        mock.set_phase_a(false);
+        mock.simulate_rotation(RotationDirection::CounterClockwise, 3);
+        mock.simulate_rotation(RotationDirection::Clockwise, 2);
         let status = device.read_status().unwrap();
-        assert_eq!(status.ccw_count, 1);
-        assert!(!status.phase_a);
-
-        // 01 -> 00 ignored, then 00 -> 01 is CW per the baseline table.
-        mock.set_phase_b(false);
-        mock.set_phase_b(true);
-        mock.set_phase_a(true);
-        let status = device.read_status().unwrap();
-        assert_eq!(status.cw_count, 1);
-        assert_eq!(status.ccw_count, 1);
-        assert_eq!(status.quadrature_state(), 0b11);
+        assert_eq!(status.cw_count, 2);
+        assert_eq!(status.ccw_count, 3);
     }
 
     #[test]

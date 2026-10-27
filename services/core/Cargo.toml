@@ -56,6 +56,12 @@ serde_json = "=1.0.140"
 rppal = { version = "=0.22.1", features = ["hal"] }
 bh1750-embedded = "=0.1.0"
 
+# EC12 Quadrature Decoding (interrupt-driven) & RGB Indicator Color Mapping
+rotary-switch-helper = "=0.3.0"
+led = "=0.3.1"
+embedded-hal = "=0.2.7"
+anyhow = "=1.0.102"
+
 # Image Processing (Cover Art Scaling & Procedural Vinyl)
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
 

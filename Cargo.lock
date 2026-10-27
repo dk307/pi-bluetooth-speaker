@@ -87,6 +87,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.102"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -276,10 +282,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-time"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75821c8282c0e622f3892087c1eeb8d4e3964b92467a263a44afa7d79dec7f3c"
+dependencies = [
+ "portable-atomic",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
+
+[[package]]
+name = "atomic_enum"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99e1aca718ea7b89985790c94aad72d77533063fe00bc497bb79a7c2dae6a661"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "auto_enums"
@@ -2474,6 +2500,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
+name = "led"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86acaf203038b5187ff2fcbf43e0587e8e482521b306417a8db3b213aaeb6972"
+dependencies = [
+ "embedded-hal 0.2.7",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3692,6 +3727,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rotary-switch-helper"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3d436da47c08bfc51d793ea927708db88d2762ca382a850415b6f29b48638ed"
+dependencies = [
+ "anyhow",
+ "atomic-time",
+ "atomic_enum",
+ "log",
+ "rppal",
+]
+
+[[package]]
 name = "rowan"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4264,11 +4312,15 @@ dependencies = [
 name = "speaker-core"
 version = "2.0.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "axum",
  "bh1750-embedded",
+ "embedded-hal 0.2.7",
  "futures-util",
  "image 0.25.10",
+ "led",
+ "rotary-switch-helper",
  "rppal",
  "rust-ini",
  "serde",

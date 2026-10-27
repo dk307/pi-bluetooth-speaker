@@ -76,29 +76,20 @@ async fn shared_clones_and_async_polling_observe_mock_updates() {
 }
 
 #[test]
-fn quadrature_rotation_and_switch_event_streaming() {
+fn rotation_and_switch_event_streaming() {
     let (device, mock) = EncoderDevice::new_mocked();
 
-    // Baseline state 0b11, then one full CCW detent cycle (11 -> 01 -> 00 -> 10 -> 11).
-    mock.set_phase_a(false);
-    mock.set_phase_b(false);
-    mock.set_phase_a(true);
-    mock.set_phase_b(true);
-
     let status = device.read_status().unwrap();
-    assert_eq!(status.quadrature_state(), 0b11);
     assert_eq!(status.cw_count, 0);
-    assert_eq!(status.ccw_count, 2);
+    assert_eq!(status.ccw_count, 0);
 
-    // One full CW detent cycle (11 -> 10 -> 00 -> 01 -> 11).
-    mock.set_phase_b(false);
-    mock.set_phase_a(false);
-    mock.set_phase_b(true);
-    mock.set_phase_a(true);
+    // One full CW detent and one full CCW detent, decoded once per detent.
+    mock.simulate_rotation(RotationDirection::Clockwise, 1);
+    mock.simulate_rotation(RotationDirection::CounterClockwise, 1);
 
     let status = device.read_status().unwrap();
-    assert_eq!(status.cw_count, 2);
-    assert_eq!(status.ccw_count, 2);
+    assert_eq!(status.cw_count, 1);
+    assert_eq!(status.ccw_count, 1);
 
     // Press and release the push switch.
     mock.set_switch_pressed(true);
