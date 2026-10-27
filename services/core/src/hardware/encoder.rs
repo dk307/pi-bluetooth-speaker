@@ -63,6 +63,13 @@ pub const ENCODER_LED_GREEN_BCM_GPIO_PIN: u8 = 16;
 pub const ENCODER_LED_BLUE_BCM_GPIO_PIN: u8 = 12;
 
 /// Debounce window applied to push switch interrupt edges.
+///
+/// The window is delegated to the Linux GPIO v2 character device
+/// (`LINE_ATTR_ID_DEBOUNCE`), which emits one event carrying the final stable
+/// line level after the bouncing settles. A tap shorter than the window
+/// therefore reports only the ending level instead of leaving a latched
+/// intermediate state, and a single press count may be skipped for taps under
+/// 50 ms.
 const SWITCH_DEBOUNCE: Duration = Duration::from_millis(50);
 
 /// Rotational direction decoded from EC12 quadrature phase transitions.
@@ -523,12 +530,11 @@ impl SharedEncoderState {
 static SHARED_ENCODER_STATE: OnceLock<Arc<SharedEncoderState>> = OnceLock::new();
 
 /// Installs `shared` into the process-global slot, reusing any existing entry.
+///
+/// The first installation wins: if the slot is already populated, `shared` is
+/// discarded and the existing counters keep accumulating.
 fn install_or_reuse_shared(shared: Arc<SharedEncoderState>) -> Arc<SharedEncoderState> {
-    let _ = SHARED_ENCODER_STATE.set(Arc::clone(&shared));
-    match SHARED_ENCODER_STATE.get() {
-        Some(existing) => Arc::clone(existing),
-        None => shared,
-    }
+    Arc::clone(SHARED_ENCODER_STATE.get_or_init(|| shared))
 }
 
 /// Applies one decoded detent to the cumulative shared counters.
@@ -1067,6 +1073,16 @@ mod tests {
     fn rotation_interrupt_callback_without_installed_state_is_noop() {
         rotation_interrupt_callback("ec12", DecoderDirection::Clockwise);
         rotation_interrupt_callback("ec12", DecoderDirection::None);
+    }
+
+    #[test]
+    fn install_or_reuse_shared_keeps_the_first_installation() {
+        let first = install_or_reuse_shared(Arc::new(SharedEncoderState::default()));
+        let second = install_or_reuse_shared(Arc::new(SharedEncoderState::default()));
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "second installation must reuse the process-global counters"
+        );
     }
 
     #[test]
