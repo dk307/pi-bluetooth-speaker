@@ -256,6 +256,7 @@ pub const fn should_print_summary(
 pub struct NumericStats {
     total_reads: usize,
     successful_reads: usize,
+    numeric_samples: usize,
     min: Option<f32>,
     max: Option<f32>,
     sum: f64,
@@ -274,9 +275,20 @@ impl NumericStats {
         );
         self.total_reads += 1;
         self.successful_reads += 1;
+        self.numeric_samples += 1;
         self.sum += f64::from(value);
         self.min = Some(self.min.map_or(value, |cur| cur.min(value)));
         self.max = Some(self.max.map_or(value, |cur| cur.max(value)));
+    }
+
+    /// Records a successful read with no numeric sample.
+    ///
+    /// Count-only variant for devices that report status rather than numeric
+    /// measurements (e.g. amplifier fault flags, Bluetooth radio state), so
+    /// meaningless `0.0` sentinel samples are never accumulated.
+    pub fn record_success_no_sample(&mut self) {
+        self.total_reads += 1;
+        self.successful_reads += 1;
     }
 
     /// Records a failed sensor read attempt.
@@ -302,29 +314,29 @@ impl NumericStats {
         self.total_reads - self.successful_reads
     }
 
-    /// Returns the minimum observed sample value, if any read succeeded.
+    /// Returns the minimum observed sample value, if any numeric sample was recorded.
     #[must_use]
     pub const fn min(&self) -> Option<f32> {
         self.min
     }
 
-    /// Returns the maximum observed sample value, if any read succeeded.
+    /// Returns the maximum observed sample value, if any numeric sample was recorded.
     #[must_use]
     pub const fn max(&self) -> Option<f32> {
         self.max
     }
 
-    /// Returns the arithmetic mean of all successful samples, if any read succeeded.
+    /// Returns the arithmetic mean of all numeric samples, if any sample was recorded.
     #[must_use]
     #[expect(
         clippy::cast_precision_loss,
         reason = "read counts are small; f64 precision is exact for integer counts"
     )]
     pub fn average(&self) -> Option<f64> {
-        (self.successful_reads > 0).then(|| self.sum / self.successful_reads as f64)
+        (self.numeric_samples > 0).then(|| self.sum / self.numeric_samples as f64)
     }
 
-    /// Returns the arithmetic mean of all successful samples as `f32`, if any read succeeded.
+    /// Returns the arithmetic mean of all numeric samples as `f32`, if any sample was recorded.
     #[must_use]
     #[expect(
         clippy::cast_possible_truncation,
@@ -529,6 +541,17 @@ mod tests {
             temp.path().to_path_buf()
         };
         assert!(!dir_path.exists());
+
+        let mut no_sample = NumericStats::default();
+        no_sample.record_success_no_sample();
+        no_sample.record_error();
+        assert_eq!(no_sample.total_reads(), 2);
+        assert_eq!(no_sample.successful_reads(), 1);
+        assert_eq!(no_sample.errors(), 1);
+        assert_eq!(no_sample.error_rate_percent(), 50.0);
+        assert!(no_sample.average().is_none());
+        assert!(no_sample.min().is_none());
+        assert!(no_sample.max().is_none());
 
         let mut stats = NumericStats::default();
         assert_eq!(stats.total_reads(), 0);

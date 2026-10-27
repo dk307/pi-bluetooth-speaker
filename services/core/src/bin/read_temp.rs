@@ -12,7 +12,7 @@ use std::time::Duration;
 use speaker_core::diag::{
     CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads, fahrenheit,
     format_timestamp, next_arg_value, parse_args_with_common, print_min_max_avg, resolve_cli_opts,
-    run_poll_loop, should_print_summary,
+    round_2dp, run_poll_loop, should_print_summary,
 };
 use speaker_core::hardware::{
     SensorId, SensorReading, SocThermal, TempError, TempSensor, Temperature,
@@ -174,23 +174,23 @@ fn output_json_reading(
     temp: Temperature,
     soc: Option<SocThermal>,
 ) {
-    let soc_json = soc.map_or("null".to_string(), |s| {
-        format!(
-            r#"{{"celsius":{:.2},"fahrenheit":{:.2}}}"#,
-            s.temperature().celsius(),
-            s.temperature().fahrenheit()
-        )
+    let obj = serde_json::json!({
+        "timestamp": timestamp,
+        "sensor_id": dev.as_str(),
+        "temperature": {
+            "celsius": round_2dp(temp.celsius()),
+            "fahrenheit": round_2dp(temp.fahrenheit()),
+            "millidegrees": temp.millidegrees_celsius(),
+        },
+        "soc_temperature": soc.map(|s| {
+            serde_json::json!({
+                "celsius": round_2dp(s.temperature().celsius()),
+                "fahrenheit": round_2dp(s.temperature().fahrenheit()),
+            })
+        }),
+        "delta_celsius": soc.map(|s| round_2dp(s.delta_from_chassis(temp))),
     });
-    let delta_json = soc.map_or("null".to_string(), |s| {
-        format!("{:.2}", s.delta_from_chassis(temp))
-    });
-
-    println!(
-        r#"{{"timestamp":"{timestamp}","sensor_id":"{dev}","temperature":{{"celsius":{:.2},"fahrenheit":{:.2},"millidegrees":{}}},"soc_temperature":{soc_json},"delta_celsius":{delta_json}}}"#,
-        temp.celsius(),
-        temp.fahrenheit(),
-        temp.millidegrees_celsius()
-    );
+    println!("{obj}");
 }
 
 fn output_json_error(timestamp: &str, sensor_id: Option<&SensorId>, err_msg: &str) {

@@ -92,7 +92,7 @@ struct AmpStats {
 
 impl AmpStats {
     fn record_success(&mut self, status: &AmpStatus) {
-        self.samples.record_success(0.0);
+        self.samples.record_success_no_sample();
         if !status.live_errors.is_clear() {
             self.live_fault_reads += 1;
         }
