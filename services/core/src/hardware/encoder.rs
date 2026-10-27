@@ -482,7 +482,7 @@ impl From<rppal::gpio::Error> for EncoderError {
 impl From<anyhow::Error> for EncoderError {
     fn from(err: anyhow::Error) -> Self {
         Self::new(EncoderErrorKind::EncoderInit {
-            message: err.to_string().into(),
+            message: format!("{err:#}").into(),
         })
     }
 }
@@ -726,6 +726,43 @@ impl EncoderDeviceMock {
     }
 }
 
+/// Process-global claim preventing duplicate hardware encoder instances.
+///
+/// A second [`EncoderDevice::new`] would install a second quadrature decoder
+/// and switch interrupt on the same pins, double-counting every detent into
+/// the shared cumulative counters. The claim is released when the owning
+/// [`HardwareDevice`] is dropped, so sequential devices are unaffected.
+static ENCODER_HARDWARE_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// RAII guard owning the process-global encoder hardware claim.
+#[derive(Debug)]
+struct HardwareClaim;
+
+impl HardwareClaim {
+    /// Acquires the exclusive hardware claim, failing if already held.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncoderError`] when another encoder hardware device in this
+    /// process already claims the EC12 pins.
+    fn acquire() -> Result<Self, EncoderError> {
+        if ENCODER_HARDWARE_CLAIMED.swap(true, Ordering::AcqRel) {
+            return Err(EncoderError::new(EncoderErrorKind::EncoderInit {
+                message: "EC12 encoder GPIO pins are already claimed by another \
+                          EncoderDevice in this process"
+                    .into(),
+            }));
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for HardwareClaim {
+    fn drop(&mut self) {
+        ENCODER_HARDWARE_CLAIMED.store(false, Ordering::Release);
+    }
+}
+
 /// Internal hardware peripheral device wrapping the Raspberry Pi GPIO pins.
 struct HardwareDevice {
     shared: Arc<SharedEncoderState>,
@@ -735,10 +772,13 @@ struct HardwareDevice {
     led_color: RgbColor,
     /// Keep-alive handle: dropping the decoder cancels the quadrature interrupts.
     _quadrature_decoder: QuadratureDecoder,
+    /// Keep-alive handle: dropping releases the process-global hardware claim.
+    _claim: HardwareClaim,
 }
 
 impl HardwareDevice {
     fn new() -> Result<Self, EncoderError> {
+        let claim = HardwareClaim::acquire()?;
         let gpio = Gpio::new()?;
 
         let mut led_red = gpio.get(ENCODER_LED_RED_BCM_GPIO_PIN)?.into_output();
@@ -774,10 +814,10 @@ impl HardwareDevice {
             .get(ENCODER_PUSH_SW_BCM_GPIO_PIN)?
             .into_input_pulldown();
 
-        // Snapshot the initial switch level (rest = released) before arming interrupts.
-        shared
-            .switch_pressed
-            .store(push_switch.is_high(), Ordering::Relaxed);
+        // Seed the initial switch level through the transition counter so a
+        // switch held at initialization records a matching press_count instead
+        // of leaving the cumulative press/release totals offset by one.
+        apply_switch_level(&shared, push_switch.is_high());
 
         let switch_shared = Arc::clone(&shared);
         push_switch.set_async_interrupt(
@@ -794,6 +834,7 @@ impl HardwareDevice {
             led,
             led_color: RgbColor::OFF,
             _quadrature_decoder: quadrature_decoder,
+            _claim: claim,
         })
     }
 
@@ -837,12 +878,14 @@ impl EncoderDevice {
     /// Creates a new [`EncoderDevice`] using the standard Raspberry Pi 3 GPIO pinout.
     ///
     /// Quadrature rotation decoding and push switch debouncing run on dedicated
-    /// interrupt threads publishing into process-global cumulative counters; only
-    /// one hardware device should exist per process.
+    /// interrupt threads publishing into process-global cumulative counters. A
+    /// process-global claim enforces that only one hardware device exists per
+    /// process at any time; the claim is released when the device is dropped.
     ///
     /// # Errors
     /// Returns [`EncoderError`] if the GPIO peripheral cannot be opened, a pin claim
-    /// fails, or the external quadrature decoder cannot be initialized.
+    /// fails, another hardware device already claims the EC12 pins, or the external
+    /// quadrature decoder cannot be initialized.
     pub fn new() -> Result<Self, EncoderError> {
         let device = HardwareDevice::new()?;
         Ok(Self {
@@ -1086,6 +1129,22 @@ mod tests {
     }
 
     #[test]
+    fn hardware_claim_is_exclusive_and_released_on_drop() {
+        {
+            let _claim = HardwareClaim::acquire().expect("first claim must succeed");
+            let err = HardwareClaim::acquire().expect_err("second claim must fail");
+            assert!(err.is_encoder_init());
+            assert!(
+                err.summary().contains("already claimed"),
+                "unexpected message: {}",
+                err.summary()
+            );
+        };
+        let _reacquired =
+            HardwareClaim::acquire().expect("dropping the holder must release the claim");
+    }
+
+    #[test]
     fn apply_switch_level_counts_transitions_only() {
         let shared = SharedEncoderState::default();
         apply_switch_level(&shared, true);
@@ -1190,6 +1249,16 @@ mod tests {
                 .contains("encoder initialization failed: decoder init boom")
         );
         assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn encoder_init_error_preserves_anyhow_causal_chain() {
+        let chained = anyhow::Error::msg("line request failed").context("decoder init");
+        let err = EncoderError::from(chained);
+        assert!(
+            err.summary()
+                .contains("encoder initialization failed: decoder init: line request failed")
+        );
     }
 
     #[test]
