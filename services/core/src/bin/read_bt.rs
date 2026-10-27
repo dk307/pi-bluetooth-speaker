@@ -156,7 +156,7 @@ pub struct BtStats {
 impl BtStats {
     /// Records a successful Bluetooth status reading.
     pub fn record_success(&mut self, status: &BluetoothStatus) {
-        self.samples.record_success(0.0);
+        self.samples.record_success_no_sample();
         if status.is_operational() {
             self.operational_reads += 1;
         }

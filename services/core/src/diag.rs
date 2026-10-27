@@ -256,6 +256,7 @@ pub const fn should_print_summary(
 pub struct NumericStats {
     total_reads: usize,
     successful_reads: usize,
+    numeric_samples: usize,
     min: Option<f32>,
     max: Option<f32>,
     sum: f64,
@@ -274,9 +275,20 @@ impl NumericStats {
         );
         self.total_reads += 1;
         self.successful_reads += 1;
+        self.numeric_samples += 1;
         self.sum += f64::from(value);
         self.min = Some(self.min.map_or(value, |cur| cur.min(value)));
         self.max = Some(self.max.map_or(value, |cur| cur.max(value)));
+    }
+
+    /// Records a successful read with no numeric sample.
+    ///
+    /// Count-only variant for devices that report status rather than numeric
+    /// measurements (e.g. amplifier fault flags, Bluetooth radio state), so
+    /// meaningless `0.0` sentinel samples are never accumulated.
+    pub fn record_success_no_sample(&mut self) {
+        self.total_reads += 1;
+        self.successful_reads += 1;
     }
 
     /// Records a failed sensor read attempt.
@@ -321,7 +333,7 @@ impl NumericStats {
         reason = "read counts are small; f64 precision is exact for integer counts"
     )]
     pub fn average(&self) -> Option<f64> {
-        (self.successful_reads > 0).then(|| self.sum / self.successful_reads as f64)
+        (self.numeric_samples > 0).then(|| self.sum / self.numeric_samples as f64)
     }
 
     /// Returns the arithmetic mean of all successful samples as `f32`, if any read succeeded.
@@ -480,26 +492,20 @@ mod tests {
     fn parse_count_and_interval_validate_bounds() {
         assert_eq!(parse_count_arg(Some("5".into())).unwrap(), 5);
         assert!(parse_count_arg(None).unwrap_err().contains("missing value"));
-        assert!(
-            parse_count_arg(Some("0".into()))
-                .unwrap_err()
-                .contains("at least 1")
-        );
-        assert!(
-            parse_count_arg(Some("abc".into()))
-                .unwrap_err()
-                .contains("invalid count")
-        );
+        assert!(parse_count_arg(Some("0".into()))
+            .unwrap_err()
+            .contains("at least 1"));
+        assert!(parse_count_arg(Some("abc".into()))
+            .unwrap_err()
+            .contains("invalid count"));
 
         assert_eq!(
             parse_interval_arg(Some("0.5".into())).unwrap(),
             Duration::from_millis(500)
         );
-        assert!(
-            parse_interval_arg(None)
-                .unwrap_err()
-                .contains("missing value")
-        );
+        assert!(parse_interval_arg(None)
+            .unwrap_err()
+            .contains("missing value"));
         for bad in ["0", "-1.0", "nan", "inf", "1e400", "abc"] {
             assert!(
                 parse_interval_arg(Some(bad.into())).is_err(),
@@ -530,6 +536,17 @@ mod tests {
         };
         assert!(!dir_path.exists());
 
+        let mut no_sample = NumericStats::default();
+        no_sample.record_success_no_sample();
+        no_sample.record_error();
+        assert_eq!(no_sample.total_reads(), 2);
+        assert_eq!(no_sample.successful_reads(), 1);
+        assert_eq!(no_sample.errors(), 1);
+        assert_eq!(no_sample.error_rate_percent(), 50.0);
+        assert!(no_sample.average().is_none());
+        assert!(no_sample.min().is_none());
+        assert!(no_sample.max().is_none());
+
         let mut stats = NumericStats::default();
         assert_eq!(stats.total_reads(), 0);
         assert_eq!(stats.error_rate_percent(), 0.0);
@@ -554,11 +571,9 @@ mod tests {
 
         let mut args = ["val".to_string()].into_iter();
         assert_eq!(next_arg_value(&mut args, "--flag").unwrap(), "val");
-        assert!(
-            next_arg_value(&mut args, "--flag")
-                .unwrap_err()
-                .contains("missing value for --flag")
-        );
+        assert!(next_arg_value(&mut args, "--flag")
+            .unwrap_err()
+            .contains("missing value for --flag"));
 
         assert_eq!(
             resolve_cli_opts(Ok(Some(42)), "bin", noop_usage).unwrap(),
