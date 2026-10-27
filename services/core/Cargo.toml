@@ -28,6 +28,10 @@ path = "src/bin/read_light.rs"
 name = "read_amp"
 path = "src/bin/read_amp.rs"
 
+[[bin]]
+name = "read_bt"
+path = "src/bin/read_bt.rs"
+
 [dependencies]
 # UI Framework (Slint with Linux Framebuffer & KMS/DRM backends)
 slint = { version = "=1.9.2", default-features = false, features = ["compat-1-2", "backend-linuxkms", "renderer-software"], optional = true }
@@ -38,7 +42,7 @@ tokio-tungstenite = { version = "=0.30.0", features = ["connect"] }
 futures-util = "=0.3.34"
 
 # D-Bus Engine for BlueZ 5 & BlueALSA
-zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio", "blocking-api"] }
 
 # Serialization & JSON-RPC
 serde = { version = "=1.0.229", features = ["derive"] }

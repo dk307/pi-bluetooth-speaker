@@ -106,6 +106,11 @@ const HELP_CASES: &[(&str, &str, &str)] = &[
         "MA12070P Amplifier Diagnostic Utility",
         "--address",
     ),
+    (
+        env!("CARGO_BIN_EXE_read_bt"),
+        "Bluetooth & BlueALSA Diagnostic Utility",
+        "--adapter",
+    ),
 ];
 
 #[test]
@@ -229,6 +234,43 @@ fn read_amp_cli_argument_validation() {
             (&["--address", "0x19"], "invalid MA12070P I2C address"),
             (&["--address", "0x24"], "invalid MA12070P I2C address"),
             (&["--address", "0x5C"], "invalid MA12070P I2C address"),
+        ],
+    );
+}
+
+#[test]
+fn read_bt_cli_argument_validation() {
+    let bin_path = env!("CARGO_BIN_EXE_read_bt");
+    assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
+    assert_cli_rejects(
+        bin_path,
+        &[
+            (&["--adapter"], "missing value for --adapter"),
+            (&["--device"], "missing value for --device"),
+            (
+                &["--device", "+AA:BB:CC:DD:EE:FF"],
+                "sign characters are not allowed",
+            ),
+            (
+                &["--device", "-AA:BB:CC:DD:EE:FF"],
+                "sign characters are not allowed",
+            ),
+            (
+                &["--device", "AA:+BB:CC:DD:EE:FF"],
+                "sign characters are not allowed",
+            ),
+            (&["--device", "not-a-mac"], "expected 6 hex octets"),
+            (
+                &["--device", "invalid"],
+                "expected 6 colon- or hyphen-separated hex octets",
+            ),
+            (&["--device", "AA:BB:CC:DD:EE"], "expected 6 hex octets"),
+            (&["--power"], "missing value for --power"),
+            (&["--power", "invalid"], "expected 'on' or 'off'"),
+            (&["--discoverable"], "missing value for --discoverable"),
+            (&["--discoverable", "invalid"], "expected 'on' or 'off'"),
+            (&["--pairable"], "missing value for --pairable"),
+            (&["--pairable", "invalid"], "expected 'on' or 'off'"),
         ],
     );
 }
