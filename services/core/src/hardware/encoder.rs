@@ -762,7 +762,9 @@ impl EncoderDevice {
     /// Samples quadrature phases and the push switch, updating cumulative counters.
     ///
     /// Quadrature transitions are decoded per the EC12 baseline table; push switch
-    /// press and release transitions increment their respective counters.
+    /// press and release transitions increment their respective counters. Press and
+    /// release follow raw sampled transitions without debouncing, matching the
+    /// baseline Python script.
     ///
     /// # Errors
     /// Returns [`EncoderError`] if GPIO reads fail.
