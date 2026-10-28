@@ -23,7 +23,7 @@
 services/core/
 ├── .cargo/
 │   └── config.toml     # Cortex-A53 NEON vectorization & cross-compile tuning
-├── Cargo.toml          # Crate dependencies & build configuration (package: speaker-core, bins: core, read_temp, read_light)
+├── Cargo.toml          # Crate dependencies & build configuration (package: speaker-core, bins: core, temp-read, light-read, amp-info, bt-info, encoder-read)
 ├── README.md           # Service documentation
 ├── AGENTS.md           # Agent instructions & guidelines
 ├── build.rs            # Slint ahead-of-time (AOT) UI compiler
@@ -33,8 +33,11 @@ services/core/
 │   ├── main.rs         # Core daemon entrypoint, Tokio runtime, and event dispatch
 │   ├── runtime.rs      # Asynchronous task join helpers & panic propagation
 │   ├── bin/
-│   │   ├── read_light.rs   # BH1750 I2C ambient light diagnostic utility
-│   │   └── read_temp.rs    # DS18B20 1-Wire temperature diagnostic utility
+│   │   ├── amp-info.rs     # MA12070P I2C amplifier diagnostic utility
+│   │   ├── bt-info.rs      # Bluetooth & BlueALSA D-Bus diagnostic utility
+│   │   ├── encoder-read.rs # EC12 rotary encoder diagnostic utility
+│   │   ├── light-read.rs   # BH1750 I2C ambient light diagnostic utility
+│   │   └── temp-read.rs    # DS18B20 1-Wire temperature diagnostic utility
 │   └── hardware/
 │       ├── light.rs    # BH1750 I2C driver, domain types, and mock controller
 │       ├── mod.rs      # Hardware GPIO pin types & shared abstractions
@@ -65,7 +68,10 @@ cargo run -p speaker-core --features simulator
 ### Diagnostic CLI Utilities
 
 The crate provides standalone diagnostics for testing and inspecting physical hardware sensors:
-- `read_temp`: Scans `/sys/bus/w1/devices/28-*/w1_slave` for attached DS18B20 1-Wire temperature sensors.
-- `read_light`: Queries `/dev/i2c-1` for BH1750 ambient light sensors at addresses `0x23` and `0x5C`.
+- `temp-read`: Scans `/sys/bus/w1/devices/28-*/w1_slave` for attached DS18B20 1-Wire temperature sensors.
+- `light-read`: Queries `/dev/i2c-1` for BH1750 ambient light sensors at addresses `0x23` and `0x5C`.
+- `amp-info`: Reports MA12070P Class-D amplifier power mode, audio input format, DCU channels, and error flags over I2C, with latched error-log clearing (`--clear`).
+- `bt-info`: Inspects BlueZ adapters and BlueALSA PCM streams over D-Bus, supports radio state control (`--power`, `--discoverable`, `--pairable`), device filters, and paired-device listings.
+- `encoder-read`: Samples the EC12 rotary encoder and RGB indicator LED driver state via GPIO, with an optional LED color-sweep verification (`--verify-leds`).
 
-Both utilities output in human-readable or NDJSON formats (`--json`), support bounded iterations (`--once`, `--count N`), print a statistical session summary on exit for multi-sample human-readable runs (suppressed for `--once` / `--count 1`), report human-mode read errors to `stderr`, and return exit code `0` on successful reads or `1` if all polling attempts fail.
+All utilities default to once mode (`--once`) so a single bounded read exits successfully; pass `--repeat` for continuous polling, `--count N` for bounded sampling, or `--version` for the semantic version. They output in human-readable or NDJSON formats (`--json`), print a statistical session summary on exit for multi-sample human-readable runs (suppressed for once mode), report human-mode read errors to `stderr`, and return exit code `0` on successful reads or `1` if all polling attempts fail.

@@ -14,8 +14,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use speaker_core::diag::{
-    CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads, format_timestamp,
-    next_arg_value, parse_args_with_common, resolve_cli_opts, run_poll_loop, should_print_summary,
+    CliParse, CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads,
+    format_timestamp, next_arg_value, parse_args_with_common, resolve_cli_opts, run_poll_loop,
+    should_print_summary,
 };
 use speaker_core::hardware::{
     BlueAlsaPcm, BluetoothDevice, BluetoothHardwareInfo, BluetoothStatus, BtAddress, BtDevice,
@@ -64,7 +65,8 @@ fn print_usage(bin_name: &str) {
     println!("Usage: {bin_name} [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  -1, --once                 Read once and exit");
+    println!("  -1, --once                 Read once and exit (default)");
+    println!("  -R, --repeat               Poll repeatedly until interrupted (Ctrl+C)");
     println!("  -n, --count <COUNT>        Read COUNT times and exit");
     println!("  -i, --interval <SECS>      Polling interval in seconds (default: 1.0)");
     println!("  -a, --adapter <ID>         Bluetooth adapter ID (default: hci0)");
@@ -77,6 +79,7 @@ fn print_usage(bin_name: &str) {
         "  -v, --verbose              Display extended hardware diagnostics (human format only)"
     );
     println!("  -j, --json                 Stream readings in newline-delimited JSON");
+    println!("  -V, --version              Print semantic version and exit");
     println!("  -h, --help                 Display this help text");
 }
 
@@ -94,7 +97,7 @@ fn parse_on_off(val: &str, flag_name: &str) -> Result<bool, String> {
 ///
 /// # Errors
 /// Returns a descriptive error message string if argument parsing or validation fails.
-pub fn parse_cli_args_from<I>(args: I) -> Result<Option<CliOptions>, String>
+pub fn parse_cli_args_from<I>(args: I) -> Result<CliParse<CliOptions>, String>
 where
     I: IntoIterator<Item = String>,
 {
@@ -136,7 +139,7 @@ where
     )
 }
 
-fn parse_cli_args() -> Result<Option<CliOptions>, String> {
+fn parse_cli_args() -> Result<CliParse<CliOptions>, String> {
     parse_cli_args_from(env_args())
 }
 
@@ -574,7 +577,7 @@ pub fn run_app(device: &BluetoothDevice, opts: &CliOptions) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let opts = match resolve_cli_opts(parse_cli_args(), "read_bt", print_usage) {
+    let opts = match resolve_cli_opts(parse_cli_args(), "bt-info", print_usage) {
         Ok(o) => o,
         Err(code) => return code,
     };
@@ -598,14 +601,26 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    fn unwrap_options(parsed: Result<CliParse<CliOptions>, String>) -> CliOptions {
+        match parsed.unwrap() {
+            CliParse::Options(o) => o,
+            other => panic!("expected CliParse::Options, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_cli_args_defaults_and_options() {
+        // Defaults: once mode, one second interval
         let args: Vec<String> = vec![];
-        let opts = parse_cli_args_from(args).unwrap().unwrap();
+        let opts = unwrap_options(parse_cli_args_from(args));
         assert_eq!(opts.common.interval, DEFAULT_POLL_INTERVAL);
-        assert!(opts.common.max_count.is_none());
+        assert_eq!(opts.common.max_count, Some(1));
         assert_eq!(opts.common.format, OutputFormat::Human);
         assert!(!opts.include_paired);
+
+        // Repeat flag switches back to continuous polling
+        let repeat = unwrap_options(parse_cli_args_from(vec!["--repeat".into()]));
+        assert_eq!(repeat.common.max_count, None);
 
         let args = vec![
             "--once".into(),
@@ -623,7 +638,7 @@ mod tests {
             "--pairable".into(),
             "yes".into(),
         ];
-        let opts = parse_cli_args_from(args).unwrap().unwrap();
+        let opts = unwrap_options(parse_cli_args_from(args));
         assert_eq!(opts.common.max_count, Some(1));
         assert_eq!(opts.adapter.as_deref(), Some("hci0"));
         assert_eq!(
@@ -637,11 +652,14 @@ mod tests {
         assert_eq!(opts.discoverable, Some(false));
         assert_eq!(opts.pairable, Some(true));
 
-        assert!(
-            parse_cli_args_from(vec!["--help".into()])
-                .unwrap()
-                .is_none()
-        );
+        assert!(matches!(
+            parse_cli_args_from(vec!["--help".into()]).unwrap(),
+            CliParse::Help
+        ));
+        assert!(matches!(
+            parse_cli_args_from(vec!["--version".into()]).unwrap(),
+            CliParse::Version
+        ));
         parse_cli_args_from(vec!["--power".into(), "invalid".into()]).unwrap_err();
         parse_cli_args_from(vec!["--device".into(), "bad-mac".into()]).unwrap_err();
     }
@@ -694,7 +712,7 @@ mod tests {
 
     #[test]
     fn print_usage_runs_cleanly() {
-        print_usage("read_bt");
+        print_usage("bt-info");
     }
 
     #[test]
