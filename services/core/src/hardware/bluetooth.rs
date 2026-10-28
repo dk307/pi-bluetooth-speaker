@@ -414,7 +414,15 @@ impl BluetoothControllerInfo {
     /// Returns `true` if any controller detail was successfully probed.
     #[must_use]
     pub fn is_known(&self) -> bool {
-        self.hci_version.is_some() || self.lmp_version.is_some()
+        self.adapter.is_some()
+            || self.hci_version.is_some()
+            || self.hci_revision.is_some()
+            || self.lmp_version.is_some()
+            || self.lmp_subversion.is_some()
+            || self.manufacturer.is_some()
+            || self.bus_type.is_some()
+            || self.bd_address.is_some()
+            || self.firmware_version.is_some()
     }
 }
 
@@ -1147,7 +1155,7 @@ impl DbusClient {
     /// Queries available codecs for a PCM via the `GetCodecs()` D-Bus method.
     ///
     /// Returns an empty list only when the daemon does not implement `GetCodecs`
-    /// (older BlueALSA versions), mirroring `bluealsactl` which prints
+    /// (older `BlueALSA` versions), mirroring `bluealsactl` which prints
     /// `[ Unknown ]` when the list is empty. Transport-level faults (connection
     /// loss, permission errors, malformed replies) propagate as [`BtError`].
     fn query_pcm_codecs(conn: &Connection, pcm_path: &str) -> Result<Box<[Box<str>]>, BtError> {
