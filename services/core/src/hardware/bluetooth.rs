@@ -495,11 +495,14 @@ fn parse_hciconfig_version(output: &str) -> Option<BluetoothControllerInfo> {
         }
     }
     info.firmware_version = match (info.hci_revision.as_deref(), info.lmp_subversion.as_deref()) {
-        (Some(rev), Some(sub)) => {
-            let rev = u32::from_str_radix(rev.trim_start_matches("0x"), 16).ok()?;
-            let sub = u32::from_str_radix(sub.trim_start_matches("0x"), 16).ok()?;
-            Some(format!("{:#x}", (rev << 16) | sub).into_boxed_str())
-        }
+        (Some(rev), Some(sub)) => u32::from_str_radix(rev.trim_start_matches("0x"), 16)
+            .ok()
+            .and_then(|rev| {
+                u32::from_str_radix(sub.trim_start_matches("0x"), 16)
+                    .ok()
+                    .map(|sub| format!("{rev:#x}{sub:04x}"))
+            })
+            .map(std::string::String::into_boxed_str),
         _ => None,
     };
     (info.hci_version.is_some() || info.lmp_version.is_some()).then_some(info)
@@ -2009,6 +2012,25 @@ hci0:	Type: Primary  Bus: UART
         assert_eq!(info.lmp_subversion.as_deref(), Some("0xc761"));
         assert_eq!(info.firmware_version.as_deref(), Some("0x555c761"));
         assert!(info.is_known());
+    }
+
+    #[test]
+    fn parse_hciconfig_version_bad_hex_keeps_other_fields() {
+        let output = "hci0:\tType: Primary  Bus: USB\nBD Address: 20:E1:5D:B2:16:BF\n\t\
+            HCI Version: 5.4 (0xd)\n\tRevision: unknown\n\t\
+            LMP Version: 5.4 (0xd)  Subversion: broken\n\t\
+            Manufacturer: Realtek Semiconductor Corporation (93)\n";
+        let info = BluetoothControllerInfo::from_hciconfig_output(output)
+            .expect("bad hex values must not abort the whole parse");
+        assert_eq!(info.bus_type.as_deref(), Some("USB"));
+        assert_eq!(info.bd_address.as_deref(), Some("20:E1:5D:B2:16:BF"));
+        assert_eq!(info.hci_version.as_deref(), Some("5.4"));
+        assert_eq!(info.lmp_version.as_deref(), Some("5.4"));
+        assert_eq!(
+            info.manufacturer.as_deref(),
+            Some("Realtek Semiconductor Corporation")
+        );
+        assert_eq!(info.firmware_version, None);
     }
 
     #[test]
