@@ -1190,12 +1190,11 @@ impl DspDevice {
             .ok()
             .and_then(|v| v.as_f64().map(|f| f as f32));
 
-        // 7. Rate Adjust
-        let rate_adjust = Self::send_command(&mut ws, "GetRateAdjust")
-            .await
-            .ok()
-            .and_then(|v| v.as_f64())
-            .unwrap_or(1.0);
+        // 7. Rate Adjust (mandatory core telemetry)
+        let rate_val = Self::send_command(&mut ws, "GetRateAdjust").await?;
+        let rate_adjust = rate_val
+            .as_f64()
+            .ok_or_else(|| DspError::protocol_error("invalid GetRateAdjust float response"))?;
 
         // 8. Buffer Level (mandatory core telemetry)
         let buf_val = Self::send_command(&mut ws, "GetBufferLevel").await?;
@@ -1204,25 +1203,24 @@ impl DspDevice {
             .map(|u| u as u32)
             .ok_or_else(|| DspError::protocol_error("invalid GetBufferLevel integer response"))?;
 
-        // 9. Clipped Samples
-        let clipped_samples = Self::send_command(&mut ws, "GetClippedSamples")
-            .await
-            .ok()
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        // 9. Clipped Samples (mandatory core telemetry)
+        let clip_val = Self::send_command(&mut ws, "GetClippedSamples").await?;
+        let clipped_samples = clip_val.as_u64().ok_or_else(|| {
+            DspError::protocol_error("invalid GetClippedSamples integer response")
+        })?;
 
-        // 10. Capture Rate
+        // 10. Capture Rate (optional, present when capture stream active)
         let capture_rate = Self::send_command(&mut ws, "GetCaptureRate")
             .await
             .ok()
             .and_then(|v| v.as_u64().map(|u| u as u32));
 
-        // 11. Stop Reason
-        let stop_reason = Self::send_command(&mut ws, "GetStopReason")
-            .await
-            .ok()
-            .and_then(|v| v.as_str().map(StopReason::parse_reason))
-            .unwrap_or(StopReason::None);
+        // 11. Stop Reason (mandatory core telemetry)
+        let stop_val = Self::send_command(&mut ws, "GetStopReason").await?;
+        let stop_str = stop_val
+            .as_str()
+            .ok_or_else(|| DspError::protocol_error("invalid GetStopReason string response"))?;
+        let stop_reason = StopReason::parse_reason(stop_str);
 
         // 12. Volume & Mute
         let volume_db = Self::send_command(&mut ws, "GetVolume")
@@ -1364,18 +1362,22 @@ pub fn format_load_meter(load_pct: f32, width: usize) -> String {
 /// and distinguishing unit absence (`NoSuchUnit`) from degradation/failure.
 fn probe_systemd_service(unit_name: &str) -> ServiceState {
     let Ok(conn) = zbus::blocking::Connection::system() else {
-        return ServiceState::NotFound;
+        return ServiceState::Failed;
     };
     let Ok(manager) = SystemdManagerProxyBlocking::new(&conn) else {
-        return ServiceState::NotFound;
+        return ServiceState::Failed;
     };
     match manager.get_unit(unit_name) {
         Ok(path) => {
-            let Ok(unit) = SystemdUnitProxyBlocking::builder(&conn)
+            let unit = match SystemdUnitProxyBlocking::builder(&conn)
                 .path(path)
                 .and_then(zbus::blocking::proxy::Builder::build)
-            else {
-                return ServiceState::NotFound;
+            {
+                Ok(u) => u,
+                Err(ref e) if super::bluetooth::is_no_such_unit_error(e) => {
+                    return ServiceState::NotFound;
+                }
+                Err(_) => return ServiceState::Failed,
             };
             let Ok(active) = unit.active_state() else {
                 return ServiceState::Failed;
@@ -1871,6 +1873,15 @@ mod tests {
                         }
                         "GetBufferLevel" => {
                             serde_json::json!({"GetBufferLevel": {"result": "Ok", "value": 512}})
+                        }
+                        "GetRateAdjust" => {
+                            serde_json::json!({"GetRateAdjust": {"result": "Ok", "value": 1.0}})
+                        }
+                        "GetClippedSamples" => {
+                            serde_json::json!({"GetClippedSamples": {"result": "Ok", "value": 0}})
+                        }
+                        "GetStopReason" => {
+                            serde_json::json!({"GetStopReason": {"result": "Ok", "value": "None"}})
                         }
                         "GetSignalLevels" => {
                             serde_json::json!({"GetSignalLevels": {"result": "Error", "value": "not implemented"}})

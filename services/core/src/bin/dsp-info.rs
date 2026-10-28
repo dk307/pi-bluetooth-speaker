@@ -157,8 +157,9 @@ impl DspStats {
 }
 
 fn update_max_peaks(dst: &mut Vec<f32>, src: &[f32]) {
-    if dst.len() < src.len() {
-        dst.resize(src.len(), -100.0);
+    if dst.len() != src.len() {
+        *dst = src.to_vec();
+        return;
     }
     for (d, s) in dst.iter_mut().zip(src.iter()) {
         if *s > *d {
@@ -741,6 +742,13 @@ mod tests {
 
         stats.record_error();
         assert_eq!(stats.samples.errors(), 1);
+
+        // Channel count change resets peak vectors cleanly
+        sample_status.capture.peaks = vec![-5.0].into_boxed_slice();
+        sample_status.playback.peaks = vec![-6.0].into_boxed_slice();
+        stats.record_success(&sample_status);
+        assert_eq!(stats.max_capture_peaks, vec![-5.0]);
+        assert_eq!(stats.max_playback_peaks, vec![-6.0]);
 
         print_session_summary(&stats);
     }
