@@ -16,7 +16,11 @@
 use std::backtrace::Backtrace;
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
+use std::io::Read;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, RwLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use zbus::blocking::Connection;
@@ -299,13 +303,13 @@ pub struct BlueAlsaPcm {
     pub sampling_rate: u32,
     /// Number of audio channels (e.g. 2 for stereo).
     pub channels: u8,
-    /// PCM sample format (e.g. `S16_LE`).
+    /// PCM sample format decoded from the 16-bit identifier (e.g. `S16_LE`).
     pub format: Box<str>,
-    /// Hardware volume level, if reported.
+    /// Hardware volume levels per channel (e.g. `L: 127 R: 127`), if reported.
     pub volume: Option<Box<str>>,
-    /// Whether audio output is muted.
+    /// Whether audio output is muted (any channel volume high bit set).
     pub muted: bool,
-    /// Audio transmission latency delay, if reported.
+    /// Audio transmission latency in milliseconds, if reported.
     pub delay: Option<Box<str>>,
 }
 
@@ -330,12 +334,14 @@ pub struct BluetoothHardwareInfo {
     pub bus: Box<str>,
     /// Operating UART baud rate in bps.
     pub baud_rate: u32,
-    /// Firmware patch file location.
+    /// Firmware file location.
     pub firmware: Box<str>,
     /// Kernel subsystem driver.
     pub driver: Box<str>,
     /// Default hardware interface identifier.
     pub default_controller: Box<str>,
+    /// Live controller identity and firmware version, when probed.
+    pub controller: BluetoothControllerInfo,
 }
 
 impl BluetoothHardwareInfo {
@@ -349,8 +355,154 @@ impl BluetoothHardwareInfo {
             firmware: BCM43438_FIRMWARE_PATH.into(),
             driver: "hci_uart (bcm)".into(),
             default_controller: DEFAULT_BT_ADAPTER.into(),
+            controller: BluetoothControllerInfo::unknown(),
         }
     }
+}
+
+/// Live HCI controller identity and firmware version read from the kernel.
+///
+/// All fields are `None` when the corresponding detail could not be probed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BluetoothControllerInfo {
+    /// HCI specification version (e.g. `5.4`).
+    pub hci_version: Option<Box<str>>,
+    /// Controller hardware revision (hex, e.g. `0xddd5`).
+    pub hci_revision: Option<Box<str>>,
+    /// LMP/Radio specification version (e.g. `5.4`).
+    pub lmp_version: Option<Box<str>>,
+    /// Controller radio subversion (hex, e.g. `0xc761`).
+    pub lmp_subversion: Option<Box<str>>,
+    /// Controller manufacturer name (e.g. `Realtek Semiconductor Corporation`).
+    pub manufacturer: Option<Box<str>>,
+    /// Physical transport bus type (e.g. `USB`, `UART`).
+    pub bus_type: Option<Box<str>>,
+    /// Controller Bluetooth device address.
+    pub bd_address: Option<Box<str>>,
+    /// Composite loaded firmware version (hex `(revision << 16) | subversion`).
+    pub firmware_version: Option<Box<str>>,
+}
+
+impl BluetoothControllerInfo {
+    /// Returns controller info with every detail unknown (probe unavailable).
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self::default()
+    }
+
+    /// Builds controller info by parsing raw `hciconfig <adapter> version` text.
+    #[must_use]
+    pub fn from_hciconfig_output(output: &str) -> Option<Self> {
+        parse_hciconfig_version(output)
+    }
+
+    /// Probes the live controller via `hciconfig <adapter> version` (10s deadline).
+    ///
+    /// Every failure mode (missing binary, timeout, parse failure) degrades to
+    /// [`BluetoothControllerInfo::unknown`] rather than an error, so status
+    /// reporting stays available even on hosts without `hciconfig`.
+    #[must_use]
+    pub fn probe(adapter: &str) -> Self {
+        let Some(output) = run_hciconfig_version(adapter) else {
+            return Self::unknown();
+        };
+        Self::from_hciconfig_output(&output).unwrap_or_else(Self::unknown)
+    }
+
+    /// Returns `true` if any controller detail was successfully probed.
+    #[must_use]
+    pub fn is_known(&self) -> bool {
+        self.hci_version.is_some()
+    }
+}
+
+/// Runs `hciconfig <adapter> version` with a hard deadline, capturing stdout.
+fn run_hciconfig_version(adapter: &str) -> Option<String> {
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+    const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+    let mut child = Command::new("hciconfig")
+        .args([adapter, "version"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(POLL_INTERVAL);
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }?;
+    if !status.success() {
+        return None;
+    }
+    let mut stdout = Vec::new();
+    child.stdout.take()?.read_to_end(&mut stdout).ok()?;
+    String::from_utf8(stdout).ok()
+}
+
+/// Parses `hciconfig <adapter> version` output into controller identity fields.
+fn parse_hciconfig_version(output: &str) -> Option<BluetoothControllerInfo> {
+    let mut info = BluetoothControllerInfo::unknown();
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some((_, rest)) = line.split_once("Bus:") {
+            info.bus_type = Some(rest.trim().to_string().into_boxed_str());
+        }
+        if let Some((_, rest)) = line.split_once("BD Address:") {
+            let rest = rest.trim();
+            let addr = rest.split_whitespace().next().unwrap_or(rest);
+            info.bd_address = Some(addr.to_string().into_boxed_str());
+        }
+        if let Some((_, rest)) = line.split_once("HCI Version:") {
+            let rest = rest.trim();
+            let version = rest.split_whitespace().next()?;
+            info.hci_version = Some(version.to_string().into_boxed_str());
+        }
+        if let Some((_, rest)) = line.split_once("Revision:") {
+            info.hci_revision = rest
+                .split_whitespace()
+                .next()
+                .map(String::from)
+                .map(Into::into);
+        }
+        if let Some((_, rest)) = line.split_once("LMP Version:") {
+            let version = rest.split_whitespace().next()?;
+            info.lmp_version = Some(version.to_string().into_boxed_str());
+        }
+        if let Some((_, rest)) = line.split_once("Subversion:") {
+            info.lmp_subversion = rest
+                .split_whitespace()
+                .next()
+                .map(String::from)
+                .map(Into::into);
+        }
+        if let Some((_, rest)) = line.split_once("Manufacturer:") {
+            let rest = rest.trim();
+            let name = match rest.rfind('(') {
+                Some(idx) => rest[..idx].trim(),
+                None => rest,
+            };
+            info.manufacturer = Some(name.to_string().into_boxed_str());
+        }
+    }
+    info.firmware_version = match (info.hci_revision.as_deref(), info.lmp_subversion.as_deref()) {
+        (Some(rev), Some(sub)) => {
+            let rev = u32::from_str_radix(rev.trim_start_matches("0x"), 16).ok()?;
+            let sub = u32::from_str_radix(sub.trim_start_matches("0x"), 16).ok()?;
+            Some(format!("{:#x}", (rev << 16) | sub).into_boxed_str())
+        }
+        _ => None,
+    };
+    (info.hci_version.is_some() || info.lmp_version.is_some()).then_some(info)
 }
 
 /// Comprehensive point-in-time snapshot of the Bluetooth subsystem.
@@ -638,6 +790,73 @@ fn get_str_array(props: &HashMap<String, OwnedValue>, key: &str) -> Box<[Box<str
     Box::default()
 }
 
+/// Extracts a D-Bus `ay` byte array property (e.g. `BlueALSA` `Volume`).
+fn get_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Box<[u8]>> {
+    match props.get(key).map(|v| &**v) {
+        Some(Value::Array(arr)) => {
+            let mut bytes = Vec::with_capacity(arr.len());
+            for v in arr.iter() {
+                bytes.push(v.downcast_ref::<u8>().ok()?);
+            }
+            Some(bytes.into_boxed_slice())
+        }
+        _ => None,
+    }
+}
+
+/// Decodes a `BlueALSA` 16-bit PCM format identifier (e.g. `0x8410` → `S16_2LE`).
+///
+/// Encoding per `BlueALSA` `BA_TRANSPORT_PCM_FORMAT`: bit 15 = signed, bit 14 = big-endian,
+/// bits 8–13 = physical bytes per sample, bits 0–7 = bit width.
+#[must_use]
+pub fn decode_pcm_format(id: u16) -> Box<str> {
+    if id == 0 {
+        return "Invalid".into();
+    }
+    let signed = (id >> 15) & 1 == 1;
+    let big_endian = (id >> 14) & 1 == 1;
+    let bytes_per_sample = ((id >> 8) & 0x3F) as u8;
+    let width = (id & 0xFF) as u8;
+
+    if width == 0 || bytes_per_sample == 0 || u16::from(bytes_per_sample) * 8 < u16::from(width) {
+        return "Invalid".into();
+    }
+
+    let sign = if signed { 'S' } else { 'U' };
+    let endian = if big_endian { "BE" } else { "LE" };
+    if bytes_per_sample == 1 {
+        format!("{sign}{width}{endian}").into()
+    } else {
+        format!("{sign}{width}_{bytes_per_sample}{endian}").into()
+    }
+}
+
+/// Renders `BlueALSA` per-channel volume bytes (`(muted << 7) | level`).
+///
+/// Uses channel names when provided (`ChannelMap`), falling back to generic indices.
+#[must_use]
+fn format_volume_bytes(
+    bytes: &[u8],
+    channel_names: Option<&[Box<str>]>,
+) -> (Option<Box<str>>, bool) {
+    if bytes.is_empty() {
+        return (None, false);
+    }
+    let muted = bytes.iter().any(|b| b & 0x80 != 0);
+    let volume = bytes
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let name = channel_names
+                .and_then(|names| names.get(i))
+                .map_or_else(|| format!("CH{i}"), std::string::ToString::to_string);
+            format!("{name}: {}", b & 0x7F)
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (Some(volume.into()), muted)
+}
+
 pub(crate) fn is_no_such_unit_error(err: &zbus::Error) -> bool {
     match err {
         zbus::Error::MethodError(name, _, _) => {
@@ -880,7 +1099,41 @@ impl DbusClient {
             Err(e) => return Err(BtError::from(e)),
         };
 
-        Ok(Self::parse_bluealsa_objects(&objects, devices))
+        Ok(Self::parse_bluealsa_objects(&objects, devices)
+            .into_iter()
+            .map(|mut pcm| {
+                pcm.available_codecs = Self::query_pcm_codecs(&self.conn, &pcm.pcm_path);
+                pcm
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice())
+    }
+
+    /// Queries available codecs for a PCM via the `GetCodecs()` D-Bus method.
+    ///
+    /// Returns an empty list on any error (e.g. unsupported method on older daemons),
+    /// mirroring `bluealsactl` which prints `[ Unknown ]` when the list is empty.
+    fn query_pcm_codecs(conn: &Connection, pcm_path: &str) -> Box<[Box<str>]> {
+        let Ok(proxy) =
+            zbus::blocking::Proxy::new(conn, "org.bluealsa", pcm_path, "org.bluealsa.PCM1")
+        else {
+            return Box::default();
+        };
+
+        let Ok(reply) = proxy.call_method("GetCodecs", &()) else {
+            return Box::default();
+        };
+
+        let Ok(codecs) = reply
+            .body()
+            .deserialize::<HashMap<String, HashMap<String, OwnedValue>>>()
+        else {
+            return Box::default();
+        };
+
+        let mut names: Vec<Box<str>> = codecs.into_keys().map(Into::into).collect();
+        names.sort();
+        names.into_boxed_slice()
     }
 
     pub(crate) fn parse_bluealsa_objects(
@@ -916,26 +1169,9 @@ impl DbusClient {
                 let running = get_bool(props, "Running");
                 let selected_codec = get_str(props, "Codec").unwrap_or("Unknown").into();
 
-                let available_codecs = if let Some(codecs_val) =
-                    props.get("AvailableCodecs").or_else(|| props.get("Codecs"))
-                {
-                    match &**codecs_val {
-                        Value::Array(arr) => arr
-                            .iter()
-                            .filter_map(|v| v.downcast_ref::<&str>().ok().map(Into::into))
-                            .collect(),
-                        _ => match codecs_val.downcast_ref::<&str>().ok() {
-                            Some(s) if s.trim() != "[ Unknown ]" => s
-                                .split(|c: char| c == ',' || c.is_whitespace())
-                                .filter(|c| !c.is_empty())
-                                .map(Into::into)
-                                .collect(),
-                            _ => Box::default(),
-                        },
-                    }
-                } else {
-                    Box::default()
-                };
+                // Available codecs are exposed only via the `GetCodecs()` method
+                // (queried per-PCM in `query_bluealsa`), never as properties.
+                let available_codecs = Box::default();
 
                 let sampling_rate = get_u32(props, "Sampling")
                     .or_else(|| get_u32(props, "Rate"))
@@ -945,14 +1181,23 @@ impl DbusClient {
                     .or_else(|| get_u16(props, "Channels").and_then(|c| u8::try_from(c).ok()))
                     .unwrap_or(2);
 
-                let format = get_str(props, "Format").unwrap_or("S16_LE").into();
-                let volume = get_str(props, "Volume")
-                    .map(Into::into)
-                    .or_else(|| get_u16(props, "Volume").map(|v| v.to_string().into_boxed_str()));
-                let muted = get_bool(props, "Mute") || get_bool(props, "Muted");
-                let delay = get_u32(props, "Delay")
-                    .map(|d| d.to_string().into_boxed_str())
-                    .or_else(|| get_str(props, "Delay").map(Into::into));
+                let format =
+                    get_u16(props, "Format").map_or_else(|| "Unknown".into(), decode_pcm_format);
+
+                let channel_map = get_str_array(props, "ChannelMap");
+                let channel_names = if channel_map.is_empty() {
+                    None
+                } else {
+                    Some(channel_map)
+                };
+                let (volume, muted) = get_byte_array(props, "Volume")
+                    .map_or((None, false), |bytes| {
+                        format_volume_bytes(&bytes, channel_names.as_deref())
+                    });
+
+                // `Delay` is a uint16 in 1/10 ms units (e.g. 1500 → 150.0 ms).
+                let delay = get_u16(props, "Delay")
+                    .map(|d| format!("{:.1} ms", f64::from(d) / 10.0).into_boxed_str());
 
                 pcms.push(BlueAlsaPcm {
                     pcm_path,
@@ -1350,12 +1595,14 @@ impl BluetoothDevice {
                 let services = dbus.check_services()?;
                 let (adapter, devices) = dbus.query_bluez(target_adapter)?;
                 let pcms = dbus.query_bluealsa(&devices)?;
+                let mut hardware = BluetoothHardwareInfo::rpi3();
+                hardware.controller = BluetoothControllerInfo::probe(&hardware.default_controller);
                 Ok(BluetoothStatus {
                     services,
                     adapter,
                     devices,
                     pcms,
-                    hardware: BluetoothHardwareInfo::rpi3(),
+                    hardware,
                 })
             }
         }
@@ -1684,6 +1931,74 @@ mod tests {
         assert_eq!(&*hw.firmware, "/lib/firmware/brcm/BCM43430A1.hcd");
         assert_eq!(&*hw.driver, "hci_uart (bcm)");
         assert_eq!(&*hw.default_controller, "hci0");
+        assert!(!hw.controller.is_known());
+        assert_eq!(hw.controller, BluetoothControllerInfo::unknown());
+    }
+
+    /// Real `hciconfig hci0 version` output from the Pi (TP-Link UB500, RTL8761B).
+    const HCICONFIG_RTL8761B_OUTPUT: &str = "\
+hci0:	Type: Primary  Bus: USB
+	BD Address: 20:E1:5D:B2:16:BF  ACL MTU: 1021:6  SCO MTU: 255:12
+	HCI Version: 5.4 (0xd)  Revision: 0xddd5
+	LMP Version: 5.4 (0xd)  Subversion: 0xc761
+	Manufacturer: Realtek Semiconductor Corporation (93)
+";
+
+    #[test]
+    fn parse_hciconfig_version_rtl8761b() {
+        let info = BluetoothControllerInfo::from_hciconfig_output(HCICONFIG_RTL8761B_OUTPUT)
+            .expect("real hciconfig output must parse");
+        assert_eq!(info.bus_type.as_deref(), Some("USB"));
+        assert_eq!(info.bd_address.as_deref(), Some("20:E1:5D:B2:16:BF"));
+        assert_eq!(info.hci_version.as_deref(), Some("5.4"));
+        assert_eq!(info.hci_revision.as_deref(), Some("0xddd5"));
+        assert_eq!(info.lmp_version.as_deref(), Some("5.4"));
+        assert_eq!(info.lmp_subversion.as_deref(), Some("0xc761"));
+        assert_eq!(
+            info.manufacturer.as_deref(),
+            Some("Realtek Semiconductor Corporation")
+        );
+        assert_eq!(info.firmware_version.as_deref(), Some("0xddd5c761"));
+        assert!(info.is_known());
+    }
+
+    #[test]
+    fn parse_hciconfig_version_bcm_uart() {
+        let output = "\
+hci0:	Type: Primary  Bus: UART
+	BD Address: B8:27:EB:12:34:56  ACL MTU: 1021:8  SCO MTU: 255:12
+	HCI Version: 4.1 (0x7)  Revision: 0x1000
+	LMP Version: 4.1 (0x7)  Subversion: 0x2207
+	Manufacturer: Broadcom Corporation (15)
+";
+        let info =
+            BluetoothControllerInfo::from_hciconfig_output(output).expect("BCM output must parse");
+        assert_eq!(info.bus_type.as_deref(), Some("UART"));
+        assert_eq!(info.bd_address.as_deref(), Some("B8:27:EB:12:34:56"));
+        assert_eq!(info.hci_version.as_deref(), Some("4.1"));
+        assert_eq!(info.hci_revision.as_deref(), Some("0x1000"));
+        assert_eq!(info.lmp_version.as_deref(), Some("4.1"));
+        assert_eq!(info.lmp_subversion.as_deref(), Some("0x2207"));
+        assert_eq!(info.manufacturer.as_deref(), Some("Broadcom Corporation"));
+        assert_eq!(info.firmware_version.as_deref(), Some("0x10002207"));
+    }
+
+    #[test]
+    fn parse_hciconfig_version_tolerates_missing_fields() {
+        let output = "hci0:\tHCI Version: 5.4 (0xd)  Revision: 0xddd5\n";
+        let info = BluetoothControllerInfo::from_hciconfig_output(output)
+            .expect("version-only output still parses");
+        assert_eq!(info.bus_type, None);
+        assert_eq!(info.bd_address, None);
+        assert_eq!(info.hci_version.as_deref(), Some("5.4"));
+        assert_eq!(info.hci_revision.as_deref(), Some("0xddd5"));
+        assert_eq!(info.firmware_version, None);
+    }
+
+    #[test]
+    fn parse_hciconfig_version_empty_is_none() {
+        assert!(BluetoothControllerInfo::from_hciconfig_output("").is_none());
+        assert!(BluetoothControllerInfo::from_hciconfig_output("garbage text\n").is_none());
     }
 
     #[test]
@@ -2084,13 +2399,11 @@ mod tests {
         pcm_props.insert("Transport".to_string(), to_val("A2DP-sink"));
         pcm_props.insert("Running".to_string(), to_val(true));
         pcm_props.insert("Codec".to_string(), to_val("AAC"));
-        pcm_props.insert("AvailableCodecs".to_string(), to_val(vec!["SBC", "AAC"]));
         pcm_props.insert("Sampling".to_string(), to_val(48000u32));
         pcm_props.insert("Channels".to_string(), to_val(2u8));
-        pcm_props.insert("Format".to_string(), to_val("S16_LE"));
-        pcm_props.insert("Volume".to_string(), to_val("L: 127 R: 127"));
-        pcm_props.insert("Mute".to_string(), to_val(false));
-        pcm_props.insert("Delay".to_string(), to_val(1500u32));
+        pcm_props.insert("Format".to_string(), to_val(0x8210u16));
+        pcm_props.insert("Volume".to_string(), to_val(vec![0x7Fu8, 0x7Fu8]));
+        pcm_props.insert("Delay".to_string(), to_val(1500u16));
 
         pcm_ifaces.insert(iface("org.bluealsa.PCM1"), pcm_props);
         objects.insert(pcm_path, pcm_ifaces);
@@ -2108,12 +2421,15 @@ mod tests {
         pcm_props2.insert("Transport".to_string(), to_val("A2DP-sink"));
         pcm_props2.insert("Running".to_string(), to_val(false));
         pcm_props2.insert("Codec".to_string(), to_val("SBC"));
-        pcm_props2.insert("AvailableCodecs".to_string(), to_val("SBC, AAC, LDAC"));
         pcm_props2.insert("Rate".to_string(), to_val(44100u32));
+        pcm_props2.insert("Format".to_string(), to_val(0x8210u16));
         pcm_props2.insert("Channels".to_string(), to_val(2u16));
-        pcm_props2.insert("Volume".to_string(), to_val(100u16));
-        pcm_props2.insert("Muted".to_string(), to_val(true));
-        pcm_props2.insert("Delay".to_string(), to_val("1200"));
+        pcm_props2.insert(
+            "ChannelMap".to_string(),
+            to_val(vec!["L".to_string(), "R".to_string()]),
+        );
+        pcm_props2.insert("Volume".to_string(), to_val(vec![0xFFu8, 0x7Fu8]));
+        pcm_props2.insert("Delay".to_string(), to_val(1200u16));
         pcm_ifaces2.insert(iface("org.bluealsa.PCM1"), pcm_props2);
         objects.insert(pcm_path2, pcm_ifaces2);
 
@@ -2146,27 +2462,74 @@ mod tests {
         // Sorted by pcm_path: .../sink comes before .../source
         let sink_pcm = &pcms[0];
         assert_eq!(sink_pcm.selected_codec.as_ref(), "SBC");
-        assert_eq!(
-            sink_pcm.available_codecs.as_ref(),
-            &["SBC".into(), "AAC".into(), "LDAC".into()]
-        );
+        assert!(sink_pcm.available_codecs.is_empty());
         assert_eq!(sink_pcm.sampling_rate, 44100);
         assert_eq!(sink_pcm.channels, 2);
         assert!(!sink_pcm.running);
         assert!(sink_pcm.muted);
-        assert_eq!(sink_pcm.delay.as_deref(), Some("1200"));
+        assert_eq!(sink_pcm.volume.as_deref(), Some("L: 127 R: 127"));
+        assert_eq!(sink_pcm.delay.as_deref(), Some("120.0 ms"));
+        assert_eq!(sink_pcm.format.as_ref(), "S16_2LE");
 
         let source_pcm = &pcms[1];
         assert_eq!(source_pcm.resolved_name.as_ref(), "Pixel Phone");
         assert_eq!(source_pcm.selected_codec.as_ref(), "AAC");
-        assert_eq!(
-            source_pcm.available_codecs.as_ref(),
-            &["SBC".into(), "AAC".into()]
-        );
+        assert!(source_pcm.available_codecs.is_empty());
         assert_eq!(source_pcm.sampling_rate, 48000);
         assert_eq!(source_pcm.channels, 2);
         assert!(source_pcm.running);
-        assert_eq!(source_pcm.delay.as_deref(), Some("1500"));
+        assert!(!source_pcm.muted);
+        assert_eq!(source_pcm.volume.as_deref(), Some("CH0: 127 CH1: 127"));
+        assert_eq!(source_pcm.delay.as_deref(), Some("150.0 ms"));
+    }
+
+    #[test]
+    fn decode_pcm_format_identifiers() {
+        // Signed/unsigned prefix, width, endian; no byte suffix when bytes*8 == width.
+        assert_eq!(decode_pcm_format(0x8210).as_ref(), "S16_2LE");
+        assert_eq!(decode_pcm_format(0x0108).as_ref(), "U8LE");
+        assert_eq!(decode_pcm_format(0x8420).as_ref(), "S32_4LE");
+        // Physical bytes larger than width: underscore byte-count suffix.
+        assert_eq!(decode_pcm_format(0x8318).as_ref(), "S24_3LE");
+        assert_eq!(decode_pcm_format(0x8418).as_ref(), "S24_4LE");
+        // Doc examples: unsigned 16-bit 2 bytes big-endian.
+        assert_eq!(decode_pcm_format(0x4210).as_ref(), "U16_2BE");
+        // Invalid: zero id, zero width, zero bytes, width larger than bytes*8.
+        assert_eq!(decode_pcm_format(0).as_ref(), "Invalid");
+        assert_eq!(decode_pcm_format(0x8100).as_ref(), "Invalid");
+        assert_eq!(decode_pcm_format(0x8000).as_ref(), "Invalid");
+        assert_eq!(decode_pcm_format(0x8020).as_ref(), "Invalid");
+    }
+
+    #[test]
+    fn format_volume_bytes_channels() {
+        // Empty input: no volume, not muted.
+        assert_eq!(
+            format_volume_bytes(&[], None),
+            (Option::<Box<str>>::None, false)
+        );
+        // Stereo, unmuted, generic channel names.
+        assert_eq!(
+            format_volume_bytes(&[0x7F, 0x40], None),
+            (Some("CH0: 127 CH1: 64".into()) as Option<Box<str>>, false)
+        );
+        // Any muted high bit → muted true; levels masked to 7 bits.
+        assert_eq!(
+            format_volume_bytes(&[0xFF, 0x7F], None),
+            (Some("CH0: 127 CH1: 127".into()) as Option<Box<str>>, true)
+        );
+        // ChannelMap names override generic indices.
+        let names: Box<[Box<str>]> = vec!["L".into(), "R".into()].into_boxed_slice();
+        assert_eq!(
+            format_volume_bytes(&[0x80, 0x20], Some(&names)),
+            (Some("L: 0 R: 32".into()) as Option<Box<str>>, true)
+        );
+        // ChannelMap shorter than volume bytes: falls back to CH{i}.
+        let one_name: Box<[Box<str>]> = vec!["L".into()].into_boxed_slice();
+        assert_eq!(
+            format_volume_bytes(&[0x10, 0x20], Some(&one_name)),
+            (Some("L: 16 CH1: 32".into()) as Option<Box<str>>, false)
+        );
     }
 
     #[test]
