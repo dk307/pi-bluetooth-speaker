@@ -473,9 +473,11 @@ fn parse_hciconfig_version(output: &str) -> Option<BluetoothControllerInfo> {
             info.bd_address = Some(addr.to_string().into_boxed_str());
         }
         if let Some((_, rest)) = line.split_once("HCI Version:") {
-            let rest = rest.trim();
-            let version = rest.split_whitespace().next()?;
-            info.hci_version = Some(version.to_string().into_boxed_str());
+            info.hci_version = rest
+                .split_whitespace()
+                .next()
+                .map(String::from)
+                .map(Into::into);
         }
         if let Some((_, rest)) = line.split_once("Revision:") {
             info.hci_revision = rest
@@ -485,8 +487,11 @@ fn parse_hciconfig_version(output: &str) -> Option<BluetoothControllerInfo> {
                 .map(Into::into);
         }
         if let Some((_, rest)) = line.split_once("LMP Version:") {
-            let version = rest.split_whitespace().next()?;
-            info.lmp_version = Some(version.to_string().into_boxed_str());
+            info.lmp_version = rest
+                .split_whitespace()
+                .next()
+                .map(String::from)
+                .map(Into::into);
         }
         if let Some((_, rest)) = line.split_once("Subversion:") {
             info.lmp_subversion = rest
