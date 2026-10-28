@@ -40,13 +40,13 @@ services/core/
 │   │   ├── light-read.rs   # BH1750 I2C ambient light diagnostic utility
 │   │   └── temp-read.rs    # DS18B20 1-Wire temperature diagnostic utility
 │   └── hardware/
-│       ├── amp.rs      # MA12070P I2C amplifier driver, domain types, and mock controller
-│       ├── bluetooth.rs# BlueZ & BlueALSA driver, domain types, and mock controller
-│       ├── dsp.rs      # CamillaDSP WebSocket client, domain types, and mock controller
-│       ├── encoder.rs  # EC12 rotary encoder & RGB LED driver and mock controller
-│       ├── light.rs    # BH1750 I2C driver, domain types, and mock controller
-│       ├── mod.rs      # Hardware GPIO pin types & shared abstractions
-│       └── temp.rs     # DS18B20 1-Wire driver, parser, and mock controller
+│       ├── amp.rs       # MA12070P I2C amplifier driver, domain types, and mock controller
+│       ├── bluetooth.rs # BlueZ & BlueALSA driver, domain types, and mock controller
+│       ├── dsp.rs       # CamillaDSP WebSocket client, domain types, and mock controller
+│       ├── encoder.rs   # EC12 rotary encoder & RGB LED driver and mock controller
+│       ├── light.rs     # BH1750 I2C driver, domain types, and mock controller
+│       ├── mod.rs       # Hardware GPIO pin types & shared abstractions
+│       └── temp.rs      # DS18B20 1-Wire driver, parser, and mock controller
 ├── tests/
 │   ├── amp_device_integration.rs   # Integration tests for MA12070P amplifier
 │   ├── bluetooth_integration.rs    # Integration tests for Bluetooth & BlueALSA

@@ -86,10 +86,16 @@ impl DspHost {
         if trimmed.parse::<IpAddr>().is_ok() {
             return Ok(Self(trimmed.into()));
         }
-        // Validate DNS hostname / localhost
-        if trimmed
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        // Validate DNS hostname / localhost (RFC 1123: no leading/trailing dot/dash, <=253 chars, alphanumeric)
+        if !trimmed.starts_with('.')
+            && !trimmed.starts_with('-')
+            && !trimmed.ends_with('.')
+            && !trimmed.ends_with('-')
+            && trimmed.len() <= 253
+            && trimmed.chars().any(|c| c.is_ascii_alphanumeric())
+            && trimmed
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
         {
             return Ok(Self(trimmed.into()));
         }
@@ -105,8 +111,11 @@ impl DspHost {
     /// Returns `true` if the host refers to the local loopback interface (`127.0.0.1`, `localhost`, `::1`).
     #[must_use]
     pub fn is_loopback(&self) -> bool {
-        let s = self.as_str();
-        s == "127.0.0.1" || s == "localhost" || s == "::1" || s == "[::1]"
+        let s = self.as_str().trim_start_matches('[').trim_end_matches(']');
+        if s.eq_ignore_ascii_case("localhost") {
+            return true;
+        }
+        s.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
     }
 }
 
@@ -1420,6 +1429,10 @@ mod tests {
         DspHost::parse_str("   ").unwrap_err();
         DspHost::parse_str("bad host name").unwrap_err();
         DspHost::parse_str("host$name").unwrap_err();
+        DspHost::parse_str("---").unwrap_err();
+        DspHost::parse_str("..").unwrap_err();
+        DspHost::parse_str("-bad").unwrap_err();
+        DspHost::parse_str("bad-").unwrap_err();
         DspHost::new("127.0.0.1").unwrap();
         DspHost::new("").unwrap_err();
     }
@@ -1899,8 +1912,11 @@ mod tests {
 
     #[tokio::test]
     async fn hardware_backend_connection_failure() {
-        // Use an unused port
-        let dsp = DspDevice::with_host_and_port(DspHost::default(), DspPort::new(59999).unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let dsp = DspDevice::with_host_and_port(DspHost::default(), DspPort::new(port).unwrap());
         let err = dsp.read_status_async().await.unwrap_err();
         assert!(err.is_connection_failed());
 
