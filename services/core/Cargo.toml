@@ -36,6 +36,10 @@ path = "src/bin/bt-info.rs"
 name = "encoder-read"
 path = "src/bin/encoder-read.rs"
 
+[[bin]]
+name = "dsp-info"
+path = "src/bin/dsp-info.rs"
+
 [dependencies]
 # UI Framework (Slint with Linux Framebuffer & KMS/DRM backends)
 slint = { version = "=1.9.2", default-features = false, features = ["compat-1-2", "backend-linuxkms", "renderer-software"], optional = true }

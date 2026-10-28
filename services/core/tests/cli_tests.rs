@@ -116,6 +116,11 @@ const HELP_CASES: &[(&str, &str, &str)] = &[
         "EC12 Rotary Encoder Diagnostic Utility",
         "--repeat",
     ),
+    (
+        env!("CARGO_BIN_EXE_dsp-info"),
+        "CamillaDSP Pipeline Diagnostic Utility",
+        "--repeat",
+    ),
 ];
 
 /// Shared `--version` semantic version probe cases for all diagnostic utilities.
@@ -125,6 +130,7 @@ const VERSION_CASES: &[(&str, &str)] = &[
     (env!("CARGO_BIN_EXE_amp-info"), "amp-info"),
     (env!("CARGO_BIN_EXE_bt-info"), "bt-info"),
     (env!("CARGO_BIN_EXE_encoder-read"), "encoder-read"),
+    (env!("CARGO_BIN_EXE_dsp-info"), "dsp-info"),
 ];
 
 #[test]
@@ -321,4 +327,35 @@ fn bt_info_cli_argument_validation() {
 fn encoder_read_cli_argument_validation() {
     let bin_path = env!("CARGO_BIN_EXE_encoder-read");
     assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
+}
+
+#[test]
+fn dsp_info_cli_argument_validation() {
+    let bin_path = env!("CARGO_BIN_EXE_dsp-info");
+    assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
+    assert_cli_rejects(
+        bin_path,
+        &[
+            (&["--port"], "missing value for --port"),
+            (&["-p"], "missing value for --port"),
+            (&["--port", "0"], "port must be between 1 and 65535"),
+            (
+                &["--port", "70000"],
+                "must be an unsigned integer 1..=65535",
+            ),
+            (
+                &["--port", "+1234"],
+                "signed prefixes ('+', '-') are not permitted",
+            ),
+            (
+                &["--port", "-1234"],
+                "signed prefixes ('+', '-') are not permitted",
+            ),
+            (&["--port", "abc"], "must be an unsigned integer 1..=65535"),
+            (&["--host"], "missing value for --host"),
+            (&["-H"], "missing value for --host"),
+            (&["--host", ""], "host cannot be empty"),
+            (&["--host", "bad host name"], "contains invalid characters"),
+        ],
+    );
 }

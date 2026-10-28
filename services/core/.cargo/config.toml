@@ -11,8 +11,10 @@ rustflags = [
     # 1. Target the exact in-order dual-issue pipeline of the BCM2837 Cortex-A53
     "-C", "target-cpu=cortex-a53",
 
-    # 2. Enable ARM NEON 128-bit vectorization & hardware floating point
-    "-C", "target-feature=+neon",
+    # 2. Enable ARM NEON 128-bit vectorization & hardware floating point.
+    # Note: Broadcom BCM2837 omits the optional ARMv8 Crypto Extension (no hardware AES/SHA-1/SHA-2).
+    # LLVM's generic cortex-a53 model enables them by default; explicitly disable -aes,-sha2 to prevent SIGILL.
+    "-C", "target-feature=+neon,-aes,-sha2",
 
     # 3. LLVM vectorizer passes for pixel blitting, Slint rasterization & meter math
     "-C", "llvm-args=-vectorize-loops",

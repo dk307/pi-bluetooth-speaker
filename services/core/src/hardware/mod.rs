@@ -50,9 +50,17 @@ pub(crate) use impl_canonical_error_display;
 
 pub(crate) mod amp;
 pub(crate) mod bluetooth;
+pub(crate) mod dsp;
 pub(crate) mod encoder;
 pub(crate) mod light;
 pub(crate) mod temp;
+
+#[doc(inline)]
+pub use dsp::{
+    DEFAULT_DSP_BUFFER_CAPACITY, DEFAULT_DSP_HOST, DEFAULT_DSP_PORT, DspChannelLevels, DspDevice,
+    DspDeviceMock, DspError, DspHardwareInfo, DspHost, DspPort, DspStatus, ProcessingState,
+    StopReason, format_dbfs_meter, format_load_meter,
+};
 
 #[doc(inline)]
 pub use bluetooth::{

@@ -7,7 +7,7 @@ This document defines the behavioral, architectural, and engineering rules for A
 ## 1. Target Platform & Compilation Environment
 
 * **Target Hardware:** **Raspberry Pi 3 Model B** (Broadcom BCM2837, quad-core ARM Cortex-A53 `aarch64`, running DietPi / Debian 13 Trixie).
-* **Primary Rust Target:** `aarch64-unknown-linux-gnu` with Cortex-A53 pipeline scheduling (`-C target-cpu=cortex-a53`) and hardware ARM NEON SIMD vectorization (`-C target-feature=+neon`), configured in [`.cargo/config.toml`](.cargo/config.toml).
+* **Primary Rust Target:** `aarch64-unknown-linux-gnu` with Cortex-A53 pipeline scheduling (`-C target-cpu=cortex-a53`) and hardware ARM NEON SIMD vectorization with crypto disabled (`-C target-feature=+neon,-aes,-sha2`), configured in [`.cargo/config.toml`](.cargo/config.toml).
 * **Building for the Target Platform:**
   Always compile binaries for the Raspberry Pi 3 `aarch64-unknown-linux-gnu` target:
   ```bash
