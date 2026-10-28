@@ -50,6 +50,15 @@ The system features:
 - **Internal Radios:** Onboard Wi-Fi and BT disabled via `/boot/firmware/config.txt` (`dtoverlay=disable-wifi`, `dtoverlay=disable-bt`).
 - **Controller MAC:** `20:E1:5D:B2:16:BF`
 - **Bluetooth Name / Class:** `DietPi Speaker` / `0x240418` (Audio/Video Loudspeaker).
+- **Firmware Override (mandatory):** The upstream Linux firmware `rtl_bt/rtl8761bu_fw.bin` (0xdfc6d922, May 2023) contains a stability regression causing **silent ACL link stalls** — the controller drops the link without emitting a disconnect event, so BlueZ/bluealsad wedge on stale connection state (no audio despite "connected"; `bluetoothctl disconnect` + `connect` temporarily recovers). Fix: install the newer Realtek firmware **0xddd5c761** (BT 5.4, from Windows WHQL driver 1.9.1038.3023) as a kernel-prioritized override:
+  ```bash
+  # Source: https://github.com/yurinogueira/rtl8761bu-firmware (md5 6c3729e7376259dbc1edc53e35f5e265, 43340 bytes)
+  install -D -m 644 rtl8761bu_fw.bin     /lib/firmware/updates/rtl_bt/rtl8761bu_fw.bin
+  install -D -m 644 rtl8761bu_config.bin /lib/firmware/updates/rtl_bt/rtl8761bu_config.bin
+  modprobe -r btusb && modprobe btusb && systemctl restart bluetooth bluealsa bluealsa-aplay
+  # Verify: dmesg shows "fw version 0xddd5c761"; btmgmt info reports version 13 (BT 5.4)
+  ```
+  Rollback: `rm /lib/firmware/updates/rtl_bt/*.bin && modprobe -r btusb && modprobe btusb`.
 
 ### 2.3. Display & Capacitive Touchscreen (Freenove 4.3" DSI)
 - **Device:** **Freenove 4.3" MIPI DSI 800x480 IPS Capacitive Touch Display**

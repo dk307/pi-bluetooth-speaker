@@ -335,6 +335,27 @@ fn print_human_hardware_info(hw: &BluetoothHardwareInfo) {
     println!("  Firmware File     : {}", hw.firmware);
     println!("  Linux Driver      : {}", hw.driver);
     println!("  Default HCI Dev   : {}", hw.default_controller);
+    let c = &hw.controller;
+    if c.is_known() {
+        println!(
+            "  Controller Live Probe (hciconfig {}):",
+            c.adapter.as_deref().unwrap_or(&hw.default_controller)
+        );
+        print_opt("  BD Address        : ", c.bd_address.as_deref());
+        print_opt("  HCI Version       : ", c.hci_version.as_deref());
+        print_opt("  HCI Revision      : ", c.hci_revision.as_deref());
+        print_opt("  LMP Version       : ", c.lmp_version.as_deref());
+        print_opt("  LMP Subversion    : ", c.lmp_subversion.as_deref());
+        print_opt("  Manufacturer      : ", c.manufacturer.as_deref());
+        print_opt("  Bus Type          : ", c.bus_type.as_deref());
+        print_opt("  Firmware Version  : ", c.firmware_version.as_deref());
+    } else {
+        println!("  Controller Live Probe: N/A");
+    }
+}
+
+fn print_opt(label: &str, value: Option<&str>) {
+    println!("{label}{}", value.unwrap_or("N/A"));
 }
 
 fn print_human_single_status(status: &BluetoothStatus, opts: &CliOptions) {
@@ -414,6 +435,17 @@ fn output_json_status(timestamp: &str, status: &BluetoothStatus, opts: &CliOptio
             "firmware": status.hardware.firmware,
             "driver": status.hardware.driver,
             "default_controller": status.hardware.default_controller,
+            "controller": {
+                "adapter": status.hardware.controller.adapter,
+                "bd_address": status.hardware.controller.bd_address,
+                "hci_version": status.hardware.controller.hci_version,
+                "hci_revision": status.hardware.controller.hci_revision,
+                "lmp_version": status.hardware.controller.lmp_version,
+                "lmp_subversion": status.hardware.controller.lmp_subversion,
+                "manufacturer": status.hardware.controller.manufacturer,
+                "bus_type": status.hardware.controller.bus_type,
+                "firmware_version": status.hardware.controller.firmware_version,
+            }
         }
     });
     println!("{obj}");
