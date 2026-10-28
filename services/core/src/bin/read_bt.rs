@@ -339,7 +339,7 @@ fn print_human_hardware_info(hw: &BluetoothHardwareInfo) {
     if c.is_known() {
         println!(
             "  Controller Live Probe (hciconfig {}):",
-            hw.default_controller
+            c.adapter.as_deref().unwrap_or(&hw.default_controller)
         );
         print_opt("  BD Address        : ", c.bd_address.as_deref());
         print_opt("  HCI Version       : ", c.hci_version.as_deref());
@@ -436,6 +436,7 @@ fn output_json_status(timestamp: &str, status: &BluetoothStatus, opts: &CliOptio
             "driver": status.hardware.driver,
             "default_controller": status.hardware.default_controller,
             "controller": {
+                "adapter": status.hardware.controller.adapter,
                 "bd_address": status.hardware.controller.bd_address,
                 "hci_version": status.hardware.controller.hci_version,
                 "hci_revision": status.hardware.controller.hci_revision,

@@ -365,6 +365,8 @@ impl BluetoothHardwareInfo {
 /// All fields are `None` when the corresponding detail could not be probed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BluetoothControllerInfo {
+    /// HCI interface name the info was probed from (e.g. `hci0`).
+    pub adapter: Option<Box<str>>,
     /// HCI specification version (e.g. `5.4`).
     pub hci_version: Option<Box<str>>,
     /// Controller hardware revision (hex, e.g. `0xddd5`).
@@ -452,8 +454,16 @@ fn run_hciconfig_version(adapter: &str) -> Option<String> {
 /// Parses `hciconfig <adapter> version` output into controller identity fields.
 fn parse_hciconfig_version(output: &str) -> Option<BluetoothControllerInfo> {
     let mut info = BluetoothControllerInfo::unknown();
-    for line in output.lines() {
+    for (index, line) in output.lines().enumerate() {
         let line = line.trim();
+        if index == 0 {
+            if let Some((dev, _)) = line.split_once(':') {
+                let dev = dev.trim();
+                if dev.starts_with("hci") {
+                    info.adapter = Some(dev.to_string().into_boxed_str());
+                }
+            }
+        }
         if let Some((_, rest)) = line.split_once("Bus:") {
             info.bus_type = Some(rest.trim().to_string().into_boxed_str());
         }
@@ -877,6 +887,23 @@ pub(crate) fn is_no_such_unit_error(err: &zbus::Error) -> bool {
     }
 }
 
+/// Detects `UnknownMethod`/`UnknownObject` D-Bus error replies.
+fn is_unknown_method_error(err: &zbus::Error) -> bool {
+    match err {
+        zbus::Error::MethodError(name, _, _) => {
+            let s = name.as_str();
+            s.ends_with(".UnknownMethod") || s.ends_with(".UnknownObject")
+        }
+        zbus::Error::FDO(fdo_err) => {
+            matches!(
+                &**fdo_err,
+                zbus::fdo::Error::UnknownMethod(_) | zbus::fdo::Error::UnknownObject(_)
+            )
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn is_service_absent_error(err: &zbus::Error) -> bool {
     match err {
         zbus::Error::MethodError(name, _, _) => {
@@ -1102,41 +1129,39 @@ impl DbusClient {
             Err(e) => return Err(BtError::from(e)),
         };
 
-        Ok(Self::parse_bluealsa_objects(&objects, devices)
+        let pcms = Self::parse_bluealsa_objects(&objects, devices)
             .into_iter()
             .map(|mut pcm| {
-                pcm.available_codecs = Self::query_pcm_codecs(&self.conn, &pcm.pcm_path);
-                pcm
+                pcm.available_codecs = Self::query_pcm_codecs(&self.conn, &pcm.pcm_path)?;
+                Ok(pcm)
             })
-            .collect::<Vec<_>>()
-            .into_boxed_slice())
+            .collect::<Result<Vec<_>, BtError>>()?;
+        Ok(pcms.into_boxed_slice())
     }
 
     /// Queries available codecs for a PCM via the `GetCodecs()` D-Bus method.
     ///
-    /// Returns an empty list on any error (e.g. unsupported method on older daemons),
-    /// mirroring `bluealsactl` which prints `[ Unknown ]` when the list is empty.
-    fn query_pcm_codecs(conn: &Connection, pcm_path: &str) -> Box<[Box<str>]> {
-        let Ok(proxy) =
-            zbus::blocking::Proxy::new(conn, "org.bluealsa", pcm_path, "org.bluealsa.PCM1")
-        else {
-            return Box::default();
-        };
+    /// Returns an empty list only when the daemon does not implement `GetCodecs`
+    /// (older BlueALSA versions), mirroring `bluealsactl` which prints
+    /// `[ Unknown ]` when the list is empty. Transport-level faults (connection
+    /// loss, permission errors, malformed replies) propagate as [`BtError`].
+    fn query_pcm_codecs(conn: &Connection, pcm_path: &str) -> Result<Box<[Box<str>]>, BtError> {
+        let proxy = zbus::blocking::Proxy::new(conn, "org.bluealsa", pcm_path, "org.bluealsa.PCM1")
+            .map_err(|e| BtError::dbus(format!("codec proxy for {pcm_path}: {e}")))?;
 
-        let Ok(reply) = proxy.call_method("GetCodecs", &()) else {
-            return Box::default();
+        let reply = match proxy.call_method("GetCodecs", &()) {
+            Ok(reply) => reply,
+            Err(e) if is_unknown_method_error(&e) => return Ok(Box::default()),
+            Err(e) => return Err(BtError::dbus(format!("GetCodecs call for {pcm_path}: {e}"))),
         };
-
-        let Ok(codecs) = reply
+        let codecs = reply
             .body()
             .deserialize::<HashMap<String, HashMap<String, OwnedValue>>>()
-        else {
-            return Box::default();
-        };
+            .map_err(|e| BtError::dbus(format!("GetCodecs reply for {pcm_path}: {e}")))?;
 
         let mut names: Vec<Box<str>> = codecs.into_keys().map(Into::into).collect();
         names.sort();
-        names.into_boxed_slice()
+        Ok(names.into_boxed_slice())
     }
 
     pub(crate) fn parse_bluealsa_objects(
@@ -1954,6 +1979,7 @@ hci0:	Type: Primary  Bus: USB
     fn parse_hciconfig_version_rtl8761b() {
         let info = BluetoothControllerInfo::from_hciconfig_output(HCICONFIG_RTL8761B_OUTPUT)
             .expect("real hciconfig output must parse");
+        assert_eq!(info.adapter.as_deref(), Some("hci0"));
         assert_eq!(info.bus_type.as_deref(), Some("USB"));
         assert_eq!(info.bd_address.as_deref(), Some("20:E1:5D:B2:16:BF"));
         assert_eq!(info.hci_version.as_deref(), Some("5.4"));
@@ -1994,6 +2020,7 @@ hci0:	Type: Primary  Bus: UART
         let output = "hci0:\tHCI Version: 5.4 (0xd)  Revision: 0xddd5\n";
         let info = BluetoothControllerInfo::from_hciconfig_output(output)
             .expect("version-only output still parses");
+        assert_eq!(info.adapter.as_deref(), Some("hci0"));
         assert_eq!(info.bus_type, None);
         assert_eq!(info.bd_address, None);
         assert_eq!(info.hci_version.as_deref(), Some("5.4"));
@@ -2030,7 +2057,15 @@ hci0:	Type: Primary  Bus: UART
             info.manufacturer.as_deref(),
             Some("Realtek Semiconductor Corporation")
         );
+        assert_eq!(info.adapter.as_deref(), Some("hci0"));
         assert_eq!(info.firmware_version, None);
+    }
+
+    #[test]
+    fn parse_hciconfig_version_first_line_only_captures_adapter() {
+        let output = "hci9:\tType: Primary  Bus: USB\nBD Address: 20:E1:5D:B2:16:BF\n\tLMP Version: 5.4 (0xd)\n";
+        let info = BluetoothControllerInfo::from_hciconfig_output(output).expect("output parses");
+        assert_eq!(info.adapter.as_deref(), Some("hci9"));
     }
 
     #[test]
