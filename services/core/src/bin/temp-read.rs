@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use speaker_core::diag::{
-    CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads, fahrenheit,
+    CliParse, CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads,
     format_timestamp, next_arg_value, parse_args_with_common, print_min_max_avg, resolve_cli_opts,
     round_2dp, run_poll_loop, should_print_summary,
 };
@@ -44,7 +44,8 @@ fn print_usage(bin_name: &str) {
     println!("Usage: {bin_name} [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  -1, --once               Read once and exit");
+    println!("  -1, --once               Read once and exit (default)");
+    println!("  -R, --repeat             Poll repeatedly until interrupted (Ctrl+C)");
     println!("  -n, --count <COUNT>      Read at most COUNT device samples and exit");
     println!("  -i, --interval <SECS>    Polling interval in seconds (default: 1.0)");
     println!(
@@ -56,15 +57,17 @@ fn print_usage(bin_name: &str) {
     );
     println!("  -d, --device <ID>        Target specific sensor (e.g. 28-01201b7d5396)");
     println!("  -j, --json               Output readings as JSON lines");
+    println!("  -V, --version            Print semantic version and exit");
     println!("  -h, --help               Show this help message and exit");
     println!();
     println!("Examples:");
-    println!("  {bin_name} --once --verbose");
+    println!("  {bin_name} --verbose");
     println!("  {bin_name} --soc -i 2");
     println!("  {bin_name} --count 5 --json");
+    println!("  {bin_name} --repeat --interval 5");
 }
 
-fn parse_cli_args_from<I>(args: I) -> Result<Option<CliOptions>, String>
+fn parse_cli_args_from<I>(args: I) -> Result<CliParse<CliOptions>, String>
 where
     I: IntoIterator<Item = String>,
 {
@@ -91,7 +94,7 @@ where
     )
 }
 
-fn parse_cli_args() -> Result<Option<CliOptions>, String> {
+fn parse_cli_args() -> Result<CliParse<CliOptions>, String> {
     parse_cli_args_from(env_args())
 }
 
@@ -165,7 +168,7 @@ fn print_session_summary(stats: &Statistics) {
             s.fraction_of_reads_percent(stats.other_errors)
         );
     }
-    print_min_max_avg(s, "Chassis", "°C", Some((fahrenheit, "°F")));
+    print_min_max_avg(s, "Chassis", "°C", None);
 }
 
 fn output_json_reading(
@@ -179,13 +182,11 @@ fn output_json_reading(
         "sensor_id": dev.as_str(),
         "temperature": {
             "celsius": round_2dp(temp.celsius()),
-            "fahrenheit": round_2dp(temp.fahrenheit()),
             "millidegrees": temp.millidegrees_celsius(),
         },
         "soc_temperature": soc.map(|s| {
             serde_json::json!({
                 "celsius": round_2dp(s.temperature().celsius()),
-                "fahrenheit": round_2dp(s.temperature().fahrenheit()),
             })
         }),
         "delta_celsius": soc.map(|s| round_2dp(s.delta_from_chassis(temp))),
@@ -237,9 +238,8 @@ fn handle_sensor_iteration(
                     OutputFormat::Human => {
                         let soc_info = soc.map_or(String::new(), |s| {
                             format!(
-                                " | SoC: {:5.2}°C ({:5.2}°F) | ΔT: {:+5.2}°C",
+                                " | SoC: {:5.2}°C | ΔT: {:+5.2}°C",
                                 s.temperature().celsius(),
-                                s.temperature().fahrenheit(),
                                 s.delta_from_chassis(reading.temperature)
                             )
                         });
@@ -345,7 +345,7 @@ fn run_app(sensor: &TempSensor, opts: &CliOptions) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    match resolve_cli_opts(parse_cli_args(), "read_temp", print_usage) {
+    match resolve_cli_opts(parse_cli_args(), "temp-read", print_usage) {
         Ok(opts) => run_app(&TempSensor::new(), &opts),
         Err(code) => code,
     }
@@ -356,9 +356,16 @@ mod tests {
     use super::*;
     use speaker_core::diag::ScopedTempDir;
 
+    fn unwrap_options(parsed: Result<CliParse<CliOptions>, String>) -> CliOptions {
+        match parsed.unwrap() {
+            CliParse::Options(o) => o,
+            other => panic!("expected CliParse::Options, got {other:?}"),
+        }
+    }
+
     #[test]
     fn print_usage_runs_cleanly() {
-        print_usage("read_temp");
+        print_usage("temp-read");
     }
 
     #[test]
@@ -384,16 +391,11 @@ mod tests {
         assert_eq!(stats.samples.max(), Some(30.0));
         assert!((stats.samples.average().unwrap() - 25.0).abs() < 1e-4);
 
-        let lines = speaker_core::diag::format_min_max_avg(
-            &stats.samples,
-            "Chassis",
-            "°C",
-            Some((fahrenheit, "°F")),
-        )
-        .unwrap();
-        assert_eq!(lines[0], "Chassis Min :   20.00 °C ( 68.00 °F)");
-        assert_eq!(lines[1], "Chassis Max :   30.00 °C ( 86.00 °F)");
-        assert_eq!(lines[2], "Chassis Avg :   25.00 °C ( 77.00 °F)");
+        let lines =
+            speaker_core::diag::format_min_max_avg(&stats.samples, "Chassis", "°C", None).unwrap();
+        assert_eq!(lines[0], "Chassis Min :   20.00 °C");
+        assert_eq!(lines[1], "Chassis Max :   30.00 °C");
+        assert_eq!(lines[2], "Chassis Avg :   25.00 °C");
 
         print_session_summary(&stats);
 
@@ -414,7 +416,7 @@ mod tests {
         let bad_id = SensorId::parse("28-000000000099").unwrap();
         print_diagnostic_registers(&sensor, &[bad_id]);
 
-        let temp_dir = ScopedTempDir::new("read_temp_bin_test");
+        let temp_dir = ScopedTempDir::new("temp_read_bin_test");
         let soc_file = temp_dir.path().join("temp");
         std::fs::write(&soc_file, "42000\n").unwrap();
         let soc = SocThermal::read_from_path(&soc_file).ok();
@@ -538,18 +540,46 @@ mod tests {
 
     #[test]
     fn parse_cli_args_flags_and_validation() {
-        print_usage("read_temp_test");
+        print_usage("temp-read-test");
 
-        // Help
-        assert!(parse_cli_args_from(["--help".into()]).unwrap().is_none());
-        assert!(parse_cli_args_from(["-h".into()]).unwrap().is_none());
+        // Help and version
+        assert!(matches!(
+            parse_cli_args_from(["--help".into()]).unwrap(),
+            CliParse::Help
+        ));
+        assert!(matches!(
+            parse_cli_args_from(["-h".into()]).unwrap(),
+            CliParse::Help
+        ));
+        assert!(matches!(
+            parse_cli_args_from(["--version".into()]).unwrap(),
+            CliParse::Version
+        ));
+        assert!(matches!(
+            parse_cli_args_from(["-V".into()]).unwrap(),
+            CliParse::Version
+        ));
+
+        // Defaults: once mode, one second interval
+        let defaults = unwrap_options(parse_cli_args_from([]));
+        assert_eq!(defaults.common.max_count, Some(1));
+
+        // Repeat flag switches back to continuous polling
+        let repeat = unwrap_options(parse_cli_args_from(["--repeat".into()]));
+        assert_eq!(repeat.common.max_count, None);
+        let repeat_short = unwrap_options(parse_cli_args_from(["-R".into()]));
+        assert_eq!(repeat_short.common.max_count, None);
+
+        // Explicit --once after --repeat wins (last flag seen)
+        let once_again = unwrap_options(parse_cli_args_from(["--repeat".into(), "--once".into()]));
+        assert_eq!(once_again.common.max_count, Some(1));
 
         // Zero count
         let err_zero = parse_cli_args_from(["--count".into(), "0".into()]).unwrap_err();
         assert!(err_zero.contains("--count must be at least 1"));
 
         // Valid flags
-        let opts = parse_cli_args_from([
+        let opts = unwrap_options(parse_cli_args_from([
             "--once".into(),
             "--verbose".into(),
             "--soc".into(),
@@ -561,9 +591,7 @@ mod tests {
             "2.5".into(),
             "--device".into(),
             "28-000000000001".into(),
-        ])
-        .unwrap()
-        .unwrap();
+        ]));
 
         assert_eq!(opts.common.max_count, Some(3));
         assert!(opts.common.verbose);

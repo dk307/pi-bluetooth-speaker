@@ -10,8 +10,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use speaker_core::diag::{
-    CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads, format_timestamp,
-    parse_args_with_common, resolve_cli_opts, run_poll_loop, should_print_summary,
+    CliParse, CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads,
+    format_timestamp, parse_args_with_common, resolve_cli_opts, run_poll_loop,
+    should_print_summary,
 };
 use speaker_core::hardware::{
     EncoderDevice, EncoderError, EncoderStatus, RgbColor, RotationDirection,
@@ -54,7 +55,8 @@ fn print_usage(bin_name: &str) {
     println!("Usage: {bin_name} [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  -1, --once               Sample once and exit");
+    println!("  -1, --once               Sample once and exit (default)");
+    println!("  -R, --repeat             Poll repeatedly until interrupted (Ctrl+C)");
     println!("  -n, --count <COUNT>      Sample COUNT times and exit");
     println!("  -i, --interval <SECS>    Polling interval in seconds (default: 0.01)");
     println!("  -l, --verify-leds        Run the RGB channel color sweep and exit");
@@ -62,10 +64,11 @@ fn print_usage(bin_name: &str) {
         "  -v, --verbose            Display extended hardware diagnostics (human format only)"
     );
     println!("  -j, --json               Stream events in newline-delimited JSON");
+    println!("  -V, --version            Print semantic version and exit");
     println!("  -h, --help               Display this help text");
 }
 
-fn parse_cli_args_from<I>(args: I) -> Result<Option<CliOptions>, String>
+fn parse_cli_args_from<I>(args: I) -> Result<CliParse<CliOptions>, String>
 where
     I: IntoIterator<Item = String>,
 {
@@ -83,7 +86,7 @@ where
     )
 }
 
-fn parse_cli_args() -> Result<Option<CliOptions>, String> {
+fn parse_cli_args() -> Result<CliParse<CliOptions>, String> {
     parse_cli_args_from(env_args())
 }
 
@@ -331,7 +334,7 @@ fn run_app(device: &EncoderDevice, opts: &CliOptions) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let opts = match resolve_cli_opts(parse_cli_args(), "read_encoder", print_usage) {
+    let opts = match resolve_cli_opts(parse_cli_args(), "encoder-read", print_usage) {
         Ok(o) => o,
         Err(code) => return code,
     };
@@ -417,16 +420,44 @@ mod tests {
         print_session_summary(&EncoderStats::default());
     }
 
+    fn unwrap_options(parsed: Result<CliParse<CliOptions>, String>) -> CliOptions {
+        match parsed.unwrap() {
+            CliParse::Options(o) => o,
+            other => panic!("expected CliParse::Options, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_cli_args_flags_and_validation() {
-        assert!(parse_cli_args_from(["--help".into()]).unwrap().is_none());
-        assert!(parse_cli_args_from(["-h".into()]).unwrap().is_none());
+        assert!(matches!(
+            parse_cli_args_from(["--help".into()]).unwrap(),
+            CliParse::Help
+        ));
+        assert!(matches!(
+            parse_cli_args_from(["-h".into()]).unwrap(),
+            CliParse::Help
+        ));
+        assert!(matches!(
+            parse_cli_args_from(["--version".into()]).unwrap(),
+            CliParse::Version
+        ));
 
-        let opts = parse_cli_args_from(["--once".into()]).unwrap().unwrap();
+        // Defaults: once mode, 10 ms interval
+        let defaults = unwrap_options(parse_cli_args_from([]));
+        assert_eq!(defaults.common.max_count, Some(1));
+        assert_eq!(defaults.common.interval, DEFAULT_POLL_INTERVAL);
+
+        // Repeat flag switches back to continuous polling
+        let repeat = unwrap_options(parse_cli_args_from(["--repeat".into()]));
+        assert_eq!(repeat.common.max_count, None);
+        let repeat_short = unwrap_options(parse_cli_args_from(["-R".into()]));
+        assert_eq!(repeat_short.common.max_count, None);
+
+        let opts = unwrap_options(parse_cli_args_from(["--once".into()]));
         assert_eq!(opts.common.max_count, Some(1));
         assert!(!opts.verify_leds);
 
-        let opts = parse_cli_args_from([
+        let opts = unwrap_options(parse_cli_args_from([
             "--count".into(),
             "5".into(),
             "--interval".into(),
@@ -434,9 +465,7 @@ mod tests {
             "--verify-leds".into(),
             "--verbose".into(),
             "--json".into(),
-        ])
-        .unwrap()
-        .unwrap();
+        ]));
 
         assert_eq!(opts.common.max_count, Some(5));
         assert_eq!(opts.common.interval, Duration::from_millis(500));

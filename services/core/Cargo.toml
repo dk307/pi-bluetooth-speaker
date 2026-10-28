@@ -17,24 +17,24 @@ name = "core"
 path = "src/main.rs"
 
 [[bin]]
-name = "read_temp"
-path = "src/bin/read_temp.rs"
+name = "temp-read"
+path = "src/bin/temp-read.rs"
 
 [[bin]]
-name = "read_light"
-path = "src/bin/read_light.rs"
+name = "light-read"
+path = "src/bin/light-read.rs"
 
 [[bin]]
-name = "read_amp"
-path = "src/bin/read_amp.rs"
+name = "amp-info"
+path = "src/bin/amp-info.rs"
 
 [[bin]]
-name = "read_bt"
-path = "src/bin/read_bt.rs"
+name = "bt-info"
+path = "src/bin/bt-info.rs"
 
 [[bin]]
-name = "read_encoder"
-path = "src/bin/read_encoder.rs"
+name = "encoder-read"
+path = "src/bin/encoder-read.rs"
 
 [dependencies]
 # UI Framework (Slint with Linux Framebuffer & KMS/DRM backends)

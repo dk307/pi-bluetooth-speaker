@@ -10,8 +10,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use speaker_core::diag::{
-    CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads, format_timestamp,
-    next_arg_value, parse_args_with_common, resolve_cli_opts, run_poll_loop, should_print_summary,
+    CliParse, CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads,
+    format_timestamp, next_arg_value, parse_args_with_common, resolve_cli_opts, run_poll_loop,
+    should_print_summary,
 };
 use speaker_core::hardware::{
     AmpDevice, AmpError, AmpErrorFlags, AmpI2cAddress, AmpStatus, MA12070P_DEFAULT_I2C_BUS,
@@ -44,7 +45,8 @@ fn print_usage(bin_name: &str) {
     println!("Usage: {bin_name} [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  -1, --once               Read once and exit");
+    println!("  -1, --once               Read once and exit (default)");
+    println!("  -R, --repeat             Poll repeatedly until interrupted (Ctrl+C)");
     println!("  -n, --count <COUNT>      Read COUNT times and exit");
     println!("  -i, --interval <SECS>    Polling interval in seconds (default: 1.0)");
     println!("  -a, --address <HEX>      I2C address in hex: 0x20 (default) or 0x21..=0x23");
@@ -53,10 +55,11 @@ fn print_usage(bin_name: &str) {
         "  -v, --verbose            Display extended hardware diagnostics (human format only)"
     );
     println!("  -j, --json               Stream readings in newline-delimited JSON");
+    println!("  -V, --version            Print semantic version and exit");
     println!("  -h, --help               Display this help text");
 }
 
-fn parse_cli_args_from<I>(args: I) -> Result<Option<CliOptions>, String>
+fn parse_cli_args_from<I>(args: I) -> Result<CliParse<CliOptions>, String>
 where
     I: IntoIterator<Item = String>,
 {
@@ -78,7 +81,7 @@ where
     )
 }
 
-fn parse_cli_args() -> Result<Option<CliOptions>, String> {
+fn parse_cli_args() -> Result<CliParse<CliOptions>, String> {
     parse_cli_args_from(env_args())
 }
 
@@ -257,7 +260,7 @@ fn handle_amp_iteration(
                     if opts.common.max_count == Some(1) {
                         println!("{status}");
                         if !status.latched_errors.is_clear() {
-                            let bin = env::args().next().unwrap_or_else(|| "read_amp".into());
+                            let bin = env::args().next().unwrap_or_else(|| "amp-info".into());
                             println!("\nTip: Clear this historical log with: {bin} --clear");
                         }
                         println!("=========================================================");
@@ -333,7 +336,7 @@ fn run_app(amp: &AmpDevice, opts: &CliOptions) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let opts = match resolve_cli_opts(parse_cli_args(), "read_amp", print_usage) {
+    let opts = match resolve_cli_opts(parse_cli_args(), "amp-info", print_usage) {
         Ok(o) => o,
         Err(code) => return code,
     };
@@ -365,17 +368,45 @@ mod tests {
         AudioInConfig, AudioInputFormat, ClockRatio, DcuChannelStatus, DcuMonitor, PowerModeProfile,
     };
 
+    fn unwrap_options(parsed: Result<CliParse<CliOptions>, String>) -> CliOptions {
+        match parsed.unwrap() {
+            CliParse::Options(o) => o,
+            other => panic!("expected CliParse::Options, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_cli_args_flags_and_validation() {
-        assert!(parse_cli_args_from(["--help".into()]).unwrap().is_none());
-        assert!(parse_cli_args_from(["-h".into()]).unwrap().is_none());
+        assert!(matches!(
+            parse_cli_args_from(["--help".into()]).unwrap(),
+            CliParse::Help
+        ));
+        assert!(matches!(
+            parse_cli_args_from(["-h".into()]).unwrap(),
+            CliParse::Help
+        ));
+        assert!(matches!(
+            parse_cli_args_from(["--version".into()]).unwrap(),
+            CliParse::Version
+        ));
 
-        let opts = parse_cli_args_from(["--once".into()]).unwrap().unwrap();
+        // Defaults: once mode, one second interval
+        let defaults = unwrap_options(parse_cli_args_from([]));
+        assert_eq!(defaults.common.max_count, Some(1));
+        assert_eq!(defaults.common.interval, DEFAULT_POLL_INTERVAL);
+
+        // Repeat flag switches back to continuous polling
+        let repeat = unwrap_options(parse_cli_args_from(["--repeat".into()]));
+        assert_eq!(repeat.common.max_count, None);
+        let repeat_short = unwrap_options(parse_cli_args_from(["-R".into()]));
+        assert_eq!(repeat_short.common.max_count, None);
+
+        let opts = unwrap_options(parse_cli_args_from(["--once".into()]));
         assert_eq!(opts.common.max_count, Some(1));
         assert_eq!(opts.address.as_u8(), 0x20);
         assert!(!opts.clear);
 
-        let opts = parse_cli_args_from([
+        let opts = unwrap_options(parse_cli_args_from([
             "--count".into(),
             "3".into(),
             "--interval".into(),
@@ -385,9 +416,7 @@ mod tests {
             "--clear".into(),
             "--verbose".into(),
             "--json".into(),
-        ])
-        .unwrap()
-        .unwrap();
+        ]));
 
         assert_eq!(opts.common.max_count, Some(3));
         assert_eq!(opts.common.interval, Duration::from_millis(500));
@@ -402,7 +431,7 @@ mod tests {
 
     #[test]
     fn print_usage_runs_cleanly() {
-        print_usage("read_amp");
+        print_usage("amp-info");
     }
 
     #[test]

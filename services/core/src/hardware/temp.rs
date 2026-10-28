@@ -61,7 +61,6 @@ const MAX_MILLIDEGREES_C: i32 = 125_000;
 ///
 /// let temp = Temperature::from_millidegrees_celsius(26_437)?;
 /// assert!((temp.celsius() - 26.437).abs() < 1e-3);
-/// assert!((temp.fahrenheit() - 79.5866).abs() < 1e-2);
 /// # Ok::<(), speaker_core::hardware::TempError>(())
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -127,12 +126,6 @@ impl Temperature {
     pub fn celsius(self) -> f32 {
         self.millidegrees_c as f32 / 1000.0
     }
-
-    /// Returns the temperature in degrees Fahrenheit (`°F`).
-    #[must_use]
-    pub fn fahrenheit(self) -> f32 {
-        crate::diag::fahrenheit(self.celsius())
-    }
 }
 
 impl TryFrom<i32> for Temperature {
@@ -145,7 +138,7 @@ impl TryFrom<i32> for Temperature {
 
 impl Display for Temperature {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:.2}°C ({:.2}°F)", self.celsius(), self.fahrenheit())
+        write!(f, "{:.2}°C", self.celsius())
     }
 }
 
@@ -257,10 +250,9 @@ impl Display for SensorReading {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "[{}] {:6.2}°C  |  {:6.2}°F",
+            "[{}] {:6.2}°C",
             self.sensor_id,
-            self.temperature.celsius(),
-            self.temperature.fahrenheit()
+            self.temperature.celsius()
         )
     }
 }
@@ -806,7 +798,7 @@ enum Backend {
 ///
 /// Cheaply cloneable (`Arc`-backed) handle that can be shared across Tokio
 /// actors in the `core` daemon, driven by [`TempSensorMock`] in tests, or used
-/// directly by CLI diagnostic utilities such as `read_temp`.
+/// directly by CLI diagnostic utilities such as `temp-read`.
 ///
 /// # Examples
 /// ```
@@ -1131,13 +1123,11 @@ mod tests {
         let t = Temperature::from_millidegrees_celsius(26_437).unwrap();
         assert_eq!(t.millidegrees_celsius(), 26_437);
         assert!((t.celsius() - 26.437).abs() < 1e-4);
-        assert!((t.fahrenheit() - 79.5866).abs() < 1e-3);
-        assert_eq!(t.to_string(), "26.44°C (79.59°F)");
+        assert_eq!(t.to_string(), "26.44°C");
 
-        // Negative temperature (-5.125 °C -> 22.775 °F)
+        // Negative temperature
         let neg = Temperature::from_millidegrees_celsius(-5_125).unwrap();
         assert!((neg.celsius() - (-5.125)).abs() < 1e-4);
-        assert!((neg.fahrenheit() - 22.775).abs() < 1e-3);
 
         // Boundary check: below -55 °C and above +125 °C must fail
         let low_err = Temperature::from_millidegrees_celsius(-55_001).unwrap_err();
@@ -1322,7 +1312,7 @@ a7 01 4b 46 7f ff 0c 10 5c
         let soc = SocThermal::read_from_path(&path).unwrap();
         assert_eq!(soc.temperature().millidegrees_celsius(), 41_856);
         assert!((soc.temperature().celsius() - 41.856).abs() < 1e-3);
-        assert_eq!(soc.to_string(), "SoC: 41.86°C (107.34°F)");
+        assert_eq!(soc.to_string(), "SoC: 41.86°C");
 
         let chassis = Temperature::from_millidegrees_celsius(24_000).unwrap();
         assert!((soc.delta_from_chassis(chassis) - 17.856).abs() < 1e-2);

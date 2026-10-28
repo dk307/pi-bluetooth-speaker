@@ -5,8 +5,8 @@
 //! physical Raspberry Pi hardware peripherals or live sysfs paths.
 //!
 //! Note that application execution, JSON serialization, and hardware fault injection
-//! are unit-tested via `run_app` entrypoints using mock backends in `src/bin/read_temp.rs`
-//! and `src/bin/read_light.rs`.
+//! are unit-tested via `run_app` entrypoints using mock backends in `src/bin/temp-read.rs`
+//! and `src/bin/light-read.rs`.
 
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
@@ -92,31 +92,68 @@ fn core_main_binary_executes() {
 
 const HELP_CASES: &[(&str, &str, &str)] = &[
     (
-        env!("CARGO_BIN_EXE_read_temp"),
+        env!("CARGO_BIN_EXE_temp-read"),
         "DS18B20 1-Wire Temperature Diagnostic Utility",
-        "--count",
+        "--repeat",
     ),
     (
-        env!("CARGO_BIN_EXE_read_light"),
+        env!("CARGO_BIN_EXE_light-read"),
         "BH1750 Ambient Light Diagnostic Utility",
-        "--address",
+        "--repeat",
     ),
     (
-        env!("CARGO_BIN_EXE_read_amp"),
+        env!("CARGO_BIN_EXE_amp-info"),
         "MA12070P Amplifier Diagnostic Utility",
-        "--address",
+        "--repeat",
     ),
     (
-        env!("CARGO_BIN_EXE_read_bt"),
+        env!("CARGO_BIN_EXE_bt-info"),
         "Bluetooth & BlueALSA Diagnostic Utility",
-        "--adapter",
+        "--repeat",
     ),
     (
-        env!("CARGO_BIN_EXE_read_encoder"),
+        env!("CARGO_BIN_EXE_encoder-read"),
         "EC12 Rotary Encoder Diagnostic Utility",
-        "--verify-leds",
+        "--repeat",
     ),
 ];
+
+/// Shared `--version` semantic version probe cases for all diagnostic utilities.
+const VERSION_CASES: &[(&str, &str)] = &[
+    (env!("CARGO_BIN_EXE_temp-read"), "temp-read"),
+    (env!("CARGO_BIN_EXE_light-read"), "light-read"),
+    (env!("CARGO_BIN_EXE_amp-info"), "amp-info"),
+    (env!("CARGO_BIN_EXE_bt-info"), "bt-info"),
+    (env!("CARGO_BIN_EXE_encoder-read"), "encoder-read"),
+];
+
+#[test]
+fn diagnostic_utilities_version_display() {
+    for &(bin_path, expected_name) in VERSION_CASES {
+        for flag in ["--version", "-V"] {
+            let (status, stdout, _) = run_cli(bin_path, &[flag]);
+            assert!(status.success(), "expected success for '{bin_path} {flag}'");
+            let expected = format!("{expected_name} {}", env!("CARGO_PKG_VERSION"));
+            assert!(
+                stdout.trim().ends_with(&expected),
+                "expected stdout to end with '{expected}', got: '{stdout}'"
+            );
+        }
+    }
+}
+
+#[test]
+fn diagnostic_utilities_once_is_the_default() {
+    // With no arguments each utility must perform a single bounded read and exit
+    // successfully instead of entering continuous polling mode.
+    for &(bin_path, expected_name) in VERSION_CASES {
+        let (_, stdout, _) = run_cli(bin_path, &[]);
+        assert!(
+            !stdout.contains("Press Ctrl+C to stop"),
+            "'{expected_name}' entered repeat mode by default"
+        );
+    }
+}
 
 #[test]
 fn diagnostic_utilities_help_display() {
@@ -131,7 +168,7 @@ fn diagnostic_utilities_help_display() {
     }
 }
 
-/// Shared invalid CLI flag cases common to all `read_*` diagnostic utilities.
+/// Shared invalid CLI flag cases common to all diagnostic utilities.
 const COMMON_INVALID_ARGS: &[(&[&str], &str)] = &[
     (&["--invalid-flag"], "unknown option '--invalid-flag'"),
     (&["--count"], "missing value for --count"),
@@ -182,8 +219,8 @@ fn assert_cli_rejects(bin_path: &str, cases: &[(&[&str], &str)]) {
 }
 
 #[test]
-fn read_temp_cli_argument_validation() {
-    let bin_path = env!("CARGO_BIN_EXE_read_temp");
+fn temp_read_cli_argument_validation() {
+    let bin_path = env!("CARGO_BIN_EXE_temp-read");
     assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
     assert_cli_rejects(
         bin_path,
@@ -198,8 +235,8 @@ fn read_temp_cli_argument_validation() {
 }
 
 #[test]
-fn read_light_cli_argument_validation() {
-    let bin_path = env!("CARGO_BIN_EXE_read_light");
+fn light_read_cli_argument_validation() {
+    let bin_path = env!("CARGO_BIN_EXE_light-read");
     assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
     assert_cli_rejects(
         bin_path,
@@ -221,8 +258,8 @@ fn read_light_cli_argument_validation() {
 }
 
 #[test]
-fn read_amp_cli_argument_validation() {
-    let bin_path = env!("CARGO_BIN_EXE_read_amp");
+fn amp_info_cli_argument_validation() {
+    let bin_path = env!("CARGO_BIN_EXE_amp-info");
     assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
     assert_cli_rejects(
         bin_path,
@@ -244,8 +281,8 @@ fn read_amp_cli_argument_validation() {
 }
 
 #[test]
-fn read_bt_cli_argument_validation() {
-    let bin_path = env!("CARGO_BIN_EXE_read_bt");
+fn bt_info_cli_argument_validation() {
+    let bin_path = env!("CARGO_BIN_EXE_bt-info");
     assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
     assert_cli_rejects(
         bin_path,
@@ -281,7 +318,7 @@ fn read_bt_cli_argument_validation() {
 }
 
 #[test]
-fn read_encoder_cli_argument_validation() {
-    let bin_path = env!("CARGO_BIN_EXE_read_encoder");
+fn encoder_read_cli_argument_validation() {
+    let bin_path = env!("CARGO_BIN_EXE_encoder-read");
     assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
 }

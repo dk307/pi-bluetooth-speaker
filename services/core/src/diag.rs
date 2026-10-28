@@ -1,8 +1,9 @@
 //! Shared CLI diagnostic and test utilities for hardware inspection binaries.
 //!
-//! Provides common argument parsers (`--count`, `--interval`), output format
-//! selection, UTC wall-clock timestamp formatting, exit-code evaluation, and
-//! scoped temporary directories shared across `read_temp` and `read_light`.
+//! Provides common argument parsers (`--once`, `--repeat`, `--count`,
+//! `--interval`, `--version`), output format selection, UTC wall-clock
+//! timestamp formatting, exit-code evaluation, and scoped temporary
+//! directories shared across the hardware diagnostic utilities.
 
 use std::env;
 use std::fs;
@@ -27,10 +28,10 @@ pub enum OutputFormat {
     Json,
 }
 
-/// Common CLI polling and formatting options shared across `read_*` diagnostic utilities.
+/// Common CLI polling and formatting options shared across hardware diagnostic utilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommonCliOptions {
-    /// Maximum number of polling iterations (`None` for continuous polling).
+    /// Maximum number of polling iterations (`Some(1)` for once mode, `None` for repeat polling).
     pub max_count: Option<usize>,
     /// Delay between polling iterations.
     pub interval: Duration,
@@ -48,54 +49,92 @@ impl Default for CommonCliOptions {
 
 impl CommonCliOptions {
     /// Creates common CLI options with the specified default polling interval.
+    ///
+    /// Defaults to once mode (`max_count: Some(1)`); pass `-R`/`--repeat` on the
+    /// command line to switch to continuous polling (`max_count: None`).
     #[must_use]
     pub const fn with_default_interval(interval: Duration) -> Self {
         Self {
-            max_count: None,
+            max_count: Some(1),
             interval,
             format: OutputFormat::Human,
             verbose: false,
         }
     }
 
-    /// Attempts to parse a shared CLI flag (`-h`/`--help`, `-1`/`--once`, `-v`/`--verbose`,
-    /// `-j`/`--json`, `-n`/`--count`, `-i`/`--interval`).
+    /// Attempts to parse a shared CLI flag (`-h`/`--help`, `-V`/`--version`,
+    /// `-1`/`--once`, `-R`/`--repeat`, `-v`/`--verbose`, `-j`/`--json`,
+    /// `-n`/`--count`, `-i`/`--interval`).
     ///
     /// # Errors
     /// Returns a descriptive user-facing error string if a recognized flag is missing its
-    /// value or fails validation. Returns `Ok(None)` when `-h` or `--help` is requested,
-    /// `Ok(Some(true))` when `arg` was consumed, or `Ok(Some(false))` when `arg` is a
-    /// binary-specific flag.
+    /// value or fails validation. Returns [`CommonFlagStatus::Exit`] when `-h`, `--help`,
+    /// `-V`, or `--version` is requested, [`CommonFlagStatus::Consumed`] when `arg` was
+    /// consumed, or [`CommonFlagStatus::Custom`] when `arg` is a binary-specific flag.
     pub fn parse_common_flag<I: Iterator<Item = String> + ?Sized>(
         &mut self,
         arg: &str,
         args: &mut I,
-    ) -> Result<Option<bool>, String> {
+    ) -> Result<CommonFlagStatus, String> {
         match arg {
-            "-h" | "--help" => return Ok(None),
+            "-h" | "--help" => return Ok(CommonFlagStatus::Exit(CliExitAction::Help)),
+            "-V" | "--version" => return Ok(CommonFlagStatus::Exit(CliExitAction::Version)),
             "-1" | "--once" => self.max_count = Some(1),
+            "-R" | "--repeat" => self.max_count = None,
             "-v" | "--verbose" => self.verbose = true,
             "-j" | "--json" => self.format = OutputFormat::Json,
             "-n" | "--count" => self.max_count = Some(parse_count_arg(args.next())?),
             "-i" | "--interval" => self.interval = parse_interval_arg(args.next())?,
-            _ => return Ok(Some(false)),
+            _ => return Ok(CommonFlagStatus::Custom),
         }
-        Ok(Some(true))
+        Ok(CommonFlagStatus::Consumed)
     }
 }
 
-/// Parses command-line arguments using shared common flags (`-h`, `-1`, `-v`, `-j`, `-n`, `-i`)
-/// and a domain-specific custom flag parser callback.
+/// Early-exit action requested through a shared CLI flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliExitAction {
+    /// Print usage information and exit (`--help`).
+    Help,
+    /// Print the semantic version and exit (`--version`).
+    Version,
+}
+
+/// Outcome of attempting to parse a shared common CLI flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommonFlagStatus {
+    /// Shared flag requests an immediate CLI exit (`--help` / `--version`).
+    Exit(CliExitAction),
+    /// Shared flag was consumed; parsing continues.
+    Consumed,
+    /// Not a shared flag; delegate to the binary-specific parser.
+    Custom,
+}
+
+/// Result of parsing command-line arguments with shared common flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliParse<O> {
+    /// Parsed options ready for the diagnostic loop.
+    Options(O),
+    /// `-h`/`--help` was requested; print usage and exit successfully.
+    Help,
+    /// `-V`/`--version` was requested; print the version and exit successfully.
+    Version,
+}
+
+/// Parses command-line arguments using shared common flags (`-h`, `-V`, `-1`, `-R`, `-v`,
+/// `-j`, `-n`, `-i`) and a domain-specific custom flag parser callback.
 ///
 /// # Errors
-/// Returns `Err(msg)` if any common or custom flag validation fails, or if an unknown option is provided.
-/// Returns `Ok(None)` if `-h` or `--help` was requested.
+/// Returns `Err(msg)` if any common or custom flag validation fails, or if an unknown
+/// option is provided. Returns `Ok(CliParse::Help)` or `Ok(CliParse::Version)` when
+/// `--help` or `--version` was requested.
 pub fn parse_args_with_common<O, I, F>(
     mut opts: O,
     args: I,
     mut get_common: impl FnMut(&mut O) -> &mut CommonCliOptions,
     mut parse_custom: F,
-) -> Result<Option<O>, String>
+) -> Result<CliParse<O>, String>
 where
     I: IntoIterator<Item = String>,
     F: FnMut(&mut O, &str, &mut I::IntoIter) -> Result<bool, String>,
@@ -103,15 +142,20 @@ where
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match get_common(&mut opts).parse_common_flag(&arg, &mut iter)? {
-            None => return Ok(None),
-            Some(true) => continue,
-            Some(false) => {}
+            CommonFlagStatus::Exit(action) => {
+                return Ok(match action {
+                    CliExitAction::Help => CliParse::Help,
+                    CliExitAction::Version => CliParse::Version,
+                });
+            }
+            CommonFlagStatus::Consumed => continue,
+            CommonFlagStatus::Custom => {}
         }
         if !parse_custom(&mut opts, &arg, &mut iter)? {
             return Err(format!("unknown option '{arg}', use --help for usage"));
         }
     }
-    Ok(Some(opts))
+    Ok(CliParse::Options(opts))
 }
 
 /// Formats the current UTC wall-clock time as `HH:MM:SS`.
@@ -142,12 +186,6 @@ pub fn program_name(default_name: &str) -> String {
         .map_or_else(|| default_name.into(), |a| a.to_string_lossy().into_owned())
 }
 
-/// Converts degrees Celsius to degrees Fahrenheit (`°C * 9 / 5 + 32`).
-#[must_use]
-pub const fn fahrenheit(celsius: f32) -> f32 {
-    (celsius * 9.0 / 5.0) + 32.0
-}
-
 /// Converts illuminance in lux (`f32`) to foot-candles (`lx * LUX_TO_FOOT_CANDLES`).
 #[must_use]
 pub const fn foot_candles(lux: f32) -> f32 {
@@ -160,20 +198,34 @@ pub fn round_2dp(value: f32) -> f64 {
     (f64::from(value) * 100.0).round() / 100.0
 }
 
-/// Evaluates a CLI option parser result, printing usage on `Ok(None)` or an error on `Err`.
+/// Evaluates a CLI option parser result, printing usage on [`CliParse::Help`], the
+/// semantic version on [`CliParse::Version`], or an error message on `Err`.
+///
+/// The version banner uses the basename of the invoked program (via `argv[0]`) followed
+/// by the crate's semantic version from `CARGO_PKG_VERSION`.
 ///
 /// # Errors
-/// Returns `Err(ExitCode::SUCCESS)` when `--help` was requested (`Ok(None)`), or
-/// `Err(ExitCode::FAILURE)` when argument validation failed (`Err(msg)`).
+/// Returns `Err(ExitCode::SUCCESS)` when `--help` or `--version` was requested
+/// (`Ok(CliParse::Help)` / `Ok(CliParse::Version)`), or `Err(ExitCode::FAILURE)` when
+/// argument validation failed (`Err(msg)`).
 pub fn resolve_cli_opts<T>(
-    parsed: Result<Option<T>, String>,
+    parsed: Result<CliParse<T>, String>,
     default_bin_name: &str,
     print_usage: fn(&str),
 ) -> Result<T, ExitCode> {
     match parsed {
-        Ok(Some(opts)) => Ok(opts),
-        Ok(None) => {
+        Ok(CliParse::Options(opts)) => Ok(opts),
+        Ok(CliParse::Help) => {
             print_usage(&program_name(default_bin_name));
+            Err(ExitCode::SUCCESS)
+        }
+        Ok(CliParse::Version) => {
+            let invoked = program_name(default_bin_name);
+            let name = Path::new(&invoked)
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or(&invoked);
+            println!("{name} {}", env!("CARGO_PKG_VERSION"));
             Err(ExitCode::SUCCESS)
         }
         Err(err) => {
@@ -522,8 +574,6 @@ mod tests {
 
     #[test]
     fn exit_code_and_arg_helpers() {
-        fn noop_usage(_: &str) {}
-
         assert_eq!(exit_code_for_reads(0, 0), ExitCode::SUCCESS);
         assert_eq!(exit_code_for_reads(3, 1), ExitCode::SUCCESS);
         assert_eq!(exit_code_for_reads(3, 0), ExitCode::FAILURE);
@@ -571,8 +621,6 @@ mod tests {
         assert!((stats.error_rate_percent() - (100.0 / 3.0)).abs() < 1e-4);
         assert!((stats.fraction_of_reads_percent(1) - (100.0 / 3.0)).abs() < 1e-4);
 
-        assert!((fahrenheit(0.0) - 32.0).abs() < 1e-5);
-        assert!((fahrenheit(100.0) - 212.0).abs() < 1e-4);
         assert!((round_2dp(12.3456) - 12.35).abs() < 1e-6);
 
         let mut args = ["val".to_string()].into_iter();
@@ -582,13 +630,22 @@ mod tests {
                 .unwrap_err()
                 .contains("missing value for --flag")
         );
+    }
+
+    #[test]
+    fn resolve_cli_opts_and_common_flag_parsing() {
+        fn noop_usage(_: &str) {}
 
         assert_eq!(
-            resolve_cli_opts(Ok(Some(42)), "bin", noop_usage).unwrap(),
+            resolve_cli_opts(Ok(CliParse::Options(42)), "bin", noop_usage).unwrap(),
             42
         );
         assert_eq!(
-            resolve_cli_opts::<i32>(Ok(None), "bin", noop_usage).unwrap_err(),
+            resolve_cli_opts::<i32>(Ok(CliParse::Help), "bin", noop_usage).unwrap_err(),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            resolve_cli_opts::<i32>(Ok(CliParse::Version), "bin", noop_usage).unwrap_err(),
             ExitCode::SUCCESS
         );
         assert_eq!(
@@ -598,28 +655,38 @@ mod tests {
 
         let mut common = CommonCliOptions::with_default_interval(Duration::from_secs(1));
         let mut empty = std::iter::empty::<String>();
+        assert_eq!(common.max_count, Some(1), "once mode is the default");
         assert_eq!(
             common.parse_common_flag("--help", &mut empty).unwrap(),
-            None
+            CommonFlagStatus::Exit(CliExitAction::Help)
         );
         assert_eq!(
+            common.parse_common_flag("--version", &mut empty).unwrap(),
+            CommonFlagStatus::Exit(CliExitAction::Version)
+        );
+        assert_eq!(
+            common.parse_common_flag("--repeat", &mut empty).unwrap(),
+            CommonFlagStatus::Consumed
+        );
+        assert_eq!(common.max_count, None, "--repeat enables polling");
+        assert_eq!(
             common.parse_common_flag("--once", &mut empty).unwrap(),
-            Some(true)
+            CommonFlagStatus::Consumed
         );
         assert_eq!(common.max_count, Some(1));
         assert_eq!(
             common.parse_common_flag("--verbose", &mut empty).unwrap(),
-            Some(true)
+            CommonFlagStatus::Consumed
         );
         assert!(common.verbose);
         assert_eq!(
             common.parse_common_flag("--json", &mut empty).unwrap(),
-            Some(true)
+            CommonFlagStatus::Consumed
         );
         assert_eq!(common.format, OutputFormat::Json);
         assert_eq!(
             common.parse_common_flag("--custom", &mut empty).unwrap(),
-            Some(false)
+            CommonFlagStatus::Custom
         );
     }
 
@@ -643,10 +710,13 @@ mod tests {
                 _ => Ok(false),
             },
         )
-        .unwrap()
         .unwrap();
-        assert_eq!(parsed.common.max_count, Some(1));
-        assert!(parsed.flag);
+        let opts = match parsed {
+            CliParse::Options(o) => o,
+            other => panic!("expected CliParse::Options, got {other:?}"),
+        };
+        assert_eq!(opts.common.max_count, Some(1));
+        assert!(opts.flag);
 
         let err = parse_args_with_common(
             TestOpts::default(),
@@ -664,7 +734,16 @@ mod tests {
             |_opts, _arg, _args| Ok(false),
         )
         .unwrap();
-        assert!(help.is_none());
+        assert!(matches!(help, CliParse::Help));
+
+        let version = parse_args_with_common(
+            TestOpts::default(),
+            ["--version".into()],
+            |o| &mut o.common,
+            |_opts, _arg, _args| Ok(false),
+        )
+        .unwrap();
+        assert!(matches!(version, CliParse::Version));
     }
 
     #[test]
@@ -701,12 +780,6 @@ mod tests {
         assert_eq!(formatted_light[0], "Light Min   :   10.00 lx (  0.93 fc)");
         assert_eq!(formatted_light[1], "Light Max   :   30.00 lx (  2.79 fc)");
         assert_eq!(formatted_light[2], "Light Avg   :   20.00 lx (  1.86 fc)");
-
-        let formatted_temp =
-            format_min_max_avg(&stats, "Chassis", "°C", Some((fahrenheit, "°F"))).unwrap();
-        assert_eq!(formatted_temp[0], "Chassis Min :   10.00 °C ( 50.00 °F)");
-        assert_eq!(formatted_temp[1], "Chassis Max :   30.00 °C ( 86.00 °F)");
-        assert_eq!(formatted_temp[2], "Chassis Avg :   20.00 °C ( 68.00 °F)");
 
         let formatted_plain = format_min_max_avg(&stats, "Chassis", "°C", None).unwrap();
         assert_eq!(formatted_plain[0], "Chassis Min :   10.00 °C");

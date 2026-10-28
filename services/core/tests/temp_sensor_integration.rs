@@ -54,10 +54,7 @@ fn sysfs_backend_discovers_and_reads_multiple_ds18b20_sensors() {
     assert_eq!(readings.len(), 2);
     assert_eq!(readings[0].temperature.millidegrees_celsius(), 26_437);
     assert_eq!(readings[1].temperature.millidegrees_celsius(), 30_125);
-    assert_eq!(
-        readings[0].to_string(),
-        "[28-00000aabbcc1]  26.44°C  |   79.59°F"
-    );
+    assert_eq!(readings[0].to_string(), "[28-00000aabbcc1]  26.44°C");
 
     // Verify primary sensor reading
     let primary = sensor.read_primary_temperature().unwrap();
