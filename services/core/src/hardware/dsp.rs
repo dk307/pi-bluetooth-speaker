@@ -101,6 +101,13 @@ impl DspHost {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Returns `true` if the host refers to the local loopback interface (`127.0.0.1`, `localhost`, `::1`).
+    #[must_use]
+    pub fn is_loopback(&self) -> bool {
+        let s = self.as_str();
+        s == "127.0.0.1" || s == "localhost" || s == "::1" || s == "[::1]"
+    }
 }
 
 /// Strong newtype wrapping a validated `CamillaDSP` TCP port.
@@ -596,6 +603,12 @@ impl DspError {
         matches!(self.kind, DspErrorKind::CommandFailed { .. })
     }
 
+    /// Returns `true` if an internal state or configuration parameter was invalid.
+    #[must_use]
+    pub const fn is_invalid_state(&self) -> bool {
+        matches!(self.kind, DspErrorKind::InvalidState { .. })
+    }
+
     /// Returns `true` if the underlying asynchronous task was cancelled.
     #[must_use]
     pub const fn is_cancelled(&self) -> bool {
@@ -829,10 +842,7 @@ impl DspDeviceMock {
     }
 
     fn read_status(&self, host: &DspHost, port: DspPort) -> Result<DspStatus, DspError> {
-        let g = self
-            .inner
-            .lock()
-            .map_err(|e| DspError::invalid_state(format!("mock mutex poisoned: {e}")))?;
+        let g = self.inner.lock().expect("dsp mock mutex poisoned");
         if let Some(ref fault) = g.injected_fault {
             return Err(DspError::protocol_error(fault.clone()));
         }
@@ -860,10 +870,7 @@ impl DspDeviceMock {
     }
 
     fn reset_clipped(&self) -> Result<(), DspError> {
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|e| DspError::invalid_state(format!("mock mutex poisoned: {e}")))?;
+        let mut g = self.inner.lock().expect("dsp mock mutex poisoned");
         if let Some(ref fault) = g.injected_fault {
             return Err(DspError::protocol_error(fault.clone()));
         }
@@ -977,7 +984,11 @@ impl DspDevice {
                 let host_clone = host.clone();
                 let port_val = *port;
                 let handle = std::thread::spawn(move || {
-                    let service = probe_systemd_service("camilladsp.service");
+                    let service = if host_clone.is_loopback() {
+                        probe_systemd_service(DspHardwareInfo::rpi3().service_unit)
+                    } else {
+                        ServiceState::NotFound
+                    };
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -1037,7 +1048,12 @@ impl DspDevice {
         host: &DspHost,
         port: DspPort,
     ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, DspError> {
-        let url = format!("ws://{}:{}", host.as_str(), port.as_u16());
+        let host_str = if host.as_str().contains(':') && !host.as_str().starts_with('[') {
+            format!("[{}]", host.as_str())
+        } else {
+            host.as_str().to_string()
+        };
+        let url = format!("ws://{host_str}:{}", port.as_u16());
         let connect_fut = tokio_tungstenite::connect_async(&url);
         let (ws, _) = tokio::time::timeout(Duration::from_secs(3), connect_fut)
             .await
@@ -1145,20 +1161,19 @@ impl DspDevice {
             .ok()
             .and_then(|v| v.as_str().map(Into::into));
 
-        // 4. State
-        let state_str = Self::send_command(&mut ws, "GetState")
-            .await
-            .ok()
-            .and_then(|v| v.as_str().map(ToString::to_string))
-            .unwrap_or_else(|| "Unknown".into());
-        let state = ProcessingState::parse_state(&state_str);
+        // 4. State (mandatory core telemetry)
+        let state_val = Self::send_command(&mut ws, "GetState").await?;
+        let state_str = state_val
+            .as_str()
+            .ok_or_else(|| DspError::protocol_error("invalid GetState string response"))?;
+        let state = ProcessingState::parse_state(state_str);
 
-        // 5. Processing Load
-        let processing_load = Self::send_command(&mut ws, "GetProcessingLoad")
-            .await
-            .ok()
-            .and_then(|v| v.as_f64().map(|f| f as f32))
-            .unwrap_or(0.0);
+        // 5. Processing Load (mandatory core telemetry)
+        let load_val = Self::send_command(&mut ws, "GetProcessingLoad").await?;
+        let processing_load = load_val
+            .as_f64()
+            .map(|f| f as f32)
+            .ok_or_else(|| DspError::protocol_error("invalid GetProcessingLoad float response"))?;
 
         // 6. Resampler Load (optional v4 feature)
         let resampler_load = Self::send_command(&mut ws, "GetResamplerLoad")
@@ -1173,12 +1188,12 @@ impl DspDevice {
             .and_then(|v| v.as_f64())
             .unwrap_or(1.0);
 
-        // 8. Buffer Level
-        let buffer_level = Self::send_command(&mut ws, "GetBufferLevel")
-            .await
-            .ok()
-            .and_then(|v| v.as_u64().map(|u| u as u32))
-            .unwrap_or(0);
+        // 8. Buffer Level (mandatory core telemetry)
+        let buf_val = Self::send_command(&mut ws, "GetBufferLevel").await?;
+        let buffer_level = buf_val
+            .as_u64()
+            .map(|u| u as u32)
+            .ok_or_else(|| DspError::protocol_error("invalid GetBufferLevel integer response"))?;
 
         // 9. Clipped Samples
         let clipped_samples = Self::send_command(&mut ws, "GetClippedSamples")
@@ -1295,70 +1310,55 @@ fn parse_levels_object(val: &serde_json::Value) -> (Vec<f32>, Vec<f32>, Vec<f32>
     (cap_peak, cap_rms, play_peak, play_rms)
 }
 
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "ratio is mathematically non-negative after clamp"
+)]
+fn meter_bar(ratio: f32, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let filled = ((ratio.clamp(0.0, 1.0) * width as f32).round() as usize).min(width);
+    let empty = width.saturating_sub(filled);
+
+    let mut bar = String::with_capacity(width * 4 + 2);
+    bar.push('[');
+    for _ in 0..filled {
+        bar.push('█');
+    }
+    for _ in 0..empty {
+        bar.push('░');
+    }
+    bar.push(']');
+    bar
+}
+
 /// Formats a graphical ASCII/Unicode dBFS level meter bar.
 ///
 /// Full scale (0.0 dBFS) fills all blocks; silence (≤ -60.0 dBFS) shows empty blocks.
 #[must_use]
-#[expect(
-    clippy::cast_sign_loss,
-    reason = "ratio is mathematically non-negative after clamp"
-)]
 pub fn format_dbfs_meter(dbfs: f32, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
     // Dynamic range from -60.0 dBFS to 0.0 dBFS
     let clamped = dbfs.clamp(-60.0, 0.0);
     let ratio = (clamped + 60.0) / 60.0;
-    let filled = ((ratio * width as f32).round() as usize).min(width);
-    let empty = width.saturating_sub(filled);
-
-    let mut bar = String::with_capacity(width * 4 + 2);
-    bar.push('[');
-    for _ in 0..filled {
-        bar.push('█');
-    }
-    for _ in 0..empty {
-        bar.push('░');
-    }
-    bar.push(']');
-    bar
+    meter_bar(ratio, width)
 }
 
 /// Formats a CPU load meter bar (0% to 100%).
 #[must_use]
-#[expect(
-    clippy::cast_sign_loss,
-    reason = "ratio is mathematically non-negative after clamp"
-)]
 pub fn format_load_meter(load_pct: f32, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let clamped = load_pct.clamp(0.0, 100.0);
-    let ratio = clamped / 100.0;
-    let filled = ((ratio * width as f32).round() as usize).min(width);
-    let empty = width.saturating_sub(filled);
-
-    let mut bar = String::with_capacity(width * 4 + 2);
-    bar.push('[');
-    for _ in 0..filled {
-        bar.push('█');
-    }
-    for _ in 0..empty {
-        bar.push('░');
-    }
-    bar.push(']');
-    bar
+    let ratio = load_pct.clamp(0.0, 100.0) / 100.0;
+    meter_bar(ratio, width)
 }
 
-/// Probes systemd for a service unit state using D-Bus, with graceful fallback.
+/// Probes systemd for a service unit state using D-Bus, adhering to M-MOCKABLE-SYSCALLS
+/// and distinguishing unit absence (`NoSuchUnit`) from degradation/failure.
 fn probe_systemd_service(unit_name: &str) -> ServiceState {
     let Ok(conn) = zbus::blocking::Connection::system() else {
-        return ServiceState::Inactive;
+        return ServiceState::NotFound;
     };
     let Ok(manager) = SystemdManagerProxyBlocking::new(&conn) else {
-        return ServiceState::Inactive;
+        return ServiceState::NotFound;
     };
     match manager.get_unit(unit_name) {
         Ok(path) => {
@@ -1368,11 +1368,16 @@ fn probe_systemd_service(unit_name: &str) -> ServiceState {
             else {
                 return ServiceState::NotFound;
             };
-            let active = unit.active_state().unwrap_or_default();
-            let load = unit.load_state().unwrap_or_default();
+            let Ok(active) = unit.active_state() else {
+                return ServiceState::Failed;
+            };
+            let Ok(load) = unit.load_state() else {
+                return ServiceState::Failed;
+            };
             super::bluetooth::DbusClient::parse_systemd_state(&active, &load)
         }
-        Err(_) => ServiceState::NotFound,
+        Err(ref e) if super::bluetooth::is_no_such_unit_error(e) => ServiceState::NotFound,
+        Err(_) => ServiceState::Failed,
     }
 }
 
@@ -1407,15 +1412,10 @@ mod tests {
     #[test]
     fn host_validation_and_parsing() {
         assert_eq!(DspHost::default().as_str(), "127.0.0.1");
-        assert_eq!(
-            DspHost::parse_str("localhost").unwrap().as_str(),
-            "localhost"
-        );
-        assert_eq!(
-            DspHost::parse_str("192.168.2.110").unwrap().as_str(),
-            "192.168.2.110"
-        );
-        assert_eq!(DspHost::parse_str("::1").unwrap().as_str(), "::1");
+        assert!(DspHost::default().is_loopback());
+        assert!(DspHost::parse_str("localhost").unwrap().is_loopback());
+        assert!(DspHost::parse_str("::1").unwrap().is_loopback());
+        assert!(!DspHost::parse_str("192.168.2.110").unwrap().is_loopback());
         DspHost::parse_str("").unwrap_err();
         DspHost::parse_str("   ").unwrap_err();
         DspHost::parse_str("bad host name").unwrap_err();
@@ -1651,6 +1651,8 @@ mod tests {
         assert!(cmd_err.is_command_failed());
 
         let invalid_err = DspError::invalid_state("port cannot be 0");
+        assert!(invalid_err.is_invalid_state());
+        assert!(!err.is_invalid_state());
         assert_eq!(
             invalid_err.summary(),
             "Invalid DSP parameter or state: port cannot be 0"
@@ -1850,6 +1852,12 @@ mod tests {
                     let resp = match cmd.as_str() {
                         "GetState" => {
                             serde_json::json!({"GetState": {"result": "Ok", "value": "Running"}})
+                        }
+                        "GetProcessingLoad" => {
+                            serde_json::json!({"GetProcessingLoad": {"result": "Ok", "value": 1.5}})
+                        }
+                        "GetBufferLevel" => {
+                            serde_json::json!({"GetBufferLevel": {"result": "Ok", "value": 512}})
                         }
                         "GetSignalLevels" => {
                             serde_json::json!({"GetSignalLevels": {"result": "Error", "value": "not implemented"}})

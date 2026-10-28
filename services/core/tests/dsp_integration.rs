@@ -10,6 +10,11 @@ use speaker_core::runtime::abort_and_map;
 fn host_and_port_validation_and_hardware_metadata() {
     let host = DspHost::parse_str("127.0.0.1").unwrap();
     assert_eq!(host.as_str(), "127.0.0.1");
+    assert!(host.is_loopback());
+
+    let host_v6 = DspHost::parse_str("::1").unwrap();
+    assert_eq!(host_v6.as_str(), "::1");
+    assert!(host_v6.is_loopback());
 
     for invalid in ["", "  ", "invalid host name", "host$name"] {
         DspHost::parse_str(invalid).unwrap_err();
@@ -106,6 +111,10 @@ async fn concurrent_device_clones_read_and_reset() {
 async fn runtime_task_cancellation_mapping() {
     let err = abort_and_map::<DspError>("dsp read").await;
     assert!(err.is_cancelled());
+    assert!(!err.is_invalid_state());
+    let invalid_err = DspHost::new("bad host name").unwrap_err();
+    assert!(invalid_err.is_invalid_state());
+    assert!(!invalid_err.is_cancelled());
     assert_eq!(
         err.summary(),
         "DSP task cancelled: dsp read task was cancelled"
