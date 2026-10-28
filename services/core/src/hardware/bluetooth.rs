@@ -412,7 +412,7 @@ impl BluetoothControllerInfo {
     /// Returns `true` if any controller detail was successfully probed.
     #[must_use]
     pub fn is_known(&self) -> bool {
-        self.hci_version.is_some()
+        self.hci_version.is_some() || self.lmp_version.is_some()
     }
 }
 
@@ -1596,7 +1596,10 @@ impl BluetoothDevice {
                 let (adapter, devices) = dbus.query_bluez(target_adapter)?;
                 let pcms = dbus.query_bluealsa(&devices)?;
                 let mut hardware = BluetoothHardwareInfo::rpi3();
-                hardware.controller = BluetoothControllerInfo::probe(&hardware.default_controller);
+                let probed = adapter
+                    .as_ref()
+                    .map_or_else(|| hardware.default_controller.clone(), |a| a.id.clone());
+                hardware.controller = BluetoothControllerInfo::probe(&probed);
                 Ok(BluetoothStatus {
                     services,
                     adapter,
@@ -1993,6 +1996,19 @@ hci0:	Type: Primary  Bus: UART
         assert_eq!(info.hci_version.as_deref(), Some("5.4"));
         assert_eq!(info.hci_revision.as_deref(), Some("0xddd5"));
         assert_eq!(info.firmware_version, None);
+    }
+
+    #[test]
+    fn parse_hciconfig_version_lmp_only_is_known() {
+        let output = "hci0:\tRevision: 0x0555  LMP Version: 5.4 (0xd)  Subversion: 0xc761\n";
+        let info = BluetoothControllerInfo::from_hciconfig_output(output)
+            .expect("LMP-only output still parses");
+        assert_eq!(info.hci_version, None);
+        assert_eq!(info.hci_revision.as_deref(), Some("0x0555"));
+        assert_eq!(info.lmp_version.as_deref(), Some("5.4"));
+        assert_eq!(info.lmp_subversion.as_deref(), Some("0xc761"));
+        assert_eq!(info.firmware_version.as_deref(), Some("0x555c761"));
+        assert!(info.is_known());
     }
 
     #[test]
