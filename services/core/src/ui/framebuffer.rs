@@ -384,16 +384,24 @@ impl Framebuffer {
             })?)
             .saturating_mul(4);
 
-        // Attempt memory mapping; if mmap fails (e.g., standard temp file in tests),
+        // For regular files smaller than byte_len (e.g. truncated files), avoid mmap to prevent SIGBUS.
+        let too_small_regular_file = file
+            .metadata()
+            .is_ok_and(|m| m.file_type().is_file() && m.len() < byte_len as u64);
+
+        // Attempt memory mapping; if mmap fails or file is too small,
         // fallback to file write with internal backing buffer.
-        //
-        // SAFETY: The file is opened with read and write permissions, byte_len is computed
-        // from valid width * height * 4, and the mapping does not exceed device boundaries.
-        let mmap = unsafe {
-            memmap2::MmapOptions::new()
-                .len(byte_len)
-                .map_mut(&file)
-                .ok()
+        let mmap = if too_small_regular_file {
+            None
+        } else {
+            // SAFETY: The file is opened with read and write permissions, byte_len is computed
+            // from valid width * height * 4, and the mapping does not exceed device boundaries.
+            unsafe {
+                memmap2::MmapOptions::new()
+                    .len(byte_len)
+                    .map_mut(&file)
+                    .ok()
+            }
         };
 
         let blank_path_str = blank_path.map(|p| p.as_ref().to_string_lossy().into());
@@ -913,5 +921,20 @@ mod tests {
         let err_missing =
             Framebuffer::validate_sysfs_geometry(&missing, 800, 480, "fb0").unwrap_err();
         assert!(err_missing.is_io());
+    }
+
+    #[test]
+    fn framebuffer_regular_file_truncated_falls_back_to_buffered() {
+        let temp = ScopedTempDir::try_new("fb_truncated_test").unwrap();
+        let dev_file = temp.path().join("short_fb");
+        // Only write 16 bytes (much smaller than 800 * 480 * 4)
+        fs::write(&dev_file, vec![0u8; 16]).unwrap();
+
+        let mut fb = Framebuffer::open(&dev_file, None::<&Path>, 800, 480).unwrap();
+        assert!(!fb.is_mocked());
+        let window = fb.init_platform().unwrap();
+        window.request_redraw();
+        let rendered = fb.render_frame(&window).unwrap();
+        assert!(rendered);
     }
 }
