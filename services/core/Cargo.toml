@@ -88,7 +88,7 @@ async-trait = "=0.1.86"
 memmap2 = { version = "=0.9.12", optional = true }
 
 [features]
-default = []
+default = ["ui"]
 ui = ["dep:slint", "dep:slint-build", "dep:memmap2"]
 linuxkms = ["ui", "slint/backend-linuxkms"]
 simulator = ["ui", "slint/backend-winit", "slint/renderer-femtovg"]

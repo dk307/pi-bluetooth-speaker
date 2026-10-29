@@ -166,14 +166,18 @@ impl FramebufferError {
         }
     }
 
-    pub(crate) fn io(path: impl Into<Box<str>>, message: impl Into<Box<str>>) -> Self {
+    /// Creates an I/O error variant.
+    #[must_use]
+    pub fn io(path: impl Into<Box<str>>, message: impl Into<Box<str>>) -> Self {
         Self::new(FramebufferErrorKind::Io {
             path: path.into(),
             message: message.into(),
         })
     }
 
-    pub(crate) fn invalid_geometry(width: u32, height: u32, message: impl Into<Box<str>>) -> Self {
+    /// Creates an invalid geometry error variant.
+    #[must_use]
+    pub fn invalid_geometry(width: u32, height: u32, message: impl Into<Box<str>>) -> Self {
         Self::new(FramebufferErrorKind::InvalidGeometry {
             width,
             height,
@@ -185,6 +189,30 @@ impl FramebufferError {
     #[must_use]
     pub fn platform(message: impl Into<Box<str>>) -> Self {
         Self::new(FramebufferErrorKind::Platform(message.into()))
+    }
+
+    /// Returns `true` if this error was caused by a device or sysfs I/O failure.
+    #[must_use]
+    pub const fn is_io(&self) -> bool {
+        matches!(self.kind, FramebufferErrorKind::Io { .. })
+    }
+
+    /// Returns `true` if this error was caused by an invalid geometry request.
+    #[must_use]
+    pub const fn is_invalid_geometry(&self) -> bool {
+        matches!(self.kind, FramebufferErrorKind::InvalidGeometry { .. })
+    }
+
+    /// Returns `true` if this error was caused by Slint platform registration.
+    #[must_use]
+    pub const fn is_platform(&self) -> bool {
+        matches!(self.kind, FramebufferErrorKind::Platform(_))
+    }
+
+    /// Returns the captured backtrace for this error.
+    #[must_use]
+    pub const fn backtrace(&self) -> &Backtrace {
+        &self.backtrace
     }
 
     /// Returns the underlying error kind.
@@ -646,6 +674,9 @@ mod tests {
 
     #[test]
     fn bgrx_target_pixel_blending() {
+        let p_rgb = <Bgrx8888Pixel as TargetPixel>::from_rgb(10, 20, 30);
+        assert_eq!(p_rgb, Bgrx8888Pixel::new(10, 20, 30));
+
         let mut p = Bgrx8888Pixel::background();
         assert_eq!(p, Bgrx8888Pixel::new(0, 0, 0));
 
@@ -770,6 +801,11 @@ mod tests {
     #[test]
     fn framebuffer_error_display_and_summary() {
         let err = FramebufferError::io("/dev/fb0", "Permission denied");
+        assert!(err.is_io());
+        assert!(!err.is_invalid_geometry());
+        assert!(!err.is_platform());
+        let _ = err.backtrace();
+
         let sum = err.summary();
         assert!(sum.contains("/dev/fb0"));
         assert!(sum.contains("Permission denied"));
@@ -777,11 +813,17 @@ mod tests {
         assert!(disp.contains("framebuffer I/O error on '/dev/fb0'"));
 
         let plat_err = FramebufferError::platform("failed to set context");
+        assert!(plat_err.is_platform());
+        assert!(!plat_err.is_io());
         assert!(
             plat_err
                 .summary()
                 .contains("slint platform registration error")
         );
+
+        let geom_err = FramebufferError::invalid_geometry(800, 480, "test mismatch");
+        assert!(geom_err.is_invalid_geometry());
+        assert!(!geom_err.is_io());
     }
 
     #[test]
@@ -812,5 +854,17 @@ mod tests {
         let win1 = fb.init_platform().unwrap();
         let win2 = fb.init_platform().unwrap();
         assert!(Rc::ptr_eq(&win1, &win2));
+    }
+
+    #[test]
+    fn framebuffer_new_default_fails_or_opens() {
+        let _ = Framebuffer::new();
+    }
+
+    #[test]
+    fn framebuffer_platform_window_adapter_fallback() {
+        let platform = FramebufferPlatform;
+        let adapter = slint::platform::Platform::create_window_adapter(&platform);
+        assert!(adapter.is_ok());
     }
 }
