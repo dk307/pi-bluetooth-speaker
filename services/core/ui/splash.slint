@@ -1,3 +1,13 @@
+// One POST checklist row: green checkmark, fixed-width label, live status text.
+component PostCheckRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> status;
+    spacing: 10px;
+    Text { text: "✓"; color: #7ee787; font-size: 13px; font-weight: 700; }
+    Text { text: root.label; color: #8b949e; font-size: 13px; width: 140px; }
+    Text { text: root.status; color: #f0f6fc; font-size: 13px; font-weight: 500; }
+}
+
 export component SplashScreen inherits Window {
     title: "DietPi Audiophile Console";
     width: 800px;
@@ -99,39 +109,29 @@ export component SplashScreen inherits Window {
                     spacing: 6px;
                     padding-top: 6px;
 
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Text { text: "✓"; color: #7ee787; font-size: 13px; font-weight: 700; }
-                        Text { text: "I2S Amplifier:"; color: #8b949e; font-size: 13px; width: 140px; }
-                        Text { text: root.amp_status; color: #f0f6fc; font-size: 13px; font-weight: 500; }
+                    PostCheckRow {
+                        label: "I2S Amplifier:";
+                        status: root.amp_status;
                     }
 
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Text { text: "✓"; color: #7ee787; font-size: 13px; font-weight: 700; }
-                        Text { text: "CamillaDSP:"; color: #8b949e; font-size: 13px; width: 140px; }
-                        Text { text: root.dsp_status; color: #f0f6fc; font-size: 13px; font-weight: 500; }
+                    PostCheckRow {
+                        label: "CamillaDSP:";
+                        status: root.dsp_status;
                     }
 
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Text { text: "✓"; color: #7ee787; font-size: 13px; font-weight: 700; }
-                        Text { text: "Bluetooth Stack:"; color: #8b949e; font-size: 13px; width: 140px; }
-                        Text { text: root.bt_status; color: #f0f6fc; font-size: 13px; font-weight: 500; }
+                    PostCheckRow {
+                        label: "Bluetooth Stack:";
+                        status: root.bt_status;
                     }
 
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Text { text: "✓"; color: #7ee787; font-size: 13px; font-weight: 700; }
-                        Text { text: "DSI Touchscreen:"; color: #8b949e; font-size: 13px; width: 140px; }
-                        Text { text: root.display_status; color: #f0f6fc; font-size: 13px; font-weight: 500; }
+                    PostCheckRow {
+                        label: "DSI Touchscreen:";
+                        status: root.display_status;
                     }
 
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Text { text: "✓"; color: #7ee787; font-size: 13px; font-weight: 700; }
-                        Text { text: "Sensors & Bus:"; color: #8b949e; font-size: 13px; width: 140px; }
-                        Text { text: root.sensor_status; color: #f0f6fc; font-size: 13px; font-weight: 500; }
+                    PostCheckRow {
+                        label: "Sensors & Bus:";
+                        status: root.sensor_status;
                     }
                 }
             }

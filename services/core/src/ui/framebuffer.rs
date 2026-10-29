@@ -311,15 +311,21 @@ pub struct FramebufferMockCtrl {
 }
 
 impl FramebufferMockCtrl {
+    /// Runs `apply` against the shared mock state under the state mutex.
+    ///
+    /// # Panics
+    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
+    fn with_state<T>(&self, apply: impl FnOnce(&mut MockState) -> T) -> T {
+        let mut state = self.state.lock().expect("mock state lock poisoned");
+        apply(&mut state)
+    }
+
     /// Forces all subsequent `unblank` calls to fail with an I/O error.
     ///
     /// # Panics
     /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     pub fn set_unblank_error(&self, message: impl Into<Box<str>>) {
-        self.state
-            .lock()
-            .expect("mock state lock poisoned")
-            .unblank_error = Some(message.into());
+        self.with_state(|state| state.unblank_error = Some(message.into()));
     }
 
     /// Forces all subsequent `render_frame` calls to fail with an I/O error.
@@ -327,10 +333,7 @@ impl FramebufferMockCtrl {
     /// # Panics
     /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     pub fn set_render_error(&self, message: impl Into<Box<str>>) {
-        self.state
-            .lock()
-            .expect("mock state lock poisoned")
-            .render_error = Some(message.into());
+        self.with_state(|state| state.render_error = Some(message.into()));
     }
 
     /// Clears any injected `unblank` fault.
@@ -338,10 +341,7 @@ impl FramebufferMockCtrl {
     /// # Panics
     /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     pub fn clear_unblank_error(&self) {
-        self.state
-            .lock()
-            .expect("mock state lock poisoned")
-            .unblank_error = None;
+        self.with_state(|state| state.unblank_error = None);
     }
 
     /// Clears any injected `render_frame` fault.
@@ -349,10 +349,7 @@ impl FramebufferMockCtrl {
     /// # Panics
     /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     pub fn clear_render_error(&self) {
-        self.state
-            .lock()
-            .expect("mock state lock poisoned")
-            .render_error = None;
+        self.with_state(|state| state.render_error = None);
     }
 
     /// Takes a snapshot of the mock counters, leaving injected faults untouched.
@@ -361,8 +358,7 @@ impl FramebufferMockCtrl {
     /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     #[must_use]
     pub fn counters(&self) -> (usize, usize) {
-        let state = self.state.lock().expect("mock state lock poisoned");
-        (state.unblank_calls, state.render_calls)
+        self.with_state(|state| (state.unblank_calls, state.render_calls))
     }
 }
 
@@ -636,7 +632,7 @@ impl Framebuffer {
                         f.flush()
                             .map_err(|err| FramebufferError::io(path.clone(), err))?;
                     } else {
-                        tracing::debug!(
+                        tracing::warn!(
                             "Sysfs display blank path '{path}' does not exist; skipping unblank"
                         );
                     }
@@ -818,12 +814,7 @@ impl Framebuffer {
     pub fn unblank_count(&self) -> usize {
         match &self.backend {
             Backend::Hardware { .. } => 0,
-            Backend::Mock { ctrl, .. } => {
-                ctrl.state
-                    .lock()
-                    .expect("mock state lock poisoned")
-                    .unblank_calls
-            }
+            Backend::Mock { ctrl, .. } => ctrl.counters().0,
         }
     }
 
@@ -835,12 +826,7 @@ impl Framebuffer {
     pub fn render_count(&self) -> usize {
         match &self.backend {
             Backend::Hardware { .. } => 0,
-            Backend::Mock { ctrl, .. } => {
-                ctrl.state
-                    .lock()
-                    .expect("mock state lock poisoned")
-                    .render_calls
-            }
+            Backend::Mock { ctrl, .. } => ctrl.counters().1,
         }
     }
 }
