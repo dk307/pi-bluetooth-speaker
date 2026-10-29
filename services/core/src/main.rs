@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 use speaker_core::hardware::TempSensor;
 
 #[cfg(feature = "ui")]
-use speaker_core::ui::{ComponentHandle, Framebuffer, SplashScreen};
+use slint::ComponentHandle;
+#[cfg(feature = "ui")]
+use speaker_core::ui::{Framebuffer, SplashScreen};
 
 fn print_help() {
     println!("DietPi Bluetooth Speaker & DSP Core Appliance Service");
@@ -33,6 +35,12 @@ fn print_help() {
 
 #[cfg(feature = "ui")]
 fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
+    if std::env::var_os("SPEAKER_CORE_HEADLESS").is_some() {
+        tracing::info!("Headless mode requested via SPEAKER_CORE_HEADLESS");
+        println!("  Display: Headless mode requested via SPEAKER_CORE_HEADLESS.");
+        return;
+    }
+
     let fb_path = Path::new(Framebuffer::DEFAULT_FB_PATH);
     if !fb_path.exists() {
         tracing::info!("Headless/simulated environment (no /dev/fb0 detected)");

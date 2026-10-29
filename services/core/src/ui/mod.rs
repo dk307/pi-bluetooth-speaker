@@ -24,5 +24,3 @@ pub mod framebuffer;
 pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError};
 #[doc(inline)]
 pub use generated::{MainWindow, SplashScreen};
-#[doc(inline)]
-pub use slint::ComponentHandle;

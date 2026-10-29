@@ -21,7 +21,7 @@ use std::backtrace::{Backtrace, BacktraceStatus};
 use std::cell::RefCell;
 use std::fmt::{self, Display, Formatter};
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -135,8 +135,8 @@ pub(crate) enum FramebufferErrorKind {
     Io {
         /// Target filesystem path.
         path: Box<str>,
-        /// Descriptive error message.
-        message: Box<str>,
+        /// Underlying I/O error cause.
+        source: io::Error,
     },
     /// Invalid display geometry requested.
     InvalidGeometry {
@@ -168,10 +168,10 @@ impl FramebufferError {
 
     /// Creates an I/O error variant.
     #[must_use]
-    pub fn io(path: impl Into<Box<str>>, message: impl Into<Box<str>>) -> Self {
+    pub fn io(path: impl Into<Box<str>>, source: io::Error) -> Self {
         Self::new(FramebufferErrorKind::Io {
             path: path.into(),
-            message: message.into(),
+            source,
         })
     }
 
@@ -197,6 +197,15 @@ impl FramebufferError {
         matches!(self.kind, FramebufferErrorKind::Io { .. })
     }
 
+    /// Returns the underlying I/O error if this error is an I/O variant.
+    #[must_use]
+    pub fn io_error(&self) -> Option<&io::Error> {
+        match &self.kind {
+            FramebufferErrorKind::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+
     /// Returns `true` if this error was caused by an invalid geometry request.
     #[must_use]
     pub const fn is_invalid_geometry(&self) -> bool {
@@ -217,8 +226,8 @@ impl FramebufferError {
 
     fn fmt_kind(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            FramebufferErrorKind::Io { path, message } => {
-                write!(f, "framebuffer I/O error on '{path}': {message}")
+            FramebufferErrorKind::Io { path, source } => {
+                write!(f, "framebuffer I/O error on '{path}': {source}")
             }
             FramebufferErrorKind::InvalidGeometry {
                 width,
@@ -259,7 +268,14 @@ impl Display for FramebufferError {
     }
 }
 
-impl std::error::Error for FramebufferError {}
+impl std::error::Error for FramebufferError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.kind {
+            FramebufferErrorKind::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// Backend implementation for the framebuffer sink.
 #[derive(Debug)]
@@ -364,7 +380,7 @@ impl Framebuffer {
             .read(true)
             .write(true)
             .open(dev_path_ref)
-            .map_err(|err| FramebufferError::io(dev_path_str.clone(), err.to_string()))?;
+            .map_err(|err| FramebufferError::io(dev_path_str.clone(), err))?;
 
         // If checking a physical /dev/fbX device, validate against sysfs virtual_size if available
         if let Some(dev_name) = dev_path_ref.file_name().and_then(|s| s.to_str()) {
@@ -431,9 +447,8 @@ impl Framebuffer {
         height: u32,
         dev_name: &str,
     ) -> Result<(), FramebufferError> {
-        let content = std::fs::read_to_string(sysfs_path).map_err(|e| {
-            FramebufferError::io(sysfs_path.to_string_lossy().to_string(), e.to_string())
-        })?;
+        let content = std::fs::read_to_string(sysfs_path)
+            .map_err(|e| FramebufferError::io(sysfs_path.to_string_lossy().to_string(), e))?;
         let parts: Vec<&str> = content.trim().split(',').collect();
         if parts.len() != 2 {
             return Err(FramebufferError::invalid_geometry(
@@ -497,11 +512,11 @@ impl Framebuffer {
                         let mut f = OpenOptions::new()
                             .write(true)
                             .open(path_ref)
-                            .map_err(|err| FramebufferError::io(path.clone(), err.to_string()))?;
+                            .map_err(|err| FramebufferError::io(path.clone(), err))?;
                         f.write_all(b"0\n")
-                            .map_err(|err| FramebufferError::io(path.clone(), err.to_string()))?;
+                            .map_err(|err| FramebufferError::io(path.clone(), err))?;
                         f.flush()
-                            .map_err(|err| FramebufferError::io(path.clone(), err.to_string()))?;
+                            .map_err(|err| FramebufferError::io(path.clone(), err))?;
                     } else {
                         tracing::debug!(
                             "Sysfs display blank path '{path}' does not exist; skipping unblank"
@@ -539,11 +554,11 @@ impl Framebuffer {
         dev_path: &str,
     ) -> Result<(), FramebufferError> {
         file.seek(SeekFrom::Start(0))
-            .map_err(|e| FramebufferError::io(dev_path, e.to_string()))?;
+            .map_err(|e| FramebufferError::io(dev_path, e))?;
         file.write_all(buf)
-            .map_err(|e| FramebufferError::io(dev_path, e.to_string()))?;
+            .map_err(|e| FramebufferError::io(dev_path, e))?;
         file.flush()
-            .map_err(|e| FramebufferError::io(dev_path, e.to_string()))?;
+            .map_err(|e| FramebufferError::io(dev_path, e))?;
         Ok(())
     }
 
@@ -576,7 +591,7 @@ impl Framebuffer {
                     if did_draw {
                         mmap_mut
                             .flush()
-                            .map_err(|e| FramebufferError::io(dev_path.clone(), e.to_string()))?;
+                            .map_err(|e| FramebufferError::io(dev_path.clone(), e))?;
                     }
                     Ok(did_draw)
                 } else {
@@ -828,10 +843,19 @@ mod tests {
 
     #[test]
     fn framebuffer_error_display_and_summary() {
-        let err = FramebufferError::io("/dev/fb0", "Permission denied");
+        use std::error::Error as _;
+
+        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "Permission denied");
+        let err = FramebufferError::io("/dev/fb0", io_err);
         assert!(err.is_io());
         assert!(!err.is_invalid_geometry());
         assert!(!err.is_platform());
+        assert!(err.source().is_some());
+        assert!(err.io_error().is_some());
+        assert_eq!(
+            err.io_error().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
         let _ = err.backtrace();
 
         let sum = err.summary();
@@ -843,6 +867,8 @@ mod tests {
         let plat_err = FramebufferError::platform("failed to set context");
         assert!(plat_err.is_platform());
         assert!(!plat_err.is_io());
+        assert!(plat_err.source().is_none());
+        assert!(plat_err.io_error().is_none());
         assert!(
             plat_err
                 .summary()
@@ -852,6 +878,8 @@ mod tests {
         let geom_err = FramebufferError::invalid_geometry(800, 480, "test mismatch");
         assert!(geom_err.is_invalid_geometry());
         assert!(!geom_err.is_io());
+        assert!(geom_err.source().is_none());
+        assert!(geom_err.io_error().is_none());
     }
 
     #[test]

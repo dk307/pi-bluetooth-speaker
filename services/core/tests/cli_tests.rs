@@ -58,6 +58,7 @@ fn run_cli_with_timeout(
     timeout: Duration,
 ) -> (ExitStatus, String, String) {
     let child = Command::new(bin)
+        .env("SPEAKER_CORE_HEADLESS", "1")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

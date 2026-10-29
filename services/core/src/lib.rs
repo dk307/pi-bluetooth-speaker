@@ -10,5 +10,5 @@ pub mod runtime;
 #[cfg(feature = "ui")]
 pub mod ui;
 
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]
 core::arch::global_asm!(".symver acosf, acosf@GLIBC_2.17");

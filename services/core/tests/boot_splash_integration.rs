@@ -52,12 +52,21 @@ fn splash_screen_defaults_and_property_updates() {
         splash.get_sensor_status(),
         "DS18B20 41.2°C | BH1750 145.0 Lux"
     );
+
+    // Verify NaN and boundary progress values
+    splash.set_progress(f32::NAN);
+    assert!(splash.get_progress().is_nan());
+    splash.set_progress(-10.0);
+    assert_eq!(splash.get_progress(), -10.0);
+    splash.set_progress(150.0);
+    assert_eq!(splash.get_progress(), 150.0);
 }
 
 #[cfg(feature = "ui")]
 #[test]
 fn splash_screen_renders_to_framebuffer() {
-    use speaker_core::ui::{Bgrx8888Pixel, ComponentHandle, Framebuffer, SplashScreen};
+    use slint::ComponentHandle;
+    use speaker_core::ui::{Bgrx8888Pixel, Framebuffer, SplashScreen};
 
     let mut fb = Framebuffer::new_mocked(800, 480);
     let window = fb.init_platform().expect("Failed to initialize platform");
