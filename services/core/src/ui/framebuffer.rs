@@ -255,6 +255,7 @@ impl Platform for FramebufferPlatform {
                 Ok(Rc::clone(active) as Rc<dyn slint::platform::WindowAdapter>)
             } else {
                 let new_win = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+                *w.borrow_mut() = Some(Rc::clone(&new_win));
                 Ok(new_win as Rc<dyn slint::platform::WindowAdapter>)
             }
         })
@@ -320,6 +321,29 @@ impl Framebuffer {
             .write(true)
             .open(dev_path_ref)
             .map_err(|err| FramebufferError::io(dev_path_str.clone(), err.to_string()))?;
+
+        // If checking physical /dev/fb0, validate against sysfs virtual_size if available
+        let sysfs_size_path = Path::new("/sys/class/graphics/fb0/virtual_size");
+        if *dev_path_str == *Self::DEFAULT_FB_PATH && sysfs_size_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(sysfs_size_path) {
+                let parts: Vec<&str> = content.trim().split(',').collect();
+                if parts.len() == 2 {
+                    if let (Ok(dev_w), Ok(dev_h)) =
+                        (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+                    {
+                        if dev_w != width || dev_h != height {
+                            return Err(FramebufferError::invalid_geometry(
+                                width,
+                                height,
+                                format!(
+                                    "requested resolution {width}x{height} does not match hardware scanout {dev_w}x{dev_h}"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
 
         let byte_len = usize::try_from(width)
             .map_err(|err| FramebufferError::invalid_geometry(width, height, err.to_string()))?
