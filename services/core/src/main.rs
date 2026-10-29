@@ -35,26 +35,31 @@ fn print_help() {
 fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
     let fb_path = Path::new(Framebuffer::DEFAULT_FB_PATH);
     if !fb_path.exists() {
+        tracing::info!("Headless/simulated environment (no /dev/fb0 detected)");
         println!("  Display: Headless/simulated environment (no /dev/fb0 detected).");
         return;
     }
 
+    tracing::info!("Initializing Framebuffer /dev/fb0 (800x480 32bpp BGRX)");
     println!("  Display: Initializing Framebuffer /dev/fb0 (800x480 32bpp BGRX)...");
     let mut fb = match Framebuffer::new() {
         Ok(fb) => fb,
         Err(e) => {
+            tracing::warn!("Could not open /dev/fb0: {e}");
             eprintln!("  Display Warning: Could not open /dev/fb0: {e}");
             return;
         }
     };
 
     if let Err(e) = fb.unblank() {
+        tracing::warn!("Failed to unblank display: {e}");
         eprintln!("  Display Warning: Failed to unblank display: {e}");
     }
 
     let window = match fb.init_platform() {
         Ok(win) => win,
         Err(e) => {
+            tracing::error!("Failed to initialize platform: {e}");
             eprintln!("  Display Error: Failed to initialize platform: {e}");
             return;
         }
@@ -63,24 +68,29 @@ fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
     let splash = match SplashScreen::new() {
         Ok(s) => s,
         Err(e) => {
+            tracing::error!("Failed to initialize SplashScreen: {e}");
             eprintln!("  Display Error: Failed to initialize SplashScreen: {e}");
             return;
         }
     };
 
     if let Err(e) = splash.show() {
+        tracing::warn!("Failed to show SplashScreen: {e}");
         eprintln!("  Display Warning: Failed to show SplashScreen: {e}");
         return;
     }
 
     match fb.render_frame(&window) {
         Ok(true) => {
+            tracing::info!("Boot splash screen rendered to /dev/fb0 successfully");
             println!("  Display: Boot splash screen rendered to /dev/fb0 successfully!");
         }
         Ok(false) => {
+            tracing::debug!("Screen buffer already current");
             println!("  Display: Screen buffer already current.");
         }
         Err(e) => {
+            tracing::error!("Failed to render frame: {e}");
             eprintln!("  Display Error: Failed to render frame: {e}");
         }
     }
@@ -88,16 +98,19 @@ fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
     if run_loop || preview_secs.is_some() {
         let start = Instant::now();
         let duration = preview_secs.map(Duration::from_secs);
+        tracing::info!("Running UI render loop");
         println!("  Display: Running UI render loop...");
 
         while run_loop || duration.is_some_and(|d| start.elapsed() < d) {
             slint::platform::update_timers_and_animations();
             if let Err(e) = fb.render_frame(&window) {
+                tracing::error!("Render loop frame failed: {e}");
                 eprintln!("  Display Error: render loop frame failed: {e}");
                 break;
             }
             std::thread::sleep(Duration::from_millis(16));
         }
+        tracing::info!("Preview complete");
         println!("  Display: Preview complete.");
     }
 }
