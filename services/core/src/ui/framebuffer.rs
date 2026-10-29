@@ -415,10 +415,11 @@ impl Framebuffer {
             *w.borrow_mut() = Some(Rc::clone(&window));
         });
 
-        // Set platform once per thread; if already set, ignore the AlreadySet error.
-        let _ = slint::platform::set_platform(Box::new(FramebufferPlatform));
-
-        Ok(window)
+        // Set platform once per thread; AlreadySet is expected across multiple component cycles.
+        match slint::platform::set_platform(Box::new(FramebufferPlatform)) {
+            Ok(()) | Err(slint::platform::SetPlatformError::AlreadySet) => Ok(window),
+            Err(err) => Err(FramebufferError::platform(err.to_string())),
+        }
     }
 
     /// Renders a pending frame into the framebuffer if redraw was requested.

@@ -92,7 +92,10 @@ fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
 
         while run_loop || duration.is_some_and(|d| start.elapsed() < d) {
             slint::platform::update_timers_and_animations();
-            let _ = fb.render_frame(&window);
+            if let Err(e) = fb.render_frame(&window) {
+                eprintln!("  Display Error: render loop frame failed: {e}");
+                break;
+            }
             std::thread::sleep(Duration::from_millis(16));
         }
         println!("  Display: Preview complete.");
