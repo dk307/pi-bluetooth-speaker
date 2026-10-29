@@ -7,6 +7,7 @@
 //! the standard library's `core` crate in external prelude and dependency graphs, the library
 //! crate is named `speaker_core`.
 
+#[cfg(feature = "ui")]
 use std::path::Path;
 use std::process::ExitCode;
 #[cfg(feature = "ui")]
@@ -101,6 +102,13 @@ fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
         }
     };
 
+    run_splash_on(&mut fb, preview_secs, run_loop);
+}
+
+/// Runs the splash lifecycle (unblank, platform init, component show, render loop)
+/// on an opened framebuffer backend, keeping the path testable with mocked hardware.
+#[cfg(feature = "ui")]
+fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool) {
     if let Err(e) = fb.unblank() {
         tracing::warn!("Failed to unblank display: {e}");
         eprintln!("  Display Warning: Failed to unblank display: {e}");
@@ -218,6 +226,25 @@ mod tests {
                 .unwrap_err()
                 .contains("invalid preview seconds")
         );
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn run_splash_on_mocked_renders_and_tracks_counters() {
+        let mut fb = Framebuffer::new_mocked();
+        assert!(fb.is_mocked());
+        run_splash_on(&mut fb, None, false);
+        assert_eq!(fb.unblank_count(), 1);
+        assert_eq!(fb.render_count(), 1);
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn run_splash_on_mocked_zero_preview_skips_loop() {
+        let mut fb = Framebuffer::new_mocked();
+        run_splash_on(&mut fb, Some(0), false);
+        // Initial render + no loop iterations for zero-length preview
+        assert_eq!(fb.render_count(), 1);
     }
 
     #[test]

@@ -338,8 +338,9 @@ impl Framebuffer {
     ///
     /// # Errors
     ///
-    /// Returns [`FramebufferError`] if the device cannot be opened or the sysfs
-    /// `virtual_size` does not match the fixed appliance panel geometry.
+    /// Returns [`FramebufferError`] if the device cannot be opened, or if the sysfs
+    /// scanout contract (`virtual_size`, `bits_per_pixel`, `stride`) is missing or does
+    /// not match the fixed appliance panel geometry.
     pub fn open(
         dev_path: impl AsRef<Path>,
         blank_path: Option<impl AsRef<Path>>,
@@ -353,8 +354,10 @@ impl Framebuffer {
             .open(dev_path_ref)
             .map_err(|err| FramebufferError::io(dev_path_str.clone(), err))?;
 
-        // If checking a physical /dev/fbX device, validate the scanout contract
-        // (resolution, pixel format, stride) against sysfs attributes when available.
+        // If checking a physical /dev/fbX device, validate the full scanout contract
+        // (resolution, pixel format, stride) against sysfs attributes. Failing closed:
+        // an fb* device whose sysfs contract is unavailable is rejected rather than
+        // mmap'ing unvalidated geometry.
         if let Some(dev_name) = dev_path_ref.file_name().and_then(|s| s.to_str()) {
             if dev_name.starts_with("fb") {
                 let sysfs_dir = format!("/sys/class/graphics/{dev_name}");
@@ -368,9 +371,16 @@ impl Framebuffer {
                 ] {
                     let sysfs_size_path = format!("{sysfs_dir}/{attr}");
                     let sysfs_path = Path::new(&sysfs_size_path);
-                    if sysfs_path.exists() {
-                        validate(sysfs_path, dev_name)?;
+                    if !sysfs_path.exists() {
+                        return Err(FramebufferError::invalid_geometry(
+                            Self::DEFAULT_WIDTH,
+                            Self::DEFAULT_HEIGHT,
+                            format!(
+                                "framebuffer '{dev_name}' does not expose required sysfs attribute '{attr}' to validate the scanout contract"
+                            ),
+                        ));
                     }
+                    validate(sysfs_path, dev_name)?;
                 }
             }
         }
