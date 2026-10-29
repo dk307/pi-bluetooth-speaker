@@ -397,8 +397,12 @@ impl Framebuffer {
         };
 
         let blank_path_str = blank_path.map(|p| p.as_ref().to_string_lossy().into());
-        let pixel_count = (width as usize).saturating_mul(height as usize);
-        let back_buffer = vec![Bgrx8888Pixel::default(); pixel_count];
+        let back_buffer = if mmap.is_some() {
+            Vec::new()
+        } else {
+            let pixel_count = (width as usize).saturating_mul(height as usize);
+            vec![Bgrx8888Pixel::default(); pixel_count]
+        };
 
         Ok(Self {
             backend: Backend::Hardware {
@@ -520,6 +524,21 @@ impl Framebuffer {
         }
     }
 
+    /// Flushes raw byte buffer to file using `seek`, `write_all`, and `flush`.
+    fn flush_file_buffer(
+        file: &mut File,
+        buf: &[u8],
+        dev_path: &str,
+    ) -> Result<(), FramebufferError> {
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| FramebufferError::io(dev_path, e.to_string()))?;
+        file.write_all(buf)
+            .map_err(|e| FramebufferError::io(dev_path, e.to_string()))?;
+        file.flush()
+            .map_err(|e| FramebufferError::io(dev_path, e.to_string()))?;
+        Ok(())
+    }
+
     /// Renders a pending frame into the framebuffer if redraw was requested.
     ///
     /// Returns `true` if a frame was rendered, or `false` if no redraw was pending.
@@ -532,9 +551,8 @@ impl Framebuffer {
         window: &MinimalSoftwareWindow,
     ) -> Result<bool, FramebufferError> {
         let width = self.width as usize;
-        let mut render_err: Option<FramebufferError> = None;
 
-        let rendered = match &mut self.backend {
+        match &mut self.backend {
             Backend::Hardware {
                 file,
                 mmap,
@@ -542,35 +560,29 @@ impl Framebuffer {
                 back_buffer,
                 ..
             } => {
-                let dev_path_clone = dev_path.clone();
                 if let Some(mmap_mut) = mmap {
                     let pixel_slice = Bgrx8888Pixel::try_from_bytes_mut(mmap_mut)?;
                     let did_draw = window.draw_if_needed(|renderer| {
                         renderer.render(pixel_slice, width);
                     });
                     if did_draw {
-                        if let Err(e) = mmap_mut.flush() {
-                            render_err = Some(FramebufferError::io(dev_path_clone, e.to_string()));
-                        }
+                        mmap_mut
+                            .flush()
+                            .map_err(|e| FramebufferError::io(dev_path.clone(), e.to_string()))?;
                     }
-                    did_draw
+                    Ok(did_draw)
                 } else {
                     let did_draw = window.draw_if_needed(|renderer| {
                         renderer.render(back_buffer, width);
                     });
                     if did_draw {
-                        if let Err(e) = file.seek(SeekFrom::Start(0)) {
-                            render_err =
-                                Some(FramebufferError::io(dev_path_clone.clone(), e.to_string()));
-                        } else if let Err(e) = file.write_all(Bgrx8888Pixel::as_bytes(back_buffer))
-                        {
-                            render_err =
-                                Some(FramebufferError::io(dev_path_clone.clone(), e.to_string()));
-                        } else if let Err(e) = file.flush() {
-                            render_err = Some(FramebufferError::io(dev_path_clone, e.to_string()));
-                        }
+                        Self::flush_file_buffer(
+                            file,
+                            Bgrx8888Pixel::as_bytes(back_buffer),
+                            dev_path,
+                        )?;
                     }
-                    did_draw
+                    Ok(did_draw)
                 }
             }
             Backend::Mock {
@@ -584,15 +596,9 @@ impl Framebuffer {
                 if did_draw {
                     *render_calls += 1;
                 }
-                did_draw
+                Ok(did_draw)
             }
-        };
-
-        if let Some(err) = render_err {
-            return Err(err);
         }
-
-        Ok(rendered)
     }
 
     /// Returns display width in pixels.

@@ -101,7 +101,7 @@ fn core_main_binary_executes() {
     for flag in &["-V", "--version"] {
         let (status, stdout, _) = run_cli(bin_path, &[flag]);
         assert!(status.success());
-        assert!(stdout.contains("core 2.0.0"));
+        assert!(stdout.contains(&format!("core {}", env!("CARGO_PKG_VERSION"))));
     }
 
     // Test zero duration preview
