@@ -3,8 +3,10 @@
 #[cfg(feature = "ui")]
 #[test]
 fn splash_screen_defaults_and_property_updates() {
-    use speaker_core::ui::SplashScreen;
-    i_slint_backend_testing::init_no_event_loop();
+    use speaker_core::ui::{Framebuffer, SplashScreen};
+
+    let fb = Framebuffer::new_mocked(800, 480);
+    let _window = fb.init_platform().expect("Failed to initialize platform");
 
     let splash = SplashScreen::new().expect("Failed to initialize SplashScreen");
 

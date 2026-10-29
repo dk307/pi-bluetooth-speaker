@@ -79,22 +79,34 @@ impl Bgrx8888Pixel {
 
     /// Mutably views a byte slice as a slice of [`Bgrx8888Pixel`].
     ///
+    /// # Errors
+    ///
+    /// Returns [`FramebufferError`] if `bytes.len()` is not a multiple of 4.
+    pub fn try_from_bytes_mut(bytes: &mut [u8]) -> Result<&mut [Self], FramebufferError> {
+        if bytes.len() % 4 != 0 {
+            return Err(FramebufferError::invalid_geometry(
+                0,
+                0,
+                format!("byte slice length {} is not a multiple of 4", bytes.len()),
+            ));
+        }
+        // SAFETY: Bgrx8888Pixel has alignment 1, size 4, and any 4-byte sequence is valid.
+        Ok(unsafe {
+            std::slice::from_raw_parts_mut(
+                bytes.as_mut_ptr().cast::<Bgrx8888Pixel>(),
+                bytes.len() / 4,
+            )
+        })
+    }
+
+    /// Mutably views a byte slice as a slice of [`Bgrx8888Pixel`].
+    ///
     /// # Panics
     ///
     /// Panics if `bytes.len()` is not a multiple of 4.
     #[must_use]
     pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut [Self] {
-        assert!(
-            bytes.len() % 4 == 0,
-            "byte slice length must be a multiple of 4"
-        );
-        // SAFETY: Bgrx8888Pixel has alignment 1, size 4, and any 4-byte sequence is valid.
-        unsafe {
-            std::slice::from_raw_parts_mut(
-                bytes.as_mut_ptr().cast::<Bgrx8888Pixel>(),
-                bytes.len() / 4,
-            )
-        }
+        Self::try_from_bytes_mut(bytes).expect("byte slice length must be a multiple of 4")
     }
 }
 
@@ -415,6 +427,10 @@ impl Framebuffer {
                             .map_err(|err| FramebufferError::io(path.clone(), err.to_string()))?;
                         f.flush()
                             .map_err(|err| FramebufferError::io(path.clone(), err.to_string()))?;
+                    } else {
+                        tracing::debug!(
+                            "Sysfs display blank path '{path}' does not exist; skipping unblank"
+                        );
                     }
                 }
                 Ok(())
@@ -432,11 +448,16 @@ impl Framebuffer {
     ///
     /// Returns [`FramebufferError`] if Slint platform registration fails.
     pub fn init_platform(&self) -> Result<Rc<MinimalSoftwareWindow>, FramebufferError> {
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
-        window.set_size(PhysicalSize::new(self.width, self.height));
-
-        ACTIVE_WINDOW.with(|w| {
-            *w.borrow_mut() = Some(Rc::clone(&window));
+        let window = ACTIVE_WINDOW.with(|w| {
+            if let Some(existing) = &*w.borrow() {
+                existing.set_size(PhysicalSize::new(self.width, self.height));
+                Rc::clone(existing)
+            } else {
+                let win = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+                win.set_size(PhysicalSize::new(self.width, self.height));
+                *w.borrow_mut() = Some(Rc::clone(&win));
+                win
+            }
         });
 
         // Set platform once per thread; AlreadySet is expected across multiple component cycles.
@@ -470,7 +491,7 @@ impl Framebuffer {
             } => {
                 let dev_path_clone = dev_path.clone();
                 if let Some(mmap_mut) = mmap {
-                    let pixel_slice = Bgrx8888Pixel::from_bytes_mut(mmap_mut);
+                    let pixel_slice = Bgrx8888Pixel::try_from_bytes_mut(mmap_mut)?;
                     let did_draw = window.draw_if_needed(|renderer| {
                         renderer.render(pixel_slice, width);
                     });
@@ -756,5 +777,35 @@ mod tests {
                 .summary()
                 .contains("slint platform registration error")
         );
+    }
+
+    #[test]
+    fn try_from_bytes_mut_validation() {
+        let mut valid_bytes = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let pixels = Bgrx8888Pixel::try_from_bytes_mut(&mut valid_bytes).unwrap();
+        assert_eq!(pixels.len(), 2);
+
+        let mut invalid_bytes = [1u8, 2, 3];
+        let err = Bgrx8888Pixel::try_from_bytes_mut(&mut invalid_bytes).unwrap_err();
+        assert!(matches!(
+            err.kind(),
+            FramebufferErrorKind::InvalidGeometry { .. }
+        ));
+        assert!(err.summary().contains("is not a multiple of 4"));
+    }
+
+    #[test]
+    #[should_panic(expected = "byte slice length must be a multiple of 4")]
+    fn from_bytes_mut_panics_on_unaligned() {
+        let mut invalid_bytes = [1u8, 2, 3];
+        let _ = Bgrx8888Pixel::from_bytes_mut(&mut invalid_bytes);
+    }
+
+    #[test]
+    fn init_platform_idempotent_window_reuse() {
+        let fb = Framebuffer::new_mocked(800, 480);
+        let win1 = fb.init_platform().unwrap();
+        let win2 = fb.init_platform().unwrap();
+        assert!(Rc::ptr_eq(&win1, &win2));
     }
 }

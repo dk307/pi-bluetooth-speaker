@@ -94,9 +94,6 @@ linuxkms = ["ui", "slint/backend-linuxkms"]
 simulator = ["ui", "slint/backend-winit", "slint/renderer-femtovg"]
 test-util = []
 
-[dev-dependencies]
-i-slint-backend-testing = "=1.9.2"
-
 [build-dependencies]
 slint-build = { version = "=1.9.2", optional = true }
 
