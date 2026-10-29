@@ -361,27 +361,7 @@ impl Framebuffer {
         if let Some(dev_name) = dev_path_ref.file_name().and_then(|s| s.to_str()) {
             if dev_name.starts_with("fb") {
                 let sysfs_dir = format!("/sys/class/graphics/{dev_name}");
-                for (attr, validate) in [
-                    (
-                        "virtual_size",
-                        Self::validate_sysfs_geometry as fn(&Path, &str) -> Result<(), _>,
-                    ),
-                    ("bits_per_pixel", Self::validate_sysfs_bits_per_pixel),
-                    ("stride", Self::validate_sysfs_stride),
-                ] {
-                    let sysfs_size_path = format!("{sysfs_dir}/{attr}");
-                    let sysfs_path = Path::new(&sysfs_size_path);
-                    if !sysfs_path.exists() {
-                        return Err(FramebufferError::invalid_geometry(
-                            Self::DEFAULT_WIDTH,
-                            Self::DEFAULT_HEIGHT,
-                            format!(
-                                "framebuffer '{dev_name}' does not expose required sysfs attribute '{attr}' to validate the scanout contract"
-                            ),
-                        ));
-                    }
-                    validate(sysfs_path, dev_name)?;
-                }
+                Self::validate_fb_scanout_contract(Path::new(&sysfs_dir), dev_name)?;
             }
         }
 
@@ -425,38 +405,56 @@ impl Framebuffer {
         })
     }
 
+    /// Validates the complete fbdev scanout contract (resolution, pixel format,
+    /// stride) for an fb* device against its sysfs attributes, failing closed when
+    /// any required attribute is missing.
+    fn validate_fb_scanout_contract(
+        sysfs_dir: &Path,
+        dev_name: &str,
+    ) -> Result<(), FramebufferError> {
+        for (attr, validate) in [
+            (
+                "virtual_size",
+                Self::validate_sysfs_geometry as fn(&Path, &str) -> Result<(), _>,
+            ),
+            ("bits_per_pixel", Self::validate_sysfs_bits_per_pixel),
+            ("stride", Self::validate_sysfs_stride),
+        ] {
+            let attr_path = sysfs_dir.join(attr);
+            if !attr_path.exists() {
+                return Err(FramebufferError::invalid_geometry(
+                    Self::DEFAULT_WIDTH,
+                    Self::DEFAULT_HEIGHT,
+                    format!(
+                        "framebuffer '{dev_name}' does not expose required sysfs attribute '{attr}' to validate the scanout contract"
+                    ),
+                ));
+            }
+            validate(&attr_path, dev_name)?;
+        }
+        Ok(())
+    }
+
     fn validate_sysfs_geometry(sysfs_path: &Path, dev_name: &str) -> Result<(), FramebufferError> {
-        let (width, height) = (Self::DEFAULT_WIDTH, Self::DEFAULT_HEIGHT);
-        let content = std::fs::read_to_string(sysfs_path)
-            .map_err(|e| FramebufferError::io(sysfs_path.to_string_lossy().to_string(), e))?;
-        let parts: Vec<&str> = content.trim().split(',').collect();
-        if parts.len() != 2 {
+        let content = Self::read_sysfs_content(sysfs_path)?;
+        let fields: Vec<&str> = content.split(',').collect();
+        if fields.len() != 2 {
             return Err(FramebufferError::invalid_geometry(
-                width,
-                height,
+                Self::DEFAULT_WIDTH,
+                Self::DEFAULT_HEIGHT,
                 format!("malformed sysfs virtual_size '{content}' on {dev_name}"),
             ));
         }
-        let dev_w = parts[0].parse::<u32>().map_err(|e| {
-            FramebufferError::invalid_geometry(
-                width,
-                height,
-                format!("invalid width in sysfs virtual_size: {e}"),
-            )
-        })?;
-        let dev_h = parts[1].parse::<u32>().map_err(|e| {
-            FramebufferError::invalid_geometry(
-                width,
-                height,
-                format!("invalid height in sysfs virtual_size: {e}"),
-            )
-        })?;
-        if dev_w != width || dev_h != height {
+        let dev_w = Self::parse_sysfs_value::<u32>(fields[0], "virtual_size", dev_name)?;
+        let dev_h = Self::parse_sysfs_value::<u32>(fields[1], "virtual_size", dev_name)?;
+        if dev_w != Self::DEFAULT_WIDTH || dev_h != Self::DEFAULT_HEIGHT {
             return Err(FramebufferError::invalid_geometry(
-                width,
-                height,
+                Self::DEFAULT_WIDTH,
+                Self::DEFAULT_HEIGHT,
                 format!(
-                    "requested resolution {width}x{height} does not match hardware scanout {dev_w}x{dev_h}"
+                    "requested resolution {}x{} does not match hardware scanout {dev_w}x{dev_h}",
+                    Self::DEFAULT_WIDTH,
+                    Self::DEFAULT_HEIGHT
                 ),
             ));
         }
@@ -1011,6 +1009,35 @@ mod tests {
                 .unwrap_err()
                 .is_io()
         );
+    }
+
+    #[test]
+    fn fb_scanout_contract_fails_closed_on_missing_attributes() {
+        let temp = ScopedTempDir::try_new("fb_contract_test").unwrap();
+
+        // Hermetic: temp dir has no sysfs attributes at all, so the contract
+        // must fail closed with a typed invalid_geometry error.
+        let err = Framebuffer::validate_fb_scanout_contract(temp.path(), "fb0").unwrap_err();
+        assert!(err.is_invalid_geometry());
+        assert!(err.summary().contains("virtual_size"));
+
+        // A directory with a complete, matching contract passes.
+        let contract_dir = temp.path().join("contract");
+        fs::create_dir(&contract_dir).unwrap();
+        fs::write(contract_dir.join("virtual_size"), "800,480\n").unwrap();
+        fs::write(contract_dir.join("bits_per_pixel"), "32\n").unwrap();
+        fs::write(contract_dir.join("stride"), "3200\n").unwrap();
+        Framebuffer::validate_fb_scanout_contract(&contract_dir, "fb0").unwrap();
+
+        // Partial contract (missing stride) fails closed.
+        let partial_dir = temp.path().join("partial");
+        fs::create_dir(&partial_dir).unwrap();
+        fs::write(partial_dir.join("virtual_size"), "800,480\n").unwrap();
+        fs::write(partial_dir.join("bits_per_pixel"), "32\n").unwrap();
+        let err_partial =
+            Framebuffer::validate_fb_scanout_contract(&partial_dir, "fb0").unwrap_err();
+        assert!(err_partial.is_invalid_geometry());
+        assert!(err_partial.summary().contains("stride"));
     }
 
     #[test]
