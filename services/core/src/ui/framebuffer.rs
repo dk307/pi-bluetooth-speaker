@@ -248,6 +248,15 @@ impl std::error::Error for FramebufferError {
     }
 }
 
+/// Creates an invalid-geometry error for the fixed appliance panel geometry.
+fn invalid_panel_geometry(message: impl Into<Box<str>>) -> FramebufferError {
+    FramebufferError::invalid_geometry(
+        Framebuffer::DEFAULT_WIDTH,
+        Framebuffer::DEFAULT_HEIGHT,
+        message,
+    )
+}
+
 /// Backend implementation for the framebuffer sink.
 #[derive(Debug)]
 enum Backend {
@@ -434,13 +443,9 @@ impl Framebuffer {
         ] {
             let attr_path = sysfs_dir.join(attr);
             if !attr_path.exists() {
-                return Err(FramebufferError::invalid_geometry(
-                    Self::DEFAULT_WIDTH,
-                    Self::DEFAULT_HEIGHT,
-                    format!(
-                        "framebuffer '{dev_name}' does not expose required sysfs attribute '{attr}' to validate the scanout contract"
-                    ),
-                ));
+                return Err(invalid_panel_geometry(format!(
+                    "framebuffer '{dev_name}' does not expose required sysfs attribute '{attr}' to validate the scanout contract"
+                )));
             }
             validate(&attr_path, dev_name)?;
         }
@@ -451,24 +456,18 @@ impl Framebuffer {
         let content = Self::read_sysfs_content(sysfs_path)?;
         let fields: Vec<&str> = content.split(',').collect();
         if fields.len() != 2 {
-            return Err(FramebufferError::invalid_geometry(
-                Self::DEFAULT_WIDTH,
-                Self::DEFAULT_HEIGHT,
-                format!("malformed sysfs virtual_size '{content}' on {dev_name}"),
-            ));
+            return Err(invalid_panel_geometry(format!(
+                "malformed sysfs virtual_size '{content}' on {dev_name}"
+            )));
         }
         let dev_w = Self::parse_sysfs_value::<u32>(fields[0], "virtual_size", dev_name)?;
         let dev_h = Self::parse_sysfs_value::<u32>(fields[1], "virtual_size", dev_name)?;
         if dev_w != Self::DEFAULT_WIDTH || dev_h != Self::DEFAULT_HEIGHT {
-            return Err(FramebufferError::invalid_geometry(
+            return Err(invalid_panel_geometry(format!(
+                "requested resolution {}x{} does not match hardware scanout {dev_w}x{dev_h}",
                 Self::DEFAULT_WIDTH,
-                Self::DEFAULT_HEIGHT,
-                format!(
-                    "requested resolution {}x{} does not match hardware scanout {dev_w}x{dev_h}",
-                    Self::DEFAULT_WIDTH,
-                    Self::DEFAULT_HEIGHT
-                ),
-            ));
+                Self::DEFAULT_HEIGHT
+            )));
         }
         Ok(())
     }
@@ -488,11 +487,9 @@ impl Framebuffer {
         <T as std::str::FromStr>::Err: std::fmt::Display,
     {
         content.parse::<T>().map_err(|e| {
-            FramebufferError::invalid_geometry(
-                Self::DEFAULT_WIDTH,
-                Self::DEFAULT_HEIGHT,
-                format!("malformed sysfs {attr} '{content}' on {dev_name}: {e}"),
-            )
+            invalid_panel_geometry(format!(
+                "malformed sysfs {attr} '{content}' on {dev_name}: {e}"
+            ))
         })
     }
 
@@ -503,14 +500,10 @@ impl Framebuffer {
         let content = Self::read_sysfs_content(sysfs_path)?;
         let bpp = Self::parse_sysfs_value::<u32>(&content, "bits_per_pixel", dev_name)?;
         if bpp != Self::BITS_PER_PIXEL {
-            return Err(FramebufferError::invalid_geometry(
-                Self::DEFAULT_WIDTH,
-                Self::DEFAULT_HEIGHT,
-                format!(
-                    "framebuffer '{dev_name}' reports {bpp}bpp; the appliance scanout contract requires {}bpp 32-bit BGRX",
-                    Self::BITS_PER_PIXEL
-                ),
-            ));
+            return Err(invalid_panel_geometry(format!(
+                "framebuffer '{dev_name}' reports {bpp}bpp; the appliance scanout contract requires {}bpp 32-bit BGRX",
+                Self::BITS_PER_PIXEL
+            )));
         }
         Ok(())
     }
@@ -520,13 +513,9 @@ impl Framebuffer {
         let stride = Self::parse_sysfs_value::<usize>(&content, "stride", dev_name)?;
         let expected = (Self::DEFAULT_WIDTH as usize) * Self::BYTES_PER_PIXEL;
         if stride != expected {
-            return Err(FramebufferError::invalid_geometry(
-                Self::DEFAULT_WIDTH,
-                Self::DEFAULT_HEIGHT,
-                format!(
-                    "framebuffer '{dev_name}' reports stride {stride}; the appliance scanout contract requires tightly packed {expected} bytes per line"
-                ),
-            ));
+            return Err(invalid_panel_geometry(format!(
+                "framebuffer '{dev_name}' reports stride {stride}; the appliance scanout contract requires tightly packed {expected} bytes per line"
+            )));
         }
         Ok(())
     }
