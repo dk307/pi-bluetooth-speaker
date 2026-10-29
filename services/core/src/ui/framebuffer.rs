@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use std::fmt::{self, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -354,21 +355,32 @@ impl Framebuffer {
             .open(dev_path_ref)
             .map_err(|err| FramebufferError::io(dev_path_str.clone(), err))?;
 
-        // If checking a physical /dev/fbX device, validate the full scanout contract
-        // (resolution, pixel format, stride) against sysfs attributes. Failing closed:
-        // an fb* device whose sysfs contract is unavailable is rejected rather than
-        // mmap'ing unvalidated geometry.
-        if let Some(dev_name) = dev_path_ref.file_name().and_then(|s| s.to_str()) {
-            if dev_name.starts_with("fb") {
-                let sysfs_dir = format!("/sys/class/graphics/{dev_name}");
-                Self::validate_fb_scanout_contract(Path::new(&sysfs_dir), dev_name)?;
-            }
+        // Discriminate the fbdev scanout contract by file type, not file name: only
+        // character devices (e.g. /dev/fb0) are validated against sysfs, while regular
+        // files that merely start with "fb" keep the mmap/buffered fallback behavior.
+        let file_meta = file.metadata();
+        let is_fb_char_device = file_meta
+            .as_ref()
+            .is_ok_and(|m| m.file_type().is_char_device())
+            && dev_path_ref
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|dev_name| dev_name.starts_with("fb"));
+
+        if is_fb_char_device {
+            let dev_name = dev_path_ref
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("fb0");
+            // Failing closed: an fb* device whose sysfs contract is unavailable is
+            // rejected rather than mmap'ing unvalidated geometry.
+            let sysfs_dir = format!("/sys/class/graphics/{dev_name}");
+            Self::validate_fb_scanout_contract(Path::new(&sysfs_dir), dev_name)?;
         }
 
         // For regular files smaller than the scanout length (e.g. truncated files),
         // avoid mmap to prevent SIGBUS.
-        let too_small_regular_file = file
-            .metadata()
+        let too_small_regular_file = file_meta
             .is_ok_and(|m| m.file_type().is_file() && m.len() < Self::SCANOUT_BYTE_LEN as u64);
 
         // Attempt memory mapping; if mmap fails or file is too small,
@@ -848,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn framebuffer_hardware_tempfile_fallback() {
+    fn framebuffer_hardware_tempfile_mmap() {
         let temp = ScopedTempDir::try_new("fb_hw_test").unwrap();
         let dev_file = temp.path().join("fake_fb");
         let blank_file = temp.path().join("fake_blank");
@@ -922,6 +934,17 @@ mod tests {
         let err = Bgrx8888Pixel::try_from_bytes_mut(&mut invalid_bytes).unwrap_err();
         assert!(err.is_invalid_geometry());
         assert!(err.summary().contains("is not a multiple of 4"));
+    }
+
+    #[test]
+    fn fb_named_regular_file_skips_sysfs_contract() {
+        let temp = ScopedTempDir::try_new("fb_named_file_test").unwrap();
+        let dev = temp.path().join("fb0");
+        fs::write(&dev, vec![0u8; 800 * 480 * 4]).unwrap();
+        let fb = Framebuffer::open(&dev, None::<&Path>).unwrap();
+        assert!(!fb.is_mocked());
+        assert_eq!(fb.pixel_count(), 384_000);
+        assert_eq!(fb.byte_len(), 1_536_000);
     }
 
     #[test]
