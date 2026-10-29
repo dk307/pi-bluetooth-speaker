@@ -7,3 +7,8 @@
 pub mod diag;
 pub mod hardware;
 pub mod runtime;
+#[cfg(feature = "ui")]
+pub mod ui;
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+core::arch::global_asm!(".symver acosf, acosf@GLIBC_2.17");

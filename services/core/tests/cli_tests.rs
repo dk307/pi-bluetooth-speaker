@@ -88,6 +88,39 @@ fn core_main_binary_executes() {
     assert!(stdout.contains("Speaker Core Service is running on Raspberry Pi 3!"));
     assert!(stdout.contains("ARM Cortex-A53 (aarch64)"));
     assert!(stdout.contains("Thermal Sensor:"));
+
+    // Test help flags
+    for flag in &["-h", "--help"] {
+        let (status, stdout, _) = run_cli(bin_path, &[flag]);
+        assert!(status.success());
+        assert!(stdout.contains("DietPi Bluetooth Speaker & DSP Core Appliance Service"));
+        assert!(stdout.contains("--preview"));
+    }
+
+    // Test version flags
+    for flag in &["-V", "--version"] {
+        let (status, stdout, _) = run_cli(bin_path, &[flag]);
+        assert!(status.success());
+        assert!(stdout.contains("core 2.0.0"));
+    }
+
+    // Test zero duration preview
+    let (status, stdout, _) = run_cli(bin_path, &["-p", "0"]);
+    assert!(status.success());
+    assert!(stdout.contains("Speaker Core Service"));
+
+    // Test error cases
+    let (status, _, stderr) = run_cli(bin_path, &["--preview", "invalid"]);
+    assert!(!status.success());
+    assert!(stderr.contains("valid positive integer"));
+
+    let (status, _, stderr) = run_cli(bin_path, &["--preview"]);
+    assert!(!status.success());
+    assert!(stderr.contains("requires a seconds argument"));
+
+    let (status, _, stderr) = run_cli(bin_path, &["--unknown-flag"]);
+    assert!(!status.success());
+    assert!(stderr.contains("unrecognized argument"));
 }
 
 const HELP_CASES: &[(&str, &str, &str)] = &[
