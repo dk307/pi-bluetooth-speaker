@@ -21,7 +21,7 @@ mod generated {
 pub mod framebuffer;
 
 #[doc(inline)]
-pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError, FramebufferErrorKind};
+pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError};
 #[doc(inline)]
 pub use generated::{MainWindow, SplashScreen};
 #[doc(inline)]

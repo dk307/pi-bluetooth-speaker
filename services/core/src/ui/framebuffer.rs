@@ -130,7 +130,7 @@ impl TargetPixel for Bgrx8888Pixel {
 
 /// Detailed reason for a [`FramebufferError`].
 #[derive(Debug)]
-pub enum FramebufferErrorKind {
+pub(crate) enum FramebufferErrorKind {
     /// I/O error accessing a framebuffer device or sysfs path.
     Io {
         /// Target filesystem path.
@@ -215,12 +215,6 @@ impl FramebufferError {
         &self.backtrace
     }
 
-    /// Returns the underlying error kind.
-    #[must_use]
-    pub const fn kind(&self) -> &FramebufferErrorKind {
-        &self.kind
-    }
-
     fn fmt_kind(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
             FramebufferErrorKind::Io { path, message } => {
@@ -284,21 +278,31 @@ enum Backend {
     },
 }
 
+fn get_or_create_active_window(size: Option<PhysicalSize>) -> Rc<MinimalSoftwareWindow> {
+    ACTIVE_WINDOW.with(|w| {
+        if let Some(existing) = &*w.borrow() {
+            if let Some(s) = size {
+                existing.set_size(s);
+            }
+            Rc::clone(existing)
+        } else {
+            let win = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+            if let Some(s) = size {
+                win.set_size(s);
+            }
+            *w.borrow_mut() = Some(Rc::clone(&win));
+            win
+        }
+    })
+}
+
 struct FramebufferPlatform;
 
 impl Platform for FramebufferPlatform {
     fn create_window_adapter(
         &self,
     ) -> Result<Rc<dyn slint::platform::WindowAdapter>, PlatformError> {
-        ACTIVE_WINDOW.with(|w| {
-            if let Some(active) = &*w.borrow() {
-                Ok(Rc::clone(active) as Rc<dyn slint::platform::WindowAdapter>)
-            } else {
-                let new_win = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
-                *w.borrow_mut() = Some(Rc::clone(&new_win));
-                Ok(new_win as Rc<dyn slint::platform::WindowAdapter>)
-            }
-        })
+        Ok(get_or_create_active_window(None) as Rc<dyn slint::platform::WindowAdapter>)
     }
 }
 
@@ -368,24 +372,7 @@ impl Framebuffer {
                 let sysfs_size_path = format!("/sys/class/graphics/{dev_name}/virtual_size");
                 let sysfs_path = Path::new(&sysfs_size_path);
                 if sysfs_path.exists() {
-                    if let Ok(content) = std::fs::read_to_string(sysfs_path) {
-                        let parts: Vec<&str> = content.trim().split(',').collect();
-                        if parts.len() == 2 {
-                            if let (Ok(dev_w), Ok(dev_h)) =
-                                (parts[0].parse::<u32>(), parts[1].parse::<u32>())
-                            {
-                                if dev_w != width || dev_h != height {
-                                    return Err(FramebufferError::invalid_geometry(
-                                        width,
-                                        height,
-                                        format!(
-                                            "requested resolution {width}x{height} does not match hardware scanout {dev_w}x{dev_h}"
-                                        ),
-                                    ));
-                                }
-                            }
-                        }
-                    }
+                    Self::validate_sysfs_geometry(sysfs_path, width, height, dev_name)?;
                 }
             }
         }
@@ -424,6 +411,49 @@ impl Framebuffer {
             width,
             height,
         })
+    }
+
+    fn validate_sysfs_geometry(
+        sysfs_path: &Path,
+        width: u32,
+        height: u32,
+        dev_name: &str,
+    ) -> Result<(), FramebufferError> {
+        let content = std::fs::read_to_string(sysfs_path).map_err(|e| {
+            FramebufferError::io(sysfs_path.to_string_lossy().to_string(), e.to_string())
+        })?;
+        let parts: Vec<&str> = content.trim().split(',').collect();
+        if parts.len() != 2 {
+            return Err(FramebufferError::invalid_geometry(
+                width,
+                height,
+                format!("malformed sysfs virtual_size '{content}' on {dev_name}"),
+            ));
+        }
+        let dev_w = parts[0].parse::<u32>().map_err(|e| {
+            FramebufferError::invalid_geometry(
+                width,
+                height,
+                format!("invalid width in sysfs virtual_size: {e}"),
+            )
+        })?;
+        let dev_h = parts[1].parse::<u32>().map_err(|e| {
+            FramebufferError::invalid_geometry(
+                width,
+                height,
+                format!("invalid height in sysfs virtual_size: {e}"),
+            )
+        })?;
+        if dev_w != width || dev_h != height {
+            return Err(FramebufferError::invalid_geometry(
+                width,
+                height,
+                format!(
+                    "requested resolution {width}x{height} does not match hardware scanout {dev_w}x{dev_h}"
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// Creates an in-memory mocked framebuffer controller for hermetic unit testing.
@@ -481,17 +511,7 @@ impl Framebuffer {
     ///
     /// Returns [`FramebufferError`] if Slint platform registration fails.
     pub fn init_platform(&self) -> Result<Rc<MinimalSoftwareWindow>, FramebufferError> {
-        let window = ACTIVE_WINDOW.with(|w| {
-            if let Some(existing) = &*w.borrow() {
-                existing.set_size(PhysicalSize::new(self.width, self.height));
-                Rc::clone(existing)
-            } else {
-                let win = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
-                win.set_size(PhysicalSize::new(self.width, self.height));
-                *w.borrow_mut() = Some(Rc::clone(&win));
-                win
-            }
-        });
+        let window = get_or_create_active_window(Some(PhysicalSize::new(self.width, self.height)));
 
         // Set platform once per thread; AlreadySet is expected across multiple component cycles.
         match slint::platform::set_platform(Box::new(FramebufferPlatform)) {
@@ -733,24 +753,18 @@ mod tests {
     #[test]
     fn framebuffer_invalid_geometry() {
         let err = Framebuffer::open("/dev/null", None::<&Path>, 0, 480).unwrap_err();
-        assert!(matches!(
-            err.kind(),
-            FramebufferErrorKind::InvalidGeometry { .. }
-        ));
+        assert!(err.is_invalid_geometry());
         assert!(err.summary().contains("invalid framebuffer geometry"));
 
         let err_h = Framebuffer::open("/dev/null", None::<&Path>, 800, 0).unwrap_err();
-        assert!(matches!(
-            err_h.kind(),
-            FramebufferErrorKind::InvalidGeometry { .. }
-        ));
+        assert!(err_h.is_invalid_geometry());
     }
 
     #[test]
     fn framebuffer_nonexistent_device() {
         let err = Framebuffer::open("/dev/nonexistent_fb_device_12345", None::<&Path>, 800, 480)
             .unwrap_err();
-        assert!(matches!(err.kind(), FramebufferErrorKind::Io { .. }));
+        assert!(err.is_io());
         assert!(err.summary().contains("framebuffer I/O error"));
     }
 
@@ -834,10 +848,7 @@ mod tests {
 
         let mut invalid_bytes = [1u8, 2, 3];
         let err = Bgrx8888Pixel::try_from_bytes_mut(&mut invalid_bytes).unwrap_err();
-        assert!(matches!(
-            err.kind(),
-            FramebufferErrorKind::InvalidGeometry { .. }
-        ));
+        assert!(err.is_invalid_geometry());
         assert!(err.summary().contains("is not a multiple of 4"));
     }
 
@@ -857,14 +868,44 @@ mod tests {
     }
 
     #[test]
-    fn framebuffer_new_default_fails_or_opens() {
-        let _ = Framebuffer::new();
-    }
-
-    #[test]
     fn framebuffer_platform_window_adapter_fallback() {
         let platform = FramebufferPlatform;
         let adapter = slint::platform::Platform::create_window_adapter(&platform);
-        assert!(adapter.is_ok());
+        let _ = adapter.unwrap();
+    }
+
+    #[test]
+    fn validate_sysfs_geometry_cases() {
+        let temp = ScopedTempDir::try_new("sysfs_geom_test").unwrap();
+        let valid = temp.path().join("valid");
+        fs::write(&valid, "800,480\n").unwrap();
+        Framebuffer::validate_sysfs_geometry(&valid, 800, 480, "fb0").unwrap();
+
+        let mismatch = temp.path().join("mismatch");
+        fs::write(&mismatch, "1920,1080\n").unwrap();
+        let err_mismatch =
+            Framebuffer::validate_sysfs_geometry(&mismatch, 800, 480, "fb0").unwrap_err();
+        assert!(err_mismatch.is_invalid_geometry());
+
+        let malformed = temp.path().join("malformed");
+        fs::write(&malformed, "800\n").unwrap();
+        let err_malformed =
+            Framebuffer::validate_sysfs_geometry(&malformed, 800, 480, "fb0").unwrap_err();
+        assert!(err_malformed.is_invalid_geometry());
+
+        let bad_w = temp.path().join("bad_w");
+        fs::write(&bad_w, "invalid,480\n").unwrap();
+        let err_bad_w = Framebuffer::validate_sysfs_geometry(&bad_w, 800, 480, "fb0").unwrap_err();
+        assert!(err_bad_w.is_invalid_geometry());
+
+        let bad_h = temp.path().join("bad_h");
+        fs::write(&bad_h, "800,invalid\n").unwrap();
+        let err_bad_h = Framebuffer::validate_sysfs_geometry(&bad_h, 800, 480, "fb0").unwrap_err();
+        assert!(err_bad_h.is_invalid_geometry());
+
+        let missing = temp.path().join("missing_file");
+        let err_missing =
+            Framebuffer::validate_sysfs_geometry(&missing, 800, 480, "fb0").unwrap_err();
+        assert!(err_missing.is_io());
     }
 }
