@@ -110,18 +110,22 @@ fn core_main_binary_executes() {
     assert!(status.success());
     assert!(stdout.contains("Speaker Core Service"));
 
-    // Test error cases
-    let (status, _, stderr) = run_cli(bin_path, &["--preview", "invalid"]);
-    assert!(!status.success());
-    assert!(stderr.contains("valid positive integer"));
-
-    let (status, _, stderr) = run_cli(bin_path, &["--preview"]);
-    assert!(!status.success());
-    assert!(stderr.contains("requires a seconds argument"));
-
-    let (status, _, stderr) = run_cli(bin_path, &["--unknown-flag"]);
-    assert!(!status.success());
-    assert!(stderr.contains("unrecognized argument"));
+    // Test error cases (clean, backtrace-free user-facing rejections)
+    for (args, expected) in [
+        (
+            &["--preview", "invalid"][..],
+            "invalid preview seconds 'invalid'",
+        ),
+        (&["--preview", "+5"][..], "sign prefixes are not accepted"),
+        (&["--preview", "-5"][..], "sign prefixes are not accepted"),
+        (&["--preview"][..], "missing value for --preview"),
+        (&["--unknown-flag"][..], "unknown option '--unknown-flag'"),
+    ] {
+        let (status, _, stderr) = run_cli(bin_path, args);
+        assert!(!status.success());
+        assert!(stderr.contains(expected), "stderr: {stderr}");
+        assert!(!stderr.contains("Backtrace") && !stderr.contains("panicked"));
+    }
 }
 
 const HELP_CASES: &[(&str, &str, &str)] = &[

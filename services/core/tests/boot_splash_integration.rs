@@ -5,7 +5,7 @@
 fn splash_screen_defaults_and_property_updates() {
     use speaker_core::ui::{Framebuffer, SplashScreen};
 
-    let fb = Framebuffer::new_mocked(800, 480);
+    let fb = Framebuffer::new_mocked();
     let _window = fb.init_platform().expect("Failed to initialize platform");
 
     let splash = SplashScreen::new().expect("Failed to initialize SplashScreen");
@@ -68,7 +68,7 @@ fn splash_screen_renders_to_framebuffer() {
     use slint::ComponentHandle;
     use speaker_core::ui::{Bgrx8888Pixel, Framebuffer, SplashScreen};
 
-    let mut fb = Framebuffer::new_mocked(800, 480);
+    let mut fb = Framebuffer::new_mocked();
     let window = fb.init_platform().expect("Failed to initialize platform");
     let splash = SplashScreen::new().expect("Failed to initialize SplashScreen");
 

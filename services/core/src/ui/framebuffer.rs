@@ -17,9 +17,9 @@
 //! allowing Slint's software renderer to render directly into video memory
 //! without an intermediate pixel format conversion step.
 
-use std::backtrace::{Backtrace, BacktraceStatus};
+use std::backtrace::Backtrace;
 use std::cell::RefCell;
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -97,16 +97,6 @@ impl Bgrx8888Pixel {
                 bytes.len() / 4,
             )
         })
-    }
-
-    /// Mutably views a byte slice as a slice of [`Bgrx8888Pixel`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `bytes.len()` is not a multiple of 4.
-    #[must_use]
-    pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut [Self] {
-        Self::try_from_bytes_mut(bytes).expect("byte slice length must be a multiple of 4")
     }
 }
 
@@ -244,29 +234,9 @@ impl FramebufferError {
             }
         }
     }
-
-    /// Single-line summary without backtrace.
-    #[must_use]
-    pub fn summary(&self) -> String {
-        struct Summary<'a>(&'a FramebufferError);
-        impl Display for Summary<'_> {
-            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                self.0.fmt_kind(f)
-            }
-        }
-        Summary(self).to_string()
-    }
 }
 
-impl Display for FramebufferError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_kind(f)?;
-        if self.backtrace.status() == BacktraceStatus::Captured {
-            write!(f, "\nBacktrace:\n{}", self.backtrace)?;
-        }
-        Ok(())
-    }
-}
+crate::hardware::impl_canonical_error_display!(FramebufferError);
 
 impl std::error::Error for FramebufferError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
@@ -323,12 +293,20 @@ impl Platform for FramebufferPlatform {
 }
 
 /// Linux framebuffer display controller managing memory-mapped video RAM and sysfs unblanking.
+///
+/// The appliance display panel is physically fixed at 800x480 32bpp BGRX; all geometry
+/// is compile-time constant and validated at startup against the sysfs `virtual_size`.
 #[derive(Debug)]
 pub struct Framebuffer {
     backend: Backend,
-    width: u32,
-    height: u32,
 }
+
+// Compile-time proofs for the fixed appliance panel geometry. The const
+// multiplication in `SCANOUT_BYTE_LEN` is itself a compile error on overflow,
+// proving the fixed 800x480x4 buffer always fits in `usize`.
+const _: () = {
+    assert!(Framebuffer::DEFAULT_WIDTH == 800 && Framebuffer::DEFAULT_HEIGHT == 480);
+};
 
 impl Framebuffer {
     /// Default display panel width in pixels (Freenove 4.3" DSI).
@@ -339,6 +317,11 @@ impl Framebuffer {
     pub const DEFAULT_FB_PATH: &'static str = "/dev/fb0";
     /// Default Linux framebuffer sysfs blank control path.
     pub const DEFAULT_BLANK_PATH: &'static str = "/sys/class/graphics/fb0/blank";
+    /// Bytes per scanout pixel (32bpp BGRX).
+    pub const BYTES_PER_PIXEL: usize = 4;
+    /// Fixed appliance scanout buffer size in bytes (800x480x4).
+    pub const SCANOUT_BYTE_LEN: usize =
+        (Self::DEFAULT_WIDTH as usize) * (Self::DEFAULT_HEIGHT as usize) * Self::BYTES_PER_PIXEL;
 
     /// Connects to the primary hardware framebuffer (`/dev/fb0`) at standard 800x480 resolution.
     ///
@@ -346,33 +329,19 @@ impl Framebuffer {
     ///
     /// Returns [`FramebufferError`] if `/dev/fb0` cannot be opened.
     pub fn new() -> Result<Self, FramebufferError> {
-        Self::open(
-            Self::DEFAULT_FB_PATH,
-            Some(Self::DEFAULT_BLANK_PATH),
-            Self::DEFAULT_WIDTH,
-            Self::DEFAULT_HEIGHT,
-        )
+        Self::open(Self::DEFAULT_FB_PATH, Some(Self::DEFAULT_BLANK_PATH))
     }
 
     /// Opens a specific framebuffer device path and optional sysfs blank path.
     ///
     /// # Errors
     ///
-    /// Returns [`FramebufferError`] if dimensions are zero or the device cannot be opened.
+    /// Returns [`FramebufferError`] if the device cannot be opened or the sysfs
+    /// `virtual_size` does not match the fixed appliance panel geometry.
     pub fn open(
         dev_path: impl AsRef<Path>,
         blank_path: Option<impl AsRef<Path>>,
-        width: u32,
-        height: u32,
     ) -> Result<Self, FramebufferError> {
-        if width == 0 || height == 0 {
-            return Err(FramebufferError::invalid_geometry(
-                width,
-                height,
-                "width and height must both be non-zero",
-            ));
-        }
-
         let dev_path_ref = dev_path.as_ref();
         let dev_path_str: Box<str> = dev_path_ref.to_string_lossy().into();
 
@@ -388,33 +357,28 @@ impl Framebuffer {
                 let sysfs_size_path = format!("/sys/class/graphics/{dev_name}/virtual_size");
                 let sysfs_path = Path::new(&sysfs_size_path);
                 if sysfs_path.exists() {
-                    Self::validate_sysfs_geometry(sysfs_path, width, height, dev_name)?;
+                    Self::validate_sysfs_geometry(sysfs_path, dev_name)?;
                 }
             }
         }
 
-        let byte_len = usize::try_from(width)
-            .map_err(|err| FramebufferError::invalid_geometry(width, height, err.to_string()))?
-            .saturating_mul(usize::try_from(height).map_err(|err| {
-                FramebufferError::invalid_geometry(width, height, err.to_string())
-            })?)
-            .saturating_mul(4);
-
-        // For regular files smaller than byte_len (e.g. truncated files), avoid mmap to prevent SIGBUS.
+        // For regular files smaller than the scanout length (e.g. truncated files),
+        // avoid mmap to prevent SIGBUS.
         let too_small_regular_file = file
             .metadata()
-            .is_ok_and(|m| m.file_type().is_file() && m.len() < byte_len as u64);
+            .is_ok_and(|m| m.file_type().is_file() && m.len() < Self::SCANOUT_BYTE_LEN as u64);
 
         // Attempt memory mapping; if mmap fails or file is too small,
         // fallback to file write with internal backing buffer.
         let mmap = if too_small_regular_file {
             None
         } else {
-            // SAFETY: The file is opened with read and write permissions, byte_len is computed
-            // from valid width * height * 4, and the mapping does not exceed device boundaries.
+            // SAFETY: The file is opened with read and write permissions, the mapping
+            // length is the fixed compile-time scanout size, and the truncated regular
+            // file case above guarantees the mapping does not exceed file boundaries.
             unsafe {
                 memmap2::MmapOptions::new()
-                    .len(byte_len)
+                    .len(Self::SCANOUT_BYTE_LEN)
                     .map_mut(&file)
                     .ok()
             }
@@ -424,8 +388,7 @@ impl Framebuffer {
         let back_buffer = if mmap.is_some() {
             Vec::new()
         } else {
-            let pixel_count = (width as usize).saturating_mul(height as usize);
-            vec![Bgrx8888Pixel::default(); pixel_count]
+            vec![Bgrx8888Pixel::default(); Self::SCANOUT_BYTE_LEN / Self::BYTES_PER_PIXEL]
         };
 
         Ok(Self {
@@ -436,17 +399,11 @@ impl Framebuffer {
                 blank_path: blank_path_str,
                 back_buffer,
             },
-            width,
-            height,
         })
     }
 
-    fn validate_sysfs_geometry(
-        sysfs_path: &Path,
-        width: u32,
-        height: u32,
-        dev_name: &str,
-    ) -> Result<(), FramebufferError> {
+    fn validate_sysfs_geometry(sysfs_path: &Path, dev_name: &str) -> Result<(), FramebufferError> {
+        let (width, height) = (Self::DEFAULT_WIDTH, Self::DEFAULT_HEIGHT);
         let content = std::fs::read_to_string(sysfs_path)
             .map_err(|e| FramebufferError::io(sysfs_path.to_string_lossy().to_string(), e))?;
         let parts: Vec<&str> = content.trim().split(',').collect();
@@ -484,17 +441,19 @@ impl Framebuffer {
     }
 
     /// Creates an in-memory mocked framebuffer controller for hermetic unit testing.
+    ///
+    /// The mock always models the fixed appliance panel geometry (800x480).
     #[must_use]
-    pub fn new_mocked(width: u32, height: u32) -> Self {
-        let pixel_count = (width as usize).saturating_mul(height as usize);
+    pub fn new_mocked() -> Self {
         Self {
             backend: Backend::Mock {
-                buffer: vec![Bgrx8888Pixel::default(); pixel_count],
+                buffer: vec![
+                    Bgrx8888Pixel::default();
+                    Self::SCANOUT_BYTE_LEN / Self::BYTES_PER_PIXEL
+                ],
                 unblank_calls: 0,
                 render_calls: 0,
             },
-            width,
-            height,
         }
     }
 
@@ -538,7 +497,10 @@ impl Framebuffer {
     ///
     /// Returns [`FramebufferError`] if Slint platform registration fails.
     pub fn init_platform(&self) -> Result<Rc<MinimalSoftwareWindow>, FramebufferError> {
-        let window = get_or_create_active_window(Some(PhysicalSize::new(self.width, self.height)));
+        let window = get_or_create_active_window(Some(PhysicalSize::new(
+            Self::DEFAULT_WIDTH,
+            Self::DEFAULT_HEIGHT,
+        )));
 
         // Set platform once per thread; AlreadySet is expected across multiple component cycles.
         match slint::platform::set_platform(Box::new(FramebufferPlatform)) {
@@ -573,7 +535,7 @@ impl Framebuffer {
         &mut self,
         window: &MinimalSoftwareWindow,
     ) -> Result<bool, FramebufferError> {
-        let width = self.width as usize;
+        let width = Self::DEFAULT_WIDTH as usize;
 
         match &mut self.backend {
             Backend::Hardware {
@@ -624,28 +586,28 @@ impl Framebuffer {
         }
     }
 
-    /// Returns display width in pixels.
+    /// Returns the fixed display panel width in pixels.
     #[must_use]
     pub const fn width(&self) -> u32 {
-        self.width
+        Self::DEFAULT_WIDTH
     }
 
-    /// Returns display height in pixels.
+    /// Returns the fixed display panel height in pixels.
     #[must_use]
     pub const fn height(&self) -> u32 {
-        self.height
+        Self::DEFAULT_HEIGHT
     }
 
-    /// Total number of pixels.
+    /// Total number of pixels on the fixed appliance panel.
     #[must_use]
-    pub fn pixel_count(&self) -> usize {
-        (self.width as usize).saturating_mul(self.height as usize)
+    pub const fn pixel_count(&self) -> usize {
+        (Self::DEFAULT_WIDTH as usize) * (Self::DEFAULT_HEIGHT as usize)
     }
 
     /// Total scanout buffer size in bytes (4 bytes per pixel).
     #[must_use]
-    pub fn byte_len(&self) -> usize {
-        self.pixel_count().saturating_mul(4)
+    pub const fn byte_len(&self) -> usize {
+        Self::SCANOUT_BYTE_LEN
     }
 
     /// Returns a slice of the rendered pixels.
@@ -713,7 +675,7 @@ mod tests {
         assert_eq!(bytes, &[0x56, 0x34, 0x12, 0xFF]);
 
         let mut raw = [0xAA, 0xBB, 0xCC, 0xDD];
-        let pixels = Bgrx8888Pixel::from_bytes_mut(&mut raw);
+        let pixels = Bgrx8888Pixel::try_from_bytes_mut(&mut raw).unwrap();
         assert_eq!(pixels.len(), 1);
         assert_eq!(pixels[0].blue, 0xAA);
         assert_eq!(pixels[0].green, 0xBB);
@@ -753,7 +715,7 @@ mod tests {
 
     #[test]
     fn mock_framebuffer_lifecycle() {
-        let mut fb = Framebuffer::new_mocked(800, 480);
+        let mut fb = Framebuffer::new_mocked();
         assert_eq!(fb.width(), 800);
         assert_eq!(fb.height(), 480);
         assert_eq!(fb.pixel_count(), 384_000);
@@ -780,19 +742,8 @@ mod tests {
     }
 
     #[test]
-    fn framebuffer_invalid_geometry() {
-        let err = Framebuffer::open("/dev/null", None::<&Path>, 0, 480).unwrap_err();
-        assert!(err.is_invalid_geometry());
-        assert!(err.summary().contains("invalid framebuffer geometry"));
-
-        let err_h = Framebuffer::open("/dev/null", None::<&Path>, 800, 0).unwrap_err();
-        assert!(err_h.is_invalid_geometry());
-    }
-
-    #[test]
     fn framebuffer_nonexistent_device() {
-        let err = Framebuffer::open("/dev/nonexistent_fb_device_12345", None::<&Path>, 800, 480)
-            .unwrap_err();
+        let err = Framebuffer::open("/dev/nonexistent_fb_device_12345", None::<&Path>).unwrap_err();
         assert!(err.is_io());
         assert!(err.summary().contains("framebuffer I/O error"));
     }
@@ -811,7 +762,7 @@ mod tests {
         let dev = temp.path().join("dev_fb");
         fs::write(&dev, vec![0u8; 800 * 480 * 4]).unwrap();
 
-        let mut fb = Framebuffer::open(&dev, None::<&Path>, 800, 480).unwrap();
+        let mut fb = Framebuffer::open(&dev, None::<&Path>).unwrap();
         assert_eq!(fb.unblank_count(), 0);
         assert_eq!(fb.render_count(), 0);
         fb.unblank().unwrap();
@@ -826,7 +777,7 @@ mod tests {
         fs::write(&dev_file, vec![0u8; 800 * 480 * 4]).unwrap();
         fs::write(&blank_file, b"1\n").unwrap();
 
-        let mut fb = Framebuffer::open(&dev_file, Some(&blank_file), 800, 480).unwrap();
+        let mut fb = Framebuffer::open(&dev_file, Some(&blank_file)).unwrap();
         assert!(!fb.is_mocked());
         assert_eq!(fb.unblank_count(), 0);
 
@@ -895,15 +846,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "byte slice length must be a multiple of 4")]
-    fn from_bytes_mut_panics_on_unaligned() {
-        let mut invalid_bytes = [1u8, 2, 3];
-        let _ = Bgrx8888Pixel::from_bytes_mut(&mut invalid_bytes);
-    }
-
-    #[test]
     fn init_platform_idempotent_window_reuse() {
-        let fb = Framebuffer::new_mocked(800, 480);
+        let fb = Framebuffer::new_mocked();
         let win1 = fb.init_platform().unwrap();
         let win2 = fb.init_platform().unwrap();
         assert!(Rc::ptr_eq(&win1, &win2));
@@ -921,33 +865,30 @@ mod tests {
         let temp = ScopedTempDir::try_new("sysfs_geom_test").unwrap();
         let valid = temp.path().join("valid");
         fs::write(&valid, "800,480\n").unwrap();
-        Framebuffer::validate_sysfs_geometry(&valid, 800, 480, "fb0").unwrap();
+        Framebuffer::validate_sysfs_geometry(&valid, "fb0").unwrap();
 
         let mismatch = temp.path().join("mismatch");
         fs::write(&mismatch, "1920,1080\n").unwrap();
-        let err_mismatch =
-            Framebuffer::validate_sysfs_geometry(&mismatch, 800, 480, "fb0").unwrap_err();
+        let err_mismatch = Framebuffer::validate_sysfs_geometry(&mismatch, "fb0").unwrap_err();
         assert!(err_mismatch.is_invalid_geometry());
 
         let malformed = temp.path().join("malformed");
         fs::write(&malformed, "800\n").unwrap();
-        let err_malformed =
-            Framebuffer::validate_sysfs_geometry(&malformed, 800, 480, "fb0").unwrap_err();
+        let err_malformed = Framebuffer::validate_sysfs_geometry(&malformed, "fb0").unwrap_err();
         assert!(err_malformed.is_invalid_geometry());
 
         let bad_w = temp.path().join("bad_w");
         fs::write(&bad_w, "invalid,480\n").unwrap();
-        let err_bad_w = Framebuffer::validate_sysfs_geometry(&bad_w, 800, 480, "fb0").unwrap_err();
+        let err_bad_w = Framebuffer::validate_sysfs_geometry(&bad_w, "fb0").unwrap_err();
         assert!(err_bad_w.is_invalid_geometry());
 
         let bad_h = temp.path().join("bad_h");
         fs::write(&bad_h, "800,invalid\n").unwrap();
-        let err_bad_h = Framebuffer::validate_sysfs_geometry(&bad_h, 800, 480, "fb0").unwrap_err();
+        let err_bad_h = Framebuffer::validate_sysfs_geometry(&bad_h, "fb0").unwrap_err();
         assert!(err_bad_h.is_invalid_geometry());
 
         let missing = temp.path().join("missing_file");
-        let err_missing =
-            Framebuffer::validate_sysfs_geometry(&missing, 800, 480, "fb0").unwrap_err();
+        let err_missing = Framebuffer::validate_sysfs_geometry(&missing, "fb0").unwrap_err();
         assert!(err_missing.is_io());
     }
 
@@ -958,7 +899,7 @@ mod tests {
         // Only write 16 bytes (much smaller than 800 * 480 * 4)
         fs::write(&dev_file, vec![0u8; 16]).unwrap();
 
-        let mut fb = Framebuffer::open(&dev_file, None::<&Path>, 800, 480).unwrap();
+        let mut fb = Framebuffer::open(&dev_file, None::<&Path>).unwrap();
         assert!(!fb.is_mocked());
         let window = fb.init_platform().unwrap();
         window.request_redraw();

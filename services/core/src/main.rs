@@ -7,13 +7,12 @@
 //! the standard library's `core` crate in external prelude and dependency graphs, the library
 //! crate is named `speaker_core`.
 
-use std::env;
-#[cfg(feature = "ui")]
 use std::path::Path;
 use std::process::ExitCode;
 #[cfg(feature = "ui")]
 use std::time::{Duration, Instant};
 
+use speaker_core::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts};
 use speaker_core::hardware::TempSensor;
 
 #[cfg(feature = "ui")]
@@ -21,16 +20,59 @@ use slint::ComponentHandle;
 #[cfg(feature = "ui")]
 use speaker_core::ui::{Framebuffer, SplashScreen};
 
-fn print_help() {
+/// Appliance service command-line options.
+#[derive(Debug, Clone, Copy, Default)]
+struct CoreCliOptions {
+    preview_secs: Option<u64>,
+    run_loop: bool,
+}
+
+fn print_usage(bin_name: &str) {
     println!("DietPi Bluetooth Speaker & DSP Core Appliance Service");
     println!();
-    println!("Usage: core [OPTIONS]");
+    println!("Usage: {bin_name} [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  -p, --preview <SECS>  Render UI and animate for SECS seconds");
-    println!("  -l, --loop            Run UI animation loop continuously");
+    println!("  -p, --preview <SECS>  Render boot splash UI for SECS seconds");
+    println!("  -l, --loop            Hold the boot splash UI on screen continuously");
     println!("  -V, --version         Print version and exit");
     println!("  -h, --help            Print this help text and exit");
+}
+
+/// Parses and validates a `--preview <SECS>` argument value (unsigned seconds).
+///
+/// # Errors
+/// Returns a descriptive user-facing error string if `val` is missing, carries a sign
+/// prefix, or is not a valid unsigned integer.
+fn parse_preview_secs(val: &str) -> Result<u64, String> {
+    if val.starts_with('+') || val.starts_with('-') {
+        return Err(format!(
+            "invalid preview seconds '{val}': sign prefixes are not accepted"
+        ));
+    }
+    val.parse::<u64>()
+        .map_err(|e| format!("invalid preview seconds '{val}': {e}"))
+}
+
+fn parse_cli_args_from<I>(args: I) -> Result<CliParse<CoreCliOptions>, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut iter = args.into_iter();
+    let mut opts = CoreCliOptions::default();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(CliParse::Help),
+            "-V" | "--version" => return Ok(CliParse::Version),
+            "-l" | "--loop" => opts.run_loop = true,
+            "-p" | "--preview" => {
+                let val = next_arg_value(&mut iter, "--preview")?;
+                opts.preview_secs = Some(parse_preview_secs(&val)?);
+            }
+            _ => return Err(format!("unknown option '{arg}', use --help for usage")),
+        }
+    }
+    Ok(CliParse::Options(opts))
 }
 
 #[cfg(feature = "ui")]
@@ -124,46 +166,10 @@ fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().collect();
-    let mut preview_secs: Option<u64> = None;
-    let mut run_loop = false;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-h" | "--help" => {
-                print_help();
-                return ExitCode::SUCCESS;
-            }
-            "-V" | "--version" => {
-                println!("core {}", env!("CARGO_PKG_VERSION"));
-                return ExitCode::SUCCESS;
-            }
-            "-l" | "--loop" => {
-                run_loop = true;
-                i += 1;
-            }
-            "-p" | "--preview" => {
-                if i + 1 < args.len() {
-                    if let Ok(secs) = args[i + 1].parse::<u64>() {
-                        preview_secs = Some(secs);
-                        i += 2;
-                    } else {
-                        eprintln!("Error: --preview requires a valid positive integer in seconds");
-                        return ExitCode::FAILURE;
-                    }
-                } else {
-                    eprintln!("Error: --preview requires a seconds argument");
-                    return ExitCode::FAILURE;
-                }
-            }
-            unknown => {
-                eprintln!("Error: unrecognized argument '{unknown}'");
-                eprintln!("Try 'core --help' for more information.");
-                return ExitCode::FAILURE;
-            }
-        }
-    }
+    let opts = match resolve_cli_opts(parse_cli_args_from(env_args()), "core", print_usage) {
+        Ok(opts) => opts,
+        Err(exit_code) => return exit_code,
+    };
 
     let temp_sensor = TempSensor::new();
 
@@ -173,13 +179,80 @@ fn main() -> ExitCode {
     println!("  Thermal Sensor: {}", temp_sensor.gpio_info());
 
     #[cfg(feature = "ui")]
-    run_ui_boot_splash(preview_secs, run_loop);
+    run_ui_boot_splash(opts.preview_secs, opts.run_loop);
 
     #[cfg(not(feature = "ui"))]
-    let _ = (preview_secs, run_loop);
+    let _ = (opts.preview_secs, opts.run_loop);
     #[cfg(not(feature = "ui"))]
     println!("  Display: UI feature disabled at compile-time.");
 
     println!("============================================================");
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_preview_secs_rejects_sign_prefixes_and_non_numeric() {
+        assert_eq!(parse_preview_secs("0").unwrap(), 0);
+        assert_eq!(parse_preview_secs("42").unwrap(), 42);
+        assert!(
+            parse_preview_secs("+5")
+                .unwrap_err()
+                .contains("sign prefixes")
+        );
+        assert!(
+            parse_preview_secs("-1")
+                .unwrap_err()
+                .contains("sign prefixes")
+        );
+        assert!(
+            parse_preview_secs("abc")
+                .unwrap_err()
+                .contains("invalid preview seconds")
+        );
+        assert!(
+            parse_preview_secs("")
+                .unwrap_err()
+                .contains("invalid preview seconds")
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_flags_and_values() {
+        let parsed = |args: &[&str]| {
+            parse_cli_args_from(args.iter().map(ToString::to_string).collect::<Vec<_>>())
+        };
+
+        match parsed(&[]).unwrap() {
+            CliParse::Options(o) => {
+                assert!(o.preview_secs.is_none());
+                assert!(!o.run_loop);
+            }
+            other => panic!("expected Options, got {other:?}"),
+        }
+
+        match parsed(&["-p", "5", "-l"]).unwrap() {
+            CliParse::Options(o) => {
+                assert_eq!(o.preview_secs, Some(5));
+                assert!(o.run_loop);
+            }
+            other => panic!("expected Options, got {other:?}"),
+        }
+
+        assert!(matches!(parsed(&["-h"]).unwrap(), CliParse::Help));
+        assert!(matches!(parsed(&["--version"]).unwrap(), CliParse::Version));
+
+        for args in [
+            &["-p"][..],
+            &["-p", "+5"][..],
+            &["-p", "nan"][..],
+            &["-x"][..],
+            &["--loop", "--preview", "1", "extra"][..],
+        ] {
+            assert!(parsed(args).is_err(), "expected rejection for {args:?}");
+        }
+    }
 }

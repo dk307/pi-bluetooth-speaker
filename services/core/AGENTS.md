@@ -78,7 +78,7 @@ Before designing types, writing modules, implementing error handling, or writing
    * **Direct Linux Framebuffer (`/dev/fb0`) Software Rendering (`crate::ui::framebuffer`):**
      1. Broadcom BCM2837 video core exposes `/dev/fb0` with little-endian 32-bit BGRX (`rgba 8/16,8/8,8/0,8/24`). Define `Bgrx8888Pixel` (`#[repr(C)]` layout: blue, green, red, alpha) implementing Slint's `TargetPixel` directly so Slint's `SoftwareRenderer` renders straight into mmapped `/dev/fb0` video RAM with zero intermediate color-conversion passes.
      2. Enable `software-renderer-systemfonts` on `slint` in `Cargo.toml` so Slint software rendering has dynamic font fallback support.
-     3. Provide `Framebuffer::new_mocked(width, height)` for 100% hermetic host testing without `/dev/fb0`.
+     3. Provide `Framebuffer::new_mocked()` for 100% hermetic host testing without `/dev/fb0` (the mock always models the fixed appliance panel geometry; do not take dynamic width/height parameters — all geometry is compile-time constant and proven via `const _` invariant blocks).
      4. When cross-compiling on newer development hosts targeting Debian/DietPi baseline (`aarch64-unknown-linux-gnu`), pin newer math symbols explicitly to Debian baseline via `#[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))] core::arch::global_asm!(".symver acosf, acosf@GLIBC_2.17");`.
      5. Retain underlying foreign errors (`io::Error`) as typed error fields (`source: io::Error` in `FramebufferErrorKind::Io`) and implement `std::error::Error::source(&self)` per `M-ERRORS-STD-SOURCE`.
      6. Never re-export foreign dependency traits (such as `pub use slint::ComponentHandle;`) per `M-FOREIGN-REEXPORTS`.

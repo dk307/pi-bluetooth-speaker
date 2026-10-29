@@ -18,7 +18,7 @@ mod generated {
     slint::include_modules!();
 }
 
-pub mod framebuffer;
+pub(crate) mod framebuffer;
 
 #[doc(inline)]
 pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError};
