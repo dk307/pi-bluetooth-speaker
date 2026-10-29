@@ -58,6 +58,7 @@ fn run_cli_with_timeout(
     timeout: Duration,
 ) -> (ExitStatus, String, String) {
     let child = Command::new(bin)
+        .env("SPEAKER_CORE_HEADLESS", "1")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -88,6 +89,43 @@ fn core_main_binary_executes() {
     assert!(stdout.contains("Speaker Core Service is running on Raspberry Pi 3!"));
     assert!(stdout.contains("ARM Cortex-A53 (aarch64)"));
     assert!(stdout.contains("Thermal Sensor:"));
+
+    // Test help flags
+    for flag in &["-h", "--help"] {
+        let (status, stdout, _) = run_cli(bin_path, &[flag]);
+        assert!(status.success());
+        assert!(stdout.contains("DietPi Bluetooth Speaker & DSP Core Appliance Service"));
+        assert!(stdout.contains("--preview"));
+    }
+
+    // Test version flags
+    for flag in &["-V", "--version"] {
+        let (status, stdout, _) = run_cli(bin_path, &[flag]);
+        assert!(status.success());
+        assert!(stdout.contains(&format!("core {}", env!("CARGO_PKG_VERSION"))));
+    }
+
+    // Test zero duration preview
+    let (status, stdout, _) = run_cli(bin_path, &["-p", "0"]);
+    assert!(status.success());
+    assert!(stdout.contains("Speaker Core Service"));
+
+    // Test error cases (clean, backtrace-free user-facing rejections)
+    for (args, expected) in [
+        (
+            &["--preview", "invalid"][..],
+            "invalid preview seconds 'invalid'",
+        ),
+        (&["--preview", "+5"][..], "sign prefixes are not accepted"),
+        (&["--preview", "-5"][..], "sign prefixes are not accepted"),
+        (&["--preview"][..], "missing value for --preview"),
+        (&["--unknown-flag"][..], "unknown option '--unknown-flag'"),
+    ] {
+        let (status, _, stderr) = run_cli(bin_path, args);
+        assert!(!status.success());
+        assert!(stderr.contains(expected), "stderr: {stderr}");
+        assert!(!stderr.contains("Backtrace") && !stderr.contains("panicked"));
+    }
 }
 
 const HELP_CASES: &[(&str, &str, &str)] = &[

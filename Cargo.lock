@@ -4320,6 +4320,7 @@ dependencies = [
  "futures-util",
  "image 0.25.10",
  "led",
+ "memmap2",
  "rotary-switch-helper",
  "rppal",
  "rust-ini",

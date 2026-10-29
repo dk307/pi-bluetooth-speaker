@@ -1,0 +1,162 @@
+export component SplashScreen inherits Window {
+    title: "DietPi Audiophile Console";
+    width: 800px;
+    height: 480px;
+    background: #090d12;
+    default-font-family: "sans-serif";
+
+    in-out property <float> progress: 100.0;
+    in-out property <string> status_text: "System Ready";
+    in-out property <string> amp_status: "InnoMaker Merus MA12070P (OK)";
+    in-out property <string> dsp_status: "CamillaDSP Active Crossover (Connected)";
+    in-out property <string> bt_status: "BlueZ 5 / UB500 RTL8761B (Ready)";
+    in-out property <string> display_status: "Freenove 4.3\" DSI 800x480 (Active)";
+    in-out property <string> sensor_status: "DS18B20 1-Wire & BH1750 I2C (Online)";
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 16px;
+        padding: 20px;
+
+        // Branding Header
+        VerticalLayout {
+            alignment: center;
+            spacing: 4px;
+
+            Text {
+                text: "◆ DIETPI AUDIOPHILE CONSOLE ◆";
+                color: #00c8ff;
+                font-size: 24px;
+                font-weight: 800;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: "High-Resolution Digital Audio Sink & DSP Engine";
+                color: #8b949e;
+                font-size: 13px;
+                font-weight: 500;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: "Appliance Release v2.0 (ARM Cortex-A53 / NEON)";
+                color: #58a6ff;
+                font-size: 11px;
+                font-weight: 600;
+                horizontal-alignment: center;
+            }
+        }
+
+        // Center POST Verification Card
+        Rectangle {
+            width: 620px;
+            background: #111923;
+            border-radius: 12px;
+            border-color: #30363d;
+            border-width: 1px;
+            clip: true;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                // Progress Bar Header
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "HARDWARE INITIALIZATION (POST)";
+                        color: #70e1ff;
+                        font-size: 12px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: "\{root.progress >= 0.0 ? (root.progress > 100.0 ? 100 : Math.round(root.progress)) : 0}%";
+                        color: #7ee787;
+                        font-size: 12px;
+                        font-weight: 700;
+                    }
+                }
+
+                // Progress Bar Track
+                Rectangle {
+                    height: 6px;
+                    background: #1c2430;
+                    border-radius: 3px;
+
+                    Rectangle {
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width * ((root.progress >= 0.0 && root.progress <= 100.0 ? root.progress : (root.progress > 100.0 ? 100.0 : 0.0)) / 100.0);
+                        height: parent.height;
+                        background: #00c8ff;
+                        border-radius: 3px;
+                    }
+                }
+
+                // POST Checklist Items
+                VerticalLayout {
+                    spacing: 6px;
+                    padding-top: 6px;
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "✓"; color: #7ee787; font-size: 13px; font-weight: 700; }
+                        Text { text: "I2S Amplifier:"; color: #8b949e; font-size: 13px; width: 140px; }
+                        Text { text: root.amp_status; color: #f0f6fc; font-size: 13px; font-weight: 500; }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "✓"; color: #7ee787; font-size: 13px; font-weight: 700; }
+                        Text { text: "CamillaDSP:"; color: #8b949e; font-size: 13px; width: 140px; }
+                        Text { text: root.dsp_status; color: #f0f6fc; font-size: 13px; font-weight: 500; }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "✓"; color: #7ee787; font-size: 13px; font-weight: 700; }
+                        Text { text: "Bluetooth Stack:"; color: #8b949e; font-size: 13px; width: 140px; }
+                        Text { text: root.bt_status; color: #f0f6fc; font-size: 13px; font-weight: 500; }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "✓"; color: #7ee787; font-size: 13px; font-weight: 700; }
+                        Text { text: "DSI Touchscreen:"; color: #8b949e; font-size: 13px; width: 140px; }
+                        Text { text: root.display_status; color: #f0f6fc; font-size: 13px; font-weight: 500; }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "✓"; color: #7ee787; font-size: 13px; font-weight: 700; }
+                        Text { text: "Sensors & Bus:"; color: #8b949e; font-size: 13px; width: 140px; }
+                        Text { text: root.sensor_status; color: #f0f6fc; font-size: 13px; font-weight: 500; }
+                    }
+                }
+            }
+        }
+
+        // Status Footer
+        HorizontalLayout {
+            alignment: center;
+            spacing: 8px;
+
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: #7ee787;
+                y: 4px;
+            }
+
+            Text {
+                text: root.status_text;
+                color: #c9d1d9;
+                font-size: 13px;
+                font-weight: 600;
+                horizontal-alignment: center;
+            }
+        }
+    }
+}
