@@ -319,6 +319,8 @@ impl Framebuffer {
     pub const DEFAULT_BLANK_PATH: &'static str = "/sys/class/graphics/fb0/blank";
     /// Bytes per scanout pixel (32bpp BGRX).
     pub const BYTES_PER_PIXEL: usize = 4;
+    /// Scanout color depth in bits per pixel (32bpp BGRX).
+    pub const BITS_PER_PIXEL: u32 = Self::BYTES_PER_PIXEL as u32 * 8;
     /// Fixed appliance scanout buffer size in bytes (800x480x4).
     pub const SCANOUT_BYTE_LEN: usize =
         (Self::DEFAULT_WIDTH as usize) * (Self::DEFAULT_HEIGHT as usize) * Self::BYTES_PER_PIXEL;
@@ -351,13 +353,24 @@ impl Framebuffer {
             .open(dev_path_ref)
             .map_err(|err| FramebufferError::io(dev_path_str.clone(), err))?;
 
-        // If checking a physical /dev/fbX device, validate against sysfs virtual_size if available
+        // If checking a physical /dev/fbX device, validate the scanout contract
+        // (resolution, pixel format, stride) against sysfs attributes when available.
         if let Some(dev_name) = dev_path_ref.file_name().and_then(|s| s.to_str()) {
             if dev_name.starts_with("fb") {
-                let sysfs_size_path = format!("/sys/class/graphics/{dev_name}/virtual_size");
-                let sysfs_path = Path::new(&sysfs_size_path);
-                if sysfs_path.exists() {
-                    Self::validate_sysfs_geometry(sysfs_path, dev_name)?;
+                let sysfs_dir = format!("/sys/class/graphics/{dev_name}");
+                for (attr, validate) in [
+                    (
+                        "virtual_size",
+                        Self::validate_sysfs_geometry as fn(&Path, &str) -> Result<(), _>,
+                    ),
+                    ("bits_per_pixel", Self::validate_sysfs_bits_per_pixel),
+                    ("stride", Self::validate_sysfs_stride),
+                ] {
+                    let sysfs_size_path = format!("{sysfs_dir}/{attr}");
+                    let sysfs_path = Path::new(&sysfs_size_path);
+                    if sysfs_path.exists() {
+                        validate(sysfs_path, dev_name)?;
+                    }
                 }
             }
         }
@@ -434,6 +447,64 @@ impl Framebuffer {
                 height,
                 format!(
                     "requested resolution {width}x{height} does not match hardware scanout {dev_w}x{dev_h}"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn read_sysfs_content(sysfs_path: &Path) -> Result<String, FramebufferError> {
+        std::fs::read_to_string(sysfs_path)
+            .map(|content| content.trim().to_string())
+            .map_err(|e| FramebufferError::io(sysfs_path.to_string_lossy().to_string(), e))
+    }
+
+    fn parse_sysfs_value<T: std::str::FromStr>(
+        content: &str,
+        attr: &str,
+        dev_name: &str,
+    ) -> Result<T, FramebufferError>
+    where
+        <T as std::str::FromStr>::Err: std::fmt::Display,
+    {
+        content.parse::<T>().map_err(|e| {
+            FramebufferError::invalid_geometry(
+                Self::DEFAULT_WIDTH,
+                Self::DEFAULT_HEIGHT,
+                format!("malformed sysfs {attr} '{content}' on {dev_name}: {e}"),
+            )
+        })
+    }
+
+    fn validate_sysfs_bits_per_pixel(
+        sysfs_path: &Path,
+        dev_name: &str,
+    ) -> Result<(), FramebufferError> {
+        let content = Self::read_sysfs_content(sysfs_path)?;
+        let bpp = Self::parse_sysfs_value::<u32>(&content, "bits_per_pixel", dev_name)?;
+        if bpp != Self::BITS_PER_PIXEL {
+            return Err(FramebufferError::invalid_geometry(
+                Self::DEFAULT_WIDTH,
+                Self::DEFAULT_HEIGHT,
+                format!(
+                    "framebuffer '{dev_name}' reports {bpp}bpp; the appliance scanout contract requires {}bpp 32-bit BGRX",
+                    Self::BITS_PER_PIXEL
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_sysfs_stride(sysfs_path: &Path, dev_name: &str) -> Result<(), FramebufferError> {
+        let content = Self::read_sysfs_content(sysfs_path)?;
+        let stride = Self::parse_sysfs_value::<usize>(&content, "stride", dev_name)?;
+        let expected = (Self::DEFAULT_WIDTH as usize) * Self::BYTES_PER_PIXEL;
+        if stride != expected {
+            return Err(FramebufferError::invalid_geometry(
+                Self::DEFAULT_WIDTH,
+                Self::DEFAULT_HEIGHT,
+                format!(
+                    "framebuffer '{dev_name}' reports stride {stride}; the appliance scanout contract requires tightly packed {expected} bytes per line"
                 ),
             ));
         }
@@ -886,10 +957,50 @@ mod tests {
         fs::write(&bad_h, "800,invalid\n").unwrap();
         let err_bad_h = Framebuffer::validate_sysfs_geometry(&bad_h, "fb0").unwrap_err();
         assert!(err_bad_h.is_invalid_geometry());
-
         let missing = temp.path().join("missing_file");
         let err_missing = Framebuffer::validate_sysfs_geometry(&missing, "fb0").unwrap_err();
         assert!(err_missing.is_io());
+    }
+
+    #[test]
+    fn validate_sysfs_format_contract_cases() {
+        let temp = ScopedTempDir::try_new("sysfs_fmt_test").unwrap();
+
+        let bpp_ok = temp.path().join("bpp_ok");
+        fs::write(&bpp_ok, "32\n").unwrap();
+        Framebuffer::validate_sysfs_bits_per_pixel(&bpp_ok, "fb0").unwrap();
+
+        let bpp16 = temp.path().join("bpp16");
+        fs::write(&bpp16, "16\n").unwrap();
+        let err_bpp = Framebuffer::validate_sysfs_bits_per_pixel(&bpp16, "fb0").unwrap_err();
+        assert!(err_bpp.is_invalid_geometry());
+        assert!(err_bpp.summary().contains("reports 16bpp"));
+
+        let bpp_junk = temp.path().join("bpp_junk");
+        fs::write(&bpp_junk, "notanumber\n").unwrap();
+        assert!(
+            Framebuffer::validate_sysfs_bits_per_pixel(&bpp_junk, "fb0")
+                .unwrap_err()
+                .summary()
+                .contains("malformed sysfs bits_per_pixel")
+        );
+
+        let stride_ok = temp.path().join("stride_ok");
+        fs::write(&stride_ok, "3200\n").unwrap();
+        Framebuffer::validate_sysfs_stride(&stride_ok, "fb0").unwrap();
+
+        let stride_padded = temp.path().join("stride_padded");
+        fs::write(&stride_padded, "3840\n").unwrap();
+        let err_stride = Framebuffer::validate_sysfs_stride(&stride_padded, "fb0").unwrap_err();
+        assert!(err_stride.is_invalid_geometry());
+        assert!(err_stride.summary().contains("stride 3840"));
+
+        let stride_missing = temp.path().join("stride_missing");
+        assert!(
+            Framebuffer::validate_sysfs_stride(&stride_missing, "fb0")
+                .unwrap_err()
+                .is_io()
+        );
     }
 
     #[test]
