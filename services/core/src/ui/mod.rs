@@ -21,6 +21,6 @@ mod generated {
 pub(crate) mod framebuffer;
 
 #[doc(inline)]
-pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError};
+pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError, FramebufferMockCtrl};
 #[doc(inline)]
 pub use generated::{MainWindow, SplashScreen};

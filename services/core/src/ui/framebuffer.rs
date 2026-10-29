@@ -25,6 +25,7 @@ use std::io::{self, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use slint::PhysicalSize;
 use slint::platform::software_renderer::{
@@ -269,8 +270,7 @@ enum Backend {
     },
     Mock {
         buffer: Vec<Bgrx8888Pixel>,
-        unblank_calls: usize,
-        render_calls: usize,
+        ctrl: FramebufferMockCtrl,
     },
 }
 
@@ -290,6 +290,80 @@ fn get_or_create_active_window(size: Option<PhysicalSize>) -> Rc<MinimalSoftware
             win
         }
     })
+}
+
+/// Internal mutable state shared between a mocked [`Framebuffer`] and its controller.
+#[derive(Debug, Default)]
+struct MockState {
+    unblank_calls: usize,
+    render_calls: usize,
+    unblank_error: Option<Box<str>>,
+    render_error: Option<Box<str>>,
+}
+
+/// Fault-injection controller paired with a mocked [`Framebuffer`].
+///
+/// Allows tests to deterministically inject `unblank` and `render_frame` failures
+/// so the surrounding error paths are exercised on any host without hardware.
+#[derive(Debug, Clone, Default)]
+pub struct FramebufferMockCtrl {
+    state: Arc<Mutex<MockState>>,
+}
+
+impl FramebufferMockCtrl {
+    /// Forces all subsequent `unblank` calls to fail with an I/O error.
+    ///
+    /// # Panics
+    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
+    pub fn set_unblank_error(&self, message: impl Into<Box<str>>) {
+        self.state
+            .lock()
+            .expect("mock state lock poisoned")
+            .unblank_error = Some(message.into());
+    }
+
+    /// Forces all subsequent `render_frame` calls to fail with an I/O error.
+    ///
+    /// # Panics
+    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
+    pub fn set_render_error(&self, message: impl Into<Box<str>>) {
+        self.state
+            .lock()
+            .expect("mock state lock poisoned")
+            .render_error = Some(message.into());
+    }
+
+    /// Clears any injected `unblank` fault.
+    ///
+    /// # Panics
+    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
+    pub fn clear_unblank_error(&self) {
+        self.state
+            .lock()
+            .expect("mock state lock poisoned")
+            .unblank_error = None;
+    }
+
+    /// Clears any injected `render_frame` fault.
+    ///
+    /// # Panics
+    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
+    pub fn clear_render_error(&self) {
+        self.state
+            .lock()
+            .expect("mock state lock poisoned")
+            .render_error = None;
+    }
+
+    /// Takes a snapshot of the mock counters, leaving injected faults untouched.
+    ///
+    /// # Panics
+    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
+    #[must_use]
+    pub fn counters(&self) -> (usize, usize) {
+        let state = self.state.lock().expect("mock state lock poisoned");
+        (state.unblank_calls, state.render_calls)
+    }
 }
 
 struct FramebufferPlatform;
@@ -522,26 +596,31 @@ impl Framebuffer {
 
     /// Creates an in-memory mocked framebuffer controller for hermetic unit testing.
     ///
-    /// The mock always models the fixed appliance panel geometry (800x480).
+    /// The mock always models the fixed appliance panel geometry (800x480) and is
+    /// paired with a [`FramebufferMockCtrl`] for deterministic fault injection.
     #[must_use]
-    pub fn new_mocked() -> Self {
-        Self {
+    pub fn new_mocked() -> (Self, FramebufferMockCtrl) {
+        let ctrl = FramebufferMockCtrl::default();
+        let fb = Self {
             backend: Backend::Mock {
                 buffer: vec![
                     Bgrx8888Pixel::default();
                     Self::SCANOUT_BYTE_LEN / Self::BYTES_PER_PIXEL
                 ],
-                unblank_calls: 0,
-                render_calls: 0,
+                ctrl: ctrl.clone(),
             },
-        }
+        };
+        (fb, ctrl)
     }
 
     /// Unblanks the physical display panel by writing `0` to the sysfs blank control file.
     ///
     /// # Errors
     ///
-    /// Returns [`FramebufferError`] if writing to sysfs fails.
+    /// Returns [`FramebufferError`] if writing to sysfs fails or a fault is injected.
+    ///
+    /// # Panics
+    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     pub fn unblank(&mut self) -> Result<(), FramebufferError> {
         match &mut self.backend {
             Backend::Hardware { blank_path, .. } => {
@@ -564,8 +643,15 @@ impl Framebuffer {
                 }
                 Ok(())
             }
-            Backend::Mock { unblank_calls, .. } => {
-                *unblank_calls += 1;
+            Backend::Mock { ctrl, .. } => {
+                let mut state = ctrl.state.lock().expect("mock state lock poisoned");
+                if let Some(message) = &state.unblank_error {
+                    return Err(FramebufferError::io(
+                        "mock-fb",
+                        io::Error::other(message.to_string()),
+                    ));
+                }
+                state.unblank_calls += 1;
                 Ok(())
             }
         }
@@ -610,7 +696,11 @@ impl Framebuffer {
     ///
     /// # Errors
     ///
-    /// Returns [`FramebufferError`] if flushing pixels to the hardware device fails.
+    /// Returns [`FramebufferError`] if flushing pixels to the hardware device fails
+    /// or a fault is injected.
+    ///
+    /// # Panics
+    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     pub fn render_frame(
         &mut self,
         window: &MinimalSoftwareWindow,
@@ -650,16 +740,19 @@ impl Framebuffer {
                     Ok(did_draw)
                 }
             }
-            Backend::Mock {
-                buffer,
-                render_calls,
-                ..
-            } => {
+            Backend::Mock { buffer, ctrl } => {
+                let mut state = ctrl.state.lock().expect("mock state lock poisoned");
+                if let Some(message) = &state.render_error {
+                    return Err(FramebufferError::io(
+                        "mock-fb",
+                        io::Error::other(message.to_string()),
+                    ));
+                }
                 let did_draw = window.draw_if_needed(|renderer| {
                     renderer.render(buffer, width);
                 });
                 if did_draw {
-                    *render_calls += 1;
+                    state.render_calls += 1;
                 }
                 Ok(did_draw)
             }
@@ -717,21 +810,37 @@ impl Framebuffer {
         matches!(self.backend, Backend::Mock { .. })
     }
 
-    /// Returns the number of unblank operations recorded.
+    /// Returns the number of unblank operations recorded on the mock backend.
+    ///
+    /// # Panics
+    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     #[must_use]
-    pub const fn unblank_count(&self) -> usize {
-        match self.backend {
+    pub fn unblank_count(&self) -> usize {
+        match &self.backend {
             Backend::Hardware { .. } => 0,
-            Backend::Mock { unblank_calls, .. } => unblank_calls,
+            Backend::Mock { ctrl, .. } => {
+                ctrl.state
+                    .lock()
+                    .expect("mock state lock poisoned")
+                    .unblank_calls
+            }
         }
     }
 
-    /// Returns the number of frames rendered.
+    /// Returns the number of frames rendered on the mock backend.
+    ///
+    /// # Panics
+    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     #[must_use]
-    pub const fn render_count(&self) -> usize {
-        match self.backend {
+    pub fn render_count(&self) -> usize {
+        match &self.backend {
             Backend::Hardware { .. } => 0,
-            Backend::Mock { render_calls, .. } => render_calls,
+            Backend::Mock { ctrl, .. } => {
+                ctrl.state
+                    .lock()
+                    .expect("mock state lock poisoned")
+                    .render_calls
+            }
         }
     }
 }
@@ -795,7 +904,7 @@ mod tests {
 
     #[test]
     fn mock_framebuffer_lifecycle() {
-        let mut fb = Framebuffer::new_mocked();
+        let (mut fb, _ctrl) = Framebuffer::new_mocked();
         assert_eq!(fb.width(), 800);
         assert_eq!(fb.height(), 480);
         assert_eq!(fb.pixel_count(), 384_000);
@@ -819,6 +928,33 @@ mod tests {
         let drawn_again = fb.render_frame(&window).unwrap();
         assert!(!drawn_again);
         assert_eq!(fb.render_count(), 1);
+    }
+
+    #[test]
+    fn mock_fault_injection_unblank_and_render() {
+        let (mut fb, ctrl) = Framebuffer::new_mocked();
+
+        ctrl.set_unblank_error("simulated unblank failure");
+        let err = fb.unblank().unwrap_err();
+        assert!(err.is_io());
+        assert!(err.summary().contains("simulated unblank failure"));
+        assert_eq!(fb.unblank_count(), 0);
+        ctrl.clear_unblank_error();
+        fb.unblank().unwrap();
+        assert_eq!(fb.unblank_count(), 1);
+
+        let window = fb.init_platform().unwrap();
+        window.request_redraw();
+        ctrl.set_render_error("simulated render failure");
+        let err = fb.render_frame(&window).unwrap_err();
+        assert!(err.is_io());
+        assert!(err.summary().contains("simulated render failure"));
+        assert_eq!(fb.render_count(), 0);
+        ctrl.clear_render_error();
+        assert!(fb.render_frame(&window).unwrap());
+        assert_eq!(fb.render_count(), 1);
+
+        assert_eq!(ctrl.counters(), (1, 1));
     }
 
     #[test]
@@ -938,7 +1074,7 @@ mod tests {
 
     #[test]
     fn init_platform_idempotent_window_reuse() {
-        let fb = Framebuffer::new_mocked();
+        let (fb, _ctrl) = Framebuffer::new_mocked();
         let win1 = fb.init_platform().unwrap();
         let win2 = fb.init_platform().unwrap();
         assert!(Rc::ptr_eq(&win1, &win2));

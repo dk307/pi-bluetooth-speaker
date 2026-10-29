@@ -76,10 +76,24 @@ where
     Ok(CliParse::Options(opts))
 }
 
+/// Reports a non-fatal display problem to both tracing telemetry and user stderr.
+#[cfg(feature = "ui")]
+fn report_display_warning(context: &str, err: impl std::fmt::Display) {
+    tracing::warn!("{context}: {err}");
+    eprintln!("  Display Warning: {context}: {err}");
+}
+
+/// Reports a fatal display problem to both tracing telemetry and user stderr.
+#[cfg(feature = "ui")]
+fn report_display_error(context: &str, err: impl std::fmt::Display) {
+    tracing::error!("{context}: {err}");
+    eprintln!("  Display Error: {context}: {err}");
+}
+
 #[cfg(feature = "ui")]
 fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
-    if std::env::var_os("SPEAKER_CORE_HEADLESS").is_some() {
-        tracing::info!("Headless mode requested via SPEAKER_CORE_HEADLESS");
+    if std::env::var_os("SPEAKER_CORE_HEADLESS").is_some_and(|v| v == "1") {
+        tracing::info!("Headless mode requested via SPEAKER_CORE_HEADLESS=1");
         println!("  Display: Headless mode requested via SPEAKER_CORE_HEADLESS.");
         return;
     }
@@ -96,8 +110,7 @@ fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
     let mut fb = match Framebuffer::new() {
         Ok(fb) => fb,
         Err(e) => {
-            tracing::warn!("Could not open /dev/fb0: {e}");
-            eprintln!("  Display Warning: Could not open /dev/fb0: {e}");
+            report_display_warning("Could not open /dev/fb0", &e);
             return;
         }
     };
@@ -110,15 +123,13 @@ fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
 #[cfg(feature = "ui")]
 fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool) {
     if let Err(e) = fb.unblank() {
-        tracing::warn!("Failed to unblank display: {e}");
-        eprintln!("  Display Warning: Failed to unblank display: {e}");
+        report_display_warning("Failed to unblank display", &e);
     }
 
     let window = match fb.init_platform() {
         Ok(win) => win,
         Err(e) => {
-            tracing::error!("Failed to initialize platform: {e}");
-            eprintln!("  Display Error: Failed to initialize platform: {e}");
+            report_display_error("Failed to initialize platform", &e);
             return;
         }
     };
@@ -126,15 +137,13 @@ fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool
     let splash = match SplashScreen::new() {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!("Failed to initialize SplashScreen: {e}");
-            eprintln!("  Display Error: Failed to initialize SplashScreen: {e}");
+            report_display_error("Failed to initialize SplashScreen", &e);
             return;
         }
     };
 
     if let Err(e) = splash.show() {
-        tracing::warn!("Failed to show SplashScreen: {e}");
-        eprintln!("  Display Warning: Failed to show SplashScreen: {e}");
+        report_display_warning("Failed to show SplashScreen", &e);
         return;
     }
 
@@ -148,8 +157,8 @@ fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool
             println!("  Display: Screen buffer already current.");
         }
         Err(e) => {
-            tracing::error!("Failed to render frame: {e}");
-            eprintln!("  Display Error: Failed to render frame: {e}");
+            report_display_error("Failed to render frame", &e);
+            return;
         }
     }
 
@@ -162,8 +171,7 @@ fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool
         while run_loop || duration.is_some_and(|d| start.elapsed() < d) {
             slint::platform::update_timers_and_animations();
             if let Err(e) = fb.render_frame(&window) {
-                tracing::error!("Render loop frame failed: {e}");
-                eprintln!("  Display Error: render loop frame failed: {e}");
+                report_display_error("Render loop frame failed", &e);
                 break;
             }
             std::thread::sleep(Duration::from_millis(16));
@@ -231,20 +239,42 @@ mod tests {
     #[cfg(feature = "ui")]
     #[test]
     fn run_splash_on_mocked_renders_and_tracks_counters() {
-        let mut fb = Framebuffer::new_mocked();
+        let (mut fb, ctrl) = Framebuffer::new_mocked();
         assert!(fb.is_mocked());
         run_splash_on(&mut fb, None, false);
         assert_eq!(fb.unblank_count(), 1);
         assert_eq!(fb.render_count(), 1);
+        assert_eq!(ctrl.counters(), (1, 1));
     }
 
     #[cfg(feature = "ui")]
     #[test]
     fn run_splash_on_mocked_zero_preview_skips_loop() {
-        let mut fb = Framebuffer::new_mocked();
+        let (mut fb, _ctrl) = Framebuffer::new_mocked();
         run_splash_on(&mut fb, Some(0), false);
         // Initial render + no loop iterations for zero-length preview
         assert_eq!(fb.render_count(), 1);
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn run_splash_on_mocked_reports_unblank_failure_and_continues() {
+        let (mut fb, ctrl) = Framebuffer::new_mocked();
+        ctrl.set_unblank_error("simulated unblank failure");
+        run_splash_on(&mut fb, None, false);
+        // Unblank failure is non-fatal: splash still initializes and renders
+        assert_eq!(fb.unblank_count(), 0);
+        assert_eq!(fb.render_count(), 1);
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn run_splash_on_mocked_render_error_skips_loop() {
+        let (mut fb, ctrl) = Framebuffer::new_mocked();
+        ctrl.set_render_error("simulated render failure");
+        run_splash_on(&mut fb, Some(0), false);
+        assert_eq!(fb.render_count(), 0);
+        assert_eq!(ctrl.counters(), (1, 0));
     }
 
     #[test]
