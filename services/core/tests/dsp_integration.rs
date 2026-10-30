@@ -603,3 +603,72 @@ fn dsp_domain_models_exhaustive_descriptions_and_display() {
     assert_eq!(levels.rms_or_floor(0), -12.0);
     assert_eq!(levels.rms_or_floor(99), -100.0);
 }
+
+#[tokio::test]
+async fn shared_clones_and_async_polling_observe_mock_updates() {
+    let (dsp, mock) = DspDevice::new_mocked();
+    let dsp_clone = dsp.clone();
+
+    // Verify initial simulated status
+    let initial = dsp.read_status_async().await.unwrap();
+    assert!(initial.is_operational());
+    assert_eq!(initial.state, ProcessingState::Running);
+    assert_eq!(initial.clipped_samples, 0);
+
+    // Update state via mock controller
+    mock.set_state(ProcessingState::Paused);
+    mock.set_processing_load(15.2);
+    mock.set_buffer_level(800);
+    mock.set_clipped_samples(12);
+    mock.set_volume(Some(-12.0), Some(true));
+    mock.set_levels(
+        vec![-10.0, -11.0],
+        vec![-14.0, -15.0],
+        vec![-12.0, -13.0],
+        vec![-16.0, -17.0],
+    );
+
+    let updated = dsp_clone.read_status_async().await.unwrap();
+    assert!(!updated.is_operational());
+    assert_eq!(updated.state, ProcessingState::Paused);
+    assert_eq!(updated.processing_load, 15.2);
+    assert_eq!(updated.buffer_level, 800);
+    assert_eq!(updated.clipped_samples, 12);
+    assert_eq!(updated.volume_db, Some(-12.0));
+    assert_eq!(updated.muted, Some(true));
+    assert_eq!(updated.capture.peaks.as_ref(), &[-10.0, -11.0]);
+    assert_eq!(updated.playback.peaks.as_ref(), &[-12.0, -13.0]);
+
+    // Test async reset clipped
+    dsp_clone.reset_clipped_samples_async().await.unwrap();
+    let after_reset = dsp.read_status_async().await.unwrap();
+    assert_eq!(after_reset.clipped_samples, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_device_clones_read_and_reset() {
+    let (dsp, mock) = DspDevice::new_mocked();
+    let d1 = dsp.clone();
+    let d2 = dsp.clone();
+
+    let h1 = tokio::spawn(async move {
+        for _ in 0..100 {
+            let res = d1.read_status_async().await;
+            res.unwrap();
+        }
+    });
+
+    let h2 = tokio::spawn(async move {
+        for i in 0..100 {
+            let load = (i % 20) as f32;
+            mock.set_processing_load(load);
+            if i % 10 == 0 {
+                d2.reset_clipped_samples_async().await.unwrap();
+            }
+        }
+    });
+
+    h1.await.unwrap();
+    h2.await.unwrap();
+    let _ = dsp.read_status().unwrap();
+}

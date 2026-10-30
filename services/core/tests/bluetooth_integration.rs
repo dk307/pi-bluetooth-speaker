@@ -1026,3 +1026,72 @@ fn bluetooth_device_control_methods_and_mock_coverage() {
     // BluetoothDevice::new invocation
     let _ = BluetoothDevice::new();
 }
+
+#[tokio::test]
+async fn shared_clones_and_async_polling_observe_mock_updates() {
+    let (bt, mock) = BluetoothDevice::new_mocked();
+    let bt_clone = bt.clone();
+
+    // Verify initial simulated status
+    let initial = bt.status_async().await.unwrap();
+    assert!(initial.is_operational());
+    assert_eq!(initial.connected_count(), 1);
+    assert!(initial.is_streaming());
+
+    // Update state via mock controller
+    mock.set_powered(false);
+    mock.set_discoverable(true);
+    mock.set_pairable(false);
+
+    let dev2 = BtDevice {
+        address: BtAddress::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]),
+        name: "Tablet".into(),
+        alias: "Kitchen Tablet".into(),
+        connected: false,
+        paired: true,
+        trusted: true,
+        blocked: false,
+        rssi: None,
+        battery_percentage: None,
+        icon: Some("tablet".into()),
+        uuids: Box::default(),
+    };
+    mock.add_device(dev2);
+
+    let updated = bt_clone.status_async().await.unwrap();
+    assert!(!updated.is_operational());
+    let adapter = updated.adapter.as_ref().unwrap();
+    assert!(!adapter.powered);
+    assert!(adapter.discoverable);
+    assert!(!adapter.pairable);
+
+    assert_eq!(updated.devices.len(), 2);
+    assert_eq!(updated.paired_devices().len(), 2);
+    assert_eq!(updated.connected_devices().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_device_clones_read_and_controls() {
+    let (bt, mock) = BluetoothDevice::new_mocked();
+    let b1 = bt.clone();
+    let b2 = bt.clone();
+
+    let h1 = tokio::spawn(async move {
+        for _ in 0..100 {
+            let res = b1.status_async().await;
+            res.unwrap();
+        }
+    });
+
+    let h2 = tokio::spawn(async move {
+        for i in 0..100 {
+            let powered = i % 2 == 0;
+            mock.set_powered(powered);
+            b2.set_discoverable(!powered).unwrap();
+        }
+    });
+
+    h1.await.unwrap();
+    h2.await.unwrap();
+    let _ = bt.status().unwrap();
+}

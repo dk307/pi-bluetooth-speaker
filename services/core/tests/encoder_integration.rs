@@ -1,6 +1,7 @@
 //! Integration and hardware driver tests for the EC12 rotary encoder.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use speaker_core::hardware::{
     EncoderDevice, EncoderError, EncoderHardwareInfo, EncoderStatus, RgbColor, RotationDirection,
@@ -397,4 +398,43 @@ fn debug_formatting_reports_mock_backend() {
     let (device, _mock) = EncoderDevice::new_mocked();
     let debug = format!("{device:?}");
     assert!(debug.contains("Mock"));
+}
+
+#[tokio::test]
+async fn shared_clones_and_async_polling_observe_mock_updates() {
+    let (device, mock) = EncoderDevice::new_mocked();
+    let device_clone = device.clone();
+
+    let initial = device.read_status_async().await.unwrap();
+    assert!(!initial.switch_pressed);
+    assert_eq!(initial.led_color, RgbColor::OFF);
+
+    mock.set_switch_pressed(true);
+    mock.set_leds(RgbColor::GREEN);
+
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        device_clone.read_status_async().await
+    });
+
+    let observed = handle.await.unwrap().unwrap();
+    assert!(observed.switch_pressed);
+    assert_eq!(observed.press_count, 1);
+    assert_eq!(observed.led_color, RgbColor::GREEN);
+}
+
+#[test]
+fn concurrent_multi_thread_status_reads() {
+    let (device, mock) = EncoderDevice::new_mocked();
+    let mut handles = Vec::new();
+    for _ in 0..4 {
+        let d = device.clone();
+        handles.push(std::thread::spawn(move || d.read_status().unwrap()));
+    }
+    mock.set_switch_pressed(true);
+    for handle in handles {
+        let _ = handle.join().unwrap();
+    }
+    let status = device.read_status().unwrap();
+    assert_eq!(status.press_count, 1);
 }
