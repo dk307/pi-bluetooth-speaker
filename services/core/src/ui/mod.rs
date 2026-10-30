@@ -30,3 +30,7 @@ pub use generated::{MainWindow, SplashScreen, Theme, ThemePalette};
 pub use shell::AppShell;
 #[doc(inline)]
 pub use theme::ThemePreset;
+
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub use framebuffer::test_helpers as framebuffer_test_helpers;

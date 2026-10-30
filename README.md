@@ -4,6 +4,7 @@
 [![Platform: Raspberry Pi 3](https://img.shields.io/badge/Platform-Raspberry%20Pi%203%20Model%20B-c51a4a.svg)](https://www.raspberrypi.com/products/raspberry-pi-3-model-b/)
 [![OS: Debian 13 (Trixie) / DietPi](https://img.shields.io/badge/OS-DietPi%20aarch64-green.svg)](https://dietpi.com/)
 [![Rust: 2024 Edition](https://img.shields.io/badge/Rust-2024%20Pinned-orange.svg)](https://www.rust-lang.org/)
+[![codecov](https://codecov.io/gh/dk307/pi-bluetooth-speaker/branch/main/graph/badge.svg)](https://codecov.io/gh/dk307/pi-bluetooth-speaker)
 
 An audiophile-grade Bluetooth audio receiver, active loudspeaker DSP crossover server, and interactive touch console engineered for the **Raspberry Pi 3 Model B (DietPi / Debian 13 Trixie, aarch64)**.
 
