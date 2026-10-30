@@ -1,0 +1,462 @@
+import { Theme } from "theme.slint";
+
+export component MainViewport inherits Rectangle {
+    height: 380px;
+    background: Theme.active.chassis;
+
+    in-out property <int> active_tab: 0;
+    in-out property <string> track_title: "Waiting for Connection...";
+    in-out property <string> track_artist: "DietPi Audiophile Speaker";
+    in-out property <string> track_album: "High-Resolution DSP Sink";
+    in-out property <float> volume_value: 75.0;
+    in-out property <bool> is_playing: false;
+
+    callback toggle_play_pause();
+    callback volume_changed(float);
+    callback cycle_theme();
+    callback select_theme(int);
+
+    // Tab 0: Now Playing
+    if root.active_tab == 0 : Rectangle {
+        padding: 20px;
+
+        Rectangle {
+            background: Theme.active.card_surface;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: Theme.active.card_border;
+            clip: true;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 12px;
+                padding: 24px;
+
+                Text {
+                    text: root.track_title;
+                    color: Theme.active.text_primary;
+                    font-size: 24px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: root.track_artist;
+                    color: Theme.active.secondary_accent;
+                    font-size: 18px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: root.track_album;
+                    color: Theme.active.text_muted;
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+
+                // Volume slider & indicator
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 16px;
+                    padding-top: 16px;
+
+                    Text {
+                        text: "VOL";
+                        color: Theme.active.text_muted;
+                        font-size: 13px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        width: 280px;
+                        height: 8px;
+                        background: #1c2430;
+                        border-radius: 4px;
+                        y: 8px;
+
+                        Rectangle {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width * (root.volume_value >= 0.0 ? (root.volume_value <= 100.0 ? root.volume_value / 100.0 : 1.0) : 0.0);
+                            height: parent.height;
+                            background: Theme.active.primary_accent;
+                            border-radius: 4px;
+                        }
+
+                        TouchArea {
+                            moved => {
+                                root.volume_value = Math.max(0.0, Math.min(100.0, self.mouse-x / self.width * 100.0));
+                                root.volume_changed(root.volume_value);
+                            }
+                            clicked => {
+                                root.volume_value = Math.max(0.0, Math.min(100.0, self.mouse-x / self.width * 100.0));
+                                root.volume_changed(root.volume_value);
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "\{Math.round(root.volume_value >= 0.0 ? (root.volume_value <= 100.0 ? root.volume_value : 100.0) : 0.0)}%";
+                        color: Theme.active.primary_accent;
+                        font-size: 14px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
+    // Tab 1: VU Meter
+    if root.active_tab == 1 : Rectangle {
+        padding: 20px;
+
+        Rectangle {
+            background: Theme.active.card_surface;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: Theme.active.card_border;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 10px;
+
+                Text {
+                    text: "🎚️ PEPPYMETER DUAL VU VISUALIZER";
+                    color: Theme.active.primary_accent;
+                    font-size: 20px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Active Skin: " + Theme.active.meter_skin_id;
+                    color: Theme.active.secondary_accent;
+                    font-size: 14px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Channel 0: Subwoofer | Channel 1: Coaxial Satellite";
+                    color: Theme.active.text_muted;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+
+    // Tab 2: Bluetooth Status
+    if root.active_tab == 2 : Rectangle {
+        padding: 20px;
+
+        Rectangle {
+            background: Theme.active.card_surface;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: Theme.active.card_border;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 10px;
+
+                Text {
+                    text: "📶 BLUETOOTH STATUS & CONTROLLER";
+                    color: Theme.active.primary_accent;
+                    font-size: 20px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Broadcom BCM43438 UART / BlueZ 5 Stack";
+                    color: Theme.active.secondary_accent;
+                    font-size: 14px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Tap Settings (Tab 5) to switch active appliance theme";
+                    color: Theme.active.text_muted;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+
+    // Tab 3: CD Player
+    if root.active_tab == 3 : Rectangle {
+        padding: 20px;
+
+        Rectangle {
+            background: Theme.active.card_surface;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: Theme.active.card_border;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 10px;
+
+                Text {
+                    text: "💿 OPTICAL CD PLAYER";
+                    color: Theme.active.primary_accent;
+                    font-size: 20px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "USB Optical Drive Subsystem (cdda://)";
+                    color: Theme.active.secondary_accent;
+                    font-size: 14px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+
+    // Tab 4: DSP & Tone Control
+    if root.active_tab == 4 : Rectangle {
+        padding: 20px;
+
+        Rectangle {
+            background: Theme.active.card_surface;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: Theme.active.card_border;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 10px;
+
+                Text {
+                    text: "🎛️ CAMILLADSP ACTIVE CROSSOVER";
+                    color: Theme.active.primary_accent;
+                    font-size: 20px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "48kHz / 32-bit LE Processing Pipeline";
+                    color: Theme.active.secondary_accent;
+                    font-size: 14px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+
+    // Tab 5: Settings & Theme Switcher
+    if root.active_tab == 5 : Rectangle {
+        padding: 16px;
+
+        Rectangle {
+            background: Theme.active.card_surface;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: Theme.active.card_border;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 14px;
+                padding: 16px;
+
+                Text {
+                    text: "⚙️ APPLIANCE THEME & PREFERENCES";
+                    color: Theme.active.primary_accent;
+                    font-size: 18px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Unified Global Theme Palette (Section 3.1):";
+                    color: Theme.active.text_muted;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                }
+
+                // 4 Theme preset buttons
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 10px;
+
+                    // 1. McIntosh Blue
+                    Rectangle {
+                        width: 160px;
+                        height: 52px;
+                        background: #090D12;
+                        border-radius: 10px;
+                        border-width: Theme.active_preset == 0 ? 2px : 1px;
+                        border-color: #00C8FF;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                text: "1. McIntosh";
+                                color: #00C8FF;
+                                font-size: 13px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Electric Cyan";
+                                color: #70E1FF;
+                                font-size: 10px;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.select_theme(0);
+                            }
+                        }
+                    }
+
+                    // 2. Marantz Amber
+                    Rectangle {
+                        width: 160px;
+                        height: 52px;
+                        background: #12100D;
+                        border-radius: 10px;
+                        border-width: Theme.active_preset == 1 ? 2px : 1px;
+                        border-color: #E5A93C;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                text: "2. Marantz";
+                                color: #E5A93C;
+                                font-size: 13px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Warm Amber";
+                                color: #FFD166;
+                                font-size: 10px;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.select_theme(1);
+                            }
+                        }
+                    }
+
+                    // 3. Cyberpunk Neon
+                    Rectangle {
+                        width: 160px;
+                        height: 52px;
+                        background: #0D0B18;
+                        border-radius: 10px;
+                        border-width: Theme.active_preset == 2 ? 2px : 1px;
+                        border-color: #00F0FF;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                text: "3. Cyberpunk";
+                                color: #00F0FF;
+                                font-size: 13px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Synthwave Pink";
+                                color: #FF007F;
+                                font-size: 10px;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.select_theme(2);
+                            }
+                        }
+                    }
+
+                    // 4. Studio Dark
+                    Rectangle {
+                        width: 160px;
+                        height: 52px;
+                        background: #121212;
+                        border-radius: 10px;
+                        border-width: Theme.active_preset == 3 ? 2px : 1px;
+                        border-color: #F0F0F0;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                text: "4. Studio Dark";
+                                color: #F0F0F0;
+                                font-size: 13px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Precision Mono";
+                                color: #A0A0A0;
+                                font-size: 10px;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.select_theme(3);
+                            }
+                        }
+                    }
+                }
+
+                // Cycle Theme Button
+                Rectangle {
+                    width: 220px;
+                    height: 40px;
+                    background: Theme.active.primary_accent;
+                    border-radius: 10px;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 8px;
+
+                        Text {
+                            text: "🔄 Cycle Next Theme";
+                            color: Theme.active.dock_active_text;
+                            font-size: 13px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    TouchArea {
+                        clicked => {
+                            root.cycle_theme();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

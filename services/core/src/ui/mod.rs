@@ -2,7 +2,7 @@
 //!
 //! Exposes ahead-of-time (AOT) compiled Slint UI components including
 //! [`MainWindow`] and [`SplashScreen`], alongside the physical Linux
-//! framebuffer (`/dev/fb0`) display driver.
+//! framebuffer (`/dev/fb0`) display driver and the unified theme system.
 
 #[expect(
     clippy::all,
@@ -19,8 +19,14 @@ mod generated {
 }
 
 pub(crate) mod framebuffer;
+pub(crate) mod shell;
+pub(crate) mod theme;
 
 #[doc(inline)]
 pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError, FramebufferMockCtrl};
 #[doc(inline)]
-pub use generated::{MainWindow, SplashScreen};
+pub use generated::{MainWindow, SplashScreen, Theme, ThemePalette};
+#[doc(inline)]
+pub use shell::AppShell;
+#[doc(inline)]
+pub use theme::ThemePreset;

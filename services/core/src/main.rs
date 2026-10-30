@@ -19,13 +19,22 @@ use speaker_core::hardware::TempSensor;
 #[cfg(feature = "ui")]
 use slint::ComponentHandle;
 #[cfg(feature = "ui")]
-use speaker_core::ui::{Framebuffer, SplashScreen};
+use speaker_core::ui::{AppShell, Framebuffer, MainWindow, SplashScreen};
+
+/// Target screen to render on the framebuffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ScreenTarget {
+    #[default]
+    Splash,
+    Shell,
+}
 
 /// Appliance service command-line options.
 #[derive(Debug, Clone, Copy, Default)]
 struct CoreCliOptions {
     preview_secs: Option<u64>,
     run_loop: bool,
+    screen: ScreenTarget,
 }
 
 fn print_usage(bin_name: &str) {
@@ -34,10 +43,11 @@ fn print_usage(bin_name: &str) {
     println!("Usage: {bin_name} [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  -p, --preview <SECS>  Render boot splash UI for SECS seconds");
-    println!("  -l, --loop            Hold the boot splash UI on screen continuously");
-    println!("  -V, --version         Print version and exit");
-    println!("  -h, --help            Print this help text and exit");
+    println!("  -s, --screen <splash|shell> Target screen to render (default: splash)");
+    println!("  -p, --preview <SECS>        Render UI for SECS seconds");
+    println!("  -l, --loop                  Hold UI on screen continuously");
+    println!("  -V, --version               Print version and exit");
+    println!("  -h, --help                  Print this help text and exit");
 }
 
 /// Parses and validates a `--preview <SECS>` argument value (unsigned seconds).
@@ -66,6 +76,18 @@ where
             "-h" | "--help" => return Ok(CliParse::Help),
             "-V" | "--version" => return Ok(CliParse::Version),
             "-l" | "--loop" => opts.run_loop = true,
+            "-s" | "--screen" => {
+                let val = next_arg_value(&mut iter, "--screen")?;
+                match val.trim().to_ascii_lowercase().as_str() {
+                    "splash" => opts.screen = ScreenTarget::Splash,
+                    "shell" | "main" => opts.screen = ScreenTarget::Shell,
+                    other => {
+                        return Err(format!(
+                            "invalid screen target '{other}': expected 'splash' or 'shell'"
+                        ));
+                    }
+                }
+            }
             "-p" | "--preview" => {
                 let val = next_arg_value(&mut iter, "--preview")?;
                 opts.preview_secs = Some(parse_preview_secs(&val)?);
@@ -96,14 +118,15 @@ fn report_display(level: tracing::Level, context: &str, err: impl std::fmt::Disp
 }
 
 #[cfg(feature = "ui")]
-fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
+fn run_ui_display(screen: ScreenTarget, preview_secs: Option<u64>, run_loop: bool) {
     if headless_requested() {
         tracing::info!("Headless mode requested via SPEAKER_CORE_HEADLESS=1");
         println!("  Display: Headless mode requested via SPEAKER_CORE_HEADLESS.");
         return;
     }
-    run_ui_boot_splash_on_path(
+    run_ui_display_on_path(
         Path::new(Framebuffer::DEFAULT_FB_PATH),
+        screen,
         preview_secs,
         run_loop,
     );
@@ -116,12 +139,14 @@ fn headless_requested() -> bool {
     std::env::var_os("SPEAKER_CORE_HEADLESS").is_some_and(|v| v == "1")
 }
 
-/// Runs the boot splash against a specific framebuffer device path.
-///
-/// The path seam keeps the display-probe branches (missing device, failed open)
-/// hermetically testable without touching the host's real `/dev/fb0`.
+/// Runs the requested screen against a specific framebuffer device path.
 #[cfg(feature = "ui")]
-fn run_ui_boot_splash_on_path(fb_path: &Path, preview_secs: Option<u64>, run_loop: bool) {
+fn run_ui_display_on_path(
+    fb_path: &Path,
+    screen: ScreenTarget,
+    preview_secs: Option<u64>,
+    run_loop: bool,
+) {
     if !fb_path.exists() {
         tracing::info!("Headless/simulated environment (no /dev/fb0 detected)");
         println!("  Display: Headless/simulated environment (no /dev/fb0 detected).");
@@ -138,7 +163,10 @@ fn run_ui_boot_splash_on_path(fb_path: &Path, preview_secs: Option<u64>, run_loo
         }
     };
 
-    run_splash_on(&mut fb, preview_secs, run_loop);
+    match screen {
+        ScreenTarget::Splash => run_splash_on(&mut fb, preview_secs, run_loop),
+        ScreenTarget::Shell => run_shell_on(&mut fb, preview_secs, run_loop),
+    }
 }
 
 /// Runs the splash lifecycle (unblank, platform init, component show, render loop)
@@ -208,6 +236,71 @@ fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool
     }
 }
 
+/// Runs the UI Shell lifecycle (unblank, platform init, component show, render loop)
+/// on an opened framebuffer backend, keeping the path testable with mocked hardware.
+#[cfg(feature = "ui")]
+fn run_shell_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool) {
+    if let Err(e) = fb.unblank() {
+        report_display(tracing::Level::WARN, "Failed to unblank display", &e);
+    }
+
+    let window = match fb.init_platform() {
+        Ok(win) => win,
+        Err(e) => {
+            report_display(tracing::Level::ERROR, "Failed to initialize platform", &e);
+            return;
+        }
+    };
+
+    let main_window = match MainWindow::new() {
+        Ok(w) => w,
+        Err(e) => {
+            report_display(tracing::Level::ERROR, "Failed to initialize MainWindow", &e);
+            return;
+        }
+    };
+
+    let shell = AppShell::new(main_window);
+
+    if let Err(e) = shell.window().show() {
+        report_display(tracing::Level::WARN, "Failed to show MainWindow", &e);
+        return;
+    }
+
+    match fb.render_frame(&window) {
+        Ok(true) => {
+            tracing::info!("UI Shell rendered to /dev/fb0 successfully");
+            println!("  Display: UI Shell rendered to /dev/fb0 successfully!");
+        }
+        Ok(false) => {
+            tracing::debug!("Screen buffer already current");
+            println!("  Display: Screen buffer already current.");
+        }
+        Err(e) => {
+            report_display(tracing::Level::ERROR, "Failed to render frame", &e);
+            return;
+        }
+    }
+
+    if run_loop || preview_secs.is_some() {
+        let start = Instant::now();
+        let duration = preview_secs.map(Duration::from_secs);
+        tracing::info!("Running UI render loop");
+        println!("  Display: Running UI render loop...");
+
+        while run_loop || duration.is_some_and(|d| start.elapsed() < d) {
+            slint::platform::update_timers_and_animations();
+            if let Err(e) = fb.render_frame(&window) {
+                report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        tracing::info!("Preview complete");
+        println!("  Display: Preview complete.");
+    }
+}
+
 fn main() -> ExitCode {
     let opts = match resolve_cli_opts(parse_cli_args_from(env_args()), "core", print_usage) {
         Ok(opts) => opts,
@@ -222,10 +315,10 @@ fn main() -> ExitCode {
     println!("  Thermal Sensor: {}", temp_sensor.gpio_info());
 
     #[cfg(feature = "ui")]
-    run_ui_boot_splash(opts.preview_secs, opts.run_loop);
+    run_ui_display(opts.screen, opts.preview_secs, opts.run_loop);
 
     #[cfg(not(feature = "ui"))]
-    let _ = (opts.preview_secs, opts.run_loop);
+    let _ = (opts.screen, opts.preview_secs, opts.run_loop);
     #[cfg(not(feature = "ui"))]
     println!("  Display: UI feature disabled at compile-time.");
 
@@ -289,7 +382,7 @@ mod tests {
 
     #[cfg(feature = "ui")]
     #[test]
-    fn run_ui_boot_splash_headless_short_circuits() {
+    fn run_ui_display_headless_short_circuits() {
         static ENV_GUARD: Mutex<()> = Mutex::new(());
         let _guard = ENV_GUARD.lock().unwrap();
         // SAFETY: tests are serialized by ENV_GUARD; no other test thread reads
@@ -297,14 +390,17 @@ mod tests {
         unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "1") };
         // Even with an existing device path, the headless guard must return
         // before any framebuffer/sysfs access.
-        run_ui_boot_splash_on_path(Path::new("/tmp"), Some(1), true);
+        run_ui_display(ScreenTarget::Splash, Some(1), true);
+        run_ui_display(ScreenTarget::Shell, Some(1), true);
+        run_ui_display_on_path(Path::new("/tmp"), ScreenTarget::Splash, Some(1), true);
+        run_ui_display_on_path(Path::new("/tmp"), ScreenTarget::Shell, Some(1), true);
         // SAFETY: same serialized-guard invariant as above.
         unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
     }
 
     #[cfg(feature = "ui")]
     #[test]
-    fn run_ui_boot_splash_missing_device_returns_early() {
+    fn run_ui_display_missing_device_returns_early() {
         static ENV_GUARD: Mutex<()> = Mutex::new(());
         let _guard = ENV_GUARD.lock().unwrap();
         // SAFETY: tests are serialized by ENV_GUARD; no other test thread reads
@@ -312,7 +408,8 @@ mod tests {
         unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
         let dir = speaker_core::diag::ScopedTempDir::new("fb-boot-splash-missing");
         let missing = dir.path().join("fb0");
-        run_ui_boot_splash_on_path(&missing, Some(1), true);
+        run_ui_display_on_path(&missing, ScreenTarget::Splash, Some(1), true);
+        run_ui_display_on_path(&missing, ScreenTarget::Shell, Some(1), true);
     }
 
     #[cfg(feature = "ui")]
@@ -356,6 +453,37 @@ mod tests {
         assert_eq!(ctrl.counters(), (1, 0));
     }
 
+    #[cfg(feature = "ui")]
+    #[test]
+    fn run_shell_on_mocked_renders_and_tracks_counters() {
+        let (mut fb, ctrl) = Framebuffer::new_mocked();
+        assert!(fb.is_mocked());
+        run_shell_on(&mut fb, None, false);
+        assert_eq!(fb.unblank_count(), 1);
+        assert_eq!(fb.render_count(), 1);
+        assert_eq!(ctrl.counters(), (1, 1));
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn run_shell_on_mocked_reports_unblank_failure_and_continues() {
+        let (mut fb, ctrl) = Framebuffer::new_mocked();
+        ctrl.set_unblank_error("simulated unblank failure");
+        run_shell_on(&mut fb, None, false);
+        assert_eq!(fb.unblank_count(), 0);
+        assert_eq!(fb.render_count(), 1);
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn run_shell_on_mocked_render_error_skips_loop() {
+        let (mut fb, ctrl) = Framebuffer::new_mocked();
+        ctrl.set_render_error("simulated render failure");
+        run_shell_on(&mut fb, Some(0), false);
+        assert_eq!(fb.render_count(), 0);
+        assert_eq!(ctrl.counters(), (1, 0));
+    }
+
     #[test]
     fn parse_cli_args_flags_and_values() {
         let parsed = |args: &[&str]| {
@@ -370,10 +498,18 @@ mod tests {
             other => panic!("expected Options, got {other:?}"),
         }
 
-        match parsed(&["-p", "5", "-l"]).unwrap() {
+        match parsed(&["-p", "5", "-l", "--screen", "shell"]).unwrap() {
             CliParse::Options(o) => {
                 assert_eq!(o.preview_secs, Some(5));
                 assert!(o.run_loop);
+                assert_eq!(o.screen, ScreenTarget::Shell);
+            }
+            other => panic!("expected Options, got {other:?}"),
+        }
+
+        match parsed(&["-s", "splash"]).unwrap() {
+            CliParse::Options(o) => {
+                assert_eq!(o.screen, ScreenTarget::Splash);
             }
             other => panic!("expected Options, got {other:?}"),
         }
@@ -385,6 +521,8 @@ mod tests {
             &["-p"][..],
             &["-p", "+5"][..],
             &["-p", "nan"][..],
+            &["-s"][..],
+            &["-s", "invalid"][..],
             &["-x"][..],
             &["--loop", "--preview", "1", "extra"][..],
         ] {

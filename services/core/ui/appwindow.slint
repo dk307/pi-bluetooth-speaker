@@ -1,125 +1,72 @@
-import { Button, Slider } from "std-widgets.slint";
 import { SplashScreen } from "splash.slint";
+import { Theme, ThemePalette } from "theme.slint";
+import { TopStatusBar } from "status_bar.slint";
+import { MainViewport } from "viewport.slint";
+import { NavDock } from "nav_dock.slint";
 
-export { SplashScreen }
+export { SplashScreen, Theme, ThemePalette }
 
 export component MainWindow inherits Window {
-    title: "Pi Audio Console";
+    title: "DietPi Audiophile Console";
     width: 800px;
     height: 480px;
-    background: #0d1117;
+    background: Theme.active.chassis;
     default-font-family: "sans-serif";
 
-    in-out property <string> track-title: "Waiting for Bluetooth Connection...";
-    in-out property <string> track-artist: "DietPi Speaker";
-    in-out property <string> track-album: "Audiophile DSP Sink";
-    in-out property <float> volume-value: 75.0;
-    in-out property <bool> is-playing: false;
-    in-out property <string> stream-codec: "aptX-HD 48kHz";
+    in-out property <int> active_tab: 0;
+    in-out property <string> active_source: "Bluetooth";
+    in-out property <string> track_or_device: "Waiting for Connection...";
+    in-out property <string> stream_codec: "aptX-HD 48kHz";
+    in-out property <string> track_title: "Waiting for Bluetooth Connection...";
+    in-out property <string> track_artist: "DietPi Speaker";
+    in-out property <string> track_album: "Audiophile DSP Sink";
+    in-out property <float> volume_value: 75.0;
+    in-out property <bool> is_playing: false;
 
-    callback toggle-play-pause();
-    callback volume-changed(float);
+    callback toggle_play_pause();
+    callback volume_changed(float);
+    callback source_clicked();
+    callback night_mode_clicked();
+    callback tab_selected(int);
+    callback select_theme(int);
+    callback cycle_theme();
 
     VerticalLayout {
-        padding: 20px;
-        spacing: 16px;
+        padding: 0px;
+        spacing: 0px;
 
-        // Top Status Bar (800 x 48)
-        HorizontalLayout {
-            height: 40px;
-            alignment: space-between;
-
-            Text {
-                text: "DIETPI AUDIO CONSOLE";
-                color: #58a6ff;
-                font-size: 16px;
-                font-weight: 700;
-                vertical-alignment: center;
-            }
-
-            Rectangle {
-                background: #161b22;
-                border-radius: 12px;
-                border-color: #30363d;
-                border-width: 1px;
-                width: 150px;
-                height: 28px;
-
-                Text {
-                    text: root.stream-codec;
-                    color: #7ee787;
-                    font-size: 12px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
+        // Top Status Bar: 800 x 40
+        status_bar := TopStatusBar {
+            active_source: root.active_source;
+            track_or_device: root.track_or_device;
+            stream_codec: root.stream_codec;
+            source_clicked => { root.source_clicked(); }
+            night_mode_clicked => { root.night_mode_clicked(); }
         }
 
-        // Center Now Playing / Artwork Canvas
-        Rectangle {
-            background: #161b22;
-            border-radius: 16px;
-            border-color: #30363d;
-            border-width: 1px;
-            clip: true;
-
-            VerticalLayout {
-                alignment: center;
-                spacing: 8px;
-
-                Text {
-                    text: root.track-title;
-                    color: #f0f6fc;
-                    font-size: 24px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                }
-
-                Text {
-                    text: root.track-artist;
-                    color: #8b949e;
-                    font-size: 18px;
-                    horizontal-alignment: center;
-                }
-
-                Text {
-                    text: root.track-album;
-                    color: #6e7681;
-                    font-size: 14px;
-                    horizontal-alignment: center;
-                }
+        // Middle Viewport: 800 x 380
+        viewport := MainViewport {
+            active_tab: root.active_tab;
+            track_title: root.track_title;
+            track_artist: root.track_artist;
+            track_album: root.track_album;
+            volume_value: root.volume_value;
+            is_playing: root.is_playing;
+            toggle_play_pause => { root.toggle_play_pause(); }
+            volume_changed(val) => {
+                root.volume_value = val;
+                root.volume_changed(val);
             }
+            select_theme(idx) => { root.select_theme(idx); }
+            cycle_theme => { root.cycle_theme(); }
         }
 
-        // Bottom Control Bar
-        HorizontalLayout {
-            height: 56px;
-            spacing: 20px;
-            alignment: center;
-
-            Text {
-                text: "VOL";
-                color: #8b949e;
-                font-size: 14px;
-                vertical-alignment: center;
-            }
-
-            Slider {
-                width: 300px;
-                minimum: 0.0;
-                maximum: 100.0;
-                value: root.volume-value;
-                changed(val) => {
-                    root.volume-changed(val);
-                }
-            }
-
-            Text {
-                text: @tr("{0}%", Math.round(root.volume-value));
-                color: #f0f6fc;
-                font-size: 14px;
-                width: 45px;
-                vertical-alignment: center;
+        // Bottom Navigation Dock: 800 x 60
+        dock := NavDock {
+            active_tab: root.active_tab;
+            tab_selected(idx) => {
+                root.active_tab = idx;
+                root.tab_selected(idx);
             }
         }
     }

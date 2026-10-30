@@ -1,0 +1,130 @@
+import { Theme } from "theme.slint";
+
+export component TopStatusBar inherits Rectangle {
+    height: 40px;
+    background: Theme.active.chassis;
+
+    in property <string> active_source: "Bluetooth";
+    in property <string> track_or_device: "Waiting for Connection...";
+    in property <string> stream_codec: "aptX-HD 48kHz";
+
+    callback source_clicked();
+    callback night_mode_clicked();
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        alignment: space-between;
+
+        // Left: Source Pill
+        HorizontalLayout {
+            alignment: start;
+            Rectangle {
+                height: 28px;
+                background: Theme.active.card_surface;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: Theme.active.card_border;
+                y: 6px;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 6px;
+                    alignment: center;
+
+                    Text {
+                        text: "📶";
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.active_source;
+                        color: Theme.active.primary_accent;
+                        font-size: 12px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "▼";
+                        color: Theme.active.text_muted;
+                        font-size: 9px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                TouchArea {
+                    clicked => {
+                        root.source_clicked();
+                    }
+                }
+            }
+        }
+
+        // Center: Track / Client Quick Info
+        HorizontalLayout {
+            alignment: center;
+            Text {
+                text: root.track_or_device;
+                color: Theme.active.text_primary;
+                font-size: 14px;
+                font-weight: 600;
+                vertical-alignment: center;
+                overflow: elide;
+                max-width: 380px;
+            }
+        }
+
+        // Right: Audio Codec Badge + Night Mode Toggle
+        HorizontalLayout {
+            alignment: end;
+            spacing: 10px;
+
+            Rectangle {
+                height: 28px;
+                background: Theme.active.card_surface;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: Theme.active.card_border;
+                y: 6px;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    alignment: center;
+
+                    Text {
+                        text: root.stream_codec;
+                        color: Theme.active.secondary_accent;
+                        font-size: 11px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                background: Theme.active.card_surface;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: Theme.active.card_border;
+                y: 6px;
+
+                Text {
+                    text: "🌙";
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    clicked => {
+                        root.night_mode_clicked();
+                    }
+                }
+            }
+        }
+    }
+}
