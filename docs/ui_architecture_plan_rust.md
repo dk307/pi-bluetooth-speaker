@@ -21,7 +21,7 @@ This document outlines the full architectural design, screen layouts, subsystem 
 1. **Zero-Interpreter, Bare-Metal Performance:** Compiled directly to ARM64 native machine code with zero runtime garbage collection pauses. Starts in **< 150 ms**, uses **~25–40 MB of RAM** (active skin bitmaps + Tokio runtime + Slint render buffers), and draws **< 1.5% CPU** during active 60 FPS playback. This is 10× leaner than moOde Audio (~400 MB) and fits comfortably within the Pi 3's 917 MB total RAM.
 2. **Declarative Slint UI with Compile-Time Optimization:** Fluid UI layouts, vector curves, and theme switching are written in declarative `.slint` markup, compiled ahead-of-time (AOT) into Rust code with zero runtime layout overhead.
 3. **Peppy-Inspired Aesthetics:** Clean, high-contrast touch interface featuring high-visibility typography, large touch targets, smooth transitions, and iconic analog/digital **PeppyMeter dual VU meters** (Channel 0 = Subwoofer, Channel 1 = Coaxial Satellite).
-4. **Unified Multi-Source Audio Pipeline:** Native integration with **Bluetooth A2DP (active now)**, external **USB CD Player**, and future network streaming protocols (**AirPlay via Shairport-Sync** and **UPnP/DLNA**).
+4. **Unified Multi-Source Audio Pipeline:** Native integration with **Bluetooth A2DP (active now)**, with modular support for external **USB CD Player**, and future network streaming protocols (**AirPlay via Shairport-Sync** and **UPnP/DLNA**). *Note: Secondary sources (CD Player, AirPlay, UPnP) only show up in the UI when explicitly enabled; currently they are disabled by default.*
 5. **Direct Hardware Safety & Fearless Concurrency:** Tokio asynchronous runtime coupled with `rppal` (Raspberry Pi Peripheral Access Library) ensures thread-safe, lock-free hardware polling with compile-time memory safety.
 6. **Read-Only Appliance Hardening:** Operates seamlessly on a 100% read-only filesystem (`ro` mode) with zero SD card wear, instant power-cut safety, silent console boot, and hardware MA12070P I2C protection alerts.
 
@@ -98,34 +98,36 @@ The display is divided into three functional zones:
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ [Top Status Bar (40px)]: Source Pill | Device/Title | Codec | Temp | Clock   │
+│ [Top Status Bar (40px)]: [Source Pill ▼]      Device / Track Info      [Codec] [🌙] │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │                                                                              │
 │                         MAIN SCREEN VIEWPORT (380px)                         │
+│                    (Displays active screen: 0 to 5)                          │
 │                                                                              │
 │                                                                              │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│ [Bottom Navigation Dock (60px)]: 🎵 Now Playing | 🎚️ VU | 📶 BT | 💿 CD | ⚙️│
+│ [Bottom Dock (60px)]:  [🎵 Player] [🎚️ VU] [📶 BT] [🎛️ DSP] [⚙️ Config]       │
+│                        (Optional when enabled: [💿 CD])                      │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 1. **Top Status Bar (Height: 40px):**
-   - **Active Source Pill:** Tap to quickly switch between `📶 Bluetooth`, `💿 CD Player`, `📻 AirPlay`, and `🌐 UPnP`.
-   - **Connected Client / Quick Info:** Shows connected device name (e.g., `Pixel 10 Pro XL`) or current track.
-   - **Codec Badge:** Real-time badge (`aptX-HD`, `AAC`, `SBC-XQ`, `CD-DA 44.1k`).
-   - **Enclosure Temperature:** Real-time reading from DS18B20 (e.g., `26.4°C`).
-   - **System Clock:** HH:MM display.
+   - **Streamlined Audio-Centric Design:** To preserve a focused, distraction-free audiophile aesthetic, ambient enclosure temperature and system clock are excluded from the top bar (thermals remain viewable in Screen 6: System Health & Thermals).
+   - **Active Source Pill:** Tap to switch active source. Displays currently enabled sources (e.g. `📶 Bluetooth`; auxiliary sources like `💿 CD Player`, `📻 AirPlay`, and `🌐 UPnP` appear only when enabled).
+   - **Connected Client / Quick Info:** Shows connected device name (e.g., `Pixel 10 Pro XL`) or current track with auto-clipping.
+   - **Codec Badge:** Real-time badge (`aptX-HD`, `AAC`, `SBC-XQ`, `48kHz`).
+   - **Night Mode Toggle:** One-tap button (`🌙`) to blank the DSI backlight.
 
 2. **Main Viewport (Height: 380px):**
-   - Displays the active screen. Supports smooth horizontal swipe gestures and transition animations driven by Slint’s reactive layout engine.
+   - Displays the active screen. Supports smooth transitions and reactive view switching.
 
 3. **Bottom Navigation Dock (Height: 60px):**
-   - Touch-friendly icon bar:
+   - Touch-friendly icon bar showing currently enabled services (minimum touch target > 48px):
      - `🎵 Player` (Now Playing & Transport)
      - `🎚️ VU Meter` (PeppyMeter Dual Visualizer)
      - `📶 Bluetooth` (Device Manager & Pairing)
-     - `💿 CD Player` (Optical Disc Playback & Eject)
+     - `💿 CD Player` (*Conditionally visible:* Only displayed when CD player subsystem is enabled; currently disabled by default)
      - `🎛️ DSP & Tone` (CamillaDSP Levels & Presets)
      - `⚙️ Settings` (Preferences, Hardware Health & Thermals)
 
@@ -382,6 +384,7 @@ export component PeppyMeterView {
 ---
 
 ### Screen 4: CD Player (Optical Disc Control)
+*Note: Conditionally enabled. This screen and its navigation entry are displayed only when the CD player service is explicitly enabled in configuration; currently disabled by default.*
 * **Disc Status & Metadata:**
   - Detects optical disc presence via `udisks2` / `/dev/cdrom`.
   - Disc Type Indicator: `Audio CD (CD-DA 44.1 kHz / 16-bit PCM)`.
@@ -539,7 +542,7 @@ export component PeppyMeterView {
 ---
 
 ### Screen 10: Semi-Hidden Hardware Diagnostics & Bench-Test Page
-* Accessible by tapping the System Clock 5 times consecutively.
+* Accessible by tapping the Audio Codec Badge 5 times consecutively.
 * Provides full hardware verification tests without external equipment:
   - 50 Hz Subwoofer & 1 kHz Coaxial Sine Wave generator.
   - Live virtual rotary dial and push button touch visualizer.

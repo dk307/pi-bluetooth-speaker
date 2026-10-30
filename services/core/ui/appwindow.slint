@@ -22,6 +22,7 @@ export component MainWindow inherits Window {
     in-out property <string> track_album: "Audiophile DSP Sink";
     in-out property <float> volume_value: 75.0;
     in-out property <bool> is_playing: false;
+    in-out property <bool> cd_enabled: false;
 
     callback toggle_play_pause();
     callback volume_changed(float);
@@ -64,6 +65,7 @@ export component MainWindow inherits Window {
         // Bottom Navigation Dock: 800 x 60
         dock := NavDock {
             active_tab: root.active_tab;
+            cd_enabled: root.cd_enabled;
             tab_selected(idx) => {
                 root.active_tab = idx;
                 root.tab_selected(idx);

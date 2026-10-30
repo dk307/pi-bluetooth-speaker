@@ -68,6 +68,17 @@ impl AppShell {
         self.active_tab.load(Ordering::Acquire)
     }
 
+    /// Returns whether the optical CD player service and navigation entry are enabled.
+    #[must_use]
+    pub fn is_cd_enabled(&self) -> bool {
+        self.window.get_cd_enabled()
+    }
+
+    /// Sets whether the optical CD player service and navigation entry are enabled.
+    pub fn set_cd_enabled(&self, enabled: bool) {
+        self.window.set_cd_enabled(enabled);
+    }
+
     /// Switches the active navigation dock tab.
     pub fn set_tab(&self, tab: i32) {
         let tab = tab.clamp(0, 5);

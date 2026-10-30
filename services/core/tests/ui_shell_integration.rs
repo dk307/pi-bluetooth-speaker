@@ -19,6 +19,15 @@ fn ui_shell_defaults_and_property_updates() {
     assert_eq!(shell.window().get_stream_codec(), "aptX-HD 48kHz");
     assert_eq!(shell.window().get_volume_value(), 75.0);
 
+    // CD Player service enablement (disabled by default)
+    assert!(!shell.is_cd_enabled());
+    assert!(!shell.window().get_cd_enabled());
+    shell.set_cd_enabled(true);
+    assert!(shell.is_cd_enabled());
+    assert!(shell.window().get_cd_enabled());
+    shell.set_cd_enabled(false);
+    assert!(!shell.is_cd_enabled());
+
     // Tab navigation updates
     for tab in 0..=5 {
         shell.set_tab(tab);

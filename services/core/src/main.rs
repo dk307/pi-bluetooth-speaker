@@ -169,10 +169,18 @@ fn run_ui_display_on_path(
     }
 }
 
-/// Runs the splash lifecycle (unblank, platform init, component show, render loop)
+/// Runs the common UI component lifecycle (unblank, platform init, setup callback, render loop)
 /// on an opened framebuffer backend, keeping the path testable with mocked hardware.
 #[cfg(feature = "ui")]
-fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool) {
+fn run_ui_lifecycle<F>(
+    fb: &mut Framebuffer,
+    label: &str,
+    preview_secs: Option<u64>,
+    run_loop: bool,
+    setup: F,
+) where
+    F: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+{
     if let Err(e) = fb.unblank() {
         report_display(tracing::Level::WARN, "Failed to unblank display", &e);
     }
@@ -185,27 +193,19 @@ fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool
         }
     };
 
-    let splash = match SplashScreen::new() {
-        Ok(s) => s,
-        Err(e) => {
-            report_display(
-                tracing::Level::ERROR,
-                "Failed to initialize SplashScreen",
-                &e,
-            );
-            return;
-        }
-    };
-
-    if let Err(e) = splash.show() {
-        report_display(tracing::Level::WARN, "Failed to show SplashScreen", &e);
+    if let Err(e) = setup() {
+        report_display(
+            tracing::Level::ERROR,
+            &format!("Failed to initialize {label}"),
+            e.as_ref(),
+        );
         return;
     }
 
     match fb.render_frame(&window) {
         Ok(true) => {
-            tracing::info!("Boot splash screen rendered to /dev/fb0 successfully");
-            println!("  Display: Boot splash screen rendered to /dev/fb0 successfully!");
+            tracing::info!("{label} rendered to /dev/fb0 successfully");
+            println!("  Display: {label} rendered to /dev/fb0 successfully!");
         }
         Ok(false) => {
             tracing::debug!("Screen buffer already current");
@@ -236,69 +236,31 @@ fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool
     }
 }
 
-/// Runs the UI Shell lifecycle (unblank, platform init, component show, render loop)
-/// on an opened framebuffer backend, keeping the path testable with mocked hardware.
+/// Runs the splash lifecycle against an opened framebuffer backend.
+#[cfg(feature = "ui")]
+fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool) {
+    run_ui_lifecycle(fb, "Boot splash screen", preview_secs, run_loop, || {
+        let splash = SplashScreen::new().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        splash
+            .show()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        Ok(())
+    });
+}
+
+/// Runs the UI Shell lifecycle against an opened framebuffer backend.
 #[cfg(feature = "ui")]
 fn run_shell_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool) {
-    if let Err(e) = fb.unblank() {
-        report_display(tracing::Level::WARN, "Failed to unblank display", &e);
-    }
-
-    let window = match fb.init_platform() {
-        Ok(win) => win,
-        Err(e) => {
-            report_display(tracing::Level::ERROR, "Failed to initialize platform", &e);
-            return;
-        }
-    };
-
-    let main_window = match MainWindow::new() {
-        Ok(w) => w,
-        Err(e) => {
-            report_display(tracing::Level::ERROR, "Failed to initialize MainWindow", &e);
-            return;
-        }
-    };
-
-    let shell = AppShell::new(main_window);
-
-    if let Err(e) = shell.window().show() {
-        report_display(tracing::Level::WARN, "Failed to show MainWindow", &e);
-        return;
-    }
-
-    match fb.render_frame(&window) {
-        Ok(true) => {
-            tracing::info!("UI Shell rendered to /dev/fb0 successfully");
-            println!("  Display: UI Shell rendered to /dev/fb0 successfully!");
-        }
-        Ok(false) => {
-            tracing::debug!("Screen buffer already current");
-            println!("  Display: Screen buffer already current.");
-        }
-        Err(e) => {
-            report_display(tracing::Level::ERROR, "Failed to render frame", &e);
-            return;
-        }
-    }
-
-    if run_loop || preview_secs.is_some() {
-        let start = Instant::now();
-        let duration = preview_secs.map(Duration::from_secs);
-        tracing::info!("Running UI render loop");
-        println!("  Display: Running UI render loop...");
-
-        while run_loop || duration.is_some_and(|d| start.elapsed() < d) {
-            slint::platform::update_timers_and_animations();
-            if let Err(e) = fb.render_frame(&window) {
-                report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(16));
-        }
-        tracing::info!("Preview complete");
-        println!("  Display: Preview complete.");
-    }
+    run_ui_lifecycle(fb, "UI Shell", preview_secs, run_loop, || {
+        let main_window =
+            MainWindow::new().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let shell = AppShell::new(main_window);
+        shell
+            .window()
+            .show()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        Ok(())
+    });
 }
 
 fn main() -> ExitCode {
