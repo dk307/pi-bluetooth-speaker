@@ -7,11 +7,12 @@ use std::sync::Mutex;
 
 use speaker_core::cli::core_daemon::{
     CoreCliOptions, ScreenTarget, headless_requested, parse_cli_args_from, parse_preview_secs,
+    print_usage,
 };
 #[cfg(feature = "ui")]
 use speaker_core::cli::core_daemon::{
-    print_usage, report_display, run_app, run_shell_on, run_splash_on, run_ui_display,
-    run_ui_display_on_path, run_ui_lifecycle,
+    report_display, run_app, run_shell_on, run_splash_on, run_ui_display, run_ui_display_on_path,
+    run_ui_lifecycle,
 };
 use speaker_core::diag::CliParse;
 #[cfg(feature = "ui")]

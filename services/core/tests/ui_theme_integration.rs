@@ -1,3 +1,4 @@
+#![cfg(feature = "ui")]
 //! Integration tests for the UI Theme Presets and Palettes.
 
 use speaker_core::ui::ThemePreset;

@@ -1,3 +1,4 @@
+#![cfg(feature = "ui")]
 //! Integration tests for the Linux Framebuffer driver and Slint platform backend.
 
 use std::fs;

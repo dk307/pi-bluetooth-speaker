@@ -158,7 +158,9 @@ pub fn run_ui_display_on_path(
 
     tracing::info!("Initializing Framebuffer /dev/fb0 (800x480 32bpp BGRX)");
     println!("  Display: Initializing Framebuffer /dev/fb0 (800x480 32bpp BGRX)...");
-    let mut fb = match Framebuffer::open(fb_path, Some(Framebuffer::DEFAULT_BLANK_PATH)) {
+    let blank_path = (fb_path == Path::new(Framebuffer::DEFAULT_FB_PATH))
+        .then_some(Framebuffer::DEFAULT_BLANK_PATH);
+    let mut fb = match Framebuffer::open(fb_path, blank_path) {
         Ok(fb) => fb,
         Err(e) => {
             report_display(tracing::Level::WARN, "Could not open /dev/fb0", &e);
