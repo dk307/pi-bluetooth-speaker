@@ -75,13 +75,24 @@ impl AppShell {
     }
 
     /// Sets whether the optical CD player service and navigation entry are enabled.
+    ///
+    /// If disabled while the shell is currently on the CD Player tab (tab 3), the active tab
+    /// is automatically reset to the Now Playing player tab (tab 0) to prevent state desync.
     pub fn set_cd_enabled(&self, enabled: bool) {
         self.window.set_cd_enabled(enabled);
+        if !enabled && self.current_tab() == 3 {
+            self.set_tab(0);
+        }
     }
 
     /// Switches the active navigation dock tab.
+    ///
+    /// If `tab` is 3 (CD Player) but CD Player is not enabled, falls back to tab 0.
     pub fn set_tab(&self, tab: i32) {
-        let tab = tab.clamp(0, 5);
+        let mut tab = tab.clamp(0, 5);
+        if tab == 3 && !self.is_cd_enabled() {
+            tab = 0;
+        }
         self.active_tab.store(tab, Ordering::Release);
         self.window.set_active_tab(tab);
     }

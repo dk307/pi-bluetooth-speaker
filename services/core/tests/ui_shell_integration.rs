@@ -19,16 +19,36 @@ fn ui_shell_defaults_and_property_updates() {
     assert_eq!(shell.window().get_stream_codec(), "aptX-HD 48kHz");
     assert_eq!(shell.window().get_volume_value(), 75.0);
 
-    // CD Player service enablement (disabled by default)
+    // CD Player service enablement & tab synchronization
     assert!(!shell.is_cd_enabled());
     assert!(!shell.window().get_cd_enabled());
+    shell.set_tab(3);
+    assert_eq!(
+        shell.current_tab(),
+        0,
+        "tab 3 should fall back to 0 when cd is disabled"
+    );
+
     shell.set_cd_enabled(true);
     assert!(shell.is_cd_enabled());
     assert!(shell.window().get_cd_enabled());
+    shell.set_tab(3);
+    assert_eq!(
+        shell.current_tab(),
+        3,
+        "tab 3 should be accessible when cd is enabled"
+    );
+
     shell.set_cd_enabled(false);
     assert!(!shell.is_cd_enabled());
+    assert_eq!(
+        shell.current_tab(),
+        0,
+        "disabling cd while on tab 3 must reset to tab 0"
+    );
 
-    // Tab navigation updates
+    // Re-enable CD for general tab testing (0..=5)
+    shell.set_cd_enabled(true);
     for tab in 0..=5 {
         shell.set_tab(tab);
         assert_eq!(shell.current_tab(), tab);

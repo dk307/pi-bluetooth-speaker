@@ -170,16 +170,16 @@ fn run_ui_display_on_path(
 }
 
 /// Runs the common UI component lifecycle (unblank, platform init, setup callback, render loop)
-/// on an opened framebuffer backend, keeping the path testable with mocked hardware.
+/// on an opened framebuffer backend, keeping the component alive and testable with mocked hardware.
 #[cfg(feature = "ui")]
-fn run_ui_lifecycle<F>(
+fn run_ui_lifecycle<C, F>(
     fb: &mut Framebuffer,
     label: &str,
     preview_secs: Option<u64>,
     run_loop: bool,
     setup: F,
 ) where
-    F: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+    F: FnOnce() -> Result<C, Box<dyn std::error::Error>>,
 {
     if let Err(e) = fb.unblank() {
         report_display(tracing::Level::WARN, "Failed to unblank display", &e);
@@ -193,14 +193,17 @@ fn run_ui_lifecycle<F>(
         }
     };
 
-    if let Err(e) = setup() {
-        report_display(
-            tracing::Level::ERROR,
-            &format!("Failed to initialize {label}"),
-            e.as_ref(),
-        );
-        return;
-    }
+    let _component = match setup() {
+        Ok(c) => c,
+        Err(e) => {
+            report_display(
+                tracing::Level::ERROR,
+                &format!("Failed to initialize {label}"),
+                e.as_ref(),
+            );
+            return;
+        }
+    };
 
     match fb.render_frame(&window) {
         Ok(true) => {
@@ -244,7 +247,7 @@ fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool
         splash
             .show()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        Ok(())
+        Ok(splash)
     });
 }
 
@@ -259,7 +262,7 @@ fn run_shell_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool)
             .window()
             .show()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        Ok(())
+        Ok(shell)
     });
 }
 
