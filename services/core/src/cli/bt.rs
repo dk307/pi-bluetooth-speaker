@@ -447,6 +447,17 @@ pub fn output_json_status(timestamp: &str, status: &BluetoothStatus, opts: &CliO
             "muted": p.muted,
             "delay": p.delay,
         })).collect::<Vec<_>>(),
+        "playback": status.playback.as_ref().map(|p| serde_json::json!({
+            "status": p.status,
+            "title": p.title,
+            "artist": p.artist,
+            "album": p.album,
+            "position_ms": p.position_ms,
+            "duration_ms": p.duration_ms,
+            "is_playing": p.is_playing(),
+            "device_address": p.device_address.map(|a| a.to_string()),
+            "device_name": p.device_name,
+        })),
         "hardware": {
             "chip": status.hardware.chip,
             "bus": status.hardware.bus,

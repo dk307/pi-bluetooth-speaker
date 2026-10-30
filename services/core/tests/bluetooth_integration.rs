@@ -7,8 +7,8 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use speaker_core::hardware::bluetooth_test_helpers::{DbusClient, ManagedObjects};
 use speaker_core::hardware::{
     BlueAlsaPcm, BluetoothControllerInfo, BluetoothDevice, BluetoothHardwareInfo,
-    BluetoothServices, BtAddress, BtDevice, BtError, ServiceState, bluetooth_test_helpers,
-    decode_pcm_format,
+    BluetoothServices, BtAddress, BtDevice, BtError, BtPlaybackState, ServiceState,
+    bluetooth_test_helpers, decode_pcm_format, format_duration_ms,
 };
 
 #[test]
@@ -307,6 +307,15 @@ fn bt_error_predicates_and_conversions() {
     let cancel_err = bluetooth_test_helpers::make_cancelled_error("aborted");
     assert!(cancel_err.is_cancelled());
     assert_eq!(cancel_err.summary(), "task cancelled: aborted");
+
+    let player_err = bluetooth_test_helpers::make_no_active_player_error("player disconnected");
+    assert!(player_err.is_no_active_player());
+    assert!(!player_err.is_dbus());
+    assert!(!player_err.is_cancelled());
+    assert_eq!(
+        player_err.summary(),
+        "no active Bluetooth media player: player disconnected"
+    );
 
     let mock_err = bluetooth_test_helpers::make_mock_fault_error("simulated error");
     assert!(mock_err.is_mock_fault());
@@ -1091,4 +1100,369 @@ async fn concurrent_device_clones_read_and_controls() {
     h1.await.unwrap();
     h2.await.unwrap();
     let _ = bt.status().unwrap();
+}
+
+#[test]
+fn playback_state_and_duration_formatting() {
+    assert_eq!(format_duration_ms(0), "00:00");
+    assert_eq!(format_duration_ms(500), "00:00");
+    assert_eq!(format_duration_ms(59_000), "00:59");
+    assert_eq!(format_duration_ms(60_000), "01:00");
+    assert_eq!(format_duration_ms(65_000), "01:05");
+    assert_eq!(format_duration_ms(3_599_000), "59:59");
+    assert_eq!(format_duration_ms(3_600_000), "01:00:00");
+    assert_eq!(format_duration_ms(3_661_000), "01:01:01");
+    assert_eq!(format_duration_ms(36_000_000), "10:00:00");
+
+    let def = BtPlaybackState::default();
+    assert_eq!(def.device_address, None);
+    assert_eq!(def.device_name.as_ref(), "Bluetooth Audio Device");
+    assert_eq!(def.status.as_ref(), "stopped");
+    assert!(!def.is_playing());
+    assert_eq!(def.title.as_ref(), "Waiting for Bluetooth Connection...");
+    assert_eq!(def.artist.as_ref(), "DietPi Audiophile Speaker");
+    assert_eq!(def.album.as_ref(), "High-Resolution DSP Sink");
+    assert_eq!(def.position_ms, 0);
+    assert_eq!(def.duration_ms, 0);
+    assert_eq!(def.player_path, None);
+    assert_eq!(def.progress_ratio(), 0.0);
+    assert_eq!(def.format_position(), "00:00");
+    assert_eq!(def.format_duration(), "00:00");
+
+    let mut state = BtPlaybackState {
+        device_address: Some(BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])),
+        device_name: "Pixel 9".into(),
+        status: "playing".into(),
+        title: "Brothers in Arms".into(),
+        artist: "Dire Straits".into(),
+        album: "Brothers in Arms".into(),
+        position_ms: 125_000,
+        duration_ms: 415_000,
+        player_path: Some("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0".into()),
+    };
+    assert!(state.is_playing());
+    assert_eq!(state.format_position(), "02:05");
+    assert_eq!(state.format_duration(), "06:55");
+    assert!((state.progress_ratio() - (125.0 / 415.0)).abs() < 1e-4);
+
+    state.status = "Playing".into();
+    assert!(state.is_playing());
+    state.status = "PLAYING".into();
+    assert!(state.is_playing());
+    state.status = "paused".into();
+    assert!(!state.is_playing());
+    state.status = "stopped".into();
+    assert!(!state.is_playing());
+
+    // Boundary progress ratio checks
+    state.position_ms = 0;
+    assert_eq!(state.progress_ratio(), 0.0);
+    state.position_ms = 415_000;
+    assert_eq!(state.progress_ratio(), 1.0);
+    state.position_ms = 500_000;
+    assert_eq!(state.progress_ratio(), 1.0);
+    state.duration_ms = 0;
+    assert_eq!(state.progress_ratio(), 0.0);
+}
+
+#[test]
+fn bluetooth_mock_playback_controls() {
+    let (device, _) = BluetoothDevice::new_mocked();
+
+    // Verify initial playback state
+    let initial = device.status().unwrap();
+    let initial_playback = initial.playback.as_ref().unwrap();
+    assert!(initial_playback.is_playing());
+    assert_eq!(initial_playback.title.as_ref(), "Money for Nothing");
+    assert_eq!(initial_playback.artist.as_ref(), "Dire Straits");
+    assert_eq!(initial_playback.album.as_ref(), "Brothers in Arms");
+    assert_eq!(initial_playback.position_ms, 105_000);
+    assert_eq!(initial_playback.duration_ms, 230_000);
+
+    // Pause
+    device.player_pause().unwrap();
+    let s = device.status().unwrap();
+    assert_eq!(s.playback.as_ref().unwrap().status.as_ref(), "paused");
+    assert!(!s.playback.as_ref().unwrap().is_playing());
+
+    // Play
+    device.player_play().unwrap();
+    let s = device.status().unwrap();
+    assert_eq!(s.playback.as_ref().unwrap().status.as_ref(), "playing");
+    assert!(s.playback.as_ref().unwrap().is_playing());
+
+    // Toggle
+    device.player_toggle().unwrap();
+    assert_eq!(
+        device
+            .status()
+            .unwrap()
+            .playback
+            .as_ref()
+            .unwrap()
+            .status
+            .as_ref(),
+        "paused"
+    );
+    device.player_toggle().unwrap();
+    assert_eq!(
+        device
+            .status()
+            .unwrap()
+            .playback
+            .as_ref()
+            .unwrap()
+            .status
+            .as_ref(),
+        "playing"
+    );
+
+    // Seek
+    device.player_seek(150_000).unwrap();
+    assert_eq!(
+        device
+            .status()
+            .unwrap()
+            .playback
+            .as_ref()
+            .unwrap()
+            .position_ms,
+        150_000
+    );
+
+    // Next / Previous
+    device.player_next().unwrap();
+    device.player_previous().unwrap();
+}
+
+#[test]
+fn bluetooth_mock_playback_state_mutation_and_faults() {
+    let (device, mock) = BluetoothDevice::new_mocked();
+
+    // Mock controller setters
+    mock.set_player_status("stopped");
+    assert_eq!(
+        device
+            .status()
+            .unwrap()
+            .playback
+            .as_ref()
+            .unwrap()
+            .status
+            .as_ref(),
+        "stopped"
+    );
+
+    mock.set_player_track("Tunnel of Love", "Dire Straits", "Making Movies", 490_000);
+    let s = device.status().unwrap();
+    let p = s.playback.as_ref().unwrap();
+    assert_eq!(p.title.as_ref(), "Tunnel of Love");
+    assert_eq!(p.artist.as_ref(), "Dire Straits");
+    assert_eq!(p.album.as_ref(), "Making Movies");
+    assert_eq!(p.duration_ms, 490_000);
+
+    mock.set_player_position(245_000);
+    assert_eq!(
+        device
+            .status()
+            .unwrap()
+            .playback
+            .as_ref()
+            .unwrap()
+            .position_ms,
+        245_000
+    );
+
+    // No active player behavior when playback is None
+    mock.set_playback(None);
+    assert!(device.status().unwrap().playback.is_none());
+
+    let err_play = device.player_play().unwrap_err();
+    assert!(err_play.is_no_active_player());
+    assert_eq!(
+        err_play.summary(),
+        "no active Bluetooth media player: no active mock player"
+    );
+    assert!(device.player_pause().unwrap_err().is_no_active_player());
+    assert!(device.player_toggle().unwrap_err().is_no_active_player());
+    assert!(device.player_next().unwrap_err().is_no_active_player());
+    assert!(device.player_previous().unwrap_err().is_no_active_player());
+    assert!(
+        device
+            .player_seek(10_000)
+            .unwrap_err()
+            .is_no_active_player()
+    );
+
+    // Mock fault injection
+    mock.set_player_status("playing");
+    mock.set_fault(Some("simulated player error".into()));
+    let err_fault = device.player_play().unwrap_err();
+    assert!(err_fault.is_mock_fault());
+    assert!(device.player_seek(1000).unwrap_err().is_mock_fault());
+}
+
+#[test]
+fn parse_bluez_all_with_media_player() {
+    let mut objects: ManagedObjects = HashMap::new();
+
+    // 1. Adapter object
+    let adapter_path = OwnedObjectPath::try_from("/org/bluez/hci0").unwrap();
+    let mut adapter_ifaces = HashMap::new();
+    let mut adapter_props = HashMap::new();
+    adapter_props.insert("Address".to_string(), to_val("DC:A6:32:11:22:33"));
+    adapter_props.insert("Name".to_string(), to_val("RaspberryPi"));
+    adapter_props.insert("Alias".to_string(), to_val("Speaker-Pi"));
+    adapter_props.insert("Powered".to_string(), to_val(true));
+    adapter_ifaces.insert(iface("org.bluez.Adapter1"), adapter_props);
+    objects.insert(adapter_path, adapter_ifaces);
+
+    // 2. Device object
+    let dev_path = OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF").unwrap();
+    let mut dev_ifaces = HashMap::new();
+    let mut dev_props = HashMap::new();
+    dev_props.insert("Address".to_string(), to_val("AA:BB:CC:DD:EE:FF"));
+    dev_props.insert("Name".to_string(), to_val("Pixel 8 Pro"));
+    dev_props.insert("Alias".to_string(), to_val("Deepak's Phone"));
+    dev_props.insert("Connected".to_string(), to_val(true));
+    dev_props.insert("Paired".to_string(), to_val(true));
+    dev_ifaces.insert(iface("org.bluez.Device1"), dev_props);
+    objects.insert(dev_path, dev_ifaces);
+
+    // 3. MediaPlayer1 object
+    let player_path =
+        OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0").unwrap();
+    let mut player_ifaces = HashMap::new();
+    let mut player_props = HashMap::new();
+    player_props.insert("Status".to_string(), to_val("playing"));
+    player_props.insert("Position".to_string(), to_val(45_000u32));
+    player_props.insert(
+        "Device".to_string(),
+        to_val(OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF").unwrap()),
+    );
+
+    let sig_s = zbus::zvariant::Signature::try_from("s").unwrap();
+    let sig_v = zbus::zvariant::Signature::try_from("v").unwrap();
+    let mut track_dict = zbus::zvariant::Dict::new(&sig_s, &sig_v);
+    track_dict
+        .append(
+            Value::from("Title"),
+            Value::Value(Box::new(Value::from("So Far Away"))),
+        )
+        .unwrap();
+    track_dict
+        .append(
+            Value::from("Artist"),
+            Value::Value(Box::new(Value::from("Dire Straits"))),
+        )
+        .unwrap();
+    track_dict
+        .append(
+            Value::from("Album"),
+            Value::Value(Box::new(Value::from("Brothers in Arms"))),
+        )
+        .unwrap();
+    track_dict
+        .append(
+            Value::from("Duration"),
+            Value::Value(Box::new(Value::from(312_000u32))),
+        )
+        .unwrap();
+    player_props.insert("Track".to_string(), to_val(Value::Dict(track_dict)));
+
+    player_ifaces.insert(iface("org.bluez.MediaPlayer1"), player_props);
+    objects.insert(player_path, player_ifaces);
+
+    // Query BlueZ with parse_bluez_all
+    let (adapter, devices, playback) = DbusClient::parse_bluez_all(&objects, Some("hci0")).unwrap();
+
+    let adapter = adapter.expect("adapter should be parsed");
+    assert_eq!(adapter.id.as_ref(), "hci0");
+
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].display_name(), "Deepak's Phone");
+
+    let pb = playback.expect("playback should be parsed");
+    assert!(pb.is_playing());
+    assert_eq!(pb.device_name.as_ref(), "Deepak's Phone");
+    assert_eq!(
+        pb.device_address,
+        Some(BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]))
+    );
+    assert_eq!(pb.title.as_ref(), "So Far Away");
+    assert_eq!(pb.artist.as_ref(), "Dire Straits");
+    assert_eq!(pb.album.as_ref(), "Brothers in Arms");
+    assert_eq!(pb.position_ms, 45_000);
+    assert_eq!(pb.duration_ms, 312_000);
+    assert_eq!(pb.format_position(), "00:45");
+    assert_eq!(pb.format_duration(), "05:12");
+    assert_eq!(
+        pb.player_path.as_deref(),
+        Some("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0")
+    );
+}
+
+#[test]
+fn parse_bluez_all_adapter_filtering_and_fallback() {
+    let mut objects: ManagedObjects = HashMap::new();
+
+    // Adapter hci0
+    let adapter_path = OwnedObjectPath::try_from("/org/bluez/hci0").unwrap();
+    let mut adapter_ifaces = HashMap::new();
+    let mut adapter_props = HashMap::new();
+    adapter_props.insert("Address".to_string(), to_val("DC:A6:32:11:22:33"));
+    adapter_ifaces.insert(iface("org.bluez.Adapter1"), adapter_props);
+    objects.insert(adapter_path, adapter_ifaces);
+
+    // Player on hci0
+    let player_path =
+        OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0").unwrap();
+    let mut player_ifaces = HashMap::new();
+    let mut player_props = HashMap::new();
+    player_props.insert("Status".to_string(), to_val("playing"));
+    player_ifaces.insert(iface("org.bluez.MediaPlayer1"), player_props);
+    objects.insert(player_path, player_ifaces);
+
+    // Player on hci1 (different adapter)
+    let other_player_path =
+        OwnedObjectPath::try_from("/org/bluez/hci1/dev_11_22_33_44_55_66/player0").unwrap();
+    let mut other_ifaces = HashMap::new();
+    let mut other_props = HashMap::new();
+    other_props.insert("Status".to_string(), to_val("paused"));
+    other_ifaces.insert(iface("org.bluez.MediaPlayer1"), other_props);
+    objects.insert(other_player_path, other_ifaces);
+
+    let (_, _, filtered_pb) = DbusClient::parse_bluez_all(&objects, Some("hci0")).unwrap();
+    assert_eq!(
+        filtered_pb.unwrap().player_path.as_deref(),
+        Some("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0")
+    );
+
+    // Test fallback defaults when Track dictionary is omitted
+    let mut minimal_objects = HashMap::new();
+    let mut min_dev_ifaces = HashMap::new();
+    min_dev_ifaces.insert(iface("org.bluez.Device1"), HashMap::new());
+    minimal_objects.insert(
+        OwnedObjectPath::try_from("/org/bluez/hci0/dev_minimal").unwrap(),
+        min_dev_ifaces,
+    );
+
+    let mut min_player_ifaces = HashMap::new();
+    let mut min_player_props = HashMap::new();
+    min_player_props.insert("Status".to_string(), to_val("paused"));
+    min_player_ifaces.insert(iface("org.bluez.MediaPlayer1"), min_player_props);
+    minimal_objects.insert(
+        OwnedObjectPath::try_from("/org/bluez/hci0/player_min").unwrap(),
+        min_player_ifaces,
+    );
+
+    let (_, _, min_pb) = DbusClient::parse_bluez_all(&minimal_objects, None).unwrap();
+    let min_pb = min_pb.unwrap();
+    assert!(!min_pb.is_playing());
+    assert_eq!(min_pb.device_name.as_ref(), "Bluetooth Audio Device");
+    assert_eq!(min_pb.title.as_ref(), "Waiting for Bluetooth Connection...");
+    assert_eq!(min_pb.artist.as_ref(), "DietPi Audiophile Speaker");
+    assert_eq!(min_pb.album.as_ref(), "High-Resolution DSP Sink");
+    assert_eq!(min_pb.position_ms, 0);
+    assert_eq!(min_pb.duration_ms, 0);
 }

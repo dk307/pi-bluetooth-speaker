@@ -1,24 +1,39 @@
 import { Theme } from "theme.slint";
+import { NowPlayingView } from "now_playing.slint";
 
 export component MainViewport inherits Rectangle {
     height: 380px;
     background: Theme.active.chassis;
 
     in-out property <int> active_tab: 0;
-    in-out property <string> track_title: "Waiting for Connection...";
+    in-out property <string> track_title: "Waiting for Bluetooth Connection...";
     in-out property <string> track_artist: "DietPi Audiophile Speaker";
     in-out property <string> track_album: "High-Resolution DSP Sink";
+    in-out property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit ➔ DSP 32-bit";
+    in-out property <string> position_text: "00:00";
+    in-out property <string> duration_text: "00:00";
+    in-out property <float> progress_ratio: 0.0;
     in-out property <float> volume_value: 75.0;
     in-out property <bool> is_playing: false;
+    in-out property <bool> is_muted: false;
+    in-out property <bool> has_cover_art: false;
+    in-out property <image> cover_image;
+    in-out property <float> left_peak_ratio: 0.0;
+    in-out property <float> right_peak_ratio: 0.0;
 
     callback toggle_play_pause();
+    callback next_track();
+    callback previous_track();
+    callback seek(float);
+    callback toggle_mute();
     callback volume_changed(float);
+    callback stream_pill_clicked();
     callback cycle_theme();
     callback select_theme(int);
 
     // Tab 0: Now Playing
     if root.active_tab == 0 : Rectangle {
-        padding: 20px;
+        padding: 16px;
 
         Rectangle {
             background: Theme.active.card_surface;
@@ -27,87 +42,29 @@ export component MainViewport inherits Rectangle {
             border-color: Theme.active.card_border;
             clip: true;
 
-            VerticalLayout {
-                alignment: center;
-                spacing: 12px;
-                padding: 24px;
+            NowPlayingView {
+                track_title: root.track_title;
+                track_artist: root.track_artist;
+                track_album: root.track_album;
+                stream_details: root.stream_details;
+                position_text: root.position_text;
+                duration_text: root.duration_text;
+                progress_ratio: root.progress_ratio;
+                is_playing: root.is_playing;
+                is_muted: root.is_muted;
+                has_cover_art: root.has_cover_art;
+                cover_image: root.cover_image;
+                left_peak_ratio: root.left_peak_ratio;
+                right_peak_ratio: root.right_peak_ratio;
+                volume_value <=> root.volume_value;
 
-                Text {
-                    text: root.track_title;
-                    color: Theme.active.text_primary;
-                    font-size: 24px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                    overflow: elide;
-                }
-
-                Text {
-                    text: root.track_artist;
-                    color: Theme.active.secondary_accent;
-                    font-size: 18px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    overflow: elide;
-                }
-
-                Text {
-                    text: root.track_album;
-                    color: Theme.active.text_muted;
-                    font-size: 14px;
-                    horizontal-alignment: center;
-                    overflow: elide;
-                }
-
-                // Volume slider & indicator
-                HorizontalLayout {
-                    alignment: center;
-                    spacing: 16px;
-                    padding-top: 16px;
-
-                    Text {
-                        text: "VOL";
-                        color: Theme.active.text_muted;
-                        font-size: 13px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-
-                    Rectangle {
-                        width: 280px;
-                        height: 8px;
-                        background: #1c2430;
-                        border-radius: 4px;
-                        y: 8px;
-
-                        Rectangle {
-                            x: 0px;
-                            y: 0px;
-                            width: parent.width * (root.volume_value >= 0.0 ? (root.volume_value <= 100.0 ? root.volume_value / 100.0 : 1.0) : 0.0);
-                            height: parent.height;
-                            background: Theme.active.primary_accent;
-                            border-radius: 4px;
-                        }
-
-                        TouchArea {
-                            moved => {
-                                root.volume_value = Math.max(0.0, Math.min(100.0, self.mouse-x / self.width * 100.0));
-                                root.volume_changed(root.volume_value);
-                            }
-                            clicked => {
-                                root.volume_value = Math.max(0.0, Math.min(100.0, self.mouse-x / self.width * 100.0));
-                                root.volume_changed(root.volume_value);
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: "\{Math.round(root.volume_value >= 0.0 ? (root.volume_value <= 100.0 ? root.volume_value : 100.0) : 0.0)}%";
-                        color: Theme.active.primary_accent;
-                        font-size: 14px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-                }
+                toggle_play_pause => { root.toggle_play_pause(); }
+                next_track => { root.next_track(); }
+                previous_track => { root.previous_track(); }
+                seek(ratio) => { root.seek(ratio); }
+                toggle_mute => { root.toggle_mute(); }
+                volume_changed(val) => { root.volume_changed(val); }
+                stream_pill_clicked => { root.stream_pill_clicked(); }
             }
         }
     }

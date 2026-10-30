@@ -20,11 +20,25 @@ export component MainWindow inherits Window {
     in-out property <string> track_title: "Waiting for Bluetooth Connection...";
     in-out property <string> track_artist: "DietPi Speaker";
     in-out property <string> track_album: "Audiophile DSP Sink";
+    in-out property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit ➔ DSP 32-bit";
+    in-out property <string> position_text: "00:00";
+    in-out property <string> duration_text: "00:00";
+    in-out property <float> progress_ratio: 0.0;
     in-out property <float> volume_value: 75.0;
     in-out property <bool> is_playing: false;
+    in-out property <bool> is_muted: false;
+    in-out property <bool> has_cover_art: false;
+    in-out property <image> cover_image;
+    in-out property <float> left_peak_ratio: 0.0;
+    in-out property <float> right_peak_ratio: 0.0;
     in-out property <bool> cd_enabled: false;
 
     callback toggle_play_pause();
+    callback next_track();
+    callback previous_track();
+    callback seek(float);
+    callback toggle_mute();
+    callback stream_pill_clicked();
     callback volume_changed(float);
     callback source_clicked();
     callback night_mode_clicked();
@@ -51,12 +65,25 @@ export component MainWindow inherits Window {
             track_title: root.track_title;
             track_artist: root.track_artist;
             track_album: root.track_album;
+            stream_details: root.stream_details;
+            position_text: root.position_text;
+            duration_text: root.duration_text;
+            progress_ratio: root.progress_ratio;
             volume_value <=> root.volume_value;
             is_playing: root.is_playing;
+            is_muted: root.is_muted;
+            has_cover_art: root.has_cover_art;
+            cover_image: root.cover_image;
+            left_peak_ratio: root.left_peak_ratio;
+            right_peak_ratio: root.right_peak_ratio;
+
             toggle_play_pause => { root.toggle_play_pause(); }
-            volume_changed(val) => {
-                root.volume_changed(val);
-            }
+            next_track => { root.next_track(); }
+            previous_track => { root.previous_track(); }
+            seek(ratio) => { root.seek(ratio); }
+            toggle_mute => { root.toggle_mute(); }
+            stream_pill_clicked => { root.stream_pill_clicked(); }
+            volume_changed(val) => { root.volume_changed(val); }
             select_theme(idx) => { root.select_theme(idx); }
             cycle_theme => { root.cycle_theme(); }
         }

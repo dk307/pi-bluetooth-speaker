@@ -85,8 +85,9 @@ fn run_ui_display_headless_short_circuits() {
     // SPEAKER_CORE_HEADLESS while this guard is held.
     unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "1") };
     // The headless guard in run_ui_display must return before any framebuffer/sysfs access.
-    run_ui_display(ScreenTarget::Splash, Some(1), true);
-    run_ui_display(ScreenTarget::Shell, Some(1), true);
+    run_ui_display(ScreenTarget::Splash, Some(1), true, false);
+    run_ui_display(ScreenTarget::Shell, Some(1), true, false);
+    run_ui_display(ScreenTarget::Shell, Some(1), true, true);
     // SAFETY: same serialized-guard invariant as above.
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
 }
@@ -100,8 +101,9 @@ fn run_ui_display_missing_device_returns_early() {
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
     let dir = ScopedTempDir::new("fb-boot-splash-missing");
     let missing = dir.path().join("fb0");
-    run_ui_display_on_path(&missing, ScreenTarget::Splash, Some(1), true);
-    run_ui_display_on_path(&missing, ScreenTarget::Shell, Some(1), true);
+    run_ui_display_on_path(&missing, ScreenTarget::Splash, Some(1), true, false);
+    run_ui_display_on_path(&missing, ScreenTarget::Shell, Some(1), true, false);
+    run_ui_display_on_path(&missing, ScreenTarget::Shell, Some(1), true, true);
 }
 
 #[cfg(feature = "ui")]
@@ -150,7 +152,7 @@ fn run_splash_on_mocked_render_error_skips_loop() {
 fn run_shell_on_mocked_renders_and_tracks_counters() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     assert!(fb.is_mocked());
-    run_shell_on(&mut fb, None, false);
+    run_shell_on(&mut fb, None, false, false);
     assert_eq!(fb.unblank_count(), 1);
     assert_eq!(fb.render_count(), 1);
     assert_eq!(ctrl.counters(), (1, 1));
@@ -161,7 +163,7 @@ fn run_shell_on_mocked_renders_and_tracks_counters() {
 fn run_shell_on_mocked_reports_unblank_failure_and_continues() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     ctrl.set_unblank_error("simulated unblank failure");
-    run_shell_on(&mut fb, None, false);
+    run_shell_on(&mut fb, None, false, false);
     assert_eq!(fb.unblank_count(), 0);
     assert_eq!(fb.render_count(), 1);
 }
@@ -171,9 +173,18 @@ fn run_shell_on_mocked_reports_unblank_failure_and_continues() {
 fn run_shell_on_mocked_render_error_skips_loop() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     ctrl.set_render_error("simulated render failure");
-    run_shell_on(&mut fb, Some(0), false);
+    run_shell_on(&mut fb, Some(0), false, false);
     assert_eq!(fb.render_count(), 0);
     assert_eq!(ctrl.counters(), (1, 0));
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn run_shell_on_mocked_with_demo_playback() {
+    let (mut fb, ctrl) = Framebuffer::new_mocked();
+    run_shell_on(&mut fb, Some(0), false, true);
+    assert_eq!(fb.render_count(), 1);
+    assert_eq!(ctrl.counters(), (1, 1));
 }
 
 #[test]
@@ -186,6 +197,7 @@ fn parse_cli_args_flags_and_values() {
         CliParse::Options(o) => {
             assert!(o.preview_secs.is_none());
             assert!(!o.run_loop);
+            assert!(!o.demo_playback);
         }
         other => panic!("expected Options, got {other:?}"),
     }
@@ -194,6 +206,23 @@ fn parse_cli_args_flags_and_values() {
         CliParse::Options(o) => {
             assert_eq!(o.preview_secs, Some(5));
             assert!(o.run_loop);
+            assert_eq!(o.screen, ScreenTarget::Shell);
+            assert!(!o.demo_playback);
+        }
+        other => panic!("expected Options, got {other:?}"),
+    }
+
+    match parsed(&["-d"]).unwrap() {
+        CliParse::Options(o) => {
+            assert!(o.demo_playback);
+            assert_eq!(o.screen, ScreenTarget::Shell);
+        }
+        other => panic!("expected Options, got {other:?}"),
+    }
+
+    match parsed(&["--demo-playback"]).unwrap() {
+        CliParse::Options(o) => {
+            assert!(o.demo_playback);
             assert_eq!(o.screen, ScreenTarget::Shell);
         }
         other => panic!("expected Options, got {other:?}"),
@@ -234,8 +263,17 @@ fn run_app_headless_executes_successfully() {
         preview_secs: Some(1),
         run_loop: false,
         screen: ScreenTarget::Splash,
+        demo_playback: false,
     });
     assert_eq!(code, std::process::ExitCode::SUCCESS);
+
+    let code_demo = run_app(CoreCliOptions {
+        preview_secs: Some(1),
+        run_loop: false,
+        screen: ScreenTarget::Shell,
+        demo_playback: true,
+    });
+    assert_eq!(code_demo, std::process::ExitCode::SUCCESS);
 
     // SAFETY: same serialized-guard invariant as above.
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
@@ -264,13 +302,14 @@ fn run_ui_display_on_valid_and_invalid_file_paths() {
     let dev = dir.path().join("fake_fb");
     fs::write(&dev, vec![0u8; 800 * 480 * 4]).unwrap();
 
-    run_ui_display_on_path(&dev, ScreenTarget::Splash, None, false);
-    run_ui_display_on_path(&dev, ScreenTarget::Shell, None, false);
+    run_ui_display_on_path(&dev, ScreenTarget::Splash, None, false, false);
+    run_ui_display_on_path(&dev, ScreenTarget::Shell, None, false, false);
+    run_ui_display_on_path(&dev, ScreenTarget::Shell, None, false, true);
 
     // Invalid file (too short) to trigger Framebuffer::open failure path
     let bad_dev = dir.path().join("bad_fb");
     fs::write(&bad_dev, [0u8; 10]).unwrap();
-    run_ui_display_on_path(&bad_dev, ScreenTarget::Splash, None, false);
+    run_ui_display_on_path(&bad_dev, ScreenTarget::Splash, None, false, false);
 }
 
 #[cfg(feature = "ui")]
@@ -312,8 +351,9 @@ fn run_ui_display_with_headless_disabled_checks_device() {
 
     let dir = ScopedTempDir::new("fb-headless-disabled");
     let missing = dir.path().join("fb0");
-    run_ui_display_on_path(&missing, ScreenTarget::Splash, None, false);
-    run_ui_display_on_path(&missing, ScreenTarget::Shell, None, false);
+    run_ui_display_on_path(&missing, ScreenTarget::Splash, None, false, false);
+    run_ui_display_on_path(&missing, ScreenTarget::Shell, None, false, false);
+    run_ui_display_on_path(&missing, ScreenTarget::Shell, None, false, true);
 
     // SAFETY: serialized test guard
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };

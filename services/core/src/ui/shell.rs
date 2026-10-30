@@ -122,6 +122,102 @@ impl AppShell {
         self.window.set_volume_value(clamped);
     }
 
+    /// Returns whether media is actively playing.
+    #[must_use]
+    pub fn is_playing(&self) -> bool {
+        self.window.get_is_playing()
+    }
+
+    /// Sets whether media is playing.
+    pub fn set_playing(&self, is_playing: bool) {
+        self.window.set_is_playing(is_playing);
+    }
+
+    /// Returns whether audio output is currently soft-muted.
+    #[must_use]
+    pub fn is_muted(&self) -> bool {
+        self.window.get_is_muted()
+    }
+
+    /// Sets whether audio output is currently soft-muted.
+    pub fn set_muted(&self, muted: bool) {
+        self.window.set_is_muted(muted);
+    }
+
+    /// Updates playback state, elapsed position, and total duration.
+    pub fn set_playback_state(&self, is_playing: bool, position_ms: u32, duration_ms: u32) {
+        self.window.set_is_playing(is_playing);
+        let ratio = if duration_ms == 0 {
+            0.0
+        } else {
+            (position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
+        };
+        self.window.set_progress_ratio(ratio);
+        self.window
+            .set_position_text(crate::hardware::format_duration_ms(position_ms).into());
+        self.window
+            .set_duration_text(crate::hardware::format_duration_ms(duration_ms).into());
+    }
+
+    /// Updates the audio stream inspector pill details.
+    pub fn set_stream_details(&self, details: impl Into<slint::SharedString>) {
+        self.window.set_stream_details(details.into());
+    }
+
+    /// Updates the mini peak meter visualization ratios (0.0 to 1.0).
+    pub fn set_peak_levels(&self, left: f32, right: f32) {
+        let clamp_ratio = |val: f32| {
+            if val.is_nan() {
+                0.0
+            } else {
+                val.clamp(0.0, 1.0)
+            }
+        };
+        self.window.set_left_peak_ratio(clamp_ratio(left));
+        self.window.set_right_peak_ratio(clamp_ratio(right));
+    }
+
+    /// Sets whether cover art is present.
+    pub fn set_has_cover_art(&self, has_art: bool) {
+        self.window.set_has_cover_art(has_art);
+    }
+
+    /// Updates the cover art image.
+    pub fn set_cover_image(&self, image: slint::Image) {
+        self.window.set_cover_image(image);
+        self.window.set_has_cover_art(true);
+    }
+
+    /// Applies state from a [`crate::hardware::BtPlaybackState`] point-in-time snapshot.
+    pub fn apply_bluetooth_playback(&self, playback: &crate::hardware::BtPlaybackState) {
+        self.set_track_metadata(
+            playback.title.as_ref(),
+            playback.artist.as_ref(),
+            playback.album.as_ref(),
+        );
+        self.set_playback_state(
+            playback.is_playing(),
+            playback.position_ms,
+            playback.duration_ms,
+        );
+        if !playback.device_name.is_empty() {
+            self.set_track_or_device(playback.device_name.as_ref());
+        }
+    }
+
+    /// Configures the shell with demo playback for visual preview and verification.
+    pub fn apply_demo_playback(&self) {
+        self.set_tab(0);
+        self.set_source("Bluetooth");
+        self.set_track_or_device("Pixel 10 Pro XL");
+        self.set_stream_codec("aptX-HD 48kHz");
+        self.set_track_metadata("Money for Nothing", "Dire Straits", "Brothers in Arms");
+        self.set_stream_details("aptX-HD 576k | 48kHz/16-bit ➔ DSP 32-bit | S: 0.999974");
+        self.set_playback_state(true, 105_000, 230_000);
+        self.set_volume(78.0);
+        self.set_peak_levels(0.72, 0.68);
+    }
+
     /// Applies a theme preset to the UI shell.
     pub fn apply_theme(&self, preset: ThemePreset) {
         preset.apply(&self.window);
@@ -164,6 +260,49 @@ impl AppShell {
             }
         });
 
+        let win = self.window.as_weak();
+        self.window.on_toggle_play_pause(move || {
+            if let Some(w) = win.upgrade() {
+                let current = w.get_is_playing();
+                w.set_is_playing(!current);
+                tracing::debug!("Play/Pause toggled to {}", !current);
+            }
+        });
+
+        let win = self.window.as_weak();
+        self.window.on_toggle_mute(move || {
+            if let Some(w) = win.upgrade() {
+                let current = w.get_is_muted();
+                w.set_is_muted(!current);
+                tracing::debug!("Mute toggled to {}", !current);
+            }
+        });
+
+        let win = self.window.as_weak();
+        self.window.on_seek(move |ratio| {
+            if let Some(w) = win.upgrade() {
+                let clamped = if ratio.is_finite() {
+                    ratio.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                w.set_progress_ratio(clamped);
+                tracing::debug!("Seek to ratio: {clamped}");
+            }
+        });
+
+        self.window.on_next_track(|| {
+            tracing::info!("Next track requested");
+        });
+
+        self.window.on_previous_track(|| {
+            tracing::info!("Previous track requested");
+        });
+
+        self.window.on_stream_pill_clicked(|| {
+            tracing::info!("Stream inspector pill clicked");
+        });
+
         self.window.on_source_clicked(|| {
             tracing::info!("Source pill clicked");
         });
@@ -174,10 +313,6 @@ impl AppShell {
 
         self.window.on_volume_changed(|val| {
             tracing::debug!("Volume changed to {val}%");
-        });
-
-        self.window.on_toggle_play_pause(|| {
-            tracing::debug!("Play/Pause toggled");
         });
     }
 }

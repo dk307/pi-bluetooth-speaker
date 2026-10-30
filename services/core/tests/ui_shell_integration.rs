@@ -197,3 +197,174 @@ fn ui_shell_renders_to_framebuffer() {
         "Rendered frame must contain drawn pixels across the 800x480 canvas"
     );
 }
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_now_playing_properties_and_playback_state() {
+    use speaker_core::hardware::BtPlaybackState;
+    use speaker_core::ui::{AppShell, Framebuffer, MainWindow};
+
+    let fb = Framebuffer::new_mocked().0;
+    let _window = fb.init_platform().expect("Failed to initialize platform");
+
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    // Initial state
+    assert!(!shell.is_playing());
+    assert!(!shell.is_muted());
+    assert_eq!(shell.window().get_progress_ratio(), 0.0);
+    assert_eq!(shell.window().get_position_text(), "00:00");
+    assert_eq!(shell.window().get_duration_text(), "00:00");
+
+    // Playback state updates
+    shell.set_playback_state(true, 65_000, 195_000);
+    assert!(shell.is_playing());
+    assert_eq!(shell.window().get_position_text(), "01:05");
+    assert_eq!(shell.window().get_duration_text(), "03:15");
+    let ratio = shell.window().get_progress_ratio();
+    assert!((ratio - (65.0 / 195.0)).abs() < 1e-4);
+
+    // Zero duration guard
+    shell.set_playback_state(false, 0, 0);
+    assert!(!shell.is_playing());
+    assert_eq!(shell.window().get_progress_ratio(), 0.0);
+
+    // Mute toggling
+    shell.set_muted(true);
+    assert!(shell.is_muted());
+    assert!(shell.window().get_is_muted());
+    shell.set_muted(false);
+    assert!(!shell.is_muted());
+    assert!(!shell.window().get_is_muted());
+
+    // Playing toggle directly
+    shell.set_playing(true);
+    assert!(shell.is_playing());
+
+    // Stream details
+    shell.set_stream_details("AAC-LC | 44.1kHz/16-bit ➔ DSP 48k");
+    assert_eq!(
+        shell.window().get_stream_details(),
+        "AAC-LC | 44.1kHz/16-bit ➔ DSP 48k"
+    );
+
+    // Peak levels & NaN / boundary clamping
+    shell.set_peak_levels(0.85, 0.42);
+    assert_eq!(shell.window().get_left_peak_ratio(), 0.85);
+    assert_eq!(shell.window().get_right_peak_ratio(), 0.42);
+
+    shell.set_peak_levels(1.5, -0.5);
+    assert_eq!(shell.window().get_left_peak_ratio(), 1.0);
+    assert_eq!(shell.window().get_right_peak_ratio(), 0.0);
+
+    shell.set_peak_levels(f32::NAN, f32::INFINITY);
+    assert_eq!(shell.window().get_left_peak_ratio(), 0.0);
+    assert_eq!(shell.window().get_right_peak_ratio(), 1.0);
+
+    // Cover art toggle
+    assert!(!shell.window().get_has_cover_art());
+    shell.set_has_cover_art(true);
+    assert!(shell.window().get_has_cover_art());
+    shell.set_has_cover_art(false);
+    assert!(!shell.window().get_has_cover_art());
+
+    // Apply BtPlaybackState
+    let playback = BtPlaybackState {
+        device_address: None,
+        device_name: "Pixel Phone".into(),
+        status: "playing".into(),
+        title: "Telegraph Road".into(),
+        artist: "Dire Straits".into(),
+        album: "Love over Gold".into(),
+        position_ms: 300_000,
+        duration_ms: 860_000,
+        player_path: None,
+    };
+    shell.apply_bluetooth_playback(&playback);
+    assert_eq!(shell.window().get_track_title(), "Telegraph Road");
+    assert_eq!(shell.window().get_track_artist(), "Dire Straits");
+    assert_eq!(shell.window().get_track_album(), "Love over Gold");
+    assert_eq!(shell.window().get_track_or_device(), "Pixel Phone");
+    assert!(shell.is_playing());
+    assert_eq!(shell.window().get_position_text(), "05:00");
+    assert_eq!(shell.window().get_duration_text(), "14:20");
+
+    // Apply demo playback
+    shell.apply_demo_playback();
+    assert_eq!(shell.current_tab(), 0);
+    assert_eq!(shell.window().get_active_source(), "Bluetooth");
+    assert_eq!(shell.window().get_track_title(), "Money for Nothing");
+    assert_eq!(shell.window().get_track_artist(), "Dire Straits");
+    assert_eq!(shell.window().get_track_album(), "Brothers in Arms");
+    assert_eq!(shell.window().get_volume_value(), 78.0);
+    assert!(shell.is_playing());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_now_playing_callbacks() {
+    use speaker_core::ui::{AppShell, Framebuffer, MainWindow};
+
+    let fb = Framebuffer::new_mocked().0;
+    let _window = fb.init_platform().expect("Failed to initialize platform");
+
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    // Invoke transport callbacks
+    assert!(!shell.is_playing());
+    shell.window().invoke_toggle_play_pause();
+    assert!(shell.is_playing());
+    shell.window().invoke_toggle_play_pause();
+    assert!(!shell.is_playing());
+
+    assert!(!shell.is_muted());
+    shell.window().invoke_toggle_mute();
+    assert!(shell.is_muted());
+    shell.window().invoke_toggle_mute();
+    assert!(!shell.is_muted());
+
+    // Seeking
+    shell.window().invoke_seek(0.65);
+    assert_eq!(shell.window().get_progress_ratio(), 0.65);
+    shell.window().invoke_seek(1.5);
+    assert_eq!(shell.window().get_progress_ratio(), 1.0);
+    shell.window().invoke_seek(-0.2);
+    assert_eq!(shell.window().get_progress_ratio(), 0.0);
+    shell.window().invoke_seek(f32::NAN);
+    assert_eq!(shell.window().get_progress_ratio(), 0.0);
+
+    // Callbacks without panicking
+    shell.window().invoke_next_track();
+    shell.window().invoke_previous_track();
+    shell.window().invoke_stream_pill_clicked();
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_demo_playback_renders_to_framebuffer() {
+    use slint::ComponentHandle;
+    use speaker_core::ui::{AppShell, Bgrx8888Pixel, Framebuffer, MainWindow};
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    shell.apply_demo_playback();
+    shell.window().show().expect("Failed to show MainWindow");
+    let rendered = fb.render_frame(&window).expect("Render frame failed");
+    assert!(rendered);
+    assert_eq!(fb.render_count(), 1);
+
+    let non_zero_pixels = fb
+        .pixels()
+        .iter()
+        .filter(|p| **p != Bgrx8888Pixel::default())
+        .count();
+    assert!(
+        non_zero_pixels > 0,
+        "Rendered demo playback frame must contain drawn pixels across the 800x480 canvas"
+    );
+}

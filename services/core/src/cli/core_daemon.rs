@@ -35,6 +35,8 @@ pub struct CoreCliOptions {
     pub run_loop: bool,
     /// Screen target to initialize and display.
     pub screen: ScreenTarget,
+    /// Whether to populate the Bluetooth Playing screen with a demo track.
+    pub demo_playback: bool,
 }
 
 /// Prints usage text for the core daemon executable.
@@ -45,6 +47,7 @@ pub fn print_usage(bin_name: &str) {
     println!();
     println!("Options:");
     println!("  -s, --screen <splash|shell> Target screen to render (default: splash)");
+    println!("  -d, --demo-playback         Render Bluetooth Playing screen with demo track");
     println!("  -p, --preview <SECS>        Render UI for SECS seconds");
     println!("  -l, --loop                  Hold UI on screen continuously");
     println!("  -V, --version               Print version and exit");
@@ -81,6 +84,10 @@ where
             "-h" | "--help" => return Ok(CliParse::Help),
             "-V" | "--version" => return Ok(CliParse::Version),
             "-l" | "--loop" => opts.run_loop = true,
+            "-d" | "--demo" | "--demo-playback" => {
+                opts.demo_playback = true;
+                opts.screen = ScreenTarget::Shell;
+            }
             "-s" | "--screen" => {
                 let val = next_arg_value(&mut iter, "--screen")?;
                 match val.trim().to_ascii_lowercase().as_str() {
@@ -121,7 +128,12 @@ pub fn report_display(level: tracing::Level, context: &str, err: impl std::fmt::
 
 /// Runs the UI display loop on the default `/dev/fb0` device path.
 #[cfg(feature = "ui")]
-pub fn run_ui_display(screen: ScreenTarget, preview_secs: Option<u64>, run_loop: bool) {
+pub fn run_ui_display(
+    screen: ScreenTarget,
+    preview_secs: Option<u64>,
+    run_loop: bool,
+    demo_playback: bool,
+) {
     if headless_requested() {
         tracing::info!("Headless mode requested via SPEAKER_CORE_HEADLESS=1");
         println!("  Display: Headless mode requested via SPEAKER_CORE_HEADLESS.");
@@ -132,6 +144,7 @@ pub fn run_ui_display(screen: ScreenTarget, preview_secs: Option<u64>, run_loop:
         screen,
         preview_secs,
         run_loop,
+        demo_playback,
     );
 }
 
@@ -149,6 +162,7 @@ pub fn run_ui_display_on_path(
     screen: ScreenTarget,
     preview_secs: Option<u64>,
     run_loop: bool,
+    demo_playback: bool,
 ) {
     if !fb_path.exists() {
         tracing::info!("Headless/simulated environment (no /dev/fb0 detected)");
@@ -170,7 +184,7 @@ pub fn run_ui_display_on_path(
 
     match screen {
         ScreenTarget::Splash => run_splash_on(&mut fb, preview_secs, run_loop),
-        ScreenTarget::Shell => run_shell_on(&mut fb, preview_secs, run_loop),
+        ScreenTarget::Shell => run_shell_on(&mut fb, preview_secs, run_loop, demo_playback),
     }
 }
 
@@ -257,17 +271,94 @@ pub fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: 
 
 /// Runs the UI Shell lifecycle against an opened framebuffer backend.
 #[cfg(feature = "ui")]
-pub fn run_shell_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool) {
-    run_ui_lifecycle(fb, "UI Shell", preview_secs, run_loop, || {
-        let main_window =
-            MainWindow::new().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        let shell = AppShell::new(main_window);
-        shell
-            .window()
-            .show()
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        Ok(shell)
-    });
+pub fn run_shell_on(
+    fb: &mut Framebuffer,
+    preview_secs: Option<u64>,
+    run_loop: bool,
+    demo_playback: bool,
+) {
+    if let Err(e) = fb.unblank() {
+        report_display(tracing::Level::WARN, "Failed to unblank display", &e);
+    }
+
+    let window = match fb.init_platform() {
+        Ok(win) => win,
+        Err(e) => {
+            report_display(tracing::Level::ERROR, "Failed to initialize platform", &e);
+            return;
+        }
+    };
+
+    let main_window = match MainWindow::new() {
+        Ok(win) => win,
+        Err(e) => {
+            report_display(
+                tracing::Level::ERROR,
+                "Failed to initialize UI Shell MainWindow",
+                &e,
+            );
+            return;
+        }
+    };
+    let shell = AppShell::new(main_window);
+    if demo_playback {
+        shell.apply_demo_playback();
+    }
+    if let Err(e) = shell.window().show() {
+        report_display(
+            tracing::Level::ERROR,
+            "Failed to show UI Shell MainWindow",
+            &e,
+        );
+        return;
+    }
+
+    match fb.render_frame(&window) {
+        Ok(true) => {
+            tracing::info!("UI Shell rendered to /dev/fb0 successfully");
+            println!("  Display: UI Shell rendered to /dev/fb0 successfully!");
+        }
+        Ok(false) => {
+            tracing::debug!("Screen buffer already current");
+            println!("  Display: Screen buffer already current.");
+        }
+        Err(e) => {
+            report_display(tracing::Level::ERROR, "Failed to render frame", &e);
+            return;
+        }
+    }
+
+    if run_loop || preview_secs.is_some() {
+        let start = Instant::now();
+        let duration = preview_secs.map(Duration::from_secs);
+        tracing::info!("Running UI render loop");
+        println!("  Display: Running UI render loop...");
+
+        let mut sim_pos_ms = 105_000u32;
+        let sim_dur_ms = 230_000u32;
+        let mut sim_tick = 0u32;
+
+        while run_loop || duration.is_some_and(|d| start.elapsed() < d) {
+            if demo_playback {
+                sim_pos_ms = (sim_pos_ms + 16) % sim_dur_ms;
+                sim_tick = sim_tick.wrapping_add(1);
+                shell.set_playback_state(true, sim_pos_ms, sim_dur_ms);
+                let l_peak = 0.65 + 0.15 * ((sim_tick as f32 * 0.1).sin()).abs();
+                let r_peak = 0.60 + 0.18 * ((sim_tick as f32 * 0.12).cos()).abs();
+                shell.set_peak_levels(l_peak, r_peak);
+                window.request_redraw();
+            }
+
+            slint::platform::update_timers_and_animations();
+            if let Err(e) = fb.render_frame(&window) {
+                report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        tracing::info!("Preview complete");
+        println!("  Display: Preview complete.");
+    }
 }
 
 /// Executes the core appliance daemon with parsed options.
@@ -281,10 +372,20 @@ pub fn run_app(opts: CoreCliOptions) -> ExitCode {
     println!("  Thermal Sensor: {}", temp_sensor.gpio_info());
 
     #[cfg(feature = "ui")]
-    run_ui_display(opts.screen, opts.preview_secs, opts.run_loop);
+    run_ui_display(
+        opts.screen,
+        opts.preview_secs,
+        opts.run_loop,
+        opts.demo_playback,
+    );
 
     #[cfg(not(feature = "ui"))]
-    let _ = (opts.screen, opts.preview_secs, opts.run_loop);
+    let _ = (
+        opts.screen,
+        opts.preview_secs,
+        opts.run_loop,
+        opts.demo_playback,
+    );
     #[cfg(not(feature = "ui"))]
     println!("  Display: UI feature disabled at compile-time.");
 
