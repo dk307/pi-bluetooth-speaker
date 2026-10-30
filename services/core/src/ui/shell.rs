@@ -152,10 +152,14 @@ impl AppShell {
         let win = self.window.as_weak();
         let tab_atomic = Arc::clone(&self.active_tab);
         self.window.on_tab_selected(move |idx| {
-            tab_atomic.store(idx, Ordering::Release);
+            let mut clamped = idx.clamp(0, 5);
             if let Some(w) = win.upgrade() {
-                w.set_active_tab(idx);
+                if clamped == 3 && !w.get_cd_enabled() {
+                    clamped = 0;
+                }
+                w.set_active_tab(clamped);
             }
+            tab_atomic.store(clamped, Ordering::Release);
         });
 
         let win = self.window.as_weak();

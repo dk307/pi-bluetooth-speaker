@@ -145,10 +145,21 @@ fn ui_shell_callbacks_and_debug_formatting() {
     shell.window().invoke_volume_changed(50.0);
     shell.window().invoke_toggle_play_pause();
 
-    // Invoke tab selection callback
+    // Invoke tab selection callback (CD disabled falls back to 0)
+    shell.window().invoke_tab_selected(3);
+    assert_eq!(shell.current_tab(), 0);
+    assert_eq!(shell.window().get_active_tab(), 0);
+
+    // Invoke tab selection with CD enabled
+    shell.set_cd_enabled(true);
     shell.window().invoke_tab_selected(3);
     assert_eq!(shell.current_tab(), 3);
     assert_eq!(shell.window().get_active_tab(), 3);
+
+    // Invoke tab selection with out-of-range index (clamps to 5)
+    shell.window().invoke_tab_selected(99);
+    assert_eq!(shell.current_tab(), 5);
+    assert_eq!(shell.window().get_active_tab(), 5);
 
     // Invoke theme selection callback
     shell.window().invoke_select_theme(1);
