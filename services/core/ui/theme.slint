@@ -1,0 +1,28 @@
+export struct ThemePalette {
+    chassis: color,
+    card_surface: color,
+    card_border: color,
+    primary_accent: color,
+    secondary_accent: color,
+    needle_peak: color,
+    dock_active_text: color,
+    text_primary: color,
+    text_muted: color,
+    meter_skin_id: string,
+}
+
+export global Theme {
+    in-out property <int> active_preset: 0;
+    in-out property <ThemePalette> active: {
+        chassis: #090D12,
+        card_surface: #111923,
+        card_border: #30363D,
+        primary_accent: #00C8FF,
+        secondary_accent: #70E1FF,
+        needle_peak: #FF3344,
+        dock_active_text: #090D12,
+        text_primary: #F0F6FC,
+        text_muted: #8B949E,
+        meter_skin_id: "mcintosh_800x480",
+    };
+}
