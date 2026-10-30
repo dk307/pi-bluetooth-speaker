@@ -76,29 +76,52 @@ where
     Ok(CliParse::Options(opts))
 }
 
-/// Reports a non-fatal display problem to both tracing telemetry and user stderr.
+/// Reports a display problem to both tracing telemetry and user stderr.
+///
+/// The stderr tag mirrors the tracing `level` (`Warning` / `Error`) so the two
+/// output channels stay symmetric by construction.
 #[cfg(feature = "ui")]
-fn report_display_warning(context: &str, err: impl std::fmt::Display) {
-    tracing::warn!("{context}: {err}");
-    eprintln!("  Display Warning: {context}: {err}");
-}
-
-/// Reports a fatal display problem to both tracing telemetry and user stderr.
-#[cfg(feature = "ui")]
-fn report_display_error(context: &str, err: impl std::fmt::Display) {
-    tracing::error!("{context}: {err}");
-    eprintln!("  Display Error: {context}: {err}");
+fn report_display(level: tracing::Level, context: &str, err: impl std::fmt::Display) {
+    let tag = match level {
+        tracing::Level::ERROR => "Display Error",
+        tracing::Level::WARN => "Display Warning",
+        _ => "Display",
+    };
+    if level == tracing::Level::ERROR {
+        tracing::error!("{context}: {err}");
+    } else {
+        tracing::warn!("{context}: {err}");
+    }
+    eprintln!("  {tag}: {context}: {err}");
 }
 
 #[cfg(feature = "ui")]
 fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
-    if std::env::var_os("SPEAKER_CORE_HEADLESS").is_some_and(|v| v == "1") {
+    if headless_requested() {
         tracing::info!("Headless mode requested via SPEAKER_CORE_HEADLESS=1");
         println!("  Display: Headless mode requested via SPEAKER_CORE_HEADLESS.");
         return;
     }
+    run_ui_boot_splash_on_path(
+        Path::new(Framebuffer::DEFAULT_FB_PATH),
+        preview_secs,
+        run_loop,
+    );
+}
 
-    let fb_path = Path::new(Framebuffer::DEFAULT_FB_PATH);
+/// Returns `true` only when the headless override is explicitly set to `"1"`
+/// (a value of `"0"` or any other content keeps the display enabled).
+#[cfg(feature = "ui")]
+fn headless_requested() -> bool {
+    std::env::var_os("SPEAKER_CORE_HEADLESS").is_some_and(|v| v == "1")
+}
+
+/// Runs the boot splash against a specific framebuffer device path.
+///
+/// The path seam keeps the display-probe branches (missing device, failed open)
+/// hermetically testable without touching the host's real `/dev/fb0`.
+#[cfg(feature = "ui")]
+fn run_ui_boot_splash_on_path(fb_path: &Path, preview_secs: Option<u64>, run_loop: bool) {
     if !fb_path.exists() {
         tracing::info!("Headless/simulated environment (no /dev/fb0 detected)");
         println!("  Display: Headless/simulated environment (no /dev/fb0 detected).");
@@ -107,10 +130,10 @@ fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
 
     tracing::info!("Initializing Framebuffer /dev/fb0 (800x480 32bpp BGRX)");
     println!("  Display: Initializing Framebuffer /dev/fb0 (800x480 32bpp BGRX)...");
-    let mut fb = match Framebuffer::new() {
+    let mut fb = match Framebuffer::open(fb_path, Some(Framebuffer::DEFAULT_BLANK_PATH)) {
         Ok(fb) => fb,
         Err(e) => {
-            report_display_warning("Could not open /dev/fb0", &e);
+            report_display(tracing::Level::WARN, "Could not open /dev/fb0", &e);
             return;
         }
     };
@@ -123,13 +146,13 @@ fn run_ui_boot_splash(preview_secs: Option<u64>, run_loop: bool) {
 #[cfg(feature = "ui")]
 fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool) {
     if let Err(e) = fb.unblank() {
-        report_display_warning("Failed to unblank display", &e);
+        report_display(tracing::Level::WARN, "Failed to unblank display", &e);
     }
 
     let window = match fb.init_platform() {
         Ok(win) => win,
         Err(e) => {
-            report_display_error("Failed to initialize platform", &e);
+            report_display(tracing::Level::ERROR, "Failed to initialize platform", &e);
             return;
         }
     };
@@ -137,13 +160,17 @@ fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool
     let splash = match SplashScreen::new() {
         Ok(s) => s,
         Err(e) => {
-            report_display_error("Failed to initialize SplashScreen", &e);
+            report_display(
+                tracing::Level::ERROR,
+                "Failed to initialize SplashScreen",
+                &e,
+            );
             return;
         }
     };
 
     if let Err(e) = splash.show() {
-        report_display_warning("Failed to show SplashScreen", &e);
+        report_display(tracing::Level::WARN, "Failed to show SplashScreen", &e);
         return;
     }
 
@@ -157,7 +184,7 @@ fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool
             println!("  Display: Screen buffer already current.");
         }
         Err(e) => {
-            report_display_error("Failed to render frame", &e);
+            report_display(tracing::Level::ERROR, "Failed to render frame", &e);
             return;
         }
     }
@@ -171,7 +198,7 @@ fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool
         while run_loop || duration.is_some_and(|d| start.elapsed() < d) {
             slint::platform::update_timers_and_animations();
             if let Err(e) = fb.render_frame(&window) {
-                report_display_error("Render loop frame failed", &e);
+                report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
                 break;
             }
             std::thread::sleep(Duration::from_millis(16));
@@ -209,6 +236,8 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "ui")]
+    use std::sync::Mutex;
 
     #[test]
     fn parse_preview_secs_rejects_sign_prefixes_and_non_numeric() {
@@ -234,6 +263,56 @@ mod tests {
                 .unwrap_err()
                 .contains("invalid preview seconds")
         );
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn headless_requested_requires_explicit_one() {
+        static ENV_GUARD: Mutex<()> = Mutex::new(());
+        let _guard = ENV_GUARD.lock().unwrap();
+        // SAFETY: tests are serialized by ENV_GUARD; no other test thread reads
+        // SPEAKER_CORE_HEADLESS while this guard is held.
+        unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
+        assert!(!headless_requested());
+        // SAFETY: same serialized-guard invariant as above.
+        unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "1") };
+        assert!(headless_requested());
+        // SAFETY: same serialized-guard invariant as above.
+        unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "0") };
+        assert!(
+            !headless_requested(),
+            "any value other than '1' must keep the display enabled"
+        );
+        // SAFETY: same serialized-guard invariant as above.
+        unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn run_ui_boot_splash_headless_short_circuits() {
+        static ENV_GUARD: Mutex<()> = Mutex::new(());
+        let _guard = ENV_GUARD.lock().unwrap();
+        // SAFETY: tests are serialized by ENV_GUARD; no other test thread reads
+        // SPEAKER_CORE_HEADLESS while this guard is held.
+        unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "1") };
+        // Even with an existing device path, the headless guard must return
+        // before any framebuffer/sysfs access.
+        run_ui_boot_splash_on_path(Path::new("/tmp"), Some(1), true);
+        // SAFETY: same serialized-guard invariant as above.
+        unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn run_ui_boot_splash_missing_device_returns_early() {
+        static ENV_GUARD: Mutex<()> = Mutex::new(());
+        let _guard = ENV_GUARD.lock().unwrap();
+        // SAFETY: tests are serialized by ENV_GUARD; no other test thread reads
+        // SPEAKER_CORE_HEADLESS while this guard is held.
+        unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
+        let dir = speaker_core::diag::ScopedTempDir::new("fb-boot-splash-missing");
+        let missing = dir.path().join("fb0");
+        run_ui_boot_splash_on_path(&missing, Some(1), true);
     }
 
     #[cfg(feature = "ui")]
