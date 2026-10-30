@@ -499,7 +499,7 @@ impl FromJoinError for EncoderError {
 /// interrupt threads and must publish their events into atomics that synchronous
 /// status reads can observe without locks.
 #[derive(Debug, Default)]
-struct SharedEncoderState {
+pub struct SharedEncoderState {
     cw_count: AtomicU64,
     ccw_count: AtomicU64,
     press_count: AtomicU64,
@@ -508,7 +508,7 @@ struct SharedEncoderState {
 }
 
 impl SharedEncoderState {
-    fn snapshot(&self, led_color: RgbColor) -> EncoderStatus {
+    pub fn snapshot(&self, led_color: RgbColor) -> EncoderStatus {
         EncoderStatus {
             switch_pressed: self.switch_pressed.load(Ordering::Relaxed),
             cw_count: self.cw_count.load(Ordering::Relaxed),
@@ -533,12 +533,12 @@ static SHARED_ENCODER_STATE: OnceLock<Arc<SharedEncoderState>> = OnceLock::new()
 ///
 /// The first installation wins: if the slot is already populated, `shared` is
 /// discarded and the existing counters keep accumulating.
-fn install_or_reuse_shared(shared: Arc<SharedEncoderState>) -> Arc<SharedEncoderState> {
+pub fn install_or_reuse_shared(shared: Arc<SharedEncoderState>) -> Arc<SharedEncoderState> {
     Arc::clone(SHARED_ENCODER_STATE.get_or_init(|| shared))
 }
 
 /// Applies one decoded detent to the cumulative shared counters.
-fn apply_rotation(shared: &SharedEncoderState, direction: DecoderDirection) {
+pub fn apply_rotation(shared: &SharedEncoderState, direction: DecoderDirection) {
     match direction {
         DecoderDirection::Clockwise => {
             shared.cw_count.fetch_add(1, Ordering::Relaxed);
@@ -551,14 +551,14 @@ fn apply_rotation(shared: &SharedEncoderState, direction: DecoderDirection) {
 }
 
 /// Rotation callback invoked by the quadrature decoder's interrupt thread.
-fn rotation_interrupt_callback(_name: &str, direction: DecoderDirection) {
+pub fn rotation_interrupt_callback(_name: &str, direction: DecoderDirection) {
     if let Some(shared) = SHARED_ENCODER_STATE.get() {
         apply_rotation(shared, direction);
     }
 }
 
 /// Applies one debounced switch level transition to the shared counters.
-fn apply_switch_level(shared: &SharedEncoderState, pressed: bool) {
+pub fn apply_switch_level(shared: &SharedEncoderState, pressed: bool) {
     let was_pressed = shared.switch_pressed.swap(pressed, Ordering::Relaxed);
     if pressed && !was_pressed {
         shared.press_count.fetch_add(1, Ordering::Relaxed);
@@ -568,7 +568,7 @@ fn apply_switch_level(shared: &SharedEncoderState, pressed: bool) {
 }
 
 /// Minimal channel-driving surface shared by rppal outputs and host test fakes.
-trait ChannelPin: Send {
+pub trait ChannelPin: Send {
     /// Sets the channel's logical load state (`true` = LED channel lit).
     fn set_channel(&mut self, on: bool);
 }
@@ -584,7 +584,8 @@ impl ChannelPin for OutputPin {
 }
 
 /// Adapter bridging a [`ChannelPin`] to the `led` crate's embedded-hal interface.
-struct HalOutputPinAdapter<P>(P);
+#[derive(Debug)]
+pub struct HalOutputPinAdapter<P>(pub P);
 
 impl<P> HalOutputPin for HalOutputPinAdapter<P>
 where
@@ -736,7 +737,7 @@ static ENCODER_HARDWARE_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 /// RAII guard owning the process-global encoder hardware claim.
 #[derive(Debug)]
-struct HardwareClaim;
+pub struct HardwareClaim;
 
 impl HardwareClaim {
     /// Acquires the exclusive hardware claim, failing if already held.
@@ -745,7 +746,7 @@ impl HardwareClaim {
     ///
     /// Returns [`EncoderError`] when another encoder hardware device in this
     /// process already claims the EC12 pins.
-    fn acquire() -> Result<Self, EncoderError> {
+    pub fn acquire() -> Result<Self, EncoderError> {
         if ENCODER_HARDWARE_CLAIMED.swap(true, Ordering::AcqRel) {
             return Err(EncoderError::new(EncoderErrorKind::EncoderInit {
                 message: "EC12 encoder GPIO pins are already claimed by another \
@@ -988,379 +989,26 @@ const _: () = {
     assert_send_sync::<EncoderDeviceMock>();
 };
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::runtime::abort_and_map;
+#[cfg(feature = "test-util")]
+pub mod test_helpers {
+    pub use led::rgb::{Color as LedColor, CommonAnodeLED};
+    pub use rotary_switch_helper::rotary_encoder::Direction as DecoderDirection;
 
-    #[test]
-    fn rotation_direction_slug_roundtrip() {
-        assert_eq!(RotationDirection::Clockwise.slug(), "cw");
-        assert_eq!(RotationDirection::CounterClockwise.slug(), "ccw");
-        assert_eq!(
-            RotationDirection::parse_slug("cw").unwrap(),
-            RotationDirection::Clockwise
-        );
-        assert_eq!(
-            RotationDirection::parse_slug("CCW").unwrap(),
-            RotationDirection::CounterClockwise
-        );
-        assert_eq!(
-            RotationDirection::parse_slug(" clockwise ").unwrap(),
-            RotationDirection::Clockwise
-        );
-        assert_eq!(
-            RotationDirection::parse_slug("counter-clockwise").unwrap(),
-            RotationDirection::CounterClockwise
-        );
-        let err = RotationDirection::parse_slug("sideways").unwrap_err();
-        assert!(err.contains("invalid rotation direction 'sideways'"));
-        assert_eq!(RotationDirection::Clockwise.to_string(), "cw");
+    use super::EncoderError;
+    pub use super::{
+        ChannelPin, HalOutputPinAdapter, HardwareClaim, SharedEncoderState, apply_rotation,
+        apply_switch_level, install_or_reuse_shared, rotation_interrupt_callback,
+    };
+
+    /// Creates an `EncoderError::cancelled` error for testing.
+    #[must_use]
+    pub fn make_cancelled_error(task: &str) -> EncoderError {
+        EncoderError::cancelled(task)
     }
 
-    #[test]
-    fn rgb_color_names_and_display() {
-        assert_eq!(RgbColor::OFF.name(), "off");
-        assert_eq!(RgbColor::RED.name(), "red");
-        assert_eq!(RgbColor::GREEN.name(), "green");
-        assert_eq!(RgbColor::BLUE.name(), "blue");
-        assert_eq!(RgbColor::YELLOW.name(), "yellow");
-        assert_eq!(RgbColor::CYAN.name(), "cyan");
-        assert_eq!(RgbColor::MAGENTA.name(), "magenta");
-        assert_eq!(RgbColor::WHITE.name(), "white");
-        assert_eq!(RgbColor::YELLOW.to_string(), "yellow");
-        assert_eq!(RgbColor::default(), RgbColor::OFF);
-    }
-
-    #[test]
-    fn rgb_color_parse_name_accepts_case_and_whitespace() {
-        assert_eq!(RgbColor::parse_name("WHITE").unwrap(), RgbColor::WHITE);
-        assert_eq!(
-            RgbColor::parse_name(" Magenta ").unwrap(),
-            RgbColor::MAGENTA
-        );
-        assert_eq!(RgbColor::parse_name("off").unwrap(), RgbColor::OFF);
-        let err = RgbColor::parse_name("chartreuse").unwrap_err();
-        assert!(err.contains("invalid LED color 'chartreuse'"));
-    }
-
-    #[test]
-    fn rgb_color_maps_to_led_crate_colors_and_back() {
-        for (rgb, led) in [
-            (RgbColor::OFF, LedColor::Black),
-            (RgbColor::RED, LedColor::Red),
-            (RgbColor::GREEN, LedColor::Green),
-            (RgbColor::BLUE, LedColor::Blue),
-            (RgbColor::YELLOW, LedColor::Yellow),
-            (RgbColor::CYAN, LedColor::Cyan),
-            (RgbColor::MAGENTA, LedColor::Magenta),
-            (RgbColor::WHITE, LedColor::White),
-        ] {
-            assert_eq!(rgb.to_led_color(), led);
-            assert_eq!(RgbColor::from_led_color(led), rgb);
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct SharedFakeChannel(Arc<Mutex<bool>>);
-
-    impl ChannelPin for SharedFakeChannel {
-        fn set_channel(&mut self, on: bool) {
-            *self.0.lock().expect("test channel lock poisoned") = on;
-        }
-    }
-
-    fn channel_lit(channel: &SharedFakeChannel) -> bool {
-        *channel.0.lock().expect("test channel lock poisoned")
-    }
-
-    #[test]
-    fn common_anode_led_drives_channels_per_color() {
-        let (red, green, blue) = (
-            SharedFakeChannel::default(),
-            SharedFakeChannel::default(),
-            SharedFakeChannel::default(),
-        );
-        let mut led = CommonAnodeLED::new(
-            HalOutputPinAdapter(red.clone()),
-            HalOutputPinAdapter(green.clone()),
-            HalOutputPinAdapter(blue.clone()),
-        );
-
-        for (color, r, g, b) in [
-            (LedColor::Red, true, false, false),
-            (LedColor::Green, false, true, false),
-            (LedColor::Blue, false, false, true),
-            (LedColor::Yellow, true, true, false),
-            (LedColor::Cyan, false, true, true),
-            (LedColor::Magenta, true, false, true),
-            (LedColor::White, true, true, true),
-            (LedColor::Black, false, false, false),
-        ] {
-            led.set(color).unwrap();
-            assert_eq!(channel_lit(&red), r, "red channel for {color:?}");
-            assert_eq!(channel_lit(&green), g, "green channel for {color:?}");
-            assert_eq!(channel_lit(&blue), b, "blue channel for {color:?}");
-        }
-    }
-
-    #[test]
-    fn apply_rotation_counts_detents_per_direction() {
-        let shared = SharedEncoderState::default();
-        apply_rotation(&shared, DecoderDirection::Clockwise);
-        apply_rotation(&shared, DecoderDirection::Clockwise);
-        apply_rotation(&shared, DecoderDirection::CounterClockwise);
-        apply_rotation(&shared, DecoderDirection::None);
-
-        let status = shared.snapshot(RgbColor::GREEN);
-        assert_eq!(status.cw_count, 2);
-        assert_eq!(status.ccw_count, 1);
-        assert_eq!(status.led_color, RgbColor::GREEN);
-    }
-
-    #[test]
-    fn rotation_interrupt_callback_without_installed_state_is_noop() {
-        rotation_interrupt_callback("ec12", DecoderDirection::Clockwise);
-        rotation_interrupt_callback("ec12", DecoderDirection::None);
-    }
-
-    #[test]
-    fn install_or_reuse_shared_keeps_the_first_installation() {
-        let first = install_or_reuse_shared(Arc::new(SharedEncoderState::default()));
-        let second = install_or_reuse_shared(Arc::new(SharedEncoderState::default()));
-        assert!(
-            Arc::ptr_eq(&first, &second),
-            "second installation must reuse the process-global counters"
-        );
-    }
-
-    #[test]
-    fn hardware_claim_is_exclusive_and_released_on_drop() {
-        {
-            let _claim = HardwareClaim::acquire().expect("first claim must succeed");
-            let err = HardwareClaim::acquire().expect_err("second claim must fail");
-            assert!(err.is_encoder_init());
-            assert!(
-                err.summary().contains("already claimed"),
-                "unexpected message: {}",
-                err.summary()
-            );
-        };
-        let _reacquired =
-            HardwareClaim::acquire().expect("dropping the holder must release the claim");
-    }
-
-    #[test]
-    fn apply_switch_level_counts_transitions_only() {
-        let shared = SharedEncoderState::default();
-        apply_switch_level(&shared, true);
-        apply_switch_level(&shared, true);
-        apply_switch_level(&shared, false);
-        apply_switch_level(&shared, false);
-        apply_switch_level(&shared, true);
-
-        let status = shared.snapshot(RgbColor::OFF);
-        assert!(status.switch_pressed);
-        assert_eq!(status.press_count, 2);
-        assert_eq!(status.release_count, 1);
-    }
-
-    #[test]
-    fn encoder_status_display() {
-        let status = EncoderStatus {
-            switch_pressed: true,
-            cw_count: 3,
-            ccw_count: 2,
-            press_count: 1,
-            release_count: 0,
-            led_color: RgbColor::GREEN,
-        };
-        let text = status.to_string();
-        assert!(text.contains("CW 3 | CCW 2"));
-        assert!(text.contains("Press 1 / Release 0"));
-        assert!(text.contains("pressed"));
-        assert!(text.contains("RGB Indicator  : green"));
-    }
-
-    #[test]
-    fn hardware_info_pin_metadata_matches_baseline() {
-        let info = EncoderHardwareInfo::rpi3_default();
-        assert_eq!(info.phase_a.bcm_pin.as_u8(), 25);
-        assert_eq!(info.phase_a.physical_pin.as_u8(), 22);
-        assert!(info.phase_a.electrical_config.contains("pull-up"));
-        assert_eq!(info.phase_b.bcm_pin.as_u8(), 24);
-        assert_eq!(info.phase_b.physical_pin.as_u8(), 18);
-        assert_eq!(info.push_switch.bcm_pin.as_u8(), 22);
-        assert_eq!(info.push_switch.physical_pin.as_u8(), 15);
-        assert!(info.push_switch.electrical_config.contains("pull-down"));
-        assert_eq!(info.led_red.bcm_pin.as_u8(), 20);
-        assert_eq!(info.led_red.physical_pin.as_u8(), 38);
-        assert_eq!(info.led_green.bcm_pin.as_u8(), 16);
-        assert_eq!(info.led_green.physical_pin.as_u8(), 36);
-        assert_eq!(info.led_blue.bcm_pin.as_u8(), 12);
-        assert_eq!(info.led_blue.physical_pin.as_u8(), 32);
-        assert!(info.led_red.electrical_config.contains("330Ω"));
-        assert!(info.led_green.electrical_config.contains("180Ω"));
-        assert!(info.led_blue.electrical_config.contains("180Ω"));
-    }
-
-    #[test]
-    fn error_predicates_and_summary() {
-        let gpio_err = EncoderError::from(rppal::gpio::Error::PinUsed(25));
-        assert!(gpio_err.is_gpio());
-        assert!(!gpio_err.is_encoder_init());
-        assert!(!gpio_err.is_cancelled());
-        assert!(!gpio_err.is_mock_fault());
-        assert!(gpio_err.summary().contains("GPIO error:"));
-
-        let init_err = EncoderError::from(anyhow::Error::msg("decoder wiring failed"));
-        assert!(init_err.is_encoder_init());
-        assert!(
-            init_err
-                .summary()
-                .contains("encoder initialization failed: decoder wiring failed")
-        );
-
-        let cancelled = EncoderError::cancelled("task went away");
-        assert!(cancelled.is_cancelled());
-        assert!(
-            cancelled
-                .summary()
-                .contains("task cancelled: task went away")
-        );
-
-        let fault = EncoderError::mock_fault("injected");
-        assert!(fault.is_mock_fault());
-        assert!(fault.summary().contains("injected mock fault: injected"));
-    }
-
-    #[test]
-    fn gpio_error_source_and_conversion() {
-        let err = EncoderError::from(rppal::gpio::Error::PinNotAvailable(99));
-        assert!(err.is_gpio());
-        let source =
-            std::error::Error::source(&err).and_then(|s| s.downcast_ref::<rppal::gpio::Error>());
-        assert!(matches!(
-            source,
-            Some(rppal::gpio::Error::PinNotAvailable(99))
-        ));
-    }
-
-    #[test]
-    fn encoder_init_error_flattens_anyhow_message() {
-        let err = EncoderError::from(anyhow::Error::msg("decoder init boom"));
-        assert!(err.is_encoder_init());
-        assert!(
-            err.summary()
-                .contains("encoder initialization failed: decoder init boom")
-        );
-        assert!(std::error::Error::source(&err).is_none());
-    }
-
-    #[test]
-    fn encoder_init_error_preserves_anyhow_causal_chain() {
-        let chained = anyhow::Error::msg("line request failed").context("decoder init");
-        let err = EncoderError::from(chained);
-        assert!(
-            err.summary()
-                .contains("encoder initialization failed: decoder init: line request failed")
-        );
-    }
-
-    #[test]
-    fn mock_simulate_rotation_counts_detents() {
-        let (device, mock) = EncoderDevice::new_mocked();
-
-        let status = device.read_status().unwrap();
-        assert!(!status.switch_pressed);
-        assert_eq!(status.cw_count, 0);
-        assert_eq!(status.ccw_count, 0);
-        assert_eq!(status.led_color, RgbColor::OFF);
-
-        mock.simulate_rotation(RotationDirection::CounterClockwise, 3);
-        mock.simulate_rotation(RotationDirection::Clockwise, 2);
-        let status = device.read_status().unwrap();
-        assert_eq!(status.cw_count, 2);
-        assert_eq!(status.ccw_count, 3);
-    }
-
-    #[test]
-    fn mock_switch_press_release_counts() {
-        let (device, mock) = EncoderDevice::new_mocked();
-        mock.set_switch_pressed(true);
-        mock.set_switch_pressed(true);
-        mock.set_switch_pressed(false);
-        mock.set_switch_pressed(false);
-        mock.set_switch_pressed(true);
-
-        let status = device.read_status().unwrap();
-        assert!(status.switch_pressed);
-        assert_eq!(status.press_count, 2);
-        assert_eq!(status.release_count, 1);
-    }
-
-    #[test]
-    fn mock_set_leds_latches_color() {
-        let mock_leds = {
-            let (device, mock) = EncoderDevice::new_mocked();
-            mock.set_leds(RgbColor::CYAN);
-            device.set_leds(RgbColor::MAGENTA).unwrap();
-            (device.read_status().unwrap().led_color, mock)
-        };
-        assert_eq!(mock_leds.0, RgbColor::MAGENTA);
-        assert_eq!(mock_leds.1.led_color(), RgbColor::MAGENTA);
-    }
-
-    #[test]
-    fn mock_fault_fails_all_operations() {
-        let (device, mock) = EncoderDevice::new_mocked();
-        mock.set_fault(Some("simulated GPIO failure".into()));
-
-        let status_err = device.read_status().unwrap_err();
-        assert!(status_err.is_mock_fault());
-        assert!(status_err.summary().contains("simulated GPIO failure"));
-
-        let leds_err = device.set_leds(RgbColor::WHITE).unwrap_err();
-        assert!(leds_err.is_mock_fault());
-        assert!(leds_err.summary().contains("simulated GPIO failure"));
-
-        mock.set_fault(None);
-        device.read_status().unwrap();
-        device.set_leds(RgbColor::OFF).unwrap();
-    }
-
-    #[test]
-    fn mock_led_color_accessor_tracks_latest_write() {
-        let (_, mock) = EncoderDevice::new_mocked();
-        assert_eq!(mock.led_color(), RgbColor::OFF);
-        mock.set_leds(RgbColor::YELLOW);
-        assert_eq!(mock.led_color(), RgbColor::YELLOW);
-    }
-
-    #[tokio::test]
-    async fn async_methods_read_from_mock_device() {
-        let (device, mock) = EncoderDevice::new_mocked();
-        mock.set_switch_pressed(true);
-
-        let status = device.read_status_async().await.unwrap();
-        assert!(status.switch_pressed);
-        assert_eq!(status.press_count, 1);
-
-        device.set_leds_async(RgbColor::BLUE).await.unwrap();
-        assert_eq!(mock.led_color(), RgbColor::BLUE);
-    }
-
-    #[tokio::test]
-    async fn cancelled_blocking_task_maps_to_encoder_error_cancelled() {
-        let err: EncoderError = abort_and_map("EC12 test task").await;
-        assert!(err.is_cancelled());
-        assert!(err.summary().contains("EC12 test task"));
-    }
-
-    #[test]
-    fn debug_formatting_reports_mock_backend() {
-        let (device, _mock) = EncoderDevice::new_mocked();
-        let debug = format!("{device:?}");
-        assert!(debug.contains("Mock"));
+    /// Creates an `EncoderError::mock_fault` error for testing.
+    #[must_use]
+    pub fn make_mock_fault_error(detail: &str) -> EncoderError {
+        EncoderError::mock_fault(detail)
     }
 }

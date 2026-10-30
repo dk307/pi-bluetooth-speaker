@@ -20,7 +20,7 @@
 use std::backtrace::Backtrace;
 use std::fmt::{self, Display, Formatter};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bh1750_embedded::{Address as BhAddress, Bh1750, Error as BhError, Resolution as BhResolution};
 use rppal::i2c::I2c;
@@ -594,39 +594,100 @@ impl LightSensorMock {
     }
 }
 
-/// Host-testable hardware state machine tracking power state and integration settle times.
-#[derive(Debug)]
-struct HwState {
-    powered: bool,
-    last_transition: Instant,
+#[cfg(feature = "test-util")]
+pub use hw_state::HwState;
+
+#[cfg(not(feature = "test-util"))]
+use hw_state::HwState;
+
+mod hw_state {
+    use std::time::{Duration, Instant};
+
+    use super::LightError;
+
+    /// Host-testable hardware state machine tracking power state and integration settle times.
+    #[derive(Debug)]
+    pub struct HwState {
+        pub(crate) powered: bool,
+        pub(crate) last_transition: Instant,
+    }
+
+    impl HwState {
+        /// Maximum continuous high-resolution conversion time guaranteed by the BH1750 datasheet (180 ms).
+        pub const SETTLE_DURATION: Duration = Duration::from_millis(180);
+
+        #[must_use]
+        pub const fn new(now: Instant) -> Self {
+            Self {
+                powered: true,
+                last_transition: now,
+            }
+        }
+
+        pub fn record_power_down(&mut self) {
+            self.powered = false;
+        }
+
+        pub fn record_wake_or_reset(&mut self, now: Instant) {
+            self.powered = true;
+            self.last_transition = now;
+        }
+
+        /// Prepares for a reading by checking the integration settle window.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`LightError`] if the sensor is powered down.
+        pub fn prepare_read(&self, now: Instant) -> Result<Option<Duration>, LightError> {
+            if !self.powered {
+                return Err(LightError::powered_down());
+            }
+            let elapsed = now.saturating_duration_since(self.last_transition);
+            Ok(Self::SETTLE_DURATION.checked_sub(elapsed))
+        }
+    }
 }
 
-impl HwState {
-    /// Maximum continuous high-resolution conversion time guaranteed by the BH1750 datasheet (180 ms).
-    const SETTLE_DURATION: Duration = Duration::from_millis(180);
+/// Test utilities exposed for integration test suites under `tests/`.
+#[cfg(feature = "test-util")]
+pub mod test_helpers {
+    use bh1750_embedded::Error as BhError;
 
-    const fn new(now: Instant) -> Self {
-        Self {
-            powered: true,
-            last_transition: now,
-        }
+    use super::LightError;
+
+    #[must_use]
+    pub fn make_i2c_error(message: impl Into<Box<str>>) -> LightError {
+        LightError::i2c(message)
     }
 
-    fn record_power_down(&mut self) {
-        self.powered = false;
+    #[must_use]
+    pub fn make_powered_down_error() -> LightError {
+        LightError::powered_down()
     }
 
-    fn record_wake_or_reset(&mut self, now: Instant) {
-        self.powered = true;
-        self.last_transition = now;
+    #[must_use]
+    pub fn make_cancelled_error(message: impl Into<Box<str>>) -> LightError {
+        LightError::cancelled(message)
     }
 
-    fn prepare_read(&self, now: Instant) -> Result<Option<Duration>, LightError> {
-        if !self.powered {
-            return Err(LightError::powered_down());
-        }
-        let elapsed = now.saturating_duration_since(self.last_transition);
-        Ok(Self::SETTLE_DURATION.checked_sub(elapsed))
+    #[must_use]
+    pub fn make_invalid_address_error(address: u8) -> LightError {
+        LightError::invalid_address(address)
+    }
+
+    #[must_use]
+    pub fn make_invalid_illuminance_error(message: impl Into<Box<str>>) -> LightError {
+        LightError::invalid_illuminance(message)
+    }
+
+    #[must_use]
+    pub fn make_mock_fault_error(message: impl Into<Box<str>>) -> LightError {
+        LightError::mock_fault(message)
+    }
+
+    #[must_use]
+    pub fn from_bh_err(err: BhError<rppal::i2c::Error>) -> LightError {
+        LightError::from_bh_err(err)
     }
 }
 
@@ -891,291 +952,3 @@ const _: () = {
     let max_from_raw = Illuminance::from_raw(u16::MAX);
     assert!(max_from_raw.lux() <= Illuminance::MAX_LUX);
 };
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::runtime::abort_and_map;
-    use std::error::Error;
-
-    #[test]
-    fn illuminance_conversions_and_bounds() {
-        let illum = Illuminance::from_lux(100.0).unwrap();
-        assert_eq!(illum.lux(), 100.0);
-        assert_eq!(illum.millilux(), 100_000);
-        assert!((illum.foot_candles() - 9.2903).abs() < 1e-3);
-
-        // Raw conversion (120 raw -> 100 lx)
-        let converted = Illuminance::from_raw(120);
-        assert!((converted.lux() - 100.0).abs() < 1e-3);
-
-        // Validation rejects negative and NaN
-        let _ = Illuminance::from_lux(-1.0).unwrap_err();
-        let _ = Illuminance::from_lux(f32::NAN).unwrap_err();
-        let _ = Illuminance::from_lux(f32::INFINITY).unwrap_err();
-    }
-
-    #[test]
-    fn i2c_address_validates_known_addresses() {
-        assert_eq!(I2cAddress::new(0x23).unwrap().as_u8(), 0x23);
-        assert_eq!(I2cAddress::new(0x5C).unwrap().as_u8(), 0x5C);
-        assert_eq!(I2cAddress::try_from(0x23).unwrap().as_u8(), 0x23);
-        assert_eq!(I2cAddress::try_from(0x5C).unwrap().as_u8(), 0x5C);
-        assert!(I2cAddress::try_from(0x42).unwrap_err().is_invalid_address());
-        assert!(I2cAddress::new(0x00).unwrap_err().is_invalid_address());
-        assert!(I2cAddress::new(0x20).unwrap_err().is_invalid_address());
-        assert!(I2cAddress::new(0x77).unwrap_err().is_invalid_address());
-        assert!(I2cAddress::new(0x80).unwrap_err().is_invalid_address());
-
-        assert_eq!(I2cAddress::parse_hex("0x23").unwrap().as_u8(), 0x23);
-        assert_eq!(I2cAddress::parse_hex(" 0X5C ").unwrap().as_u8(), 0x5C);
-        assert_eq!(I2cAddress::parse_hex("23").unwrap().as_u8(), 0x23);
-        for signed in ["+0x23", "-0x23", "0x+23", "0x-23", "0X+5C", "+23", "-23"] {
-            assert!(
-                I2cAddress::parse_hex(signed)
-                    .unwrap_err()
-                    .contains("sign characters are not allowed"),
-                "failed to reject signed input {signed}"
-            );
-        }
-        for invalid in ["", "0x", "0X", "not-hex", "0xzz"] {
-            assert!(
-                I2cAddress::parse_hex(invalid)
-                    .unwrap_err()
-                    .contains("invalid hex address"),
-                "failed to reject invalid hex {invalid}"
-            );
-        }
-        assert_eq!(
-            I2cAddress::parse_hex("0x77").unwrap_err(),
-            "invalid BH1750 I2C address '0x77' (expected 0x23 or 0x5C)"
-        );
-    }
-
-    #[test]
-    fn mock_sensor_supports_readings_and_fault_injection() {
-        let (sensor, mock) = LightSensor::new_mocked();
-        assert!(mock.is_powered());
-
-        // Default mock value: 100 lx
-        let reading = sensor.read_lux().unwrap();
-        assert!((reading.lux() - 100.0).abs() < 1e-3);
-
-        // Update mock illuminance
-        mock.set_lux(500.0);
-        let reading = sensor.read_lux().unwrap();
-        assert!((reading.lux() - 500.0).abs() < 1e-1);
-
-        // Diagnostics
-        let diag = sensor.read_diagnostics().unwrap();
-        assert_eq!(diag.bus, BH1750_DEFAULT_I2C_BUS);
-        assert_eq!(diag.address.as_u8(), BH1750_DEFAULT_I2C_ADDR);
-        assert!(diag.to_string().contains("Continuous High-Resolution"));
-
-        // Power down
-        sensor.power_down().unwrap();
-        assert!(!mock.is_powered());
-        assert!(sensor.read_lux().unwrap_err().is_powered_down());
-        assert!(sensor.read_diagnostics().unwrap_err().is_powered_down());
-
-        // Reset re-awakens and preserves the simulated ambient level
-        sensor.reset().unwrap();
-        assert!(mock.is_powered());
-        assert!((sensor.read_lux().unwrap().lux() - 500.0).abs() < 1e-1);
-
-        // Fault injection
-        mock.set_fault(Some("bus arbitration lost".into()));
-        let err = sensor.read_lux().unwrap_err();
-        assert!(err.is_mock_fault());
-        assert!(sensor.read_diagnostics().unwrap_err().is_mock_fault());
-        assert!(sensor.power_down().unwrap_err().is_mock_fault());
-        assert!(sensor.reset().unwrap_err().is_mock_fault());
-
-        // Clear fault
-        mock.set_fault(None);
-        mock.set_lux(150.0);
-        assert_eq!(sensor.read_lux().unwrap().lux(), 150.0);
-    }
-
-    #[test]
-    #[should_panic(expected = "mock lux must be finite and non-negative")]
-    fn mock_set_lux_panics_on_nan() {
-        let (_, mock) = LightSensor::new_mocked();
-        mock.set_lux(f32::NAN);
-    }
-
-    #[test]
-    #[should_panic(expected = "mock lux must be finite and non-negative")]
-    fn mock_set_lux_panics_on_negative() {
-        let (_, mock) = LightSensor::new_mocked();
-        mock.set_lux(-1.0);
-    }
-
-    #[test]
-    fn hw_state_settle_math_and_transitions() {
-        let now = Instant::now();
-        let mut state = HwState::new(now);
-
-        // Within 180ms window, settle delay is required
-        let delay = state.prepare_read(now).unwrap();
-        assert!(delay.is_some());
-        assert!(delay.unwrap() <= HwState::SETTLE_DURATION);
-
-        // After 180ms window, settle delay is None
-        let later = now + Duration::from_millis(200);
-        assert_eq!(state.prepare_read(later).unwrap(), None);
-
-        // Power down
-        state.record_power_down();
-        assert!(state.prepare_read(later).unwrap_err().is_powered_down());
-
-        // Reset re-arms and records new transition
-        state.record_wake_or_reset(later);
-        let reset_delay = state.prepare_read(later).unwrap();
-        assert!(reset_delay.is_some());
-        assert!(reset_delay.unwrap() <= HwState::SETTLE_DURATION);
-    }
-
-    #[test]
-    fn light_diagnostics_formatting_and_hardware_info() {
-        let (sensor, _) = LightSensor::new_mocked();
-        let diag = sensor.read_diagnostics().unwrap();
-        let diag_str = diag.to_string();
-        assert!(diag_str.contains("BH1750 Light Diagnostics: Bus 1, Addr 0x23"));
-        assert!(diag_str.contains("Illuminance"));
-
-        let hw = sensor.hardware_info();
-        assert_eq!(hw.bus, 1);
-        assert_eq!(hw.address.as_u8(), 0x23);
-        assert_eq!(hw.device_path.as_ref(), "/dev/i2c-1");
-        assert_eq!(hw.sda_pin.physical_pin.as_u8(), 3);
-        assert_eq!(hw.scl_pin.physical_pin.as_u8(), 5);
-        assert_eq!(hw.vcc_pin.as_u8(), 1);
-        assert_eq!(hw.gnd_pin.as_u8(), 9);
-    }
-
-    #[test]
-    fn light_error_variants_predicates_and_conversions() {
-        let err_i2c = LightError::i2c("arbitration lost");
-        assert!(err_i2c.is_i2c());
-        assert!(!err_i2c.is_powered_down());
-        assert_eq!(err_i2c.summary(), "I2C bus error: arbitration lost");
-        assert!(err_i2c.to_string().contains("arbitration lost"));
-        assert!(err_i2c.source().is_none());
-
-        let err_down = LightError::powered_down();
-        assert!(err_down.is_powered_down());
-        assert_eq!(
-            err_down.summary(),
-            "sensor is powered down; call reset() before reading"
-        );
-
-        let err_cancel = LightError::cancelled("aborted");
-        assert!(err_cancel.is_cancelled());
-        assert_eq!(err_cancel.summary(), "task cancelled: aborted");
-
-        let err_addr = LightError::invalid_address(0x42);
-        assert!(err_addr.is_invalid_address());
-        assert!(err_addr.summary().contains("0x42"));
-
-        let err_illum = LightError::invalid_illuminance("negative");
-        assert!(err_illum.is_invalid_illuminance());
-        assert_eq!(err_illum.summary(), "invalid illuminance: negative");
-
-        let err_mock = LightError::mock_fault("test fault");
-        assert!(err_mock.is_mock_fault());
-        assert_eq!(err_mock.summary(), "injected mock fault: test fault");
-
-        let err_bh = LightError::from_bh_err(BhError::MeasurementTimeOutOfRange);
-        assert!(err_bh.is_i2c());
-        assert_eq!(
-            err_bh.summary(),
-            "I2C bus error: measurement time out of range"
-        );
-    }
-
-    #[tokio::test]
-    async fn async_methods_read_from_mock_sensor() {
-        let (sensor, mock) = LightSensor::new_mocked();
-        mock.set_lux(350.0);
-
-        let illum = sensor.read_lux_async().await.unwrap();
-        assert!((illum.lux() - 350.0).abs() < 1e-1);
-
-        let diag = sensor.read_diagnostics_async().await.unwrap();
-        assert!((diag.illuminance.lux() - 350.0).abs() < 1e-1);
-    }
-
-    #[tokio::test]
-    async fn cancelled_blocking_task_maps_to_light_error_cancelled() {
-        let err: LightError = abort_and_map("BH1750 test task").await;
-        assert!(err.is_cancelled());
-        assert!(err.summary().contains("BH1750 test task"));
-    }
-
-    #[test]
-    fn sensor_bus_validation_and_debug_formatting() {
-        // Hermetic: invalid bus is rejected before any `/dev/i2c-*` device is opened.
-        let err = LightSensor::with_bus_and_address(99, I2cAddress::default()).unwrap_err();
-        assert!(err.summary().contains("unsupported I2C bus 99"));
-        let (sensor, _) = LightSensor::new_mocked();
-        let debug = format!("{sensor:?}");
-        assert!(debug.contains("Mock"));
-    }
-
-    #[test]
-    fn i2c_address_methods_and_formatting() {
-        let addr = I2cAddress::default_address();
-        assert_eq!(addr.as_u8(), 0x23);
-        assert_eq!(addr.as_u16(), 0x0023);
-        assert_eq!(addr.to_string(), "0x23");
-
-        let alt = I2cAddress::alternate_address();
-        assert_eq!(alt.as_u8(), 0x5C);
-        assert_eq!(alt.as_u16(), 0x005C);
-        assert_eq!(alt.to_string(), "0x5C");
-
-        assert_eq!(BhAddress::from(addr), BhAddress::Low);
-        assert_eq!(BhAddress::from(alt), BhAddress::High);
-
-        let default_hw = I2cHardwareInfo::rpi3_default(addr);
-        assert_eq!(default_hw.bus, 1);
-        assert_eq!(default_hw.address, addr);
-    }
-
-    #[test]
-    fn illuminance_bounds_and_millilux_edge_cases() {
-        let zero = Illuminance::from_lux(0.0).unwrap();
-        assert_eq!(zero.millilux(), 0);
-        assert_eq!(zero.foot_candles(), 0.0);
-        assert_eq!(zero.to_string(), "0.00 lx");
-
-        let max = Illuminance::from_lux(Illuminance::MAX_LUX).unwrap();
-        assert_eq!(max.millilux(), 120_000_000);
-
-        let err_over = Illuminance::from_lux(Illuminance::MAX_LUX + 1.0).unwrap_err();
-        assert!(err_over.is_invalid_illuminance());
-    }
-
-    #[test]
-    fn light_error_backtrace_and_predicates() {
-        let err = LightError::i2c("test");
-        let _ = err.backtrace();
-    }
-
-    #[test]
-    fn try_rpi3_hardware_info_validates_bus() {
-        let err =
-            I2cHardwareInfo::try_rpi3_with_bus_and_address(2, I2cAddress::default()).unwrap_err();
-        assert!(err.is_i2c());
-        assert!(err.summary().contains("unsupported I2C bus 2"));
-    }
-
-    #[test]
-    fn mock_sensor_bus_matches_rpi3_default() {
-        let (sensor, _) = LightSensor::new_mocked();
-        assert_eq!(sensor.i2c_bus(), BH1750_DEFAULT_I2C_BUS);
-        let info = sensor.hardware_info();
-        assert_eq!(info.bus, BH1750_DEFAULT_I2C_BUS);
-    }
-}
