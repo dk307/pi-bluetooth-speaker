@@ -8,19 +8,15 @@
 //! Follows Microsoft Pragmatic Rust Guidelines (`M-SERVICES-CLONE`, `M-STRONG-TYPES`).
 
 use std::fmt::{self, Debug, Formatter};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
 
 use slint::ComponentHandle;
 
-use super::generated::MainWindow;
+use super::generated::{MainWindow, Theme};
 use super::theme::ThemePreset;
 
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
-    active_theme: Arc<AtomicI32>,
-    active_tab: Arc<AtomicI32>,
 }
 
 impl Debug for AppShell {
@@ -36,14 +32,7 @@ impl AppShell {
     /// Initializes an [`AppShell`] controller wrapping a [`MainWindow`] component.
     #[must_use]
     pub fn new(window: MainWindow) -> Self {
-        let active_theme = Arc::new(AtomicI32::new(ThemePreset::default().index()));
-        let active_tab = Arc::new(AtomicI32::new(0));
-
-        let shell = Self {
-            window,
-            active_theme,
-            active_tab,
-        };
+        let shell = Self { window };
 
         shell.setup_callbacks();
         shell.apply_theme(ThemePreset::default());
@@ -59,13 +48,13 @@ impl AppShell {
     /// Returns the currently active theme preset.
     #[must_use]
     pub fn current_theme(&self) -> ThemePreset {
-        ThemePreset::from_index(self.active_theme.load(Ordering::Acquire))
+        ThemePreset::from_index(self.window.global::<Theme>().get_active_preset())
     }
 
     /// Returns the currently active navigation dock tab index (0 to 5).
     #[must_use]
     pub fn current_tab(&self) -> i32 {
-        self.active_tab.load(Ordering::Acquire)
+        self.window.get_active_tab()
     }
 
     /// Returns whether the optical CD player service and navigation entry are enabled.
@@ -93,7 +82,6 @@ impl AppShell {
         if tab == 3 && !self.is_cd_enabled() {
             tab = 0;
         }
-        self.active_tab.store(tab, Ordering::Release);
         self.window.set_active_tab(tab);
     }
 
@@ -136,7 +124,6 @@ impl AppShell {
 
     /// Applies a theme preset to the UI shell.
     pub fn apply_theme(&self, preset: ThemePreset) {
-        self.active_theme.store(preset.index(), Ordering::Release);
         preset.apply(&self.window);
     }
 
@@ -150,35 +137,29 @@ impl AppShell {
 
     fn setup_callbacks(&self) {
         let win = self.window.as_weak();
-        let tab_atomic = Arc::clone(&self.active_tab);
         self.window.on_tab_selected(move |idx| {
-            let mut clamped = idx.clamp(0, 5);
             if let Some(w) = win.upgrade() {
+                let mut clamped = idx.clamp(0, 5);
                 if clamped == 3 && !w.get_cd_enabled() {
                     clamped = 0;
                 }
                 w.set_active_tab(clamped);
             }
-            tab_atomic.store(clamped, Ordering::Release);
         });
 
         let win = self.window.as_weak();
-        let theme_atomic = Arc::clone(&self.active_theme);
         self.window.on_select_theme(move |idx| {
-            let preset = ThemePreset::from_index(idx);
-            theme_atomic.store(preset.index(), Ordering::Release);
             if let Some(w) = win.upgrade() {
+                let preset = ThemePreset::from_index(idx);
                 preset.apply(&w);
             }
         });
 
         let win = self.window.as_weak();
-        let theme_atomic = Arc::clone(&self.active_theme);
         self.window.on_cycle_theme(move || {
-            let current = ThemePreset::from_index(theme_atomic.load(Ordering::Acquire));
-            let next = current.next();
-            theme_atomic.store(next.index(), Ordering::Release);
             if let Some(w) = win.upgrade() {
+                let current = ThemePreset::from_index(w.global::<Theme>().get_active_preset());
+                let next = current.next();
                 next.apply(&w);
             }
         });

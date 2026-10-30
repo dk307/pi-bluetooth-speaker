@@ -35,10 +35,15 @@ impl ThemePreset {
         self as i32
     }
 
-    /// Resolves a theme preset from an integer index (wraps modulo 4).
+    /// Resolves a theme preset from an integer index (wraps modulo [`COUNT`](Self::COUNT)).
     #[must_use]
     pub const fn from_index(index: i32) -> Self {
-        match index.rem_euclid(4) {
+        #[expect(
+            clippy::cast_possible_wrap,
+            clippy::cast_possible_truncation,
+            reason = "COUNT is small (4)"
+        )]
+        match index.rem_euclid(Self::COUNT as i32) {
             0 => Self::McIntoshBlue,
             1 => Self::MarantzAmber,
             2 => Self::CyberpunkNeon,
