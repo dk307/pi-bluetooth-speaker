@@ -498,7 +498,6 @@ impl Framebuffer {
         })
     }
 
-    /// Validates the complete fbdev scanout contract (resolution, pixel format,
     /// Validates the complete scanout contract for an fb* device against its sysfs attributes,
     /// failing closed when any required attribute is missing.
     ///

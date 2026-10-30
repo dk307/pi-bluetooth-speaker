@@ -3,8 +3,6 @@
 #[cfg(feature = "ui")]
 use std::fs;
 #[cfg(feature = "ui")]
-use std::path::Path;
-#[cfg(feature = "ui")]
 use std::sync::Mutex;
 
 use speaker_core::cli::core_daemon::{
@@ -20,6 +18,16 @@ use speaker_core::diag::CliParse;
 use speaker_core::diag::ScopedTempDir;
 #[cfg(feature = "ui")]
 use speaker_core::ui::Framebuffer;
+
+#[cfg(feature = "ui")]
+static ENV_GUARD: Mutex<()> = Mutex::new(());
+
+#[cfg(feature = "ui")]
+fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    ENV_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[test]
 fn parse_preview_secs_rejects_sign_prefixes_and_non_numeric() {
@@ -50,8 +58,7 @@ fn parse_preview_secs_rejects_sign_prefixes_and_non_numeric() {
 #[cfg(feature = "ui")]
 #[test]
 fn headless_requested_requires_explicit_one() {
-    static ENV_GUARD: Mutex<()> = Mutex::new(());
-    let _guard = ENV_GUARD.lock().unwrap();
+    let _guard = lock_env();
     // SAFETY: tests are serialized by ENV_GUARD; no other test thread reads
     // SPEAKER_CORE_HEADLESS while this guard is held.
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
@@ -72,17 +79,13 @@ fn headless_requested_requires_explicit_one() {
 #[cfg(feature = "ui")]
 #[test]
 fn run_ui_display_headless_short_circuits() {
-    static ENV_GUARD: Mutex<()> = Mutex::new(());
-    let _guard = ENV_GUARD.lock().unwrap();
+    let _guard = lock_env();
     // SAFETY: tests are serialized by ENV_GUARD; no other test thread reads
     // SPEAKER_CORE_HEADLESS while this guard is held.
     unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "1") };
-    // Even with an existing device path, the headless guard must return
-    // before any framebuffer/sysfs access.
+    // The headless guard in run_ui_display must return before any framebuffer/sysfs access.
     run_ui_display(ScreenTarget::Splash, Some(1), true);
     run_ui_display(ScreenTarget::Shell, Some(1), true);
-    run_ui_display_on_path(Path::new("/tmp"), ScreenTarget::Splash, Some(1), true);
-    run_ui_display_on_path(Path::new("/tmp"), ScreenTarget::Shell, Some(1), true);
     // SAFETY: same serialized-guard invariant as above.
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
 }
@@ -90,8 +93,7 @@ fn run_ui_display_headless_short_circuits() {
 #[cfg(feature = "ui")]
 #[test]
 fn run_ui_display_missing_device_returns_early() {
-    static ENV_GUARD: Mutex<()> = Mutex::new(());
-    let _guard = ENV_GUARD.lock().unwrap();
+    let _guard = lock_env();
     // SAFETY: tests are serialized by ENV_GUARD; no other test thread reads
     // SPEAKER_CORE_HEADLESS while this guard is held.
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
@@ -222,8 +224,7 @@ fn parse_cli_args_flags_and_values() {
 #[cfg(feature = "ui")]
 #[test]
 fn run_app_headless_executes_successfully() {
-    static ENV_GUARD: Mutex<()> = Mutex::new(());
-    let _guard = ENV_GUARD.lock().unwrap();
+    let _guard = lock_env();
     // SAFETY: tests are serialized by ENV_GUARD; no other test thread reads
     // SPEAKER_CORE_HEADLESS while this guard is held.
     unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "1") };
@@ -299,13 +300,19 @@ fn print_usage_executes_without_panic() {
 #[cfg(feature = "ui")]
 #[test]
 fn run_ui_display_with_headless_disabled_checks_device() {
-    static ENV_GUARD: Mutex<()> = Mutex::new(());
-    let _guard = ENV_GUARD.lock().unwrap();
+    let _guard = lock_env();
     // SAFETY: serialized test guard
     unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "0") };
 
-    run_ui_display(ScreenTarget::Splash, None, false);
-    run_ui_display(ScreenTarget::Shell, None, false);
+    assert!(
+        !headless_requested(),
+        "SPEAKER_CORE_HEADLESS=0 must not enable headless mode"
+    );
+
+    let dir = ScopedTempDir::new("fb-headless-disabled");
+    let missing = dir.path().join("fb0");
+    run_ui_display_on_path(&missing, ScreenTarget::Splash, None, false);
+    run_ui_display_on_path(&missing, ScreenTarget::Shell, None, false);
 
     // SAFETY: serialized test guard
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };

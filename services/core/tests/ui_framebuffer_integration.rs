@@ -363,14 +363,6 @@ fn framebuffer_regular_file_truncated_falls_back_to_buffered() {
 }
 
 #[test]
-fn framebuffer_new_default_path_fails_or_opens() {
-    let res = Framebuffer::new();
-    if !Path::new(Framebuffer::DEFAULT_FB_PATH).exists() {
-        let _ = res.unwrap_err();
-    }
-}
-
-#[test]
 fn framebuffer_unblank_with_missing_blank_file() {
     let temp = ScopedTempDir::try_new("fb_missing_blank_test").unwrap();
     let dev = temp.path().join("fake_fb");

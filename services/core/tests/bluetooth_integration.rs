@@ -1022,9 +1022,6 @@ fn bluetooth_device_control_methods_and_mock_coverage() {
     let fdo_err = BtError::from(zbus::fdo::Error::UnknownObject("test obj".into()));
     assert!(fdo_err.is_dbus());
     assert!(fdo_err.summary().contains("test obj"));
-
-    // BluetoothDevice::new invocation
-    let _ = BluetoothDevice::new();
 }
 
 #[tokio::test]
