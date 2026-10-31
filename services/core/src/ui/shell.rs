@@ -195,18 +195,29 @@ impl AppShell {
 
     /// Applies state from a [`crate::hardware::BtPlaybackState`] point-in-time snapshot.
     pub fn apply_bluetooth_playback(&self, playback: &crate::hardware::BtPlaybackState) {
-        self.set_track_metadata(
-            playback.title.as_ref(),
-            playback.artist.as_ref(),
-            playback.album.as_ref(),
-        );
-        self.set_playback_state(
-            playback.is_playing(),
-            playback.position_ms,
-            playback.duration_ms,
-        );
+        Self::apply_playback_to_window(&self.window, playback);
+    }
+
+    fn apply_playback_to_window(w: &MainWindow, playback: &crate::hardware::BtPlaybackState) {
+        w.set_track_title(playback.title.as_ref().into());
+        w.set_track_artist(playback.artist.as_ref().into());
+        w.set_track_album(playback.album.as_ref().into());
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "duration_ms up to i32::MAX fits cleanly in slint int"
+        )]
+        w.set_duration_ms(playback.duration_ms as i32);
+        w.set_is_playing(playback.is_playing());
+        let ratio = if playback.duration_ms == 0 {
+            0.0
+        } else {
+            (playback.position_ms as f32 / playback.duration_ms as f32).clamp(0.0, 1.0)
+        };
+        w.set_progress_ratio(ratio);
+        w.set_position_text(crate::hardware::format_duration_ms(playback.position_ms).into());
+        w.set_duration_text(crate::hardware::format_duration_ms(playback.duration_ms).into());
         if !playback.device_name.is_empty() {
-            self.set_track_or_device(playback.device_name.as_ref());
+            w.set_track_or_device(playback.device_name.as_ref().into());
         }
     }
 
@@ -242,21 +253,41 @@ impl AppShell {
         let win = self.window.as_weak();
         self.window.on_toggle_play_pause(move || {
             if let Some(w) = win.upgrade() {
-                let current = w.get_is_playing();
-                if bt_toggle.player_toggle().is_ok() {
-                    w.set_is_playing(!current);
+                if let Ok(next_state) = bt_toggle.player_toggle() {
+                    let actual = bt_toggle
+                        .playback_state()
+                        .ok()
+                        .flatten()
+                        .map_or(next_state, |p| p.is_playing());
+                    w.set_is_playing(actual);
                 }
             }
         });
 
         let bt_next = bt.clone();
+        let bt_sync_next = bt.clone();
+        let win_next = self.window.as_weak();
         self.window.on_next_track(move || {
-            let _ = bt_next.player_next();
+            if bt_next.player_next().is_ok() {
+                if let Some(w) = win_next.upgrade() {
+                    if let Ok(Some(ref p)) = bt_sync_next.playback_state() {
+                        Self::apply_playback_to_window(&w, p);
+                    }
+                }
+            }
         });
 
         let bt_prev = bt.clone();
+        let bt_sync_prev = bt.clone();
+        let win_prev = self.window.as_weak();
         self.window.on_previous_track(move || {
-            let _ = bt_prev.player_previous();
+            if bt_prev.player_previous().is_ok() {
+                if let Some(w) = win_prev.upgrade() {
+                    if let Ok(Some(ref p)) = bt_sync_prev.playback_state() {
+                        Self::apply_playback_to_window(&w, p);
+                    }
+                }
+            }
         });
 
         let bt_seek = bt;
@@ -317,13 +348,8 @@ impl AppShell {
             }
         });
 
-        let win = self.window.as_weak();
-        self.window.on_toggle_play_pause(move || {
-            if let Some(w) = win.upgrade() {
-                let current = w.get_is_playing();
-                w.set_is_playing(!current);
-                tracing::debug!("Play/Pause toggled to {}", !current);
-            }
+        self.window.on_toggle_play_pause(|| {
+            tracing::debug!("Play/Pause requested (no audio transport wired)");
         });
 
         let win = self.window.as_weak();

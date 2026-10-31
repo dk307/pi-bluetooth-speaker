@@ -7,6 +7,8 @@
 use std::path::Path;
 use std::process::ExitCode;
 #[cfg(feature = "ui")]
+use std::rc::Rc;
+#[cfg(feature = "ui")]
 use std::time::{Duration, Instant};
 
 use crate::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts};
@@ -15,6 +17,8 @@ use crate::hardware::TempSensor;
 use crate::ui::{AppShell, Framebuffer, MainWindow, SplashScreen};
 #[cfg(feature = "ui")]
 use slint::ComponentHandle;
+#[cfg(feature = "ui")]
+use slint::platform::software_renderer::MinimalSoftwareWindow;
 
 /// Target screen to render on the framebuffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -269,6 +273,90 @@ pub fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: 
     });
 }
 
+#[cfg(feature = "ui")]
+fn init_shell(
+    demo_playback: bool,
+    main_window: MainWindow,
+) -> (AppShell, Option<crate::hardware::BluetoothDevice>) {
+    let shell = AppShell::new(main_window);
+    if demo_playback {
+        let (mock_bt, _) = crate::hardware::BluetoothDevice::new_mocked();
+        shell.wire_bluetooth_transport(mock_bt);
+        shell.apply_demo_playback();
+        (shell, None)
+    } else {
+        match crate::hardware::BluetoothDevice::new() {
+            Ok(bt) => {
+                if let Ok(Some(ref pb)) = bt.playback_state() {
+                    shell.apply_bluetooth_playback(pb);
+                }
+                shell.wire_bluetooth_transport(bt.clone());
+                (shell, Some(bt))
+            }
+            Err(e) => {
+                report_display(
+                    tracing::Level::WARN,
+                    "Failed to connect to Bluetooth D-Bus for UI transport",
+                    &e,
+                );
+                (shell, None)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "ui")]
+pub fn run_render_loop(
+    fb: &mut Framebuffer,
+    window: &Rc<MinimalSoftwareWindow>,
+    shell: &AppShell,
+    maybe_bt: Option<&crate::hardware::BluetoothDevice>,
+    preview_secs: Option<u64>,
+    run_loop: bool,
+    demo_playback: bool,
+) {
+    let start = Instant::now();
+    let duration = preview_secs.map(Duration::from_secs);
+    tracing::info!("Running UI render loop");
+    println!("  Display: Running UI render loop...");
+
+    let mut sim_pos_ms = 105_000u32;
+    let sim_dur_ms = 230_000u32;
+    let mut sim_tick = 0u32;
+    let mut last_bt_sync = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
+
+    while run_loop || duration.is_some_and(|d| start.elapsed() < d) {
+        if demo_playback {
+            sim_pos_ms = (sim_pos_ms + 16) % sim_dur_ms;
+            sim_tick = sim_tick.wrapping_add(1);
+            shell.set_playback_state(true, sim_pos_ms, sim_dur_ms);
+            let l_peak = 0.65 + 0.15 * ((sim_tick as f32 * 0.1).sin()).abs();
+            let r_peak = 0.60 + 0.18 * ((sim_tick as f32 * 0.12).cos()).abs();
+            shell.set_peak_levels(l_peak, r_peak);
+            window.request_redraw();
+        } else if let Some(bt) = maybe_bt {
+            if last_bt_sync.elapsed() >= Duration::from_millis(500) {
+                last_bt_sync = Instant::now();
+                if let Ok(Some(ref pb)) = bt.playback_state() {
+                    shell.apply_bluetooth_playback(pb);
+                    window.request_redraw();
+                }
+            }
+        }
+
+        slint::platform::update_timers_and_animations();
+        if let Err(e) = fb.render_frame(window) {
+            report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    tracing::info!("Preview complete");
+    println!("  Display: Preview complete.");
+}
+
 /// Runs the UI Shell lifecycle against an opened framebuffer backend.
 #[cfg(feature = "ui")]
 pub fn run_shell_on(
@@ -300,10 +388,8 @@ pub fn run_shell_on(
             return;
         }
     };
-    let shell = AppShell::new(main_window);
-    if demo_playback {
-        shell.apply_demo_playback();
-    }
+
+    let (shell, maybe_bt) = init_shell(demo_playback, main_window);
     if let Err(e) = shell.window().show() {
         report_display(
             tracing::Level::ERROR,
@@ -329,35 +415,15 @@ pub fn run_shell_on(
     }
 
     if run_loop || preview_secs.is_some() {
-        let start = Instant::now();
-        let duration = preview_secs.map(Duration::from_secs);
-        tracing::info!("Running UI render loop");
-        println!("  Display: Running UI render loop...");
-
-        let mut sim_pos_ms = 105_000u32;
-        let sim_dur_ms = 230_000u32;
-        let mut sim_tick = 0u32;
-
-        while run_loop || duration.is_some_and(|d| start.elapsed() < d) {
-            if demo_playback {
-                sim_pos_ms = (sim_pos_ms + 16) % sim_dur_ms;
-                sim_tick = sim_tick.wrapping_add(1);
-                shell.set_playback_state(true, sim_pos_ms, sim_dur_ms);
-                let l_peak = 0.65 + 0.15 * ((sim_tick as f32 * 0.1).sin()).abs();
-                let r_peak = 0.60 + 0.18 * ((sim_tick as f32 * 0.12).cos()).abs();
-                shell.set_peak_levels(l_peak, r_peak);
-                window.request_redraw();
-            }
-
-            slint::platform::update_timers_and_animations();
-            if let Err(e) = fb.render_frame(&window) {
-                report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(16));
-        }
-        tracing::info!("Preview complete");
-        println!("  Display: Preview complete.");
+        run_render_loop(
+            fb,
+            &window,
+            &shell,
+            maybe_bt.as_ref(),
+            preview_secs,
+            run_loop,
+            demo_playback,
+        );
     }
 }
 

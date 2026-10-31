@@ -1427,7 +1427,17 @@ impl DbusClient {
         Ok(())
     }
 
-    pub(crate) fn player_toggle(&self) -> Result<(), BtError> {
+    pub(crate) fn playback_state(&self) -> Result<Option<BtPlaybackState>, BtError> {
+        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+            .destination("org.bluez")
+            .and_then(|b| b.path("/"))
+            .and_then(zbus::blocking::proxy::Builder::build)?;
+        let objects = proxy.get_managed_objects()?;
+        let (_, _, playback) = Self::parse_bluez_all(&objects, None)?;
+        Ok(playback)
+    }
+
+    pub(crate) fn player_toggle(&self) -> Result<bool, BtError> {
         let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
             .destination("org.bluez")
             .and_then(|b| b.path("/"))
@@ -1436,12 +1446,14 @@ impl DbusClient {
         let (_, _, playback) = Self::parse_bluez_all(&objects, None)?;
         let playback = playback
             .ok_or_else(|| BtError::no_active_player("no active MediaPlayer1 found on D-Bus"))?;
+        let next_playing = !playback.is_playing();
         let method = if playback.is_playing() {
             "Pause"
         } else {
             "Play"
         };
-        self.call_player_method(playback.player_path.as_deref(), method)
+        self.call_player_method(playback.player_path.as_deref(), method)?;
+        Ok(next_playing)
     }
 
     pub(crate) fn query_bluealsa(
@@ -1897,18 +1909,27 @@ impl BluetoothDeviceMock {
         }
     }
 
-    fn player_toggle(&self) -> Result<(), BtError> {
+    fn playback_state(&self) -> Result<Option<BtPlaybackState>, BtError> {
+        let state = self.state.read().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        Ok(state.playback.clone())
+    }
+
+    fn player_toggle(&self) -> Result<bool, BtError> {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(BtError::mock_fault(fault.clone()));
         }
         if let Some(ref mut p) = state.playback {
-            if p.is_playing() {
-                p.status = "paused".into();
-            } else {
+            let next_playing = !p.is_playing();
+            if next_playing {
                 p.status = "playing".into();
+            } else {
+                p.status = "paused".into();
             }
-            Ok(())
+            Ok(next_playing)
         } else {
             Err(BtError::no_active_player("no active mock player"))
         }
@@ -2204,7 +2225,10 @@ impl BluetoothDevice {
     /// # Errors
     /// Returns [`BtError`] if querying fails.
     pub fn playback_state(&self) -> Result<Option<BtPlaybackState>, BtError> {
-        Ok(self.status()?.playback)
+        match &*self.backend {
+            Backend::Mock(mock) => mock.playback_state(),
+            Backend::Dbus(dbus) => dbus.playback_state(),
+        }
     }
 
     /// Returns the active media player playback state asynchronously.
@@ -2240,9 +2264,11 @@ impl BluetoothDevice {
 
     /// Toggles between Play and Pause on the active Bluetooth media player.
     ///
+    /// Returns `true` if the player transitioned to playing, or `false` if paused.
+    ///
     /// # Errors
     /// Returns [`BtError`] if D-Bus communication fails or no player is available.
-    pub fn player_toggle(&self) -> Result<(), BtError> {
+    pub fn player_toggle(&self) -> Result<bool, BtError> {
         match &*self.backend {
             Backend::Mock(mock) => mock.player_toggle(),
             Backend::Dbus(dbus) => dbus.player_toggle(),

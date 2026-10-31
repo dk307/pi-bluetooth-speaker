@@ -1192,24 +1192,24 @@ fn bluetooth_mock_playback_controls() {
     assert!(s.playback.as_ref().unwrap().is_playing());
 
     // Toggle
-    device.player_toggle().unwrap();
+    let is_playing = device.player_toggle().unwrap();
+    assert!(!is_playing);
     assert_eq!(
         device
-            .status()
+            .playback_state()
             .unwrap()
-            .playback
             .as_ref()
             .unwrap()
             .status
             .as_ref(),
         "paused"
     );
-    device.player_toggle().unwrap();
+    let is_playing = device.player_toggle().unwrap();
+    assert!(is_playing);
     assert_eq!(
         device
-            .status()
+            .playback_state()
             .unwrap()
-            .playback
             .as_ref()
             .unwrap()
             .status

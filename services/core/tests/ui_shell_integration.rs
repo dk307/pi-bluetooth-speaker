@@ -312,10 +312,8 @@ fn ui_shell_now_playing_callbacks() {
     let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
     let shell = AppShell::new(main_window);
 
-    // Invoke transport callbacks
+    // Invoke transport callbacks on unwired shell (does not falsely claim playing)
     assert!(!shell.is_playing());
-    shell.window().invoke_toggle_play_pause();
-    assert!(shell.is_playing());
     shell.window().invoke_toggle_play_pause();
     assert!(!shell.is_playing());
 
@@ -348,11 +346,17 @@ fn ui_shell_now_playing_callbacks() {
     assert!(bt.status().unwrap().playback.unwrap().is_playing());
     shell.window().invoke_toggle_play_pause();
     assert!(!bt.status().unwrap().playback.unwrap().is_playing());
+    assert!(!shell.is_playing());
+    shell.window().invoke_toggle_play_pause();
+    assert!(bt.status().unwrap().playback.unwrap().is_playing());
+    assert!(shell.is_playing());
 
     shell.window().invoke_next_track();
+    assert_eq!(shell.window().get_track_title(), "Money for Nothing");
     shell.window().invoke_previous_track();
+    assert_eq!(shell.window().get_track_title(), "Money for Nothing");
     shell.window().invoke_seek(0.5);
-    assert_eq!(bt.status().unwrap().playback.unwrap().position_ms, 50_000);
+    assert_eq!(bt.status().unwrap().playback.unwrap().position_ms, 115_000);
 
     // Callbacks without panicking
     shell.window().invoke_stream_pill_clicked();

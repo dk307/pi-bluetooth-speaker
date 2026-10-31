@@ -11,8 +11,8 @@ use speaker_core::cli::core_daemon::{
 };
 #[cfg(feature = "ui")]
 use speaker_core::cli::core_daemon::{
-    report_display, run_app, run_shell_on, run_splash_on, run_ui_display, run_ui_display_on_path,
-    run_ui_lifecycle,
+    report_display, run_app, run_render_loop, run_shell_on, run_splash_on, run_ui_display,
+    run_ui_display_on_path, run_ui_lifecycle,
 };
 use speaker_core::diag::CliParse;
 #[cfg(feature = "ui")]
@@ -185,6 +185,26 @@ fn run_shell_on_mocked_with_demo_playback() {
     run_shell_on(&mut fb, Some(0), false, true);
     assert_eq!(fb.render_count(), 1);
     assert_eq!(ctrl.counters(), (1, 1));
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn run_render_loop_demo_playback_and_bluetooth_paths() {
+    use speaker_core::ui::{AppShell, MainWindow};
+
+    let (mut fb, ctrl) = Framebuffer::new_mocked();
+    let window = fb.init_platform().unwrap();
+    let main_window = MainWindow::new().unwrap();
+    let shell = AppShell::new(main_window);
+
+    // 1. Demo playback loop branch breaking on render failure
+    ctrl.set_render_error("simulated demo loop failure");
+    run_render_loop(&mut fb, &window, &shell, None, Some(10), true, true);
+
+    // 2. Bluetooth sync branch with mocked BluetoothDevice breaking on render failure
+    let (bt, _) = speaker_core::hardware::BluetoothDevice::new_mocked();
+    ctrl.set_render_error("simulated bt loop failure");
+    run_render_loop(&mut fb, &window, &shell, Some(&bt), Some(10), true, false);
 }
 
 #[test]
