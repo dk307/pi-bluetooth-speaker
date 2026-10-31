@@ -167,7 +167,7 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 | **`bluetooth.service`** | `active (running)` | System | `/usr/libexec/bluetooth/bluetoothd` | Official BlueZ daemon managing HCI controller and A2DP profile. |
 | **`bt-agent.service`** | `active (running)` | Custom | `/usr/local/bin/bt-auto-trust-agent.py` | Python D-Bus agent providing headless auto-pairing and auto-trusting of incoming Bluetooth connections without PIN prompts. |
 | **`bluealsa.service`** | `active (running)` | Custom/System | `/usr/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+` | BlueALSA v5.0.0 daemon acting as an A2DP sink supporting all high-resolution codecs except Opus, with native AVRCP volume. |
-| **`bluealsa-aplay.service`**| `active (running)` | Custom/System | `/usr/bin/bluealsa-aplay -S -D default --mixer-control="A.Mstr Vol"` | Pipes incoming decoded audio stream from BlueALSA to ALSA `default` (`dsp_dmix` -> `Loopback,0,0` -> CamillaDSP) with hardware volume auto-sync to the Merus MA12070P chip. |
+| **`bluealsa-aplay.service`**| `active (running)` | Custom/System | `/usr/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"` | Pipes incoming decoded audio stream from BlueALSA to ALSA `default` (`dsp_dmix` -> `Loopback,0,0` -> CamillaDSP) with hardware-only volume auto-sync to the Merus MA12070P chip (`hw:sndrpimerusamp`). |
 | **`camilladsp.service`** | `active (running)` | Custom | `/usr/local/bin/camilladsp -p 1234 -o /var/log/camilladsp/camilladsp.log /etc/camilladsp/crossover.yml` | CamillaDSP v4.1.3 crossover and filter engine with WebSocket control API on port 1234. |
 
 ### Infrastructure & System Services
@@ -276,10 +276,10 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 ### 7.2. BlueALSA Playback Forwarder (`bluealsa-aplay.service`)
 - **File:** `/etc/systemd/system/bluealsa-aplay.service`
 - **Target Device:** `-D default` (routes through ALSA `pcm.!default` -> `dsp_dmix` -> `Loopback,0,0`)
-- **Hardware Volume Sync:** `--mixer-control="A.Mstr Vol"` links the phone's AVRCP Bluetooth volume slider directly to the Merus MA12070P hardware amplifier mixer (`sndrpimerusamp`), providing bit-perfect 100% digital signal level into CamillaDSP while controlling attenuation in the hardware amplifier.
+- **Hardware-Only Volume Sync:** `-M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"` explicitly binds `bluealsa-aplay` to the Merus MA12070P hardware amplifier mixer (`Card 1: sndrpimerusamp`) rather than relying on `ctl.!default`. This sets `SoftVolume: false` on the BlueALSA PCM transport so BlueALSA performs **zero software attenuation**, feeding a bit-perfect 100% full-scale digital signal into CamillaDSP while mapping AVRCP volume (`0..127`) exclusively to the MA12070P hardware `'A.Mstr Vol'` register (`0..144`, `-144 dB..0.00 dB`).
 - **Command Line:**
   ```bash
-  /usr/bin/bluealsa-aplay -S -D default --mixer-control="A.Mstr Vol"
+  /usr/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"
   ```
 
 ### 7.3. ALSA Routing Configuration (`/etc/asound.conf`)
@@ -476,6 +476,8 @@ amixer -c sndrpimerusamp sset 'R.Power Mode' 'Dynamic power mode'
 alsactl store
 ```
 
+> **⚠️ DietPi Warning (`dietpi-config`):** Because this appliance uses a custom DTBO (`dtoverlay=merus-amp-custom`), `/boot/dietpi.txt` has `CONFIG_SOUNDCARD=none`. Running `dietpi-config` (or `/boot/dietpi/func/dietpi-set_hardware soundcard none`) triggers `Soundcard_Reset_All()`, which **deletes `/etc/asound.conf` and `/var/lib/alsa/asound.state` and purges `alsa-utils`**. If `dietpi-config` is ever invoked, immediately restore `alsa-utils`, `/etc/asound.conf`, and `/var/lib/alsa/asound.state` from `baseline/` and run `alsactl restore sndrpimerusamp && systemctl restart camilladsp bluealsa-aplay`.
+
 ### 10.3. ALSA Virtual Loopback Configuration
 Allows BlueALSA audio to be piped through ALSA dmix and captured by CamillaDSP:
 ```bash
@@ -625,7 +627,7 @@ Wants=camilladsp.service
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/bluealsa-aplay -S -D default --mixer-control="A.Mstr Vol"
+ExecStart=/usr/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"
 Restart=always
 RestartSec=2
 

@@ -391,9 +391,36 @@ const _: () = {
     assert!(Framebuffer::DEFAULT_WIDTH == 800 && Framebuffer::DEFAULT_HEIGHT == 480);
 };
 
+/// Line-by-line render target.
+///
+/// When `scratch` is non-empty (memory-mapped `/dev/fb0`), each line is rendered into a cached
+/// RAM row and then copied to the scanout buffer write-only. The framebuffer mapping is
+/// uncached device memory, so blending text directly into it (read-modify-write per pixel)
+/// is extremely slow and keeps the scanout buffer in a half-drawn state for most of a frame.
 struct FbLineBuffer<'a> {
     pixels: &'a mut [Bgrx8888Pixel],
     stride: usize,
+    scratch: Vec<Bgrx8888Pixel>,
+}
+
+impl<'a> FbLineBuffer<'a> {
+    /// Renders directly into `pixels` (cached RAM targets).
+    fn direct(pixels: &'a mut [Bgrx8888Pixel], stride: usize) -> Self {
+        Self {
+            pixels,
+            stride,
+            scratch: Vec::new(),
+        }
+    }
+
+    /// Renders via a cached scratch row, then copies to `pixels` (uncached device memory).
+    fn buffered(pixels: &'a mut [Bgrx8888Pixel], stride: usize) -> Self {
+        Self {
+            pixels,
+            stride,
+            scratch: vec![Bgrx8888Pixel::default(); stride],
+        }
+    }
 }
 
 impl LineBufferProvider for FbLineBuffer<'_> {
@@ -406,7 +433,13 @@ impl LineBufferProvider for FbLineBuffer<'_> {
         render_fn: impl FnOnce(&mut [Self::TargetPixel]),
     ) {
         let offset = line * self.stride + range.start;
-        render_fn(&mut self.pixels[offset..offset + range.len()]);
+        if self.scratch.is_empty() {
+            render_fn(&mut self.pixels[offset..offset + range.len()]);
+        } else {
+            let row = &mut self.scratch[range.clone()];
+            render_fn(row);
+            self.pixels[offset..offset + range.len()].copy_from_slice(row);
+        }
     }
 }
 
@@ -753,10 +786,7 @@ impl Framebuffer {
                 if let Some(mmap_mut) = mmap {
                     let pixel_slice = Bgrx8888Pixel::try_from_bytes_mut(mmap_mut)?;
                     let did_draw = window.draw_if_needed(|renderer| {
-                        renderer.render_by_line(FbLineBuffer {
-                            pixels: pixel_slice,
-                            stride: width,
-                        });
+                        renderer.render_by_line(FbLineBuffer::buffered(pixel_slice, width));
                     });
                     if did_draw {
                         mmap_mut
@@ -766,10 +796,7 @@ impl Framebuffer {
                     Ok(did_draw)
                 } else {
                     let did_draw = window.draw_if_needed(|renderer| {
-                        renderer.render_by_line(FbLineBuffer {
-                            pixels: back_buffer,
-                            stride: width,
-                        });
+                        renderer.render_by_line(FbLineBuffer::direct(back_buffer, width));
                     });
                     if did_draw {
                         Self::flush_file_buffer(
@@ -790,10 +817,7 @@ impl Framebuffer {
                     ));
                 }
                 let did_draw = window.draw_if_needed(|renderer| {
-                    renderer.render_by_line(FbLineBuffer {
-                        pixels: buffer,
-                        stride: width,
-                    });
+                    renderer.render_by_line(FbLineBuffer::direct(buffer, width));
                 });
                 if did_draw {
                     state.render_calls += 1;

@@ -16,10 +16,12 @@ component MarqueeText inherits Rectangle {
     property <length> gap: 80px;
     property <length> cycle_distance: text_width + gap;
 
-    // Smooth 60fps unidirectional marquee:
-    // 2.0s stationary pause at start, followed by smooth constant-speed leftward scroll (35px/s)
+    // Unidirectional marquee: 2.0s stationary pause at start, then constant-speed leftward scroll.
+    // The software renderer snaps text to whole pixels, so the speed is ~1 physical px per
+    // 60 fps frame (60px/s) to avoid uneven 0/1/0/1 px steps that read as judder.
+    property <length> speed: 60px;
     property <float> pause_secs: 2.0;
-    property <float> scroll_secs: Math.max(1.0, (cycle_distance / 35px));
+    property <float> scroll_secs: Math.max(1.0, (cycle_distance / speed));
     property <float> period: is_overflow ? (pause_secs + scroll_secs) : 1000.0;
 
     property <float> phase_t: is_overflow ? Math.mod(animation-tick() / 1s, period) : 0.0;
