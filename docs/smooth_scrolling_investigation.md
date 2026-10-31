@@ -220,3 +220,29 @@ confirms the storm is gone (table above) and scrolling CPU is ~9%.
 `Option<MarqueeStrip>` (`None` = cache hit) so identical strips never re-fire Slint property
 change notifications, and `apply_pcm_stream` change-guards every stream property setter
 (codec, sample rate, bit depth, mute, volume) against the 250 ms worker pushes.
+
+## 8. Real-Playback CPU Follow-Up (2026-10-31)
+
+During real Bluetooth playback the render thread still burned ~56% of a core (preview
+without playback showed ~9%). Host-side frame-by-frame reproduction with simulated playback
+(`set_playing(true)` + 250 ms `set_playback_state` ticks, per-frame `PhysicalRegion::iter`
+rect sampling) attributed the cost precisely:
+
+1. **Wave indicator height animations (~33% CPU):** the five `AmbientWaveIndicator` bars
+   used `animate height {160ms}` restarted by a 180 ms timer. The continuous per-frame
+   geometry transitions dirtied the animated bars AND both layout rows below them
+   ((300,217,484,28) + (300,291,484,86) ~ 55k px every frame). Fix: stepped discrete bar
+   heights (no `animate height`); per-tick dirty is now a few tiny 24x24 bar rects.
+2. **Per-second position-text full redraw (~2.5% CPU, known limitation):** every mm:ss
+   `position_text` string change produces a dirty region spanning the whole Now Playing
+   card (Slint 1.9.2 partial-rendering layout cascade; unaffected by geometry pinning,
+   `wrap: no-wrap`, or change guards). Accepted and documented; roughly one 25 ms full
+   redraw per second.
+3. The earlier full-screen conditional flap (section 7) was already fixed.
+
+**Host regression test:** `tests/marquee_full_redraw_diagnostic.rs` now simulates playback
+and asserts no two consecutive full-window frames and at most one full-window redraw per
+simulated second (storm-free contract).
+
+**Expected playback CPU after the wave fix:** ~12-15% of one core (marquee image blit
+~1.4 ms + wave ticks + 1 Hz text redraw), down from ~56%.

@@ -1,8 +1,10 @@
 #![cfg(feature = "ui")]
 //! Host-side diagnostic: drives the real shell UI frame-by-frame through the software
-//! renderer's partial rendering to detect spurious full-window redraw storms.
+//! renderer's partial rendering to detect spurious full-window redraw storms and
+//! attribute per-frame dirty regions to UI elements under simulated playback.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use slint::platform::software_renderer::{LineBufferProvider, TargetPixel};
@@ -51,10 +53,17 @@ fn shell_frame_loop_has_no_persistent_full_window_redraws() {
         "Some Artist Name",
         "Audiophile DSP Sink",
     );
+    shell.set_playing(true);
     shell.set_tab(0);
 
     let full_frames: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+    let mut rect_histogram: BTreeMap<String, usize> = BTreeMap::new();
+    let mut position_ms: u32 = 0;
     for frame in 0..FRAMES {
+        if frame % 15 == 0 {
+            position_ms = position_ms.saturating_add(250);
+            shell.set_playback_state(true, position_ms, 240_000);
+        }
         std::thread::sleep(std::time::Duration::from_micros(16_700));
         slint::platform::update_timers_and_animations();
         let mut buffer = ScratchBuffer::new();
@@ -69,6 +78,17 @@ fn shell_frame_loop_has_no_persistent_full_window_redraws() {
                 usize::try_from(size.width).unwrap_or(0),
                 usize::try_from(size.height).unwrap_or(0),
             );
+            if frame % 100 == 0 {
+                let rects: Vec<String> = region
+                    .iter()
+                    .map(|(pos, size)| {
+                        format!("({},{},{},{})", pos.x, pos.y, size.width, size.height)
+                    })
+                    .collect();
+                *rect_histogram
+                    .entry(format!("frame {frame}: {}", rects.join(" ")))
+                    .or_default() += 1;
+            }
         });
         let (_x, _y, width, height) = dirty;
         if width * height > (WIDTH * HEIGHT) / 2 {
@@ -76,16 +96,19 @@ fn shell_frame_loop_has_no_persistent_full_window_redraws() {
         }
     }
 
+    for (entry, count) in &rect_histogram {
+        println!("{entry} x{count}");
+    }
     let full = full_frames.borrow().clone();
-    let first_burst = full.first().copied();
     println!(
-        "full-window frames: {} of {FRAMES}, first_burst_start={first_burst:?}, indexes={:?}",
+        "full-window frames: {} of {FRAMES}, indexes={:?}",
         full.len(),
-        &full[..full.len().min(12)],
+        &full[..full.len().min(16)],
     );
-    assert!(
-        full.len() <= 8,
-        "expected only startup full draws, got {} full-window frames starting at {first_burst:?}",
-        full.len(),
-    );
+    // Known bounded behavior: one full-window redraw per position-text (mm:ss) change
+    // (~1 Hz), plus the startup draws. A full-redraw STORM (every frame, as caused by
+    // per-frame item-tree destruction) must never reappear: no two consecutive
+    // full-window frames, and no more than one per second of simulated time.
+    let storm_free = full.windows(2).all(|w| w[1] - w[0] > 1) && full.len() <= (FRAMES / 60) + 2;
+    assert!(storm_free, "full-window redraw storm detected: {full:?}");
 }

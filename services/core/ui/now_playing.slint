@@ -98,35 +98,30 @@ component AmbientWaveIndicator inherits Rectangle {
             height: root.is_playing ? Math.max(6px, (Math.mod(root.tick, 4) == 0 ? 20px : (Math.mod(root.tick, 4) == 2 ? 8px : 14px))) : 4px;
             border-radius: 2px;
             background: Theme.active.primary_accent;
-            animate height { duration: 160ms; easing: ease-in-out; }
         }
         Rectangle {
             width: 4px;
             height: root.is_playing ? Math.max(6px, (Math.mod(root.tick + 1, 4) == 0 ? 24px : (Math.mod(root.tick + 1, 4) == 2 ? 10px : 18px))) : 4px;
             border-radius: 2px;
             background: Theme.active.secondary_accent;
-            animate height { duration: 160ms; easing: ease-in-out; }
         }
         Rectangle {
             width: 4px;
             height: root.is_playing ? Math.max(6px, (Math.mod(root.tick + 2, 4) == 0 ? 18px : (Math.mod(root.tick + 2, 4) == 2 ? 7px : 12px))) : 4px;
             border-radius: 2px;
             background: Theme.active.primary_accent;
-            animate height { duration: 160ms; easing: ease-in-out; }
         }
         Rectangle {
             width: 4px;
             height: root.is_playing ? Math.max(6px, (Math.mod(root.tick + 3, 4) == 0 ? 22px : (Math.mod(root.tick + 3, 4) == 2 ? 9px : 16px))) : 4px;
             border-radius: 2px;
             background: Theme.active.secondary_accent;
-            animate height { duration: 160ms; easing: ease-in-out; }
         }
         Rectangle {
             width: 4px;
             height: root.is_playing ? Math.max(6px, (Math.mod(root.tick, 3) == 0 ? 16px : 8px)) : 4px;
             border-radius: 2px;
             background: Theme.active.primary_accent;
-            animate height { duration: 160ms; easing: ease-in-out; }
         }
     }
 }
