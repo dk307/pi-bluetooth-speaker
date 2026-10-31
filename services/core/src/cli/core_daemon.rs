@@ -23,10 +23,12 @@ use slint::platform::software_renderer::MinimalSoftwareWindow;
 /// Target screen to render on the framebuffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScreenTarget {
-    /// Boot splash screen.
+    /// Boot splash sequence followed by main UI shell (production appliance default).
     #[default]
+    Appliance,
+    /// Boot splash screen only.
     Splash,
-    /// Main user interface shell.
+    /// Main user interface shell only.
     Shell,
 }
 
@@ -39,8 +41,6 @@ pub struct CoreCliOptions {
     pub run_loop: bool,
     /// Screen target to initialize and display.
     pub screen: ScreenTarget,
-    /// Whether to populate the Bluetooth Playing screen with a demo track.
-    pub demo_playback: bool,
     /// Theme preset to apply on startup.
     #[cfg(feature = "ui")]
     pub theme: Option<crate::ui::ThemePreset>,
@@ -55,8 +55,9 @@ pub fn print_usage(bin_name: &str) {
     println!("Usage: {bin_name} [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  -s, --screen <splash|shell> Target screen to render (default: splash)");
-    println!("  -d, --demo-playback         Render Bluetooth Playing screen with demo track");
+    println!(
+        "  -s, --screen <appliance|splash|shell> Target screen to render (default: appliance)"
+    );
     println!(
         "  -t, --theme <PRESET>        Appliance theme preset (mcintosh, marantz, cyberpunk, studio-dark, peppy)"
     );
@@ -120,10 +121,6 @@ where
             "-h" | "--help" => return Ok(CliParse::Help),
             "-V" | "--version" => return Ok(CliParse::Version),
             "-l" | "--loop" => opts.run_loop = true,
-            "-d" | "--demo" | "--demo-playback" => {
-                opts.demo_playback = true;
-                opts.screen = ScreenTarget::Shell;
-            }
             "-t" | "--theme" => {
                 let val = next_arg_value(&mut iter, "--theme")?;
                 #[cfg(feature = "ui")]
@@ -141,11 +138,12 @@ where
             "-s" | "--screen" => {
                 let val = next_arg_value(&mut iter, "--screen")?;
                 match val.trim().to_ascii_lowercase().as_str() {
+                    "appliance" | "full" | "auto" => opts.screen = ScreenTarget::Appliance,
                     "splash" => opts.screen = ScreenTarget::Splash,
                     "shell" | "main" => opts.screen = ScreenTarget::Shell,
                     other => {
                         return Err(format!(
-                            "invalid screen target '{other}': expected 'splash' or 'shell'"
+                            "invalid screen target '{other}': expected 'appliance', 'splash', or 'shell'"
                         ));
                     }
                 }
@@ -182,7 +180,6 @@ pub fn run_ui_display(
     screen: ScreenTarget,
     preview_secs: Option<u64>,
     run_loop: bool,
-    demo_playback: bool,
     theme: Option<crate::ui::ThemePreset>,
     tab: Option<i32>,
 ) {
@@ -196,7 +193,6 @@ pub fn run_ui_display(
         screen,
         preview_secs,
         run_loop,
-        demo_playback,
         theme,
         tab,
     );
@@ -216,7 +212,6 @@ pub fn run_ui_display_on_path(
     screen: ScreenTarget,
     preview_secs: Option<u64>,
     run_loop: bool,
-    demo_playback: bool,
     theme: Option<crate::ui::ThemePreset>,
     tab: Option<i32>,
 ) {
@@ -239,9 +234,15 @@ pub fn run_ui_display_on_path(
     };
 
     match screen {
-        ScreenTarget::Splash => run_splash_on(&mut fb, preview_secs, run_loop),
+        ScreenTarget::Appliance => {
+            // Default appliance sequence: POST splash screen, then main UI shell
+            let splash_secs = preview_secs.map_or(2, |p| p.min(2));
+            run_splash_on(&mut fb, Some(splash_secs), false, theme);
+            run_shell_on(&mut fb, preview_secs, run_loop, theme, tab);
+        }
+        ScreenTarget::Splash => run_splash_on(&mut fb, preview_secs, run_loop, theme),
         ScreenTarget::Shell => {
-            run_shell_on(&mut fb, preview_secs, run_loop, demo_playback, theme, tab);
+            run_shell_on(&mut fb, preview_secs, run_loop, theme, tab);
         }
     }
 }
@@ -317,9 +318,17 @@ pub fn run_ui_lifecycle<C, F>(
 
 /// Runs the splash lifecycle against an opened framebuffer backend.
 #[cfg(feature = "ui")]
-pub fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: bool) {
+pub fn run_splash_on(
+    fb: &mut Framebuffer,
+    preview_secs: Option<u64>,
+    run_loop: bool,
+    theme: Option<crate::ui::ThemePreset>,
+) {
     run_ui_lifecycle(fb, "Boot splash screen", preview_secs, run_loop, || {
         let splash = SplashScreen::new().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        if let Some(t) = theme {
+            t.apply_splash(&splash);
+        }
         splash
             .show()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
@@ -330,7 +339,6 @@ pub fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: 
 #[cfg(feature = "ui")]
 #[must_use]
 pub fn init_shell(
-    demo_playback: bool,
     main_window: MainWindow,
     mocked_device: bool,
     theme: Option<crate::ui::ThemePreset>,
@@ -340,12 +348,7 @@ pub fn init_shell(
     if let Some(t) = theme {
         shell.apply_theme(t);
     }
-    let maybe_bt = if demo_playback {
-        let (mock_bt, _) = crate::hardware::BluetoothDevice::new_mocked();
-        shell.wire_bluetooth_transport(mock_bt);
-        shell.apply_demo_playback();
-        None
-    } else if mocked_device {
+    let maybe_bt = if mocked_device {
         let (mock_bt, _) = crate::hardware::BluetoothDevice::new_mocked();
         if let Ok(Some(ref pb)) = mock_bt.playback_state() {
             shell.apply_bluetooth_playback(pb);
@@ -385,34 +388,18 @@ pub fn run_render_loop(
     maybe_bt: Option<&crate::hardware::BluetoothDevice>,
     preview_secs: Option<u64>,
     run_loop: bool,
-    demo_playback: bool,
 ) {
     let start = Instant::now();
     let duration = preview_secs.map(Duration::from_secs);
     tracing::info!("Running UI render loop");
     println!("  Display: Running UI render loop...");
 
-    let mut sim_pos_ms = 105_000u32;
-    let sim_dur_ms = 230_000u32;
-    let mut sim_tick = 0u32;
     let mut last_bt_sync = Instant::now()
         .checked_sub(Duration::from_secs(1))
         .unwrap_or_else(Instant::now);
 
     while run_loop || duration.is_some_and(|d| start.elapsed() < d) {
-        if demo_playback {
-            if shell.is_playing() {
-                sim_pos_ms = (sim_pos_ms + 16) % sim_dur_ms;
-                sim_tick = sim_tick.wrapping_add(1);
-                shell.set_playback_state(true, sim_pos_ms, sim_dur_ms);
-                let l_peak = 0.65 + 0.15 * ((sim_tick as f32 * 0.1).sin()).abs();
-                let r_peak = 0.60 + 0.18 * ((sim_tick as f32 * 0.12).cos()).abs();
-                shell.set_peak_levels(l_peak, r_peak);
-            } else {
-                shell.set_peak_levels(0.0, 0.0);
-            }
-            window.request_redraw();
-        } else if let Some(bt) = maybe_bt {
+        if let Some(bt) = maybe_bt {
             if last_bt_sync.elapsed() >= Duration::from_millis(500) {
                 last_bt_sync = Instant::now();
                 if let Ok(Some(ref pb)) = bt.playback_state() {
@@ -439,7 +426,6 @@ pub fn run_shell_on(
     fb: &mut Framebuffer,
     preview_secs: Option<u64>,
     run_loop: bool,
-    demo_playback: bool,
     theme: Option<crate::ui::ThemePreset>,
     tab: Option<i32>,
 ) {
@@ -467,13 +453,7 @@ pub fn run_shell_on(
         }
     };
 
-    let (shell, maybe_bt) = init_shell(
-        demo_playback,
-        main_window,
-        !fb.is_hardware_panel(),
-        theme,
-        tab,
-    );
+    let (shell, maybe_bt) = init_shell(main_window, !fb.is_hardware_panel(), theme, tab);
     if let Err(e) = shell.window().show() {
         report_display(
             tracing::Level::ERROR,
@@ -498,7 +478,6 @@ pub fn run_shell_on(
             maybe_bt.as_ref(),
             preview_secs,
             run_loop,
-            demo_playback,
         );
     }
 }
@@ -518,19 +497,12 @@ pub fn run_app(opts: CoreCliOptions) -> ExitCode {
         opts.screen,
         opts.preview_secs,
         opts.run_loop,
-        opts.demo_playback,
         opts.theme,
         opts.tab,
     );
 
     #[cfg(not(feature = "ui"))]
-    let _ = (
-        opts.screen,
-        opts.preview_secs,
-        opts.run_loop,
-        opts.demo_playback,
-        opts.tab,
-    );
+    let _ = (opts.screen, opts.preview_secs, opts.run_loop, opts.tab);
     #[cfg(not(feature = "ui"))]
     println!("  Display: UI feature disabled at compile-time.");
 

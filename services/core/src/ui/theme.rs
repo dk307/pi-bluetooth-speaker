@@ -8,7 +8,7 @@ use std::fmt::{self, Display, Formatter};
 
 use slint::ComponentHandle;
 
-use super::generated::{MainWindow, Theme, ThemePalette};
+use super::generated::{MainWindow, SplashScreen, Theme, ThemePalette};
 
 /// Strongly typed theme preset identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -187,6 +187,13 @@ impl ThemePreset {
     /// Applies this theme preset to a [`MainWindow`] component.
     pub fn apply(self, window: &MainWindow) {
         let theme = window.global::<Theme>();
+        theme.set_active_preset(self.index());
+        theme.set_active(self.palette());
+    }
+
+    /// Applies this theme preset to a [`SplashScreen`] component.
+    pub fn apply_splash(self, splash: &SplashScreen) {
+        let theme = splash.global::<Theme>();
         theme.set_active_preset(self.index());
         theme.set_active(self.palette());
     }

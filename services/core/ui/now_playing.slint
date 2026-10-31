@@ -4,7 +4,7 @@ export component NowPlayingView inherits Rectangle {
     in property <string> track_title: "Waiting for Bluetooth Connection...";
     in property <string> track_artist: "DietPi Audiophile Speaker";
     in property <string> track_album: "High-Resolution DSP Sink";
-    in property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit ➔ DSP 32-bit";
+    in property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit -> DSP 32-bit";
     in property <string> position_text: "00:00";
     in property <string> duration_text: "00:00";
     in property <float> progress_ratio: 0.0;
@@ -98,11 +98,23 @@ export component NowPlayingView inherits Rectangle {
                                     alignment: center;
                                     spacing: 2px;
 
-                                    Text {
-                                        text: root.is_playing ? "▶" : "⏸";
-                                        font-size: 16px;
-                                        color: Theme.active.primary_accent;
-                                        horizontal-alignment: center;
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        height: 14px;
+                                        if root.is_playing : Path {
+                                            width: 10px;
+                                            height: 12px;
+                                            MoveTo { x: 1; y: 0; }
+                                            LineTo { x: 10; y: 6; }
+                                            LineTo { x: 1; y: 12; }
+                                            Close {}
+                                            fill: Theme.active.primary_accent;
+                                        }
+                                        if !root.is_playing : HorizontalLayout {
+                                            spacing: 3px;
+                                            Rectangle { width: 3px; height: 10px; border-radius: 1px; background: Theme.active.primary_accent; }
+                                            Rectangle { width: 3px; height: 10px; border-radius: 1px; background: Theme.active.primary_accent; }
+                                        }
                                     }
 
                                     Text {
@@ -171,7 +183,7 @@ export component NowPlayingView inherits Rectangle {
                     }
 
                     Text {
-                        text: "•";
+                        text: "-";
                         color: Theme.active.text_muted;
                         font-size: 14px;
                     }
@@ -191,7 +203,7 @@ export component NowPlayingView inherits Rectangle {
 
                 Rectangle {
                     height: 26px;
-                    background: #111923;
+                    background: Theme.active.card_surface;
                     border-radius: 13px;
                     border-width: 1px;
                     border-color: Theme.active.card_border;
@@ -202,10 +214,12 @@ export component NowPlayingView inherits Rectangle {
                         spacing: 6px;
                         alignment: center;
 
-                        Text {
-                            text: "ℹ️";
-                            font-size: 10px;
-                            vertical-alignment: center;
+                        Rectangle {
+                            width: 6px;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: Theme.active.primary_accent;
+                            y: 10px;
                         }
 
                         Text {
@@ -296,12 +310,27 @@ export component NowPlayingView inherits Rectangle {
                     border-width: 1px;
                     border-color: Theme.active.card_border;
 
-                    Text {
-                        text: "◀◀";
-                        font-size: 16px;
-                        color: Theme.active.text_primary;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        y: 18px;
+                        Rectangle { width: 3px; height: 14px; border-radius: 1px; background: Theme.active.text_primary; }
+                        Path {
+                            width: 8px; height: 14px;
+                            MoveTo { x: 8; y: 0; }
+                            LineTo { x: 0; y: 7; }
+                            LineTo { x: 8; y: 14; }
+                            Close {}
+                            fill: Theme.active.text_primary;
+                        }
+                        Path {
+                            width: 8px; height: 14px;
+                            MoveTo { x: 8; y: 0; }
+                            LineTo { x: 0; y: 7; }
+                            LineTo { x: 8; y: 14; }
+                            Close {}
+                            fill: Theme.active.text_primary;
+                        }
                     }
 
                     TouchArea {
@@ -318,12 +347,24 @@ export component NowPlayingView inherits Rectangle {
                     border-radius: 29px;
                     background: Theme.active.primary_accent;
 
-                    Text {
-                        text: root.is_playing ? "❚❚" : "▶";
-                        font-size: 20px;
-                        color: Theme.active.dock_active_text;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    if root.is_playing : HorizontalLayout {
+                        alignment: center;
+                        spacing: 5px;
+                        y: 19px;
+                        Rectangle { width: 5px; height: 20px; border-radius: 2px; background: Theme.active.dock_active_text; }
+                        Rectangle { width: 5px; height: 20px; border-radius: 2px; background: Theme.active.dock_active_text; }
+                    }
+
+                    if !root.is_playing : Path {
+                        width: 18px;
+                        height: 20px;
+                        x: 23px;
+                        y: 19px;
+                        MoveTo { x: 0; y: 0; }
+                        LineTo { x: 18; y: 10; }
+                        LineTo { x: 0; y: 20; }
+                        Close {}
+                        fill: Theme.active.dock_active_text;
                     }
 
                     TouchArea {
@@ -342,12 +383,27 @@ export component NowPlayingView inherits Rectangle {
                     border-width: 1px;
                     border-color: Theme.active.card_border;
 
-                    Text {
-                        text: "▶▶";
-                        font-size: 16px;
-                        color: Theme.active.text_primary;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        y: 18px;
+                        Path {
+                            width: 8px; height: 14px;
+                            MoveTo { x: 0; y: 0; }
+                            LineTo { x: 8; y: 7; }
+                            LineTo { x: 0; y: 14; }
+                            Close {}
+                            fill: Theme.active.text_primary;
+                        }
+                        Path {
+                            width: 8px; height: 14px;
+                            MoveTo { x: 0; y: 0; }
+                            LineTo { x: 8; y: 7; }
+                            LineTo { x: 0; y: 14; }
+                            Close {}
+                            fill: Theme.active.text_primary;
+                        }
+                        Rectangle { width: 3px; height: 14px; border-radius: 1px; background: Theme.active.text_primary; }
                     }
 
                     TouchArea {

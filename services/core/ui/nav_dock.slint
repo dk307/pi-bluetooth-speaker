@@ -1,31 +1,26 @@
 import { Theme } from "theme.slint";
 
 component NavDockButton inherits Rectangle {
-    in property <string> icon;
     in property <string> label;
     in property <bool> is_active: false;
     callback clicked();
 
-    height: 48px;
+    height: 44px;
     background: root.is_active ? Theme.active.primary_accent : transparent;
-    border-radius: 12px;
+    border-radius: 10px;
 
     HorizontalLayout {
         alignment: center;
-        spacing: 6px;
-
-        Text {
-            text: root.icon;
-            font-size: 15px;
-            vertical-alignment: center;
-        }
+        padding-left: 14px;
+        padding-right: 14px;
 
         Text {
             text: root.label;
             font-size: 13px;
-            font-weight: root.is_active ? 800 : 500;
+            font-weight: root.is_active ? 800 : 600;
             color: root.is_active ? Theme.active.dock_active_text : Theme.active.text_muted;
             vertical-alignment: center;
+            horizontal-alignment: center;
         }
     }
 
@@ -54,15 +49,14 @@ export component NavDock inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-        padding-top: 6px;
-        padding-bottom: 6px;
-        spacing: 8px;
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 10px;
         alignment: space-between;
 
         NavDockButton {
-            icon: "🎵";
             label: "Player";
             is_active: root.active_tab == 0;
             clicked => {
@@ -72,7 +66,6 @@ export component NavDock inherits Rectangle {
         }
 
         NavDockButton {
-            icon: "🎚️";
             label: "VU Meter";
             is_active: root.active_tab == 1;
             clicked => {
@@ -82,7 +75,6 @@ export component NavDock inherits Rectangle {
         }
 
         NavDockButton {
-            icon: "📶";
             label: "Bluetooth";
             is_active: root.active_tab == 2;
             clicked => {
@@ -92,7 +84,6 @@ export component NavDock inherits Rectangle {
         }
 
         if root.cd_enabled : NavDockButton {
-            icon: "💿";
             label: "CD Player";
             is_active: root.active_tab == 3;
             clicked => {
@@ -102,7 +93,6 @@ export component NavDock inherits Rectangle {
         }
 
         NavDockButton {
-            icon: "🎛️";
             label: "DSP & Tone";
             is_active: root.active_tab == 4;
             clicked => {
@@ -112,7 +102,6 @@ export component NavDock inherits Rectangle {
         }
 
         NavDockButton {
-            icon: "⚙️";
             label: "Settings";
             is_active: root.active_tab == 5;
             clicked => {

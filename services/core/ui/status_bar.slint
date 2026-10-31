@@ -33,11 +33,16 @@ export component TopStatusBar inherits Rectangle {
                     spacing: 6px;
                     alignment: center;
 
-                    Text {
-                        text: "📶";
-                        font-size: 11px;
-                        vertical-alignment: center;
+                    // Vector signal bars
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        y: 9px;
+                        Rectangle { width: 3px; height: 4px; border-radius: 1px; background: Theme.active.primary_accent; y: 6px; }
+                        Rectangle { width: 3px; height: 7px; border-radius: 1px; background: Theme.active.primary_accent; y: 3px; }
+                        Rectangle { width: 3px; height: 10px; border-radius: 1px; background: Theme.active.primary_accent; y: 0px; }
                     }
+
                     Text {
                         text: root.active_source;
                         color: Theme.active.primary_accent;
@@ -45,11 +50,17 @@ export component TopStatusBar inherits Rectangle {
                         font-weight: 700;
                         vertical-alignment: center;
                     }
-                    Text {
-                        text: "▼";
-                        color: Theme.active.text_muted;
-                        font-size: 9px;
-                        vertical-alignment: center;
+
+                    // Vector dropdown chevron
+                    Path {
+                        width: 6px;
+                        height: 4px;
+                        MoveTo { x: 0; y: 0; }
+                        LineTo { x: 6; y: 0; }
+                        LineTo { x: 3; y: 4; }
+                        Close {}
+                        fill: Theme.active.text_muted;
+                        y: 12px;
                     }
                 }
 
@@ -104,17 +115,19 @@ export component TopStatusBar inherits Rectangle {
             }
 
             Rectangle {
-                width: 28px;
+                width: 36px;
                 height: 28px;
                 background: Theme.active.card_surface;
-                border-radius: 14px;
+                border-radius: 8px;
                 border-width: 1px;
                 border-color: Theme.active.card_border;
                 y: 6px;
 
                 Text {
-                    text: "🌙";
-                    font-size: 12px;
+                    text: "DIM";
+                    font-size: 10px;
+                    font-weight: 800;
+                    color: Theme.active.text_muted;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }

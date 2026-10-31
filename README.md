@@ -76,7 +76,7 @@ pi-bluetooth-speaker/
         ├── AGENTS.md         # Agent instructions & guidelines
         ├── build.rs          # Slint AOT build script
         ├── src/main.rs       # Entrypoint & Tokio actor runtime
-        └── ui/appwindow.slint# Declarative 800x480 UI layout
+        └── ui/               # Declarative 800x480 UI components (appwindow, now_playing, splash, viewport, etc.)
 ```
 
 ---

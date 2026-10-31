@@ -221,19 +221,6 @@ impl AppShell {
         }
     }
 
-    /// Configures the shell with demo playback for visual preview and verification.
-    pub fn apply_demo_playback(&self) {
-        self.set_tab(0);
-        self.set_source("Bluetooth");
-        self.set_track_or_device("Pixel 10 Pro XL");
-        self.set_stream_codec("aptX-HD 48kHz");
-        self.set_track_metadata("Money for Nothing", "Dire Straits", "Brothers in Arms");
-        self.set_stream_details("aptX-HD 576k | 48kHz/16-bit ➔ DSP 32-bit | S: 0.999974");
-        self.set_playback_state(true, 105_000, 230_000);
-        self.set_volume(78.0);
-        self.set_peak_levels(0.72, 0.68);
-    }
-
     /// Applies a theme preset to the UI shell.
     pub fn apply_theme(&self, preset: ThemePreset) {
         preset.apply(&self.window);

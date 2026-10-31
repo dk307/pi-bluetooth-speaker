@@ -293,8 +293,12 @@ fn ui_shell_now_playing_properties_and_playback_state() {
     assert_eq!(shell.window().get_position_text(), "05:00");
     assert_eq!(shell.window().get_duration_text(), "14:20");
 
-    // Apply demo playback
-    shell.apply_demo_playback();
+    // Direct setters on AppShell
+    shell.set_tab(0);
+    shell.set_source("Bluetooth");
+    shell.set_track_metadata("Money for Nothing", "Dire Straits", "Brothers in Arms");
+    shell.set_volume(78.0);
+    shell.set_playback_state(true, 60_000, 500_000);
     assert_eq!(shell.current_tab(), 0);
     assert_eq!(shell.window().get_active_source(), "Bluetooth");
     assert_eq!(shell.window().get_track_title(), "Money for Nothing");
@@ -319,6 +323,18 @@ fn ui_shell_now_playing_callbacks() {
     assert!(!shell.is_playing());
     shell.window().invoke_toggle_play_pause();
     assert!(!shell.is_playing());
+    shell.window().invoke_next_track();
+    shell.window().invoke_previous_track();
+    shell.window().invoke_volume_changed(60.0);
+    shell.window().invoke_cycle_theme();
+    shell.window().invoke_source_clicked();
+    shell.window().invoke_night_mode_clicked();
+
+    // Cover image setter
+    let pixel_buf = slint::SharedPixelBuffer::new(1, 1);
+    let image = slint::Image::from_rgba8(pixel_buf);
+    shell.set_cover_image(image);
+    assert!(shell.window().get_has_cover_art());
 
     assert!(!shell.is_muted());
     shell.window().invoke_toggle_mute();
@@ -367,7 +383,7 @@ fn ui_shell_now_playing_callbacks() {
 
 #[cfg(feature = "ui")]
 #[test]
-fn ui_shell_demo_playback_renders_to_framebuffer() {
+fn ui_shell_playback_state_renders_to_framebuffer() {
     use slint::ComponentHandle;
     use speaker_core::ui::{AppShell, Bgrx8888Pixel, Framebuffer, MainWindow};
 
@@ -376,7 +392,11 @@ fn ui_shell_demo_playback_renders_to_framebuffer() {
     let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
     let shell = AppShell::new(main_window);
 
-    shell.apply_demo_playback();
+    shell.set_tab(0);
+    shell.set_source("Bluetooth");
+    shell.set_track_metadata("Money for Nothing", "Dire Straits", "Brothers in Arms");
+    shell.set_volume(78.0);
+    shell.set_playback_state(true, 60_000, 500_000);
     shell.window().show().expect("Failed to show MainWindow");
     let rendered = fb.render_frame(&window).expect("Render frame failed");
     assert!(rendered);
