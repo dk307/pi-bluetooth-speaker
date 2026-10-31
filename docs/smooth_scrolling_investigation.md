@@ -182,3 +182,41 @@ All three phases were implemented and verified on the physical panel; the marque
 Measured on the Pi: scrolling render cost dropped from 8.3 ms to a cheap image blit per frame; CPU during active scroll fell from ~64% to ~47%, and idle CPU on the Now Playing screen drops to near-zero instead of staying at 60–70%.
 
 Process notes distilled into `services/core/AGENTS.md`: slint codegen only covers exported `Window`-rooted components; `slint-build` rerun must be forced by purging build dirs after `.slint` edits; never read `animation-tick()` in per-frame polling bindings.
+
+## 7. Full-Window Redraw Storm Follow-Up (2026-10-31)
+
+After the phase 1-3 fixes, sustained scroll still burned ~47-70% CPU on the Pi. Instrumented
+phase timing (`FrameTiming` in `framebuffer.rs`, aggregated by `FrameLoopTiming` in
+`core_daemon.rs` and reported every 600 rendered frames) exposed the real cost distribution:
+
+| Phase | Before | After |
+| --- | --- | --- |
+| Slint `draw_if_needed` | 7.5-9.1 ms avg | **1.4 ms avg** |
+| `FBIO_WAITFORVSYNC` wait | 6-10 ms (blocking) | unchanged |
+| Dirty-rect blit | 0.6-0.9 ms | **0.06 ms avg** |
+| Avg dirty area | 138,000 px | **12,800 px** |
+| Full-screen (0,0,800,480) frames | ~149 per 10 s run, contiguous from ~5 s | 1 (initial draw only) |
+
+**Root cause:** the wrap-around marquee copy was a conditional element
+(`if root.is_overflow && root.scroll_offset + root.cycle_distance < root.width : Image`).
+The f32 `scroll_offset` is non-monotonic near the crossing boundary due to rounding
+(`-(cycle * ((frame - pause) / cycle_frames))` wobbles at the exact pixel), so the condition
+flapped every frame once the scroll reached it. Each flap destroyed the conditional's item
+tree; Slint's partial renderer reacts to every item-tree destruction with
+`free_graphics_resources` -> `force_screen_refresh` ("we don't have a way to determine the
+screen region of the deleted items ... refresh everything"), producing a full 800x480 scene
+rebuild at ~20-30 ms per frame, every frame, for the remainder of the run.
+
+**Fix:** the wrap-around `Image` now lives in the item tree permanently and only its
+`visible` flag toggles; the toggle condition is pure integer frame arithmetic
+(`(scroll_frame - pause_frames) > cycle_frames - Math.round(width / 1px)`), strictly
+monotonic and incapable of oscillating. Total toggle cost is 2 full redraws per ~10 s cycle.
+
+**Verification:** `tests/marquee_full_redraw_diagnostic.rs` drives the real shell on the host
+through 700 frames and asserts full-window dirty frames stay bounded; on-device profiling
+confirms the storm is gone (table above) and scrolling CPU is ~9%.
+
+**Also fixed en route:** `MarqueeStripCache::rasterize_title/artist` now return
+`Option<MarqueeStrip>` (`None` = cache hit) so identical strips never re-fire Slint property
+change notifications, and `apply_pcm_stream` change-guards every stream property setter
+(codec, sample rate, bit depth, mute, volume) against the 250 ms worker pushes.

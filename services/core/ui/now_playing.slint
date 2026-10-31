@@ -52,9 +52,24 @@ component MarqueeText inherits Rectangle {
     // The wrap-around copy is only ever visible once the trailing gap of the first
     // copy has entered the viewport's right edge; skipping it otherwise halves the
     // per-frame image blit area.
-    if root.is_overflow && root.scroll_offset + root.cycle_distance < root.width : Image {
+    // Whether the wrap-around copy must be composited. Expressed in INTEGER frame
+    // arithmetic on purpose: the previous float comparison
+    // `scroll_offset + cycle_distance < width` flapped when f32 rounding made
+    // `scroll_offset` non-monotonic at the crossing, destroying and recreating the
+    // conditional item tree every frame — and each item-tree destruction forces a
+    // full-window redraw (~30 ms) in Slint's partial renderer
+    // (`free_graphics_resources` -> `force_screen_refresh`), causing a ~70% CPU storm.
+    property <bool> wrap_visible: root.is_overflow
+        && (root.scroll_frame - root.pause_frames) > root.cycle_frames - Math.round(root.width / 1px);
+
+    // The wrap-around copy is only ever visible once the trailing gap of the first
+    // copy has entered the viewport's right edge; skipping it otherwise halves the
+    // per-frame image blit area. The element stays in the item tree permanently and
+    // only its `visible` flag toggles, so no item-tree destruction can occur.
+    Image {
         x: root.scroll_offset + root.cycle_distance;
         source: root.strip;
+        visible: root.wrap_visible;
     }
 }
 

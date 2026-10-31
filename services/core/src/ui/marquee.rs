@@ -170,15 +170,16 @@ pub struct MarqueeStripCache {
 }
 
 impl MarqueeStripCache {
-    /// Rasterizes (or returns the cached) title strip for `request`.
+    /// Rasterizes the title strip for `request`, or returns `None` when the cached strip
+    /// already matches (no re-render, no property invalidation).
     #[must_use]
-    pub fn rasterize_title(&mut self, request: &StripRequest) -> MarqueeStrip {
+    pub fn rasterize_title(&mut self, request: &StripRequest) -> Option<MarqueeStrip> {
         Self::rasterize_slot(&mut self.rasterizer, &mut self.title, request, "title")
     }
 
-    /// Rasterizes (or returns the cached) artist/album strip for `request`.
+    /// Rasterizes the artist/album strip for `request`, or returns `None` when cached.
     #[must_use]
-    pub fn rasterize_artist(&mut self, request: &StripRequest) -> MarqueeStrip {
+    pub fn rasterize_artist(&mut self, request: &StripRequest) -> Option<MarqueeStrip> {
         Self::rasterize_slot(&mut self.rasterizer, &mut self.artist, request, "artist")
     }
 
@@ -195,10 +196,10 @@ impl MarqueeStripCache {
         slot: &mut Option<(StripKey, MarqueeStrip)>,
         request: &StripRequest,
         label: &str,
-    ) -> MarqueeStrip {
-        if let Some((key, strip)) = slot {
+    ) -> Option<MarqueeStrip> {
+        if let Some((key, _strip)) = slot {
             if *key == request.key() {
-                return strip.clone();
+                return None;
             }
         }
         if rasterizer.is_none() {
@@ -206,9 +207,7 @@ impl MarqueeStripCache {
                 Ok(created) => *rasterizer = Some(created),
                 Err(err) => {
                     tracing::warn!("Marquee strip rasterizer unavailable ({label}): {err}");
-                    return slot
-                        .as_ref()
-                        .map_or_else(MarqueeStrip::empty, |(_, strip)| strip.clone());
+                    return None;
                 }
             }
         }
@@ -217,7 +216,7 @@ impl MarqueeStripCache {
             .expect("rasterizer created above")
             .rasterize(request);
         *slot = Some((request.key(), strip.clone()));
-        strip
+        Some(strip)
     }
 }
 

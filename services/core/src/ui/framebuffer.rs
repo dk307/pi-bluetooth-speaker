@@ -27,6 +27,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use slint::PhysicalSize;
 use slint::platform::software_renderer::{
@@ -286,6 +287,32 @@ enum ScanoutSync {
     FileMapped,
 }
 
+/// Phase timing of the most recent [`Framebuffer::render_frame`] call.
+///
+/// Aggregated by the render loop to attribute CPU cost to Slint scene drawing, the
+/// hardware vertical blanking wait, and the scanout blit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FrameTiming {
+    /// Slint `draw_if_needed` scene traversal and rasterization duration.
+    pub draw_us: u64,
+    /// `FBIO_WAITFORVSYNC` blocking duration (zero when unsupported or not drawn).
+    pub vsync_us: u64,
+    /// Dirty-rectangle shadow-buffer-to-scanout copy (and msync flush) duration.
+    pub blit_us: u64,
+    /// Dirty bounding-box area in pixels (zero when nothing was drawn).
+    pub dirty_px: u64,
+    /// Dirty bounding box `(x, y, width, height)` in pixels.
+    pub dirty_box: (u32, u32, u32, u32),
+}
+
+impl FrameTiming {
+    /// Total non-blocking CPU time attributable to this frame.
+    #[must_use]
+    pub const fn cpu_us(&self) -> u64 {
+        self.draw_us + self.blit_us
+    }
+}
+
 /// Backend implementation for the framebuffer sink.
 #[derive(Debug)]
 enum Backend {
@@ -425,6 +452,7 @@ pub(crate) fn take_last_secondary_window() -> Option<Rc<MinimalSoftwareWindow>> 
 #[derive(Debug)]
 pub struct Framebuffer {
     backend: Backend,
+    last_timing: core::cell::Cell<Option<FrameTiming>>,
 }
 
 // Compile-time proofs for the fixed appliance panel geometry. The const
@@ -571,6 +599,7 @@ impl Framebuffer {
         };
 
         Ok(Self {
+            last_timing: core::cell::Cell::new(None),
             backend: Backend::Hardware {
                 file,
                 mmap,
@@ -704,6 +733,7 @@ impl Framebuffer {
     pub fn new_mocked() -> (Self, FramebufferMockCtrl) {
         let ctrl = FramebufferMockCtrl::default();
         let fb = Self {
+            last_timing: core::cell::Cell::new(None),
             backend: Backend::Mock {
                 buffer: vec![
                     Bgrx8888Pixel::default();
@@ -829,7 +859,10 @@ impl Framebuffer {
             } => {
                 if let Some(mmap_mut) = mmap {
                     let pixel_slice = Bgrx8888Pixel::try_from_bytes_mut(mmap_mut)?;
+                    let mut timing = FrameTiming::default();
                     let mut dirty = (0_usize, 0_usize, 0_usize, 0_usize);
+                    let draw_start = Instant::now();
+
                     let did_draw = window.draw_if_needed(|renderer| {
                         let region =
                             renderer.render_by_line(FbLineBuffer::direct(back_buffer, width));
@@ -842,12 +875,24 @@ impl Framebuffer {
                             usize::try_from(size.height).unwrap_or(0),
                         );
                     });
+                    timing.draw_us = Self::elapsed_us(draw_start);
+                    let dirty_px = u64::try_from(dirty.2 * dirty.3).unwrap_or(u64::MAX);
+                    timing.dirty_px = dirty_px;
+                    timing.dirty_box = (
+                        u32::try_from(dirty.0).unwrap_or(0),
+                        u32::try_from(dirty.1).unwrap_or(0),
+                        u32::try_from(dirty.2).unwrap_or(0),
+                        u32::try_from(dirty.3).unwrap_or(0),
+                    );
                     if did_draw {
                         if matches!(*sync, ScanoutSync::CharDevice { vsync: true }) {
                             // The vsync wait itself paces this frame to the hardware
                             // refresh; the boolean result is informational only.
+                            let vsync_start = Instant::now();
                             let _ = Self::wait_for_vsync(file);
+                            timing.vsync_us = Self::elapsed_us(vsync_start);
                         }
+                        let blit_start = Instant::now();
                         Self::blit_dirty_rect(
                             back_buffer,
                             pixel_slice,
@@ -862,12 +907,17 @@ impl Framebuffer {
                                 .flush()
                                 .map_err(|e| FramebufferError::io(dev_path.clone(), e))?;
                         }
+                        timing.blit_us = Self::elapsed_us(blit_start);
                     }
+                    self.last_timing.set(Some(timing));
                     Ok(did_draw)
                 } else {
+                    let mut timing = FrameTiming::default();
+                    let draw_start = Instant::now();
                     let did_draw = window.draw_if_needed(|renderer| {
                         renderer.render_by_line(FbLineBuffer::direct(back_buffer, width));
                     });
+                    timing.draw_us = Self::elapsed_us(draw_start);
                     if did_draw {
                         Self::flush_file_buffer(
                             file,
@@ -875,6 +925,7 @@ impl Framebuffer {
                             dev_path,
                         )?;
                     }
+                    self.last_timing.set(Some(timing));
                     Ok(did_draw)
                 }
             }
@@ -886,15 +937,25 @@ impl Framebuffer {
                         io::Error::other(message.to_string()),
                     ));
                 }
+                let mut timing = FrameTiming::default();
+                let draw_start = Instant::now();
                 let did_draw = window.draw_if_needed(|renderer| {
                     renderer.render_by_line(FbLineBuffer::direct(buffer, width));
                 });
+                timing.draw_us = Self::elapsed_us(draw_start);
                 if did_draw {
                     state.render_calls += 1;
                 }
+                self.last_timing.set(Some(timing));
                 Ok(did_draw)
             }
         }
+    }
+
+    /// Returns the phase timing of the most recent [`render_frame`](Self::render_frame) call.
+    #[must_use]
+    pub fn last_frame_timing(&self) -> Option<FrameTiming> {
+        self.last_timing.get()
     }
 
     /// Blocks until the display controller's next vertical blanking interval.
@@ -912,6 +973,12 @@ impl Framebuffer {
         let crtc: libc::c_uint = 0;
         // SAFETY: `file` is an open file descriptor and `crtc` outlives the syscall.
         unsafe { libc::ioctl(file.as_raw_fd(), FBIO_WAITFORVSYNC, &crtc) == 0 }
+    }
+
+    /// Microseconds elapsed since `start`.
+    #[must_use]
+    fn elapsed_us(start: Instant) -> u64 {
+        u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
     }
 
     /// Copies the dirty rectangle scanlines from the cached shadow buffer into the

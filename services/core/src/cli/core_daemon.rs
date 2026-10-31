@@ -15,16 +15,16 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "ui")]
 use std::time::{Duration, Instant};
 
-use crate::diag::{env_args, next_arg_value, resolve_cli_opts, CliParse};
+use crate::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts};
 use crate::hardware::TempSensor;
 #[cfg(feature = "ui")]
-use crate::ui::{AppShell, Framebuffer, MainWindow, SplashScreen};
+use crate::ui::{AppShell, FrameTiming, Framebuffer, MainWindow, SplashScreen};
 #[cfg(feature = "ui")]
-use slint::platform::software_renderer::MinimalSoftwareWindow;
+use slint::ComponentHandle;
 #[cfg(feature = "ui")]
 use slint::platform::WindowAdapter;
 #[cfg(feature = "ui")]
-use slint::ComponentHandle;
+use slint::platform::software_renderer::MinimalSoftwareWindow;
 
 /// Target screen to render on the framebuffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -449,6 +449,7 @@ pub fn run_render_loop(
             })
     });
 
+    let mut loop_timing = FrameLoopTiming::default();
     while duration.is_none_or(|d| start.elapsed() < d) {
         let frame_start = Instant::now();
 
@@ -474,6 +475,9 @@ pub fn run_render_loop(
                 break;
             }
         };
+        if let Some(timing) = fb.last_frame_timing() {
+            loop_timing.record(&timing);
+        }
 
         let has_animations = window.window().has_active_animations();
         if did_render || has_animations || is_animating {
@@ -484,22 +488,81 @@ pub fn run_render_loop(
                 std::thread::sleep(remaining);
             }
         } else {
-            // Adaptive power-saving sleep when UI is completely static (0% CPU at idle)
-            let timer_duration = slint::platform::duration_until_next_timer_update();
-            let sleep_duration = match timer_duration {
-                Some(d) => d.min(Duration::from_millis(50)),
-                None => Duration::from_millis(50),
-            };
-            std::thread::sleep(sleep_duration.max(Duration::from_millis(10)));
+            idle_sleep();
         }
     }
 
+    loop_timing.report();
     bg_running.store(false, Ordering::Relaxed);
     if let Some(Ok(worker)) = bt_worker {
         let _ = worker.join();
     }
     tracing::info!("Render loop finished");
     println!("  Display: Render loop finished.");
+}
+
+/// Adaptive power-saving sleep when the UI is completely static (0% CPU at idle).
+fn idle_sleep() {
+    let timer_duration = slint::platform::duration_until_next_timer_update();
+    let sleep_duration = match timer_duration {
+        Some(d) => d.min(Duration::from_millis(50)),
+        None => Duration::from_millis(50),
+    };
+    std::thread::sleep(sleep_duration.max(Duration::from_millis(10)));
+}
+
+/// Aggregated frame phase timings for render-loop CPU diagnostics.
+#[derive(Debug, Default)]
+struct FrameLoopTiming {
+    frames: u64,
+    rendered: u64,
+    draw_us: u64,
+    vsync_us: u64,
+    blit_us: u64,
+    max_draw_us: u64,
+    dirty_px: u64,
+    max_dirty_px: u64,
+    max_dirty_box: (u32, u32, u32, u32),
+}
+
+impl FrameLoopTiming {
+    fn record(&mut self, timing: &FrameTiming) {
+        self.frames += 1;
+        let active = timing.draw_us > 0 || timing.blit_us > 0;
+        if !active {
+            return;
+        }
+        self.rendered += 1;
+        self.draw_us += timing.draw_us;
+        self.vsync_us += timing.vsync_us;
+        self.blit_us += timing.blit_us;
+        self.max_draw_us = self.max_draw_us.max(timing.draw_us);
+        self.dirty_px += timing.dirty_px;
+        if timing.dirty_px > self.max_dirty_px {
+            self.max_dirty_px = timing.dirty_px;
+            self.max_dirty_box = timing.dirty_box;
+        }
+        if self.rendered % 600 == 0 {
+            self.report();
+        }
+    }
+
+    fn report(&self) {
+        let rendered = self.rendered.max(1);
+        let max_dirty_box = format!("{:?}", self.max_dirty_box);
+        println!(
+            "Frame timing: {frames} loop iterations, {rendered} rendered | avg draw {draw} us, avg vsync {vsync} us (blocking), avg blit {blit} us, max draw {max_draw} us | avg dirty {dirty} px, max dirty {max_dirty} px at {max_dirty_box}",
+            frames = self.frames,
+            rendered = self.rendered,
+            draw = self.draw_us / rendered,
+            vsync = self.vsync_us / rendered,
+            blit = self.blit_us / rendered,
+            max_draw = self.max_draw_us,
+            dirty = self.dirty_px / rendered,
+            max_dirty = self.max_dirty_px,
+            max_dirty_box = max_dirty_box,
+        );
+    }
 }
 
 /// Runs the UI Shell lifecycle against an opened framebuffer backend.

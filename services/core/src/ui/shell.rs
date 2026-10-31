@@ -203,7 +203,11 @@ impl AppShell {
 
     /// Applies audio stream metrics from an active [`crate::hardware::BlueAlsaPcm`].
     pub fn apply_pcm_stream(&self, pcm: &crate::hardware::BlueAlsaPcm) {
-        if !pcm.selected_codec.is_empty() {
+        // Guarded setters: repeated identical property sets still notify Slint bindings
+        // and force repeated partial invalidations on every 250 ms worker push.
+        if !pcm.selected_codec.is_empty()
+            && self.window.get_stream_codec().as_str() != pcm.selected_codec.as_ref()
+        {
             self.set_stream_codec(pcm.selected_codec.as_ref());
         }
         let rate_khz = if pcm.sampling_rate > 0 {
@@ -211,7 +215,9 @@ impl AppShell {
         } else {
             "48 kHz".to_string()
         };
-        self.set_stream_sample_rate(rate_khz);
+        if self.window.get_stream_sample_rate().as_str() != rate_khz.as_str() {
+            self.set_stream_sample_rate(rate_khz);
+        }
 
         let bit_depth = match pcm.format.as_ref() {
             "S16_LE" | "S16_BE" => "16-bit",
@@ -229,10 +235,17 @@ impl AppShell {
                 }
             }
         };
-        self.set_stream_bit_depth(bit_depth);
-        self.window.set_is_muted(pcm.muted);
+        if self.window.get_stream_bit_depth().as_str() != bit_depth {
+            self.set_stream_bit_depth(bit_depth);
+        }
+        if self.window.get_is_muted() != pcm.muted {
+            self.window.set_is_muted(pcm.muted);
+        }
         if let Some(pct) = pcm.volume_percent {
-            self.set_volume(f32::from(pct));
+            let volume = f32::from(pct);
+            if (self.window.get_volume_value() - volume).abs() > f32::EPSILON {
+                self.set_volume(volume);
+            }
         }
     }
 
@@ -375,8 +388,15 @@ impl AppShell {
                 cache.rasterize_artist(&artist_request),
             )
         };
-        w.set_title_marquee_strip(title_strip.image().clone());
-        w.set_artist_marquee_strip(artist_strip.image().clone());
+        // Only touch the image properties when a strip actually re-rendered: setting an
+        // identical property value still fires Slint change notifications and forces
+        // (expensive) partial/full invalidations four times per second.
+        if let Some(strip) = title_strip {
+            w.set_title_marquee_strip(strip.image().clone());
+        }
+        if let Some(strip) = artist_strip {
+            w.set_artist_marquee_strip(strip.image().clone());
+        }
     }
 
     /// Cycles to the next available theme preset in cyclic order.
