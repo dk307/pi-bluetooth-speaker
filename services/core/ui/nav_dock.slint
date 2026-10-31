@@ -1,27 +1,23 @@
 import { Theme } from "theme.slint";
 
 component NavDockButton inherits Rectangle {
-    in property <string> label;
+    in property <image> icon;
     in property <bool> is_active: false;
     callback clicked();
 
-    height: 44px;
+    height: 48px;
+    width: 90px;
     background: root.is_active ? Theme.active.primary_accent : transparent;
-    border-radius: 10px;
+    border-radius: 14px;
 
-    HorizontalLayout {
-        alignment: center;
-        padding-left: 14px;
-        padding-right: 14px;
-
-        Text {
-            text: root.label;
-            font-size: 13px;
-            font-weight: root.is_active ? 800 : 600;
-            color: root.is_active ? Theme.active.dock_active_text : Theme.active.text_muted;
-            vertical-alignment: center;
-            horizontal-alignment: center;
-        }
+    Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        width: 32px;
+        height: 32px;
+        colorize: root.is_active ? Theme.active.dock_active_text : Theme.active.text_muted;
+        image-fit: contain;
     }
 
     TouchArea {
@@ -49,64 +45,79 @@ export component NavDock inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 16px;
-        padding-right: 16px;
-        padding-top: 8px;
-        padding-bottom: 8px;
-        spacing: 10px;
-        alignment: space-between;
+        padding-left: 24px;
+        padding-right: 24px;
+        alignment: space-around;
 
-        NavDockButton {
-            label: "Player";
-            is_active: root.active_tab == 0;
-            clicked => {
-                root.active_tab = 0;
-                root.tab_selected(0);
+        VerticalLayout {
+            alignment: center;
+            NavDockButton {
+                icon: @image-url("../../../assets/icons/player.svg");
+                is_active: root.active_tab == 0;
+                clicked => {
+                    root.active_tab = 0;
+                    root.tab_selected(0);
+                }
             }
         }
 
-        NavDockButton {
-            label: "VU Meter";
-            is_active: root.active_tab == 1;
-            clicked => {
-                root.active_tab = 1;
-                root.tab_selected(1);
+        VerticalLayout {
+            alignment: center;
+            NavDockButton {
+                icon: @image-url("../../../assets/icons/peppymeter.svg");
+                is_active: root.active_tab == 1;
+                clicked => {
+                    root.active_tab = 1;
+                    root.tab_selected(1);
+                }
             }
         }
 
-        NavDockButton {
-            label: "Bluetooth";
-            is_active: root.active_tab == 2;
-            clicked => {
-                root.active_tab = 2;
-                root.tab_selected(2);
+        VerticalLayout {
+            alignment: center;
+            NavDockButton {
+                icon: @image-url("../../../assets/icons/bluetooth.svg");
+                is_active: root.active_tab == 2;
+                clicked => {
+                    root.active_tab = 2;
+                    root.tab_selected(2);
+                }
             }
         }
 
-        if root.cd_enabled : NavDockButton {
-            label: "CD Player";
-            is_active: root.active_tab == 3;
-            clicked => {
-                root.active_tab = 3;
-                root.tab_selected(3);
+        if root.cd_enabled : VerticalLayout {
+            alignment: center;
+            NavDockButton {
+                icon: @image-url("../../../assets/icons/disk.svg");
+                is_active: root.active_tab == 3;
+                clicked => {
+                    root.active_tab = 3;
+                    root.tab_selected(3);
+                }
             }
         }
 
-        NavDockButton {
-            label: "DSP & Tone";
-            is_active: root.active_tab == 4;
-            clicked => {
-                root.active_tab = 4;
-                root.tab_selected(4);
+        VerticalLayout {
+            alignment: center;
+            NavDockButton {
+                icon: @image-url("../../../assets/icons/equalizer.svg");
+                is_active: root.active_tab == 4;
+                clicked => {
+                    root.active_tab = 4;
+                    root.tab_selected(4);
+                }
             }
         }
 
-        NavDockButton {
-            label: "Settings";
-            is_active: root.active_tab == 5;
-            clicked => {
-                root.active_tab = 5;
-                root.tab_selected(5);
+        VerticalLayout {
+            alignment: center;
+            NavDockButton {
+                icon: @image-url("../../../assets/icons/config.svg");
+                is_active: root.active_tab == 5;
+                clicked => {
+                    root.active_tab = 5;
+                    root.tab_selected(5);
+                }
             }
         }
     }

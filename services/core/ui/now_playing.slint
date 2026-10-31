@@ -1,279 +1,261 @@
 import { Theme } from "theme.slint";
 
+component MarqueeText inherits Rectangle {
+    in property <string> text;
+    in property <color> text_color;
+    in property <length> font-size: 16px;
+    in property <int> font-weight: 400;
+
+    clip: true;
+    height: txt1.preferred-height;
+    horizontal-stretch: 1;
+    preferred-width: 0px;
+
+    property <length> text_width: txt1.preferred-width;
+    out property <bool> is_overflow: text_width > root.width;
+    property <length> gap: 80px;
+    property <length> cycle_distance: text_width + gap;
+
+    // Smooth 60fps unidirectional marquee:
+    // 2.0s stationary pause at start, followed by smooth constant-speed leftward scroll (35px/s)
+    property <float> pause_secs: 2.0;
+    property <float> scroll_secs: Math.max(1.0, (cycle_distance / 35px));
+    property <float> period: is_overflow ? (pause_secs + scroll_secs) : 1000.0;
+
+    property <float> phase_t: is_overflow ? Math.mod(animation-tick() / 1s, period) : 0.0;
+    property <float> progress: (phase_t < pause_secs) ? 0.0 : ((phase_t - pause_secs) / scroll_secs);
+    // Smooth continuous subpixel scroll offset (no integer truncation):
+    property <length> scroll_offset: is_overflow ? (-cycle_distance * progress) : 0px;
+
+    txt1 := Text {
+        x: root.scroll_offset;
+        width: root.is_overflow ? root.text_width : parent.width;
+        text: root.text;
+        color: root.text_color;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        vertical-alignment: center;
+    }
+
+    if root.is_overflow : Text {
+        x: root.scroll_offset + root.cycle_distance;
+        width: root.text_width;
+        text: root.text;
+        color: root.text_color;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        vertical-alignment: center;
+    }
+}
+
+component AmbientWaveIndicator inherits Rectangle {
+    in property <bool> is_playing: true;
+    width: 64px;
+    height: 24px;
+    background: transparent;
+
+    property <int> tick: 0;
+
+    Timer {
+        interval: 180ms;
+        running: root.is_playing;
+        triggered() => {
+            root.tick = Math.mod(root.tick + 1, 6);
+        }
+    }
+
+    HorizontalLayout {
+        alignment: center;
+        spacing: 4px;
+
+        Rectangle {
+            width: 4px;
+            height: root.is_playing ? Math.max(6px, (Math.mod(root.tick, 4) == 0 ? 20px : (Math.mod(root.tick, 4) == 2 ? 8px : 14px))) : 4px;
+            border-radius: 2px;
+            background: Theme.active.primary_accent;
+            animate height { duration: 160ms; easing: ease-in-out; }
+        }
+        Rectangle {
+            width: 4px;
+            height: root.is_playing ? Math.max(6px, (Math.mod(root.tick + 1, 4) == 0 ? 24px : (Math.mod(root.tick + 1, 4) == 2 ? 10px : 18px))) : 4px;
+            border-radius: 2px;
+            background: Theme.active.secondary_accent;
+            animate height { duration: 160ms; easing: ease-in-out; }
+        }
+        Rectangle {
+            width: 4px;
+            height: root.is_playing ? Math.max(6px, (Math.mod(root.tick + 2, 4) == 0 ? 18px : (Math.mod(root.tick + 2, 4) == 2 ? 7px : 12px))) : 4px;
+            border-radius: 2px;
+            background: Theme.active.primary_accent;
+            animate height { duration: 160ms; easing: ease-in-out; }
+        }
+        Rectangle {
+            width: 4px;
+            height: root.is_playing ? Math.max(6px, (Math.mod(root.tick + 3, 4) == 0 ? 22px : (Math.mod(root.tick + 3, 4) == 2 ? 9px : 16px))) : 4px;
+            border-radius: 2px;
+            background: Theme.active.secondary_accent;
+            animate height { duration: 160ms; easing: ease-in-out; }
+        }
+        Rectangle {
+            width: 4px;
+            height: root.is_playing ? Math.max(6px, (Math.mod(root.tick, 3) == 0 ? 16px : 8px)) : 4px;
+            border-radius: 2px;
+            background: Theme.active.primary_accent;
+            animate height { duration: 160ms; easing: ease-in-out; }
+        }
+    }
+}
+
 export component NowPlayingView inherits Rectangle {
     in property <string> track_title: "Waiting for Bluetooth Connection...";
     in property <string> track_artist: "DietPi Audiophile Speaker";
-    in property <string> track_album: "High-Resolution DSP Sink";
-    in property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit -> DSP 32-bit";
+    in property <string> track_album: "";
     in property <string> position_text: "00:00";
     in property <string> duration_text: "00:00";
     in property <float> progress_ratio: 0.0;
     in property <bool> is_playing: false;
-    in property <bool> is_muted: false;
     in property <bool> has_cover_art: false;
     in property <image> cover_image;
-    in property <float> left_peak_ratio: 0.0;
-    in property <float> right_peak_ratio: 0.0;
-    in-out property <float> volume_value: 75.0;
+    out property <bool> is_animating: title_marquee.is_overflow || artist_marquee.is_overflow || root.is_playing;
 
     callback toggle_play_pause();
     callback next_track();
     callback previous_track();
     callback seek(float);
-    callback toggle_mute();
-    callback volume_changed(float);
-    callback stream_pill_clicked();
 
     HorizontalLayout {
         padding: 16px;
-        spacing: 20px;
+        spacing: 24px;
 
-        // Left Column: 260x260 Cover Art / Procedural Vinyl Box
+        // Left Column: 260x260 Cover Art / Vinyl Disc Box
         Rectangle {
             width: 260px;
             height: 260px;
             border-radius: 16px;
             clip: true;
-            background: Theme.active.card_surface;
+            background: @linear-gradient(145deg, Theme.active.card_surface 0%, Theme.active.chassis 100%);
             border-width: 1px;
             border-color: Theme.active.card_border;
 
-            // 1. Cover Art Image (if available)
+            // Ambient glowing aura behind the turntable when music is playing
+            Rectangle {
+                x: 20px;
+                y: 20px;
+                width: 220px;
+                height: 220px;
+                border-radius: 110px;
+                background: Theme.active.primary_accent;
+                opacity: root.is_playing ? 0.12 : 0.02;
+                animate opacity { duration: 600ms; easing: ease-in-out; }
+            }
+
+            // 1. Cover Art Image (if available from AVRCP)
             if root.has_cover_art : Image {
                 width: 100%;
                 height: 100%;
                 source: root.cover_image;
-                image-fit: cover;
+                image-fit: contain;
+                horizontal-alignment: center;
+                vertical-alignment: center;
             }
 
-            // 2. Procedural Vinyl Fallback Disc
-            if !root.has_cover_art : Rectangle {
-                width: 100%;
-                height: 100%;
-                background: #0d1117;
-
-                // Outer Disc Rim
-                Rectangle {
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    width: 240px;
-                    height: 240px;
-                    border-radius: 120px;
-                    background: #141922;
-                    border-width: 2px;
-                    border-color: #21262d;
-
-                    // Groove Ring 1
-                    Rectangle {
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                        width: 196px;
-                        height: 196px;
-                        border-radius: 98px;
-                        border-width: 1px;
-                        border-color: #1e2430;
-
-                        // Groove Ring 2
-                        Rectangle {
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            width: 154px;
-                            height: 154px;
-                            border-radius: 77px;
-                            border-width: 1px;
-                            border-color: #262e3d;
-
-                            // Center Record Label
-                            Rectangle {
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                                width: 100px;
-                                height: 100px;
-                                border-radius: 50px;
-                                background: Theme.active.card_surface;
-                                border-width: 2px;
-                                border-color: Theme.active.primary_accent;
-
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: 2px;
-
-                                    HorizontalLayout {
-                                        alignment: center;
-                                        height: 14px;
-                                        if root.is_playing : Path {
-                                            width: 10px;
-                                            height: 12px;
-                                            MoveTo { x: 1; y: 0; }
-                                            LineTo { x: 10; y: 6; }
-                                            LineTo { x: 1; y: 12; }
-                                            Close {}
-                                            fill: Theme.active.primary_accent;
-                                        }
-                                        if !root.is_playing : HorizontalLayout {
-                                            spacing: 3px;
-                                            Rectangle { width: 3px; height: 10px; border-radius: 1px; background: Theme.active.primary_accent; }
-                                            Rectangle { width: 3px; height: 10px; border-radius: 1px; background: Theme.active.primary_accent; }
-                                        }
-                                    }
-
-                                    Text {
-                                        text: "A2DP SINK";
-                                        font-size: 10px;
-                                        font-weight: 800;
-                                        color: Theme.active.secondary_accent;
-                                        horizontal-alignment: center;
-                                    }
-
-                                    Text {
-                                        text: "BLUETOOTH";
-                                        font-size: 8px;
-                                        font-weight: 700;
-                                        color: Theme.active.text_muted;
-                                        horizontal-alignment: center;
-                                    }
-                                }
-
-                                // Spindle Hole
-                                Rectangle {
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                    width: 14px;
-                                    height: 14px;
-                                    border-radius: 7px;
-                                    background: #090d12;
-                                    border-width: 1px;
-                                    border-color: Theme.active.card_border;
-                                }
-                            }
-                        }
-                    }
-                }
+            // 2. Vinyl Record Graphic (when no Bluetooth cover art)
+            if !root.has_cover_art : Image {
+                width: 78%;
+                height: 78%;
+                source: @image-url("../../../assets/icons/disk.svg");
+                colorize: Theme.active.primary_accent;
+                image-fit: contain;
+                horizontal-alignment: center;
+                vertical-alignment: center;
             }
         }
 
-        // Right Column: Track Info, Scrubber, Transport & Mini VU
+        // Right Column: Track Info, Scrubber & Transport
         VerticalLayout {
-            alignment: space-between;
+            alignment: space-around;
             padding-top: 4px;
             padding-bottom: 4px;
-            spacing: 8px;
+            spacing: 14px;
 
-            // Track metadata
+            // Track metadata & live playback wave
             VerticalLayout {
-                spacing: 4px;
+                spacing: 6px;
 
-                Text {
+                title_marquee := MarqueeText {
                     text: root.track_title;
-                    font-size: 22px;
+                    font-size: 30px;
                     font-weight: 800;
-                    color: Theme.active.text_primary;
-                    overflow: elide;
+                    text_color: Theme.active.text_primary;
                 }
 
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: 12px;
 
-                    Text {
-                        text: root.track_artist;
-                        font-size: 15px;
-                        font-weight: 600;
-                        color: Theme.active.secondary_accent;
-                        overflow: elide;
+                    artist_marquee := MarqueeText {
+                        horizontal-stretch: 1;
+                        text: (root.track_album != "" && root.track_album != "High-Resolution DSP Sink" && root.track_album != "Audiophile DSP Sink") ? 
+                              (root.track_artist + " • " + root.track_album) : root.track_artist;
+                        font-size: 22px;
+                        font-weight: 700;
+                        text_color: Theme.active.secondary_accent;
                     }
 
-                    Text {
-                        text: "-";
-                        color: Theme.active.text_muted;
-                        font-size: 14px;
-                    }
-
-                    Text {
-                        text: root.track_album;
-                        font-size: 14px;
-                        color: Theme.active.text_muted;
-                        overflow: elide;
+                    if root.is_playing : AmbientWaveIndicator {
+                        is_playing: root.is_playing;
                     }
                 }
             }
 
-            // Audio stream inspector pill
+            // Playback progress scrubber (Thick bar + large draggable knob)
             HorizontalLayout {
-                alignment: start;
-
-                Rectangle {
-                    height: 26px;
-                    background: Theme.active.card_surface;
-                    border-radius: 13px;
-                    border-width: 1px;
-                    border-color: Theme.active.card_border;
-
-                    HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 10px;
-                        spacing: 6px;
-                        alignment: center;
-
-                        Rectangle {
-                            width: 6px;
-                            height: 6px;
-                            border-radius: 3px;
-                            background: Theme.active.primary_accent;
-                            y: 10px;
-                        }
-
-                        Text {
-                            text: root.stream_details;
-                            font-size: 11px;
-                            font-weight: 600;
-                            color: Theme.active.primary_accent;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.stream_pill_clicked();
-                        }
-                    }
-                }
-            }
-
-            // Playback progress scrubber
-            HorizontalLayout {
-                spacing: 10px;
-                alignment: center;
+                spacing: 16px;
 
                 Text {
                     text: root.position_text;
-                    font-size: 12px;
-                    font-weight: 700;
-                    color: Theme.active.text_muted;
+                    font-size: 18px;
+                    font-weight: 800;
+                    color: Theme.active.text_primary;
                     vertical-alignment: center;
-                    width: 42px;
+                    width: 58px;
                     horizontal-alignment: right;
                 }
 
                 Rectangle {
-                    height: 16px;
+                    horizontal-stretch: 1;
+                    height: 28px;
                     background: transparent;
 
+                    // Background track (Vertically centered)
                     Rectangle {
                         x: 0px;
-                        y: 5px;
+                        y: (parent.height - self.height) / 2;
                         width: parent.width;
-                        height: 6px;
+                        height: 14px;
                         background: #1c2430;
-                        border-radius: 3px;
+                        border-radius: 7px;
 
+                        // Filled played position bar
                         Rectangle {
                             x: 0px;
                             y: 0px;
                             width: parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio));
                             height: parent.height;
                             background: Theme.active.primary_accent;
-                            border-radius: 3px;
+                            border-radius: 7px;
                         }
+                    }
+
+                    // Scrubber handle knob (Vertically centered in parent container)
+                    Rectangle {
+                        x: Math.max(0px, Math.min(parent.width - self.width, parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio)) - self.width / 2));
+                        y: (parent.height - self.height) / 2;
+                        width: 24px;
+                        height: 24px;
+                        border-radius: 12px;
+                        background: Theme.active.text_primary;
+                        border-width: 3px;
+                        border-color: Theme.active.primary_accent;
                     }
 
                     TouchArea {
@@ -288,273 +270,145 @@ export component NowPlayingView inherits Rectangle {
 
                 Text {
                     text: root.duration_text;
-                    font-size: 12px;
-                    font-weight: 700;
+                    font-size: 18px;
+                    font-weight: 800;
                     color: Theme.active.text_muted;
                     vertical-alignment: center;
-                    width: 42px;
+                    width: 58px;
+                    horizontal-alignment: left;
                 }
             }
 
-            // Transport controls row (No repeat/shuffle, clean touch targets)
+            // Transport controls row (Larger touch targets & Peppy graphics)
             HorizontalLayout {
                 alignment: center;
-                spacing: 20px;
+                spacing: 36px;
 
-                // Previous
-                Rectangle {
-                    width: 50px;
-                    height: 50px;
-                    border-radius: 25px;
-                    background: Theme.active.card_surface;
-                    border-width: 1px;
-                    border-color: Theme.active.card_border;
-
-                    HorizontalLayout {
-                        alignment: center;
-                        spacing: 2px;
-                        y: 18px;
-                        Rectangle { width: 3px; height: 14px; border-radius: 1px; background: Theme.active.text_primary; }
-                        Path {
-                            width: 8px; height: 14px;
-                            MoveTo { x: 8; y: 0; }
-                            LineTo { x: 0; y: 7; }
-                            LineTo { x: 8; y: 14; }
-                            Close {}
-                            fill: Theme.active.text_primary;
-                        }
-                        Path {
-                            width: 8px; height: 14px;
-                            MoveTo { x: 8; y: 0; }
-                            LineTo { x: 0; y: 7; }
-                            LineTo { x: 8; y: 14; }
-                            Close {}
-                            fill: Theme.active.text_primary;
-                        }
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.previous_track();
-                        }
-                    }
-                }
-
-                // Play / Pause
-                Rectangle {
-                    width: 58px;
-                    height: 58px;
-                    border-radius: 29px;
-                    background: Theme.active.primary_accent;
-
-                    if root.is_playing : HorizontalLayout {
-                        alignment: center;
-                        spacing: 5px;
-                        y: 19px;
-                        Rectangle { width: 5px; height: 20px; border-radius: 2px; background: Theme.active.dock_active_text; }
-                        Rectangle { width: 5px; height: 20px; border-radius: 2px; background: Theme.active.dock_active_text; }
-                    }
-
-                    if !root.is_playing : Path {
-                        width: 18px;
-                        height: 20px;
-                        x: 23px;
-                        y: 19px;
-                        MoveTo { x: 0; y: 0; }
-                        LineTo { x: 18; y: 10; }
-                        LineTo { x: 0; y: 20; }
-                        Close {}
-                        fill: Theme.active.dock_active_text;
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.toggle_play_pause();
-                        }
-                    }
-                }
-
-                // Next
-                Rectangle {
-                    width: 50px;
-                    height: 50px;
-                    border-radius: 25px;
-                    background: Theme.active.card_surface;
-                    border-width: 1px;
-                    border-color: Theme.active.card_border;
-
-                    HorizontalLayout {
-                        alignment: center;
-                        spacing: 2px;
-                        y: 18px;
-                        Path {
-                            width: 8px; height: 14px;
-                            MoveTo { x: 0; y: 0; }
-                            LineTo { x: 8; y: 7; }
-                            LineTo { x: 0; y: 14; }
-                            Close {}
-                            fill: Theme.active.text_primary;
-                        }
-                        Path {
-                            width: 8px; height: 14px;
-                            MoveTo { x: 0; y: 0; }
-                            LineTo { x: 8; y: 7; }
-                            LineTo { x: 0; y: 14; }
-                            Close {}
-                            fill: Theme.active.text_primary;
-                        }
-                        Rectangle { width: 3px; height: 14px; border-radius: 1px; background: Theme.active.text_primary; }
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.next_track();
-                        }
-                    }
-                }
-
-                // Soft-Mute
-                Rectangle {
-                    width: 50px;
-                    height: 50px;
-                    border-radius: 25px;
-                    background: Theme.active.card_surface;
-                    border-width: 1px;
-                    border-color: root.is_muted ? Theme.active.needle_peak : Theme.active.card_border;
-
-                    Text {
-                        text: root.is_muted ? "MUTED" : "VOL";
-                        font-size: 11px;
-                        font-weight: 700;
-                        color: root.is_muted ? Theme.active.needle_peak : Theme.active.secondary_accent;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.toggle_mute();
-                        }
-                    }
-                }
-            }
-
-            // Mini Peak VU visualizer & Volume control
-            HorizontalLayout {
-                alignment: space-between;
-                spacing: 16px;
-
-                // Mini Peak VU meters
-                HorizontalLayout {
-                    spacing: 8px;
-                    alignment: start;
-
-                    Text {
-                        text: "L";
-                        font-size: 11px;
-                        font-weight: 700;
-                        color: Theme.active.text_muted;
-                        vertical-alignment: center;
-                    }
-
+                // Previous Button (72px, vertically centered with 86px hero button)
+                VerticalLayout {
+                    alignment: center;
                     Rectangle {
-                        width: 90px;
-                        height: 6px;
-                        background: #1c2430;
-                        border-radius: 3px;
-                        y: 7px;
+                        width: 72px;
+                        height: 72px;
+                        border-radius: 36px;
+                        background: Theme.active.card_surface;
+                        border-width: 1px;
+                        border-color: Theme.active.card_border;
 
-                        Rectangle {
-                            x: 0px;
-                            y: 0px;
-                            width: parent.width * Math.max(0.0, Math.min(1.0, root.left_peak_ratio));
-                            height: parent.height;
-                            background: Theme.active.primary_accent;
-                            border-radius: 3px;
-                        }
-                    }
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 4px;
 
-                    Text {
-                        text: "R";
-                        font-size: 11px;
-                        font-weight: 700;
-                        color: Theme.active.text_muted;
-                        vertical-alignment: center;
-                    }
+                                Rectangle {
+                                    width: 4px;
+                                    height: 22px;
+                                    border-radius: 2px;
+                                    background: Theme.active.text_primary;
+                                }
 
-                    Rectangle {
-                        width: 90px;
-                        height: 6px;
-                        background: #1c2430;
-                        border-radius: 3px;
-                        y: 7px;
-
-                        Rectangle {
-                            x: 0px;
-                            y: 0px;
-                            width: parent.width * Math.max(0.0, Math.min(1.0, root.right_peak_ratio));
-                            height: parent.height;
-                            background: Theme.active.primary_accent;
-                            border-radius: 3px;
-                        }
-                    }
-                }
-
-                // Volume slider
-                HorizontalLayout {
-                    spacing: 8px;
-                    alignment: end;
-
-                    Text {
-                        text: "VOL";
-                        color: Theme.active.text_muted;
-                        font-size: 11px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-
-                    Rectangle {
-                        width: 110px;
-                        height: 16px;
-                        background: transparent;
-
-                        Rectangle {
-                            x: 0px;
-                            y: 5px;
-                            width: parent.width;
-                            height: 6px;
-                            background: #1c2430;
-                            border-radius: 3px;
-
-                            Rectangle {
-                                x: 0px;
-                                y: 0px;
-                                width: parent.width * (root.volume_value >= 0.0 ? (root.volume_value <= 100.0 ? root.volume_value / 100.0 : 1.0) : 0.0);
-                                height: parent.height;
-                                background: Theme.active.secondary_accent;
-                                border-radius: 3px;
+                                Image {
+                                    source: @image-url("../../../assets/icons/left.svg");
+                                    colorize: Theme.active.text_primary;
+                                    width: 16px;
+                                    height: 22px;
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                }
                             }
                         }
 
                         TouchArea {
-                            moved => {
-                                root.volume_value = Math.max(0.0, Math.min(100.0, self.mouse-x / self.width * 100.0));
-                                root.volume_changed(root.volume_value);
-                            }
                             clicked => {
-                                root.volume_value = Math.max(0.0, Math.min(100.0, self.mouse-x / self.width * 100.0));
-                                root.volume_changed(root.volume_value);
+                                root.previous_track();
                             }
                         }
                     }
+                }
 
-                    Text {
-                        text: "\{Math.round(root.volume_value >= 0.0 ? (root.volume_value <= 100.0 ? root.volume_value : 100.0) : 0.0)}%";
-                        color: Theme.active.secondary_accent;
-                        font-size: 12px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                        width: 38px;
+                // Play / Pause (Hero Button 86px, vertically centered)
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 86px;
+                        height: 86px;
+                        border-radius: 43px;
+                        background: Theme.active.primary_accent;
+
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
+                                alignment: center;
+
+                                if root.is_playing : Image {
+                                    source: @image-url("../../../assets/icons/pause.svg");
+                                    colorize: Theme.active.dock_active_text;
+                                    width: 24px;
+                                    height: 30px;
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                }
+
+                                if !root.is_playing : Image {
+                                    source: @image-url("../../../assets/icons/play.svg");
+                                    colorize: Theme.active.dock_active_text;
+                                    width: 26px;
+                                    height: 30px;
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.toggle_play_pause();
+                            }
+                        }
+                    }
+                }
+
+                // Next Button (72px, vertically centered with 86px hero button)
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 72px;
+                        height: 72px;
+                        border-radius: 36px;
+                        background: Theme.active.card_surface;
+                        border-width: 1px;
+                        border-color: Theme.active.card_border;
+
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 4px;
+
+                                Image {
+                                    source: @image-url("../../../assets/icons/right.svg");
+                                    colorize: Theme.active.text_primary;
+                                    width: 16px;
+                                    height: 22px;
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    width: 4px;
+                                    height: 22px;
+                                    border-radius: 2px;
+                                    background: Theme.active.text_primary;
+                                }
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.next_track();
+                            }
+                        }
                     }
                 }
             }

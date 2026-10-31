@@ -80,6 +80,40 @@ fn bluetooth_services_predicates() {
 }
 
 #[test]
+fn bluetooth_status_query_methods() {
+    let (device, mock) = BluetoothDevice::new_mocked();
+    let mut status = device.status().unwrap();
+
+    assert!(status.is_operational());
+    assert_eq!(status.connected_count(), 1);
+    assert!(status.is_streaming());
+    assert!(status.active_pcm().is_some());
+    assert_eq!(status.connected_devices().len(), 1);
+    assert_eq!(status.paired_devices().len(), 1);
+    assert!(status.is_playing());
+    assert!(status.playback_state().is_some());
+
+    // Toggle playback to paused and verify status.is_playing()
+    mock.set_player_status("paused");
+    let paused_status = device.status().unwrap();
+    assert!(!paused_status.is_playing());
+
+    // Clear playback and verify None
+    mock.set_playback(None);
+    let no_pb_status = device.status().unwrap();
+    assert!(!no_pb_status.is_playing());
+    assert!(no_pb_status.playback_state().is_none());
+
+    // Disconnect adapter power
+    mock.set_powered(false);
+    assert!(!device.status().unwrap().is_operational());
+
+    // No operational services
+    status.services.bluetoothd = ServiceState::Inactive;
+    assert!(!status.is_operational());
+}
+
+#[test]
 fn bt_device_helpers() {
     let addr = BtAddress::new([1, 2, 3, 4, 5, 6]);
     let dev1 = BtDevice {
@@ -142,6 +176,7 @@ fn bluealsa_pcm_stream_state_description() {
         channels: 2,
         format: "S16_LE".into(),
         volume: Some("100%".into()),
+        volume_percent: Some(100),
         muted: false,
         delay: None,
     };
@@ -378,6 +413,7 @@ fn mock_device_operations_and_fault_injection() {
         channels: 2,
         format: "S32_LE".into(),
         volume: Some("80".into()),
+        volume_percent: Some(63),
         muted: false,
         delay: None,
     };
@@ -786,32 +822,32 @@ fn decode_pcm_format_identifiers() {
 
 #[test]
 fn format_volume_bytes_channels() {
-    // Empty input: no volume, not muted.
+    // Empty input: no volume, not muted, no percent.
     assert_eq!(
         bluetooth_test_helpers::format_volume_bytes(&[], None),
-        (Option::<Box<str>>::None, false)
+        (Option::<Box<str>>::None, false, None)
     );
-    // Stereo, unmuted, generic channel names.
+    // Stereo, unmuted, generic channel names. (127 + 64) / 2 = 95.5 -> 95.5 / 127 = 75.2% -> 75%
     assert_eq!(
         bluetooth_test_helpers::format_volume_bytes(&[0x7F, 0x40], None),
-        (Some("CH0: 127 CH1: 64".into()) as Option<Box<str>>, false)
+        (Some("CH0: 127 CH1: 64".into()), false, Some(75))
     );
-    // Any muted high bit → muted true; levels masked to 7 bits.
+    // Any muted high bit → muted true; levels masked to 7 bits. 127 / 127 = 100%
     assert_eq!(
         bluetooth_test_helpers::format_volume_bytes(&[0xFF, 0x7F], None),
-        (Some("CH0: 127 CH1: 127".into()) as Option<Box<str>>, true)
+        (Some("CH0: 127 CH1: 127".into()), true, Some(100))
     );
-    // ChannelMap names override generic indices.
+    // ChannelMap names override generic indices. (0 + 32) / 2 = 16 -> 16 / 127 = 12.6% -> 13%
     let names: Box<[Box<str>]> = vec!["L".into(), "R".into()].into_boxed_slice();
     assert_eq!(
         bluetooth_test_helpers::format_volume_bytes(&[0x80, 0x20], Some(&names)),
-        (Some("L: 0 R: 32".into()) as Option<Box<str>>, true)
+        (Some("L: 0 R: 32".into()), true, Some(13))
     );
-    // ChannelMap shorter than volume bytes: falls back to CH{i}.
+    // ChannelMap shorter than volume bytes: falls back to CH{i}. (16 + 32) / 2 = 24 -> 24 / 127 = 18.9% -> 19%
     let one_name: Box<[Box<str>]> = vec!["L".into()].into_boxed_slice();
     assert_eq!(
         bluetooth_test_helpers::format_volume_bytes(&[0x10, 0x20], Some(&one_name)),
-        (Some("L: 16 CH1: 32".into()) as Option<Box<str>>, false)
+        (Some("L: 16 CH1: 32".into()), false, Some(19))
     );
 }
 
@@ -1125,6 +1161,9 @@ fn playback_state_and_duration_formatting() {
     assert_eq!(def.position_ms, 0);
     assert_eq!(def.duration_ms, 0);
     assert_eq!(def.player_path, None);
+    assert_eq!(def.obex_port, None);
+    assert_eq!(def.image_handle, None);
+    assert_eq!(def.cover_art_path, None);
     assert_eq!(def.progress_ratio(), 0.0);
     assert_eq!(def.format_position(), "00:00");
     assert_eq!(def.format_duration(), "00:00");
@@ -1139,6 +1178,9 @@ fn playback_state_and_duration_formatting() {
         position_ms: 125_000,
         duration_ms: 415_000,
         player_path: Some("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0".into()),
+        obex_port: Some(4097),
+        image_handle: Some("img001".into()),
+        cover_art_path: Some("/tmp/test.jpg".into()),
     };
     assert!(state.is_playing());
     assert_eq!(state.format_position(), "02:05");
@@ -1368,7 +1410,14 @@ fn parse_bluez_all_with_media_player() {
             Value::Value(Box::new(Value::from(312_000u32))),
         )
         .unwrap();
+    track_dict
+        .append(
+            Value::from("ImgHandle"),
+            Value::Value(Box::new(Value::from("12345"))),
+        )
+        .unwrap();
     player_props.insert("Track".to_string(), to_val(Value::Dict(track_dict)));
+    player_props.insert("ObexPort".to_string(), to_val(Value::from(4097u16)));
 
     player_ifaces.insert(iface("org.bluez.MediaPlayer1"), player_props);
     objects.insert(player_path, player_ifaces);
@@ -1396,6 +1445,8 @@ fn parse_bluez_all_with_media_player() {
     assert_eq!(pb.duration_ms, 312_000);
     assert_eq!(pb.format_position(), "00:45");
     assert_eq!(pb.format_duration(), "05:12");
+    assert_eq!(pb.obex_port, Some(4097));
+    assert_eq!(pb.image_handle.as_deref(), Some("12345"));
     assert_eq!(
         pb.player_path.as_deref(),
         Some("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0")
@@ -1465,4 +1516,176 @@ fn parse_bluez_all_adapter_filtering_and_fallback() {
     assert_eq!(min_pb.album.as_ref(), "High-Resolution DSP Sink");
     assert_eq!(min_pb.position_ms, 0);
     assert_eq!(min_pb.duration_ms, 0);
+}
+
+#[test]
+fn clean_cover_art_pruning_logic() {
+    use speaker_core::diag::ScopedTempDir;
+    use speaker_core::hardware::{clean_cover_art_in_dir, clean_old_cover_art};
+
+    let temp = ScopedTempDir::new("cover_art_clean_test");
+    let dir = temp.path();
+
+    let mac = "AA_BB_CC_DD_EE_FF";
+    let old1 = dir.join(format!("speaker-cover-{mac}-old1.jpg"));
+    let old2 = dir.join(format!("speaker-cover-{mac}-old2.jpg"));
+    let current = dir.join(format!("speaker-cover-{mac}-current.jpg"));
+    let other_mac = dir.join("speaker-cover-11_22_33_44_55_66-handle.jpg");
+    let non_cover = dir.join(format!("speaker-cover-{mac}-non_image.txt"));
+
+    std::fs::write(&old1, b"old1").unwrap();
+    std::fs::write(&old2, b"old2").unwrap();
+    std::fs::write(&current, b"current").unwrap();
+    std::fs::write(&other_mac, b"other").unwrap();
+    std::fs::write(&non_cover, b"txt").unwrap();
+
+    clean_cover_art_in_dir(dir, mac, "current");
+
+    assert!(!old1.exists());
+    assert!(!old2.exists());
+    assert!(current.exists());
+    assert!(other_mac.exists());
+    assert!(non_cover.exists());
+
+    // Also call clean_old_cover_art
+    clean_old_cover_art("00_00_00_00_00_00", "none");
+}
+
+#[test]
+fn cover_art_path_and_cache_validation() {
+    use speaker_core::hardware::{BtAddress, cover_art_cached_path, cover_art_path_for};
+
+    let addr = BtAddress::new([0x30, 0xE0, 0x44, 0x67, 0x38, 0xA2]);
+
+    // Empty handle returns None
+    assert!(cover_art_path_for(addr, "").is_none());
+    assert!(cover_art_cached_path(addr, "").is_none());
+    assert!(cover_art_path_for(addr, "!@#$%^&*()").is_none());
+
+    // Valid handle generates path
+    let (cache_path, mac, handle) = cover_art_path_for(addr, "img-001_A").unwrap();
+    assert_eq!(mac, "30_E0_44_67_38_A2");
+    assert_eq!(handle, "img-001_A");
+    assert_eq!(
+        cache_path,
+        "/tmp/speaker-cover-30_E0_44_67_38_A2-img-001_A.jpg"
+    );
+
+    // When file doesn't exist or is incomplete, cached_path returns None
+    let _ = std::fs::remove_file(&cache_path);
+    assert!(cover_art_cached_path(addr, "img-001_A").is_none());
+
+    // When file is truncated/incomplete, cached_path returns None
+    std::fs::write(&cache_path, b"incomplete-jpeg").unwrap();
+    assert!(cover_art_cached_path(addr, "img-001_A").is_none());
+
+    // When file has valid JPEG SOI and EOI markers, cached_path returns Some
+    let mut valid_jpeg = vec![0u8; 120];
+    valid_jpeg[0] = 0xFF;
+    valid_jpeg[1] = 0xD8;
+    valid_jpeg[118] = 0xFF;
+    valid_jpeg[119] = 0xD9;
+    std::fs::write(&cache_path, &valid_jpeg).unwrap();
+    let res = cover_art_cached_path(addr, "img-001_A");
+    assert_eq!(res.as_deref(), Some(cache_path.as_str()));
+    let _ = std::fs::remove_file(&cache_path);
+}
+
+#[test]
+fn is_complete_jpeg_thorough_validation() {
+    use speaker_core::diag::ScopedTempDir;
+    use speaker_core::hardware::is_complete_jpeg;
+
+    let dir = ScopedTempDir::new("complete-jpeg-test");
+    let non_existent = dir.path().join("missing.jpg");
+    assert!(!is_complete_jpeg(&non_existent));
+
+    // File with < 100 bytes
+    let small_file = dir.path().join("small.jpg");
+    std::fs::write(&small_file, [0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+    assert!(!is_complete_jpeg(&small_file));
+
+    // File with exactly 99 bytes even with valid markers
+    let mut ninety_nine = vec![0u8; 99];
+    ninety_nine[0] = 0xFF;
+    ninety_nine[1] = 0xD8;
+    ninety_nine[97] = 0xFF;
+    ninety_nine[98] = 0xD9;
+    let ninety_nine_file = dir.path().join("99.jpg");
+    std::fs::write(&ninety_nine_file, &ninety_nine).unwrap();
+    assert!(!is_complete_jpeg(&ninety_nine_file));
+
+    // File with 100 bytes but invalid SOI header
+    let mut bad_header = vec![0u8; 100];
+    bad_header[0] = 0x00;
+    bad_header[1] = 0x00;
+    bad_header[98] = 0xFF;
+    bad_header[99] = 0xD9;
+    let bad_header_file = dir.path().join("bad_header.jpg");
+    std::fs::write(&bad_header_file, &bad_header).unwrap();
+    assert!(!is_complete_jpeg(&bad_header_file));
+
+    // File with 100 bytes with valid SOI header but invalid EOI footer
+    let mut bad_footer = vec![0u8; 100];
+    bad_footer[0] = 0xFF;
+    bad_footer[1] = 0xD8;
+    bad_footer[98] = 0x00;
+    bad_footer[99] = 0x00;
+    let bad_footer_file = dir.path().join("bad_footer.jpg");
+    std::fs::write(&bad_footer_file, &bad_footer).unwrap();
+    assert!(!is_complete_jpeg(&bad_footer_file));
+
+    // Valid 100-byte JPEG file
+    let mut valid = vec![0u8; 100];
+    valid[0] = 0xFF;
+    valid[1] = 0xD8;
+    valid[98] = 0xFF;
+    valid[99] = 0xD9;
+    let valid_file = dir.path().join("valid.jpg");
+    std::fs::write(&valid_file, &valid).unwrap();
+    assert!(is_complete_jpeg(&valid_file));
+}
+
+#[test]
+fn mock_cover_art_resolution_and_control() {
+    use speaker_core::hardware::{BluetoothDevice, BtAddress, cover_art_path_for};
+
+    let (device, mock) = BluetoothDevice::new_mocked();
+    let addr = BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+
+    // Initial mock state has no cover art path
+    let pb = device.playback_state().unwrap().unwrap();
+    assert!(pb.cover_art_path.is_none());
+
+    // Explicitly set mock cover art path
+    mock.set_player_cover_art(Some("/tmp/custom-cover.jpg".into()));
+    let pb = device.playback_state().unwrap().unwrap();
+    assert_eq!(pb.cover_art_path.as_deref(), Some("/tmp/custom-cover.jpg"));
+
+    // Reset mock cover art to None and test automatic resolution via cache
+    mock.set_player_cover_art(None);
+    mock.set_player_image_handle(Some("test-h1".into()), Some(4097));
+
+    let (cache_path, _, _) = cover_art_path_for(addr, "test-h1").unwrap();
+    let mut valid_bytes = vec![0u8; 128];
+    valid_bytes[0] = 0xFF;
+    valid_bytes[1] = 0xD8;
+    valid_bytes[126] = 0xFF;
+    valid_bytes[127] = 0xD9;
+    std::fs::write(&cache_path, &valid_bytes).unwrap();
+
+    let pb = device.playback_state().unwrap().unwrap();
+    assert_eq!(pb.cover_art_path.as_deref(), Some(cache_path.as_str()));
+
+    // Verify status reading also derives cover art
+    let status = device.status().unwrap();
+    assert_eq!(
+        status
+            .playback
+            .as_ref()
+            .and_then(|p| p.cover_art_path.as_deref()),
+        Some(cache_path.as_str())
+    );
+
+    let _ = std::fs::remove_file(&cache_path);
 }

@@ -29,7 +29,8 @@ use std::sync::{Arc, Mutex};
 
 use slint::PhysicalSize;
 use slint::platform::software_renderer::{
-    MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, TargetPixel,
+    LineBufferProvider, MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
+    TargetPixel,
 };
 use slint::platform::{Platform, PlatformError};
 
@@ -390,6 +391,25 @@ const _: () = {
     assert!(Framebuffer::DEFAULT_WIDTH == 800 && Framebuffer::DEFAULT_HEIGHT == 480);
 };
 
+struct FbLineBuffer<'a> {
+    pixels: &'a mut [Bgrx8888Pixel],
+    stride: usize,
+}
+
+impl LineBufferProvider for FbLineBuffer<'_> {
+    type TargetPixel = Bgrx8888Pixel;
+
+    fn process_line(
+        &mut self,
+        line: usize,
+        range: core::ops::Range<usize>,
+        render_fn: impl FnOnce(&mut [Self::TargetPixel]),
+    ) {
+        let offset = line * self.stride + range.start;
+        render_fn(&mut self.pixels[offset..offset + range.len()]);
+    }
+}
+
 impl Framebuffer {
     /// Default display panel width in pixels (Freenove 4.3" DSI).
     pub const DEFAULT_WIDTH: u32 = 800;
@@ -481,11 +501,8 @@ impl Framebuffer {
         };
 
         let blank_path_str = blank_path.map(|p| p.as_ref().to_string_lossy().into());
-        let back_buffer = if mmap.is_some() {
-            Vec::new()
-        } else {
-            vec![Bgrx8888Pixel::default(); Self::SCANOUT_BYTE_LEN / Self::BYTES_PER_PIXEL]
-        };
+        let back_buffer =
+            vec![Bgrx8888Pixel::default(); Self::SCANOUT_BYTE_LEN / Self::BYTES_PER_PIXEL];
 
         Ok(Self {
             backend: Backend::Hardware {
@@ -736,7 +753,10 @@ impl Framebuffer {
                 if let Some(mmap_mut) = mmap {
                     let pixel_slice = Bgrx8888Pixel::try_from_bytes_mut(mmap_mut)?;
                     let did_draw = window.draw_if_needed(|renderer| {
-                        renderer.render(pixel_slice, width);
+                        renderer.render_by_line(FbLineBuffer {
+                            pixels: pixel_slice,
+                            stride: width,
+                        });
                     });
                     if did_draw {
                         mmap_mut
@@ -746,7 +766,10 @@ impl Framebuffer {
                     Ok(did_draw)
                 } else {
                     let did_draw = window.draw_if_needed(|renderer| {
-                        renderer.render(back_buffer, width);
+                        renderer.render_by_line(FbLineBuffer {
+                            pixels: back_buffer,
+                            stride: width,
+                        });
                     });
                     if did_draw {
                         Self::flush_file_buffer(
@@ -767,7 +790,10 @@ impl Framebuffer {
                     ));
                 }
                 let did_draw = window.draw_if_needed(|renderer| {
-                    renderer.render(buffer, width);
+                    renderer.render_by_line(FbLineBuffer {
+                        pixels: buffer,
+                        stride: width,
+                    });
                 });
                 if did_draw {
                     state.render_calls += 1;

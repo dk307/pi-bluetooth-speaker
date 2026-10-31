@@ -319,7 +319,12 @@ pub fn print_human_audio_pipeline(status: &BluetoothStatus, opts: &CliOptions) {
                 pcm.available_codecs.join(", ")
             };
             let delay_str = pcm.delay.as_deref().unwrap_or("N/A");
-            let vol_str = pcm.volume.as_deref().unwrap_or("N/A");
+            let vol_str = match (pcm.volume_percent, pcm.volume.as_deref()) {
+                (Some(pct), Some(raw)) => format!("{pct}% ({raw})"),
+                (Some(pct), None) => format!("{pct}%"),
+                (None, Some(raw)) => raw.to_string(),
+                (None, None) => "N/A".to_string(),
+            };
             let muted_str = if pcm.muted { "YES" } else { "NO" };
 
             println!("  Stream State      : {}", pcm.stream_state_description());
@@ -338,6 +343,23 @@ pub fn print_human_audio_pipeline(status: &BluetoothStatus, opts: &CliOptions) {
             println!("  ↳ Codecs Allowed  : {codecs_avail}");
             println!();
         }
+    }
+
+    if let Some(ref p) = status.playback {
+        println!("  AVRCP Now Playing Stream:");
+        println!("  ↳ Title / Artist  : {} / {}", p.title, p.artist);
+        println!("  ↳ Album           : {}", p.album);
+        println!(
+            "  ↳ Status / Pos    : {} ({})",
+            p.status,
+            p.format_position()
+        );
+        if let Some(ref path) = p.cover_art_path {
+            println!("  ↳ BIP Cover Art   : {path}");
+        } else if let Some(ref handle) = p.image_handle {
+            println!("  ↳ BIP Handle      : {handle}");
+        }
+        println!();
     }
 }
 
@@ -444,6 +466,7 @@ pub fn output_json_status(timestamp: &str, status: &BluetoothStatus, opts: &CliO
             "channels": p.channels,
             "format": p.format,
             "volume": p.volume,
+            "volume_percent": p.volume_percent,
             "muted": p.muted,
             "delay": p.delay,
         })).collect::<Vec<_>>(),
@@ -457,6 +480,9 @@ pub fn output_json_status(timestamp: &str, status: &BluetoothStatus, opts: &CliO
             "is_playing": p.is_playing(),
             "device_address": p.device_address.map(|a| a.to_string()),
             "device_name": p.device_name,
+            "obex_port": p.obex_port,
+            "image_handle": p.image_handle,
+            "cover_art_path": p.cover_art_path,
         })),
         "hardware": {
             "chip": status.hardware.chip,

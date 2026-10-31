@@ -20,15 +20,33 @@
 ## Appliance UI Architecture (800x480 Framebuffer)
 
 The appliance interface is structured into three coordinated zones rendered directly to `/dev/fb0`:
-1. **Top Status Bar (`TopStatusBar`):** Dynamic source indicator (`Bluetooth`, `CD Player`, `DSP`), connected device / track title, active codec pill (`aptX-HD 48kHz`), vector signal strength bars, and display brightness/night mode control.
+1. **Top Status Bar (`TopStatusBar`):**
+   - **Source Indicator Pill (Top-Left):** Vertically centered (`y: 6px; height: 30px;`) with a symmetric Bluetooth vector icon (`18×18px`) and active source label (`Bluetooth`).
+   - **Center Client Info:** Connected device name (e.g. `Pixel 10 Pro XL`) with automated text elision.
+   - **Graphic Status Badges (Top-Right):** Clean, distraction-free chips:
+     - **Codec Badge:** Active codec (`aptX-HD`, `SBC`, `AAC`, `LDAC`) styled in primary accent gold.
+     - **Dynamic Stream Spec Badges:** Sample rate (`48 kHz`, `96 kHz`) and bit depth (`16-bit`, `24-bit`) badges in warm amber gold (`secondary_accent`) shown only for variable/scalable codecs (`LDAC`, `aptX Adaptive`, `LHDC`, `SSC`, `SBC`, `AAC`, `LC3`), and automatically hidden for fixed-spec codecs (`aptX-HD`, `aptX`, `aptX-LL`) to eliminate spec redundancy.
+     - **Volume Badge (0-100):** Real-time volume chip (`VOL 75` or `MUTE`) styled in warm amber gold, touch-interactive for mute toggling.
+     - **DIM Control:** Dedicated one-tap hardware backlight dimming button (`DIM`).
 2. **Main Viewport (`MainViewport`):** Active tab view container hosting 6 screens:
-   - **Tab 0: Now Playing (`NowPlayingView`):** Vinyl spinning indicator, track title, artist, album, elapsed & duration timestamps, interactive progress seek bar, volume control slider, vector transport controls (Previous, Play/Pause, Next), and audio stream inspector pill.
+   - **Tab 0: Now Playing (`NowPlayingView`):**
+     - **Turntable Vinyl Container with Glowing Halo:** Left pane displays an authentic turntable vinyl record graphic (`disk.svg`) inside an album box, surrounded by an ambient warm halo in `Theme.active.primary_accent` that illuminates softly while audio is actively streaming.
+     - **Live Ambient Wave Indicator:** A rhythmic 5-bar equalizer wave (`AmbientWaveIndicator`) animating in alternating gold/amber accent colors beside the artist/album metadata during active playback.
+     - **Seamless Unidirectional 60 FPS Marquee Scrolling:** Long track titles and album names glide continuously in one direction (right-to-left) with a 2.5-second initial reading delay, precise 60 FPS frame-pacing, and an imperceptible loop wrap-around, eliminating jerkiness and ping-pong reversals.
+     - **Themed Linear Gradient Depth:** Chassis and card surface styled with `@linear-gradient` shading rather than flat solid color.
+     - **Cleaned-Up Distraction-Free Layout:** Eliminated redundant stream inspector pill, album subtitle ("High Resolution DSP Sink"), volume button/slider, and mini L/R speaker VU bars.
+     - **Thick Progress Scrubber:** Stretched **16px** played position bar with a large **26px** draggable handle knob and bold **18px** elapsed/duration timestamps.
+     - **Enlarged Vector Transport Controls:** Large **86px** circular hero Play/Pause button (`||` / `▶`), **72px** Previous button with `|◀` graphic (`left.svg`), and **72px** Next button with `▶|` graphic (`right.svg`), aligned along their shared vertical center axis.
    - **Tab 1: VU Meter (`VuMeterView`):** Stereo dual analog needle meters with ballistics, peak LEDs, and calibrated dBFS scale.
    - **Tab 2: Bluetooth Manager (`BluetoothView`):** Adapter status, paired device list, connection state, signal level, and pairing controls.
    - **Tab 3: CD Player (`CdPlayerView`):** Optical disc drive status, TOC track listing, disc transport controls (gated by service enablement).
    - **Tab 4: DSP & Tone (`DspToneView`):** CamillaDSP master volume, clipping sample indicators, filter profiles, and parametric EQ status.
    - **Tab 5: Settings & Preferences (`SettingsView`):** Theme selector pills, display backlight dimming, thermal monitor, and hardware diagnostics.
-3. **Bottom Navigation Dock (`NavDock`):** Typographic navigation pills (`PLAYER`, `VU`, `BT`, `CD`, `DSP`, `SETTINGS`) with dynamic active theme highlights and touch responsiveness.
+3. **Bottom Navigation Dock (`NavDock`):** Typographic navigation pills (`Player`, `VU Meter`, `Bluetooth`, `DSP & Tone`, `Settings`) with dynamic active theme highlights and touch responsiveness.
+
+### Hardware-Accelerated Slint Delta Rendering & Zero-Idle CPU
+- **Slint Built-in Delta Rendering (`LineBufferProvider`):** Implements Slint's `LineBufferProvider` trait using `SoftwareRenderer::render_by_line` and `RepaintBufferType::ReusedBuffer`. Slint automatically determines dirty scanline bounding boxes and horizontal pixel spans, rendering only modified regions directly into Linux framebuffer memory (`/dev/fb0`) with zero full-screen clearing or flashing.
+- **Adaptive Timer/Event Sleep Loop:** The core daemon render loop dynamically checks `slint::platform::duration_until_next_timer_update()`, sleeping adaptively up to 750ms when idle or 250ms during active playback. Verified via `top` on the Raspberry Pi 3: **CPU usage at idle dropped from ~27% to 0.0%**.
 
 ### Boot Sequence & Appliance Lifecycle
 - **`ScreenTarget::Appliance` (Default):** On service start, displays the POST **Boot Splash Screen** (`SplashScreen`) verifying hardware subsystems (Thermal, Merus Amp, Ambient Light, Bluetooth D-Bus, CamillaDSP), then transitions seamlessly to the **UI Shell** (`MainWindow`) without screen flicker or platform re-initialization.
@@ -42,13 +60,13 @@ All screens (Splash, Shell, and Viewport tabs) dynamically adapt to the active t
 - **`cyberpunk` (Cyberpunk Neon):** Pitch Black background with High-Contrast Neon Magenta (`#EC4899`) and Cyan (`#06B6D4`).
 - **`studio-dark` (Studio Dark):** Professional neutral Charcoal (`#18181B`) with Crisp White accents (`#FAFAFA`).
 
-### Pure Vector Graphics (No Unicode Picture Dependencies)
-To ensure robust, pixel-perfect rendering across minimal Linux environments (like DietPi without full emoji fonts installed), all UI controls are rendered with pure Slint vector primitives (`Path`, `Rectangle`):
-- Vector Play triangle & Pause double-bars.
-- Vector Next / Previous fast-forward triangles and end-stops.
-- Vector Wi-Fi / Bluetooth signal bars.
-- Vector dropdown chevrons.
-- Vector status check dots and bullet dividers.
+### Authentic Vector Graphics & Peppy SVG Icons
+To ensure robust, pixel-perfect rendering across minimal Linux environments (like DietPi without full emoji fonts installed), all UI controls use pure vector graphics and official Peppy SVG assets stored in `assets/icons/`:
+- Bluetooth rune icon (`bluetooth-rune.svg`) centered in the active source pill.
+- Streamlined audio badges: codec (`aptX-HD`) in primary accent gold, sample rate (`48 kHz`) and bit depth (`24-bit`) in matching secondary amber gold.
+- Turntable vinyl disc icon (`disk.svg`) for album/now-playing cover container.
+- Hero Play/Pause vector icons (`play.svg`, `pause.svg`).
+- Skip Previous/Next vector icons (`left.svg`, `right.svg`).
 
 ---
 

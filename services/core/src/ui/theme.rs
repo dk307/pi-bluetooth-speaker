@@ -96,6 +96,22 @@ impl ThemePreset {
         }
     }
 
+    /// Returns the primary font family name for this theme preset.
+    #[must_use]
+    #[expect(
+        clippy::match_same_arms,
+        reason = "Explicit per-theme arm structure allows each theme preset to independently customize its typography"
+    )]
+    pub const fn font_family(self) -> &'static str {
+        match self {
+            Self::McIntoshBlue => "Inter",
+            Self::MarantzAmber => "Inter",
+            Self::CyberpunkNeon => "Inter",
+            Self::StudioDark => "Inter",
+            Self::Peppy => "Inter",
+        }
+    }
+
     /// Parses a theme preset from a slug or name string.
     ///
     /// # Errors
@@ -132,6 +148,7 @@ impl ThemePreset {
                 text_primary: slint::Color::from_rgb_u8(0xF0, 0xF6, 0xFC),
                 text_muted: slint::Color::from_rgb_u8(0x8B, 0x94, 0x9E),
                 meter_skin_id: self.meter_skin_id().into(),
+                font_family: self.font_family().into(),
             },
             Self::MarantzAmber => ThemePalette {
                 chassis: slint::Color::from_rgb_u8(0x12, 0x10, 0x0D),
@@ -144,6 +161,7 @@ impl ThemePreset {
                 text_primary: slint::Color::from_rgb_u8(0xFD, 0xFB, 0xF7),
                 text_muted: slint::Color::from_rgb_u8(0x9C, 0x92, 0x83),
                 meter_skin_id: self.meter_skin_id().into(),
+                font_family: self.font_family().into(),
             },
             Self::CyberpunkNeon => ThemePalette {
                 chassis: slint::Color::from_rgb_u8(0x0D, 0x0B, 0x18),
@@ -156,6 +174,7 @@ impl ThemePreset {
                 text_primary: slint::Color::from_rgb_u8(0xF5, 0xEE, 0xFD),
                 text_muted: slint::Color::from_rgb_u8(0xA3, 0x90, 0xC5),
                 meter_skin_id: self.meter_skin_id().into(),
+                font_family: self.font_family().into(),
             },
             Self::StudioDark => ThemePalette {
                 chassis: slint::Color::from_rgb_u8(0x12, 0x12, 0x12),
@@ -168,6 +187,7 @@ impl ThemePreset {
                 text_primary: slint::Color::from_rgb_u8(0xFF, 0xFF, 0xFF),
                 text_muted: slint::Color::from_rgb_u8(0x88, 0x88, 0x88),
                 meter_skin_id: self.meter_skin_id().into(),
+                font_family: self.font_family().into(),
             },
             Self::Peppy => ThemePalette {
                 chassis: slint::Color::from_rgb_u8(0x14, 0x11, 0x0D),
@@ -180,6 +200,7 @@ impl ThemePreset {
                 text_primary: slint::Color::from_rgb_u8(0xFF, 0xFD, 0xF5),
                 text_muted: slint::Color::from_rgb_u8(0xA6, 0x9B, 0x8D),
                 meter_skin_id: self.meter_skin_id().into(),
+                font_family: self.font_family().into(),
             },
         }
     }

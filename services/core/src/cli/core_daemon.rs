@@ -9,6 +9,10 @@ use std::process::ExitCode;
 #[cfg(feature = "ui")]
 use std::rc::Rc;
 #[cfg(feature = "ui")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "ui")]
+use std::sync::{Arc, Mutex};
+#[cfg(feature = "ui")]
 use std::time::{Duration, Instant};
 
 use crate::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts};
@@ -17,6 +21,8 @@ use crate::hardware::TempSensor;
 use crate::ui::{AppShell, Framebuffer, MainWindow, SplashScreen};
 #[cfg(feature = "ui")]
 use slint::ComponentHandle;
+#[cfg(feature = "ui")]
+use slint::platform::WindowAdapter;
 #[cfg(feature = "ui")]
 use slint::platform::software_renderer::MinimalSoftwareWindow;
 
@@ -37,8 +43,6 @@ pub enum ScreenTarget {
 pub struct CoreCliOptions {
     /// Optional preview duration in seconds.
     pub preview_secs: Option<u64>,
-    /// Whether to hold the UI in an infinite animation loop.
-    pub run_loop: bool,
     /// Screen target to initialize and display.
     pub screen: ScreenTarget,
     /// Theme preset to apply on startup.
@@ -64,8 +68,7 @@ pub fn print_usage(bin_name: &str) {
     println!(
         "  -T, --tab <TAB>             Active UI tab on startup (0-5 or name: player, vu, bt, cd, dsp, settings)"
     );
-    println!("  -p, --preview <SECS>        Render UI for SECS seconds");
-    println!("  -l, --loop                  Hold UI on screen continuously");
+    println!("  -p, --preview <SECS>        Render UI for SECS seconds (preview/testing mode)");
     println!("  -V, --version               Print version and exit");
     println!("  -h, --help                  Print this help text and exit");
 }
@@ -120,7 +123,6 @@ where
         match arg.as_str() {
             "-h" | "--help" => return Ok(CliParse::Help),
             "-V" | "--version" => return Ok(CliParse::Version),
-            "-l" | "--loop" => opts.run_loop = true,
             "-t" | "--theme" => {
                 let val = next_arg_value(&mut iter, "--theme")?;
                 #[cfg(feature = "ui")]
@@ -179,7 +181,6 @@ pub fn report_display(level: tracing::Level, context: &str, err: impl std::fmt::
 pub fn run_ui_display(
     screen: ScreenTarget,
     preview_secs: Option<u64>,
-    run_loop: bool,
     theme: Option<crate::ui::ThemePreset>,
     tab: Option<i32>,
 ) {
@@ -192,7 +193,6 @@ pub fn run_ui_display(
         Path::new(Framebuffer::DEFAULT_FB_PATH),
         screen,
         preview_secs,
-        run_loop,
         theme,
         tab,
     );
@@ -211,7 +211,6 @@ pub fn run_ui_display_on_path(
     fb_path: &Path,
     screen: ScreenTarget,
     preview_secs: Option<u64>,
-    run_loop: bool,
     theme: Option<crate::ui::ThemePreset>,
     tab: Option<i32>,
 ) {
@@ -237,12 +236,16 @@ pub fn run_ui_display_on_path(
         ScreenTarget::Appliance => {
             // Default appliance sequence: POST splash screen, then main UI shell
             let splash_secs = preview_secs.map_or(2, |p| p.min(2));
-            run_splash_on(&mut fb, Some(splash_secs), false, theme);
-            run_shell_on(&mut fb, preview_secs, run_loop, theme, tab);
+            run_splash_on(&mut fb, Some(splash_secs), theme);
+            let remaining_preview = preview_secs.and_then(|p| p.checked_sub(splash_secs));
+            run_shell_on(&mut fb, remaining_preview, theme, tab);
         }
-        ScreenTarget::Splash => run_splash_on(&mut fb, preview_secs, run_loop, theme),
+        ScreenTarget::Splash => {
+            let splash_secs = preview_secs.or(Some(2));
+            run_splash_on(&mut fb, splash_secs, theme);
+        }
         ScreenTarget::Shell => {
-            run_shell_on(&mut fb, preview_secs, run_loop, theme, tab);
+            run_shell_on(&mut fb, preview_secs, theme, tab);
         }
     }
 }
@@ -253,7 +256,6 @@ pub fn run_ui_lifecycle<C, F>(
     fb: &mut Framebuffer,
     label: &str,
     preview_secs: Option<u64>,
-    run_loop: bool,
     setup: F,
 ) where
     F: FnOnce() -> Result<C, Box<dyn std::error::Error>>,
@@ -297,23 +299,21 @@ pub fn run_ui_lifecycle<C, F>(
         }
     }
 
-    if run_loop || preview_secs.is_some() {
-        let start = Instant::now();
-        let duration = preview_secs.map(Duration::from_secs);
-        tracing::info!("Running UI render loop");
-        println!("  Display: Running UI render loop...");
+    let start = Instant::now();
+    let duration = preview_secs.map(Duration::from_secs);
+    tracing::info!("Running UI render loop");
+    println!("  Display: Running UI render loop...");
 
-        while run_loop || duration.is_some_and(|d| start.elapsed() < d) {
-            slint::platform::update_timers_and_animations();
-            if let Err(e) = fb.render_frame(&window) {
-                report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(16));
+    while duration.is_none_or(|d| start.elapsed() < d) {
+        slint::platform::update_timers_and_animations();
+        if let Err(e) = fb.render_frame(&window) {
+            report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
+            break;
         }
-        tracing::info!("Preview complete");
-        println!("  Display: Preview complete.");
+        std::thread::sleep(Duration::from_millis(16));
     }
+    tracing::info!("Render loop finished");
+    println!("  Display: Render loop finished.");
 }
 
 /// Runs the splash lifecycle against an opened framebuffer backend.
@@ -321,10 +321,9 @@ pub fn run_ui_lifecycle<C, F>(
 pub fn run_splash_on(
     fb: &mut Framebuffer,
     preview_secs: Option<u64>,
-    run_loop: bool,
     theme: Option<crate::ui::ThemePreset>,
 ) {
-    run_ui_lifecycle(fb, "Boot splash screen", preview_secs, run_loop, || {
+    run_ui_lifecycle(fb, "Boot splash screen", preview_secs, || {
         let splash = SplashScreen::new().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
         if let Some(t) = theme {
             t.apply_splash(&splash);
@@ -387,37 +386,120 @@ pub fn run_render_loop(
     shell: &AppShell,
     maybe_bt: Option<&crate::hardware::BluetoothDevice>,
     preview_secs: Option<u64>,
-    run_loop: bool,
 ) {
     let start = Instant::now();
     let duration = preview_secs.map(Duration::from_secs);
     tracing::info!("Running UI render loop");
     println!("  Display: Running UI render loop...");
 
-    let mut last_bt_sync = Instant::now()
-        .checked_sub(Duration::from_secs(1))
-        .unwrap_or_else(Instant::now);
+    let bg_running = Arc::new(AtomicBool::new(true));
+    let bg_running_worker = Arc::clone(&bg_running);
+    let shared_state: Arc<
+        Mutex<(
+            Option<crate::hardware::BtPlaybackState>,
+            Option<crate::hardware::BlueAlsaPcm>,
+        )>,
+    > = Arc::new(Mutex::new((None, None)));
+    let shared_state_worker = Arc::clone(&shared_state);
 
-    while run_loop || duration.is_some_and(|d| start.elapsed() < d) {
-        if let Some(bt) = maybe_bt {
-            if last_bt_sync.elapsed() >= Duration::from_millis(500) {
-                last_bt_sync = Instant::now();
-                if let Ok(Some(ref pb)) = bt.playback_state() {
-                    shell.apply_bluetooth_playback(pb);
-                    window.request_redraw();
+    let bt_worker = maybe_bt.map(|bt| {
+        let bt = bt.clone();
+        std::thread::Builder::new()
+            .name("bt-monitor".into())
+            .spawn(move || {
+                let mut last_pb: Option<crate::hardware::BtPlaybackState> = None;
+                let mut last_pcms: Option<Box<[crate::hardware::BlueAlsaPcm]>> = None;
+
+                while bg_running_worker.load(Ordering::Relaxed) {
+                    let is_playing = last_pb
+                        .as_ref()
+                        .is_some_and(crate::hardware::BtPlaybackState::is_playing);
+                    let poll_interval = if is_playing {
+                        Duration::from_millis(250)
+                    } else {
+                        Duration::from_millis(750)
+                    };
+
+                    if let Ok(Some(ref pb)) = bt.playback_state() {
+                        if last_pb.as_ref() != Some(pb) {
+                            if let Ok(mut lock) = shared_state_worker.lock() {
+                                lock.0 = Some(pb.clone());
+                            }
+                            last_pb = Some(pb.clone());
+                        }
+                    }
+                    if let Ok(ref pcms) = bt.audio_pcms() {
+                        if last_pcms.as_ref() != Some(pcms) {
+                            if let Some(active) =
+                                pcms.iter().find(|p| p.running).or_else(|| pcms.first())
+                            {
+                                if let Ok(mut lock) = shared_state_worker.lock() {
+                                    lock.1 = Some(active.clone());
+                                }
+                            }
+                            last_pcms = Some(pcms.clone());
+                        }
+                    }
+
+                    let deadline = Instant::now() + poll_interval;
+                    while bg_running_worker.load(Ordering::Relaxed) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
                 }
+            })
+    });
+
+    while duration.is_none_or(|d| start.elapsed() < d) {
+        let frame_start = Instant::now();
+
+        if let Ok(mut lock) = shared_state.try_lock() {
+            if let Some(pb) = lock.0.take() {
+                shell.apply_bluetooth_playback(&pb);
+            }
+            if let Some(pcm) = lock.1.take() {
+                shell.apply_pcm_stream(&pcm);
             }
         }
 
-        slint::platform::update_timers_and_animations();
-        if let Err(e) = fb.render_frame(window) {
-            report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
-            break;
+        let is_animating = shell.window().get_is_animating();
+        if is_animating {
+            window.window().request_redraw();
         }
-        std::thread::sleep(Duration::from_millis(16));
+
+        slint::platform::update_timers_and_animations();
+        let did_render = match fb.render_frame(window) {
+            Ok(rendered) => rendered,
+            Err(e) => {
+                report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
+                break;
+            }
+        };
+
+        let has_animations = window.window().has_active_animations();
+        if did_render || has_animations || is_animating {
+            // Target precise 60 FPS (16,667 µs per frame) for buttery smooth, tear-free animations
+            const TARGET_FRAME_TIME: Duration = Duration::from_micros(16_667);
+            let elapsed = frame_start.elapsed();
+            if let Some(remaining) = TARGET_FRAME_TIME.checked_sub(elapsed) {
+                std::thread::sleep(remaining);
+            }
+        } else {
+            // Adaptive power-saving sleep when UI is completely static (0% CPU at idle)
+            let timer_duration = slint::platform::duration_until_next_timer_update();
+            let sleep_duration = match timer_duration {
+                Some(d) => d.min(Duration::from_millis(50)),
+                None => Duration::from_millis(50),
+            };
+            std::thread::sleep(sleep_duration.max(Duration::from_millis(10)));
+        }
     }
-    tracing::info!("Preview complete");
-    println!("  Display: Preview complete.");
+
+    bg_running.store(false, Ordering::Relaxed);
+    if let Some(Ok(worker)) = bt_worker {
+        let _ = worker.join();
+    }
+    tracing::info!("Render loop finished");
+    println!("  Display: Render loop finished.");
 }
 
 /// Runs the UI Shell lifecycle against an opened framebuffer backend.
@@ -425,7 +507,6 @@ pub fn run_render_loop(
 pub fn run_shell_on(
     fb: &mut Framebuffer,
     preview_secs: Option<u64>,
-    run_loop: bool,
     theme: Option<crate::ui::ThemePreset>,
     tab: Option<i32>,
 ) {
@@ -470,16 +551,7 @@ pub fn run_shell_on(
     tracing::info!("UI Shell rendered to /dev/fb0 successfully");
     println!("  Display: UI Shell rendered to /dev/fb0 successfully!");
 
-    if run_loop || preview_secs.is_some() {
-        run_render_loop(
-            fb,
-            &window,
-            &shell,
-            maybe_bt.as_ref(),
-            preview_secs,
-            run_loop,
-        );
-    }
+    run_render_loop(fb, &window, &shell, maybe_bt.as_ref(), preview_secs);
 }
 
 /// Executes the core appliance daemon with parsed options.
@@ -493,16 +565,10 @@ pub fn run_app(opts: CoreCliOptions) -> ExitCode {
     println!("  Thermal Sensor: {}", temp_sensor.gpio_info());
 
     #[cfg(feature = "ui")]
-    run_ui_display(
-        opts.screen,
-        opts.preview_secs,
-        opts.run_loop,
-        opts.theme,
-        opts.tab,
-    );
+    run_ui_display(opts.screen, opts.preview_secs, opts.theme, opts.tab);
 
     #[cfg(not(feature = "ui"))]
-    let _ = (opts.screen, opts.preview_secs, opts.run_loop, opts.tab);
+    let _ = opts;
     #[cfg(not(feature = "ui"))]
     println!("  Display: UI feature disabled at compile-time.");
 

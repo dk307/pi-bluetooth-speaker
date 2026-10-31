@@ -71,7 +71,9 @@ pub use bluetooth::{
     BCM43438_FIRMWARE_PATH, BCM43438_UART_BAUD_RATE, BT_ADDRESS_OCTETS, BlueAlsaPcm,
     BluetoothControllerInfo, BluetoothDevice, BluetoothDeviceMock, BluetoothHardwareInfo,
     BluetoothServices, BluetoothStatus, BluezSnapshot, BtAdapter, BtAddress, BtDevice, BtError,
-    BtPlaybackState, DEFAULT_BT_ADAPTER, ServiceState, decode_pcm_format, format_duration_ms,
+    BtPlaybackState, DEFAULT_BT_ADAPTER, ServiceState, clean_cover_art_in_dir, clean_old_cover_art,
+    cover_art_cached_path, cover_art_path_for, decode_pcm_format, format_duration_ms,
+    is_complete_jpeg,
 };
 
 #[cfg(feature = "test-util")]

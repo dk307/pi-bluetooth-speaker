@@ -2,7 +2,6 @@ import { Theme } from "theme.slint";
 import { NowPlayingView } from "now_playing.slint";
 
 export component MainViewport inherits Rectangle {
-    height: 380px;
     background: Theme.active.chassis;
 
     in-out property <int> active_tab: 0;
@@ -20,6 +19,7 @@ export component MainViewport inherits Rectangle {
     in-out property <image> cover_image;
     in-out property <float> left_peak_ratio: 0.0;
     in-out property <float> right_peak_ratio: 0.0;
+    in-out property <string> track_or_device: "Waiting for Connection...";
 
     callback toggle_play_pause();
     callback next_track();
@@ -36,114 +36,271 @@ export component MainViewport inherits Rectangle {
         padding: 16px;
 
         Rectangle {
+            background: @linear-gradient(150deg, Theme.active.card_surface 0%, Theme.active.chassis 100%);
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: Theme.active.card_border;
+            clip: true;
+
+            now_playing := NowPlayingView {
+                track_title: root.track_title;
+                track_artist: root.track_artist;
+                track_album: root.track_album;
+                position_text: root.position_text;
+                duration_text: root.duration_text;
+                progress_ratio: root.progress_ratio;
+                is_playing: root.is_playing;
+                has_cover_art: root.has_cover_art;
+                cover_image: root.cover_image;
+
+                toggle_play_pause => { root.toggle_play_pause(); }
+                next_track => { root.next_track(); }
+                previous_track => { root.previous_track(); }
+                seek(ratio) => { root.seek(ratio); }
+            }
+        }
+    }
+
+    // Tab 1: VU Meter (Authentic PeppyMeter Skin Picture)
+    if root.active_tab == 1 : Rectangle {
+        padding: 8px;
+
+        Rectangle {
             background: Theme.active.card_surface;
             border-radius: 16px;
             border-width: 1px;
             border-color: Theme.active.card_border;
             clip: true;
 
-            NowPlayingView {
-                track_title: root.track_title;
-                track_artist: root.track_artist;
-                track_album: root.track_album;
-                stream_details: root.stream_details;
-                position_text: root.position_text;
-                duration_text: root.duration_text;
-                progress_ratio: root.progress_ratio;
-                is_playing: root.is_playing;
-                is_muted: root.is_muted;
-                has_cover_art: root.has_cover_art;
-                cover_image: root.cover_image;
-                left_peak_ratio: root.left_peak_ratio;
-                right_peak_ratio: root.right_peak_ratio;
-                volume_value <=> root.volume_value;
-
-                toggle_play_pause => { root.toggle_play_pause(); }
-                next_track => { root.next_track(); }
-                previous_track => { root.previous_track(); }
-                seek(ratio) => { root.seek(ratio); }
-                toggle_mute => { root.toggle_mute(); }
-                volume_changed(val) => { root.volume_changed(val); }
-                stream_pill_clicked => { root.stream_pill_clicked(); }
+            Image {
+                width: 100%;
+                height: 100%;
+                source: Theme.active_preset == 0 ? @image-url("../../../assets/skins/800x480/blue-bgr.png") :
+                        Theme.active_preset == 1 ? @image-url("../../../assets/skins/800x480/gold-bgr.png") :
+                        Theme.active_preset == 2 ? @image-url("../../../assets/skins/800x480/rainbow-bgr.png") :
+                        Theme.active_preset == 3 ? @image-url("../../../assets/skins/800x480/black-white-bgr.png") :
+                        @image-url("../../../assets/skins/800x480/vintage-bgr.png");
+                image-fit: contain;
             }
         }
     }
 
-    // Tab 1: VU Meter
-    if root.active_tab == 1 : Rectangle {
-        padding: 20px;
-
-        Rectangle {
-            background: Theme.active.card_surface;
-            border-radius: 16px;
-            border-width: 1px;
-            border-color: Theme.active.card_border;
-
-            VerticalLayout {
-                alignment: center;
-                spacing: 10px;
-
-                Text {
-                    text: "PEPPYMETER DUAL VU VISUALIZER";
-                    color: Theme.active.primary_accent;
-                    font-size: 20px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                }
-
-                Text {
-                    text: "Active Skin: " + Theme.active.meter_skin_id;
-                    color: Theme.active.secondary_accent;
-                    font-size: 14px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                }
-
-                Text {
-                    text: "Channel 0: Subwoofer | Channel 1: Coaxial Satellite";
-                    color: Theme.active.text_muted;
-                    font-size: 13px;
-                    horizontal-alignment: center;
-                }
-            }
-        }
-    }
-
-    // Tab 2: Bluetooth Status
+    // Tab 2: Bluetooth Status & Controller
     if root.active_tab == 2 : Rectangle {
-        padding: 20px;
+        padding: 14px;
 
-        Rectangle {
-            background: Theme.active.card_surface;
-            border-radius: 16px;
-            border-width: 1px;
-            border-color: Theme.active.card_border;
+        VerticalLayout {
+            spacing: 12px;
 
-            VerticalLayout {
-                alignment: center;
-                spacing: 10px;
+            HorizontalLayout {
+                spacing: 14px;
 
-                Text {
-                    text: "BLUETOOTH STATUS & CONTROLLER";
-                    color: Theme.active.primary_accent;
-                    font-size: 20px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
+                // Left Card: Connected Source & A2DP Sink
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: Theme.active.card_surface;
+                    border-radius: 14px;
+                    border-width: 1px;
+                    border-color: Theme.active.card_border;
+                    padding: 16px;
+
+                    VerticalLayout {
+                        spacing: 10px;
+
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 8px;
+
+                            Rectangle {
+                                width: 10px;
+                                height: 10px;
+                                border-radius: 5px;
+                                background: root.is_playing ? Theme.active.primary_accent : Theme.active.secondary_accent;
+                                y: 4px;
+                            }
+
+                            Text {
+                                text: "ACTIVE SOURCE / A2DP SINK";
+                                color: Theme.active.primary_accent;
+                                font-size: 14px;
+                                font-weight: 800;
+                            }
+                        }
+
+                        Text {
+                            text: root.track_or_device;
+                            color: Theme.active.text_primary;
+                            font-size: 20px;
+                            font-weight: 800;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: root.is_playing ? "Streaming High-Res Audio" : "Connected (Standby / Idle)";
+                            color: root.is_playing ? Theme.active.primary_accent : Theme.active.text_muted;
+                            font-size: 14px;
+                            font-weight: 600;
+                        }
+
+                        Rectangle {
+                            height: 32px;
+                            background: Theme.active.chassis;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: Theme.active.card_border;
+                            padding-left: 10px;
+                            padding-right: 10px;
+
+                            HorizontalLayout {
+                                alignment: start;
+                                spacing: 8px;
+
+                                Text {
+                                    text: "CODEC:";
+                                    color: Theme.active.secondary_accent;
+                                    font-size: 12px;
+                                    font-weight: 800;
+                                    vertical-alignment: center;
+                                }
+
+                                Text {
+                                    text: root.stream_details;
+                                    color: Theme.active.text_primary;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "Profile: A2DP Sink (Advanced Audio Distribution Profile)";
+                            color: Theme.active.text_muted;
+                            font-size: 12px;
+                        }
+
+                        Text {
+                            text: "Routing: BlueALSA -> CamillaDSP 96k/32-bit Active Crossover";
+                            color: Theme.active.text_muted;
+                            font-size: 12px;
+                        }
+                    }
                 }
 
-                Text {
-                    text: "Broadcom BCM43438 UART / BlueZ 5 Stack";
-                    color: Theme.active.secondary_accent;
-                    font-size: 14px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                }
+                // Right Card: Controller & Pairing
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: Theme.active.card_surface;
+                    border-radius: 14px;
+                    border-width: 1px;
+                    border-color: Theme.active.card_border;
+                    padding: 16px;
 
-                Text {
-                    text: "Tap Settings (Tab 5) to switch active appliance theme";
-                    color: Theme.active.text_muted;
-                    font-size: 13px;
-                    horizontal-alignment: center;
+                    VerticalLayout {
+                        spacing: 10px;
+
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 8px;
+
+                            Rectangle {
+                                width: 10px;
+                                height: 10px;
+                                border-radius: 5px;
+                                background: Theme.active.primary_accent;
+                                y: 4px;
+                            }
+
+                            Text {
+                                text: "BLUETOOTH CONTROLLER";
+                                color: Theme.active.primary_accent;
+                                font-size: 14px;
+                                font-weight: 800;
+                            }
+                        }
+
+                        Text {
+                            text: "DietPi Audiophile Speaker";
+                            color: Theme.active.text_primary;
+                            font-size: 20px;
+                            font-weight: 800;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: "Hardware: TP-Link UB500 (RTL8761B / hci0)";
+                            color: Theme.active.secondary_accent;
+                            font-size: 14px;
+                            font-weight: 600;
+                        }
+
+                        Rectangle {
+                            height: 38px;
+                            background: Theme.active.primary_accent;
+                            border-radius: 8px;
+
+                            Text {
+                                text: "DISCOVERABLE & READY TO PAIR";
+                                color: #000000;
+                                font-size: 13px;
+                                font-weight: 800;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Text {
+                            text: "Agent Policy: Auto-Accept & Trust (No PIN prompt)";
+                            color: Theme.active.text_muted;
+                            font-size: 12px;
+                        }
+
+                        Text {
+                            text: "Software Stack: BlueZ 5.79 / BlueALSA v5.0.0";
+                            color: Theme.active.text_muted;
+                            font-size: 12px;
+                        }
+                    }
+                }
+            }
+
+            // Bottom Telemetry Strip
+            Rectangle {
+                height: 30px;
+                background: Theme.active.card_surface;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: Theme.active.card_border;
+                padding-left: 12px;
+                padding-right: 12px;
+
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    Text {
+                        text: "DSP Crossover: 96kHz / 32-bit Float Matrix";
+                        color: Theme.active.text_muted;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "BCM2837 Core Load: Nominal";
+                        color: Theme.active.text_muted;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "Audio Latency: ~12ms";
+                        color: Theme.active.text_muted;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }

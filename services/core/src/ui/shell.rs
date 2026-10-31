@@ -8,6 +8,7 @@
 //! Follows Microsoft Pragmatic Rust Guidelines (`M-SERVICES-CLONE`, `M-STRONG-TYPES`).
 
 use std::fmt::{self, Debug, Formatter};
+use std::sync::{Arc, Mutex};
 
 use slint::ComponentHandle;
 
@@ -17,6 +18,7 @@ use super::theme::ThemePreset;
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
+    last_cover_path: Arc<Mutex<Option<Box<str>>>>,
 }
 
 impl Debug for AppShell {
@@ -32,7 +34,10 @@ impl AppShell {
     /// Initializes an [`AppShell`] controller wrapping a [`MainWindow`] component.
     #[must_use]
     pub fn new(window: MainWindow) -> Self {
-        let shell = Self { window };
+        let shell = Self {
+            window,
+            last_cover_path: Arc::new(Mutex::new(None)),
+        };
 
         shell.setup_callbacks();
         shell.apply_theme(ThemePreset::default());
@@ -112,6 +117,18 @@ impl AppShell {
         self.window.set_track_album(album.into());
     }
 
+    /// Returns the current volume percentage (0.0–100.0).
+    #[must_use]
+    pub fn volume(&self) -> f32 {
+        self.window.get_volume_value()
+    }
+
+    /// Returns whether audio stream specifications (sample rate / bit depth) are currently visible.
+    #[must_use]
+    pub fn show_stream_specs(&self) -> bool {
+        self.window.get_show_stream_specs()
+    }
+
     /// Updates the volume percentage (clamped to 0.0–100.0).
     pub fn set_volume(&self, volume: f32) {
         let clamped = if volume.is_finite() {
@@ -169,6 +186,51 @@ impl AppShell {
         self.window.set_stream_details(details.into());
     }
 
+    /// Updates the sampling rate badge on the top status bar.
+    pub fn set_stream_sample_rate(&self, rate: impl Into<slint::SharedString>) {
+        self.window.set_stream_sample_rate(rate.into());
+    }
+
+    /// Updates the bit depth badge on the top status bar.
+    pub fn set_stream_bit_depth(&self, depth: impl Into<slint::SharedString>) {
+        self.window.set_stream_bit_depth(depth.into());
+    }
+
+    /// Applies audio stream metrics from an active [`crate::hardware::BlueAlsaPcm`].
+    pub fn apply_pcm_stream(&self, pcm: &crate::hardware::BlueAlsaPcm) {
+        if !pcm.selected_codec.is_empty() {
+            self.set_stream_codec(pcm.selected_codec.as_ref());
+        }
+        let rate_khz = if pcm.sampling_rate > 0 {
+            format!("{} kHz", pcm.sampling_rate / 1000)
+        } else {
+            "48 kHz".to_string()
+        };
+        self.set_stream_sample_rate(rate_khz);
+
+        let bit_depth = match pcm.format.as_ref() {
+            "S16_LE" | "S16_BE" => "16-bit",
+            "S24_LE" | "S24_BE" | "S24_3LE" => "24-bit",
+            "S32_LE" | "S32_BE" => "32-bit",
+            other => {
+                if other.contains("16") {
+                    "16-bit"
+                } else if other.contains("24") {
+                    "24-bit"
+                } else if other.contains("32") {
+                    "32-bit"
+                } else {
+                    "16-bit"
+                }
+            }
+        };
+        self.set_stream_bit_depth(bit_depth);
+        self.window.set_is_muted(pcm.muted);
+        if let Some(pct) = pcm.volume_percent {
+            self.set_volume(f32::from(pct));
+        }
+    }
+
     /// Updates the mini peak meter visualization ratios (0.0 to 1.0).
     pub fn set_peak_levels(&self, left: f32, right: f32) {
         let clamp_ratio = |val: f32| {
@@ -184,6 +246,11 @@ impl AppShell {
 
     /// Sets whether cover art is present.
     pub fn set_has_cover_art(&self, has_art: bool) {
+        if !has_art {
+            if let Ok(mut last) = self.last_cover_path.lock() {
+                *last = None;
+            }
+        }
         self.window.set_has_cover_art(has_art);
     }
 
@@ -195,10 +262,14 @@ impl AppShell {
 
     /// Applies state from a [`crate::hardware::BtPlaybackState`] point-in-time snapshot.
     pub fn apply_bluetooth_playback(&self, playback: &crate::hardware::BtPlaybackState) {
-        Self::apply_playback_to_window(&self.window, playback);
+        Self::apply_playback_to_window(&self.window, &self.last_cover_path, playback);
     }
 
-    fn apply_playback_to_window(w: &MainWindow, playback: &crate::hardware::BtPlaybackState) {
+    fn apply_playback_to_window(
+        w: &MainWindow,
+        cover_cache: &Mutex<Option<Box<str>>>,
+        playback: &crate::hardware::BtPlaybackState,
+    ) {
         w.set_track_title(playback.title.as_ref().into());
         w.set_track_artist(playback.artist.as_ref().into());
         w.set_track_album(playback.album.as_ref().into());
@@ -218,6 +289,25 @@ impl AppShell {
         w.set_duration_text(crate::hardware::format_duration_ms(playback.duration_ms).into());
         if !playback.device_name.is_empty() {
             w.set_track_or_device(playback.device_name.as_ref().into());
+        }
+
+        if let Ok(mut last) = cover_cache.lock() {
+            if let Some(ref path) = playback.cover_art_path {
+                if last.as_deref() != Some(path.as_ref()) {
+                    if let Ok(img) =
+                        slint::Image::load_from_path(std::path::Path::new(path.as_ref()))
+                    {
+                        w.set_cover_image(img);
+                        w.set_has_cover_art(true);
+                    } else {
+                        w.set_has_cover_art(false);
+                    }
+                    *last = Some(path.clone());
+                }
+            } else if last.is_some() {
+                w.set_has_cover_art(false);
+                *last = None;
+            }
         }
     }
 
@@ -254,11 +344,12 @@ impl AppShell {
         let bt_next = bt.clone();
         let bt_sync_next = bt.clone();
         let win_next = self.window.as_weak();
+        let cover_next = Arc::clone(&self.last_cover_path);
         self.window.on_next_track(move || {
             if bt_next.player_next().is_ok() {
                 if let Some(w) = win_next.upgrade() {
                     if let Ok(Some(ref p)) = bt_sync_next.playback_state() {
-                        Self::apply_playback_to_window(&w, p);
+                        Self::apply_playback_to_window(&w, &cover_next, p);
                     }
                 }
             }
@@ -267,11 +358,12 @@ impl AppShell {
         let bt_prev = bt.clone();
         let bt_sync_prev = bt.clone();
         let win_prev = self.window.as_weak();
+        let cover_prev = Arc::clone(&self.last_cover_path);
         self.window.on_previous_track(move || {
             if bt_prev.player_previous().is_ok() {
                 if let Some(w) = win_prev.upgrade() {
                     if let Ok(Some(ref p)) = bt_sync_prev.playback_state() {
-                        Self::apply_playback_to_window(&w, p);
+                        Self::apply_playback_to_window(&w, &cover_prev, p);
                     }
                 }
             }

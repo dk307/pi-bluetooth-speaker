@@ -15,7 +15,7 @@ This document defines the behavioral, architectural, and engineering rules for A
   ```
 * **Live Hardware Testing via SSH (`root@192.168.2.110`):**
   * You can test compiled `aarch64` binaries directly on the live Raspberry Pi 3 over SSH at `root@192.168.2.110`.
-  * **Strict Non-Destructive Rule:** **Do NOT modify any persistent files, configurations, or running services on the SSH server.** Copy test/utility binaries only to `/tmp/<binary>`, execute them, and remove `/tmp/<binary>` immediately afterward.
+  * **Strict Non-Destructive Rule:** **Do NOT modify any persistent files, configurations, or running services on the SSH server.** Copy test/utility binaries only to `/tmp/<binary>`, execute them, and remove `/tmp/<binary>` immediately afterward. **Exception:** when the user explicitly asks to deploy/install release binaries, copy them to `/usr/local/bin` (never touch configs or services, and do not restart services unless asked).
 
 ---
 
@@ -58,7 +58,7 @@ Before designing types, writing modules, implementing error handling, or writing
    * Use `#[expect(..., reason = "...")]` instead of `#[allow(...)]` for lint overrides.
    * All code must format cleanly with `cargo fmt --check` and pass `cargo clippy --all-targets -- -D warnings` with zero warnings.
 7. **Mandatory Code Coverage Verification (`M-INTEGRATION-TESTS`, `M-TEST-UTIL` & Repository Coverage Mandate):**
-   * **Always check code coverage:** Run `cargo llvm-cov --manifest-path services/core/Cargo.toml` before completing tasks or submitting changes.
+   * **Always check code coverage:** Run `cargo llvm-cov --manifest-path services/core/Cargo.toml --target x86_64-unknown-linux-gnu` before completing tasks or submitting changes.
    * **Target Standards:** Maintain **>85%–90%+** line and function coverage across the library, hardware modules, and diagnostic CLI binaries.
    * **Testable CLI Utilities:** Architect CLI diagnostic binaries with modular, testable entrypoints (`fn run_app(sensor: &Sensor, opts: &CliOptions) -> ExitCode`) to enable deterministic unit and integration testing of CLI flags, JSON outputs, session summaries, and error handling without physical hardware.
    * **Thorough Mock & Invariant Coverage:** Test domain invariant bounds, conversions, all mock state controls, and fault injections. Isolated physical hardware syscalls (e.g., `/dev/i2c-1`) must have their surrounding logic completely tested.
@@ -84,6 +84,7 @@ Before designing types, writing modules, implementing error handling, or writing
      6. Never re-export foreign dependency traits (such as `pub use slint::ComponentHandle;`) per `M-FOREIGN-REEXPORTS`.
      7. Guard appliance service display initialization with `SPEAKER_CORE_HEADLESS=1` in subprocess tests to prevent non-hermetic writes to host workstation displays.
      8. Guard Slint float layout properties against `NaN` using explicit boundary checks (`val >= 0.0 ? ... : 0`) to prevent widget layout collapse.
+     9. **Dynamic Math Expressions over Hardcoded Pixel Offsets (`M-SLINT-MATH-LAYOUT`):** In Slint UI markup, component layouts, and geometry calculations, always use dynamic mathematical expressions (`(parent.height - self.height) / 2`, `(parent.width - self.width) / 2`, layout centering containers `VerticalLayout { alignment: center; ... }`, or relative percentage/stretch properties) to compute positions, alignments, and sizes. Never manually pre-calculate pixel offsets and hardcode literal numbers into `.slint` files (e.g. `y: 6px`, `y: -5px`, `y: 24px`, or manual top-alignment offsets). Hardcoded literal numbers break whenever parent bounds, padding, themes, or font scales change, introducing subtle visual regressions. Let Slint compute the geometry dynamically.
 
 ---
 
@@ -94,6 +95,6 @@ AI agents working on `speaker-core` **MUST** follow the repository-wide **First-
 * **Service-Specific Gate Sequence:** Before every push, execute in order:
   1. `cargo fmt --manifest-path services/core/Cargo.toml -- --check`
   2. `cargo clippy --manifest-path services/core/Cargo.toml --all-targets -- -D warnings`
-  3. `cargo llvm-cov --manifest-path services/core/Cargo.toml --fail-under-lines 90 --fail-under-functions 90`
+  3. `cargo llvm-cov --manifest-path services/core/Cargo.toml --target x86_64-unknown-linux-gnu --fail-under-lines 90 --fail-under-functions 90`
   4. `cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins`
 * **Protocol & Review Rules:** Consult [root `AGENTS.md` (§4.1–§4.3)](../../AGENTS.md) for the 3-Tier review triage classification, mandatory critical analysis of code review comments before fixing (only fix what genuinely makes sense), strict PR blast radius containment, code anti-bloat mandate, and continuous post-review distillation requirements.

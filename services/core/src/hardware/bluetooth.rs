@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -307,6 +307,8 @@ pub struct BlueAlsaPcm {
     pub format: Box<str>,
     /// Hardware volume levels per channel (e.g. `L: 127 R: 127`), if reported.
     pub volume: Option<Box<str>>,
+    /// Average volume level as a percentage (0..=100), if reported.
+    pub volume_percent: Option<u8>,
     /// Whether audio output is muted (any channel volume high bit set).
     pub muted: bool,
     /// Audio transmission latency in milliseconds, if reported.
@@ -360,6 +362,12 @@ pub struct BtPlaybackState {
     pub duration_ms: u32,
     /// Path to player D-Bus object (e.g. `/org/bluez/hci0/dev_.../player0`).
     pub player_path: Option<Box<str>>,
+    /// OBEX BIP L2CAP PSM port (AVRCP 1.6 Cover Art), if advertised by remote player.
+    pub obex_port: Option<u16>,
+    /// Track image handle (e.g. "1000001") for AVRCP Cover Art over OBEX BIP.
+    pub image_handle: Option<Box<str>>,
+    /// Local cache path to downloaded cover art image (e.g. `/tmp/speaker-cover-...jpg`).
+    pub cover_art_path: Option<Box<str>>,
 }
 
 impl Default for BtPlaybackState {
@@ -374,6 +382,9 @@ impl Default for BtPlaybackState {
             position_ms: 0,
             duration_ms: 0,
             player_path: None,
+            obex_port: None,
+            image_handle: None,
+            cover_art_path: None,
         }
     }
 }
@@ -878,6 +889,53 @@ pub(crate) trait BlueZAdapter1 {
     fn set_pairable(&self, value: bool) -> zbus::Result<()>;
 }
 
+#[zbus::proxy(
+    default_service = "org.bluez.obex",
+    default_path = "/org/bluez/obex",
+    interface = "org.bluez.obex.Client1",
+    gen_async = false,
+    blocking_name = "ObexClientProxyBlocking"
+)]
+pub(crate) trait ObexClient {
+    fn create_session(
+        &self,
+        destination: &str,
+        args: &HashMap<&str, Value<'_>>,
+    ) -> zbus::Result<OwnedObjectPath>;
+}
+
+#[zbus::proxy(
+    default_service = "org.bluez.obex",
+    interface = "org.bluez.obex.Image1",
+    gen_async = false,
+    blocking_name = "ObexImageProxyBlocking"
+)]
+pub(crate) trait ObexImage {
+    fn get(
+        &self,
+        file: &str,
+        handle: &str,
+        properties: &HashMap<&str, Value<'_>>,
+    ) -> zbus::Result<(OwnedObjectPath, HashMap<String, OwnedValue>)>;
+
+    fn get_thumbnail(
+        &self,
+        file: &str,
+        handle: &str,
+    ) -> zbus::Result<(OwnedObjectPath, HashMap<String, OwnedValue>)>;
+}
+
+#[zbus::proxy(
+    default_service = "org.bluez.obex",
+    interface = "org.bluez.obex.Transfer1",
+    gen_async = false,
+    blocking_name = "ObexTransferProxyBlocking"
+)]
+pub(crate) trait ObexTransfer {
+    #[zbus(property)]
+    fn status(&self) -> zbus::Result<String>;
+}
+
 /// Type alias for D-Bus `ObjectManager` `GetManagedObjects` map.
 pub type ManagedObjects =
     HashMap<OwnedObjectPath, HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>>;
@@ -1028,30 +1086,43 @@ pub fn decode_pcm_format(id: u16) -> Box<str> {
     }
 }
 
-/// Renders `BlueALSA` per-channel volume bytes (`(muted << 7) | level`).
+/// Renders `BlueALSA` per-channel volume bytes (`(muted << 7) | level`) and calculates average volume percent.
 ///
 /// Uses channel names when provided (`ChannelMap`), falling back to generic indices.
+/// Returns `(formatted_channel_string, is_muted, volume_percent)`.
 #[must_use]
 pub fn format_volume_bytes(
     bytes: &[u8],
     channel_names: Option<&[Box<str>]>,
-) -> (Option<Box<str>>, bool) {
+) -> (Option<Box<str>>, bool, Option<u8>) {
     if bytes.is_empty() {
-        return (None, false);
+        return (None, false, None);
     }
     let muted = bytes.iter().any(|b| b & 0x80 != 0);
+    let mut total_level: u32 = 0;
     let volume = bytes
         .iter()
         .enumerate()
         .map(|(i, b)| {
+            let level = b & 0x7F;
+            total_level += u32::from(level);
             let name = channel_names
                 .and_then(|names| names.get(i))
                 .map_or_else(|| format!("CH{i}"), std::string::ToString::to_string);
-            format!("{name}: {}", b & 0x7F)
+            format!("{name}: {level}")
         })
         .collect::<Vec<_>>()
         .join(" ");
-    (Some(volume.into()), muted)
+
+    let avg_level = f64::from(total_level) / (bytes.len() as f64);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "percentage clamped 0.0..=100.0 fits in u8"
+    )]
+    let percent = ((avg_level / 127.0) * 100.0).round().clamp(0.0, 100.0) as u8;
+
+    (Some(volume.into()), muted, Some(percent))
 }
 
 #[must_use]
@@ -1126,6 +1197,7 @@ pub fn is_service_absent_fdo_error(err: &zbus::fdo::Error) -> bool {
 #[derive(Clone, Debug)]
 pub struct DbusClient {
     conn: Connection,
+    obex_session: Arc<Mutex<Option<(BtAddress, OwnedObjectPath)>>>,
 }
 
 /// Snapshot of `BlueZ` adapter, connected/paired devices, and media player state.
@@ -1134,7 +1206,10 @@ pub type BluezSnapshot = (Option<BtAdapter>, Box<[BtDevice]>, Option<BtPlaybackS
 impl DbusClient {
     #[must_use]
     pub fn new(conn: Connection) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            obex_session: Arc::new(Mutex::new(None)),
+        }
     }
 
     pub(crate) fn check_services(&self) -> Result<BluetoothServices, BtError> {
@@ -1271,6 +1346,12 @@ impl DbusClient {
             )
         };
 
+        let obex_port = get_u16(props, "ObexPort").filter(|&p| p > 0);
+        let image_handle = props
+            .get("Track")
+            .and_then(|track_val| get_track_prop_str(track_val, "ImgHandle"))
+            .filter(|h| !h.is_empty());
+
         BtPlaybackState {
             device_address,
             device_name,
@@ -1281,6 +1362,9 @@ impl DbusClient {
             position_ms,
             duration_ms,
             player_path,
+            obex_port,
+            image_handle,
+            cover_art_path: None,
         }
     }
 
@@ -1295,9 +1379,219 @@ impl DbusClient {
 
         let objects = proxy.get_managed_objects()?;
 
-        Self::parse_bluez_all(&objects, target_adapter)
+        let (adapter, devices, mut playback) = Self::parse_bluez_all(&objects, target_adapter)?;
+        self.resolve_cover_art(&mut playback);
+        Ok((adapter, devices, playback))
     }
 
+    fn resolve_cover_art(&self, playback: &mut Option<BtPlaybackState>) {
+        if let Some(pb) = playback {
+            if let Some(addr) = pb.device_address {
+                if let Some(port) = pb.obex_port {
+                    let _ = self.ensure_obex_session(addr, port);
+                    if let Some(ref handle) = pb.image_handle {
+                        pb.cover_art_path = self.fetch_cover_art(addr, handle);
+                    }
+                }
+            }
+        }
+    }
+
+    fn is_obex_session_alive(&self, path: &str) -> bool {
+        zbus::blocking::Proxy::new(
+            &self.conn,
+            "org.bluez.obex",
+            path,
+            "org.bluez.obex.Session1",
+        )
+        .and_then(|p| p.get_property::<String>("Destination"))
+        .is_ok()
+    }
+
+    fn ensure_obex_session(&self, addr: BtAddress, port: u16) -> Option<OwnedObjectPath> {
+        let mut session_lock = self.obex_session.lock().ok()?;
+        if let Some((cached_addr, ref path)) = *session_lock {
+            if cached_addr == addr && self.is_obex_session_alive(path.as_str()) {
+                return Some(path.clone());
+            }
+            *session_lock = None;
+        }
+
+        let client = ObexClientProxyBlocking::new(&self.conn).ok()?;
+        let mut args = HashMap::new();
+        args.insert("Target", Value::from("bip-avrcp"));
+        args.insert("PSM", Value::from(port));
+
+        match client.create_session(&addr.to_string(), &args) {
+            Ok(new_path) => {
+                tracing::info!("Created OBEX BIP session at {new_path} for device {addr}");
+                *session_lock = Some((addr, new_path.clone()));
+                Some(new_path)
+            }
+            Err(e) => {
+                tracing::debug!("Failed to create OBEX BIP session for {addr}: {e}");
+                None
+            }
+        }
+    }
+
+    fn fetch_cover_art(&self, addr: BtAddress, handle: &str) -> Option<Box<str>> {
+        if let Some(cached) = cover_art_cached_path(addr, handle) {
+            return Some(cached);
+        }
+
+        let (cache_path, sanitized_mac, sanitized_handle) = cover_art_path_for(addr, handle)?;
+        let cache_path_buf = std::path::PathBuf::from(&cache_path);
+        let _ = std::fs::remove_file(&cache_path_buf);
+
+        let session_path = {
+            let session_lock = self.obex_session.lock().ok()?;
+            session_lock.as_ref().map(|(_, p)| p.clone())?
+        };
+
+        let image_proxy = ObexImageProxyBlocking::builder(&self.conn)
+            .path(session_path.as_str())
+            .ok()?
+            .build()
+            .ok()?;
+
+        let empty_props = HashMap::new();
+        let transfer_res = image_proxy
+            .get_thumbnail(&cache_path, handle)
+            .or_else(|_| image_proxy.get(&cache_path, handle, &empty_props));
+
+        let (transfer_path, _) = match transfer_res {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::debug!("OBEX Image1 GetThumbnail/Get failed for handle {handle}: {e}");
+                if let Ok(mut lock) = self.obex_session.lock() {
+                    *lock = None;
+                }
+                return None;
+            }
+        };
+
+        let transfer_proxy = ObexTransferProxyBlocking::builder(&self.conn)
+            .path(transfer_path.as_str())
+            .ok()
+            .and_then(|b| b.build().ok());
+
+        let deadline = Instant::now() + Duration::from_millis(3500);
+        while Instant::now() < deadline {
+            let is_finished = if let Some(ref tp) = transfer_proxy {
+                match tp.status() {
+                    Ok(status) => match status.as_str() {
+                        "complete" => true,
+                        "error" => {
+                            tracing::debug!("OBEX transfer reported error for handle {handle}");
+                            break;
+                        }
+                        _ => false,
+                    },
+                    Err(_) => true,
+                }
+            } else {
+                true
+            };
+
+            if is_finished && is_complete_jpeg(&cache_path_buf) {
+                clean_old_cover_art(&sanitized_mac, &sanitized_handle);
+                return Some(cache_path.into_boxed_str());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        let _ = std::fs::remove_file(&cache_path_buf);
+        if let Ok(mut lock) = self.obex_session.lock() {
+            *lock = None;
+        }
+        None
+    }
+}
+
+/// Validates whether a file on disk is a fully flushed, complete JPEG image.
+///
+/// Ensures both the SOI marker (`0xFF, 0xD8`) and the EOI marker (`0xFF, 0xD9`)
+/// are present so Slint never attempts to decode a partially written transfer buffer.
+#[must_use]
+pub fn is_complete_jpeg(path: &std::path::Path) -> bool {
+    use std::io::{Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(len) = f.metadata().map(|m| m.len()) else {
+        return false;
+    };
+    if len < 100 {
+        return false;
+    }
+    let mut header = [0u8; 2];
+    if f.read_exact(&mut header).is_err() || header != [0xFF, 0xD8] {
+        return false;
+    }
+    if f.seek(SeekFrom::End(-2)).is_err() {
+        return false;
+    }
+    let mut footer = [0u8; 2];
+    if f.read_exact(&mut footer).is_err() {
+        return false;
+    }
+    footer == [0xFF, 0xD9]
+}
+
+/// Returns the deterministic cache path and sanitized MAC/handle for an OBEX cover art handle.
+#[must_use]
+pub fn cover_art_path_for(addr: BtAddress, handle: &str) -> Option<(String, String, String)> {
+    let sanitized_mac = addr.to_string().replace([':', '-'], "_");
+    let sanitized_handle: String = handle
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if sanitized_handle.is_empty() {
+        return None;
+    }
+    let cache_path = format!("/tmp/speaker-cover-{sanitized_mac}-{sanitized_handle}.jpg");
+    Some((cache_path, sanitized_mac, sanitized_handle))
+}
+
+/// Checks if cover art is already cached on disk and cleans obsolete images.
+#[must_use]
+pub fn cover_art_cached_path(addr: BtAddress, handle: &str) -> Option<Box<str>> {
+    let (cache_path, sanitized_mac, sanitized_handle) = cover_art_path_for(addr, handle)?;
+    let cache_path_buf = std::path::PathBuf::from(&cache_path);
+    if is_complete_jpeg(&cache_path_buf) {
+        clean_old_cover_art(&sanitized_mac, &sanitized_handle);
+        return Some(cache_path.into_boxed_str());
+    }
+    None
+}
+
+/// Cleans old cover art files in the target directory for a device address except the active handle.
+pub fn clean_cover_art_in_dir(dir: &std::path::Path, sanitized_mac: &str, current_handle: &str) {
+    let prefix = format!("speaker-cover-{sanitized_mac}-");
+    let current_filename = format!("speaker-cover-{sanitized_mac}-{current_handle}.jpg");
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Ok(file_name) = entry.file_name().into_string() {
+                if file_name.starts_with(&prefix)
+                    && std::path::Path::new(&file_name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg"))
+                    && file_name != current_filename
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
+/// Cleans old cover art files in `/tmp` for a device address except the active handle.
+pub fn clean_old_cover_art(sanitized_mac: &str, current_handle: &str) {
+    clean_cover_art_in_dir(std::path::Path::new("/tmp"), sanitized_mac, current_handle);
+}
+
+impl DbusClient {
     /// Parses `BlueZ` managed objects into adapter and device models.
     ///
     /// # Errors
@@ -1433,7 +1727,8 @@ impl DbusClient {
             .and_then(|b| b.path("/"))
             .and_then(zbus::blocking::proxy::Builder::build)?;
         let objects = proxy.get_managed_objects()?;
-        let (_, _, playback) = Self::parse_bluez_all(&objects, None)?;
+        let (_, _, mut playback) = Self::parse_bluez_all(&objects, None)?;
+        self.resolve_cover_art(&mut playback);
         Ok(playback)
     }
 
@@ -1565,8 +1860,8 @@ impl DbusClient {
                 } else {
                     Some(channel_map)
                 };
-                let (volume, muted) = get_byte_array(props, "Volume")
-                    .map_or((None, false), |bytes| {
+                let (volume, muted, volume_percent) = get_byte_array(props, "Volume")
+                    .map_or((None, false, None), |bytes| {
                         format_volume_bytes(&bytes, channel_names.as_deref())
                     });
 
@@ -1586,6 +1881,7 @@ impl DbusClient {
                     channels,
                     format,
                     volume,
+                    volume_percent,
                     muted,
                     delay,
                 });
@@ -1710,6 +2006,7 @@ impl BluetoothDeviceMock {
                 channels: 2,
                 format: "S16_LE".into(),
                 volume: Some("L: 100 R: 100".into()),
+                volume_percent: Some(79),
                 muted: false,
                 delay: Some("2000".into()),
             }],
@@ -1723,6 +2020,9 @@ impl BluetoothDeviceMock {
                 position_ms: 105_000,
                 duration_ms: 230_000,
                 player_path: Some("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0".into()),
+                obex_port: Some(4097),
+                image_handle: Some("1000001".into()),
+                cover_art_path: None,
             }),
             fault: None,
         };
@@ -1883,6 +2183,29 @@ impl BluetoothDeviceMock {
         }
     }
 
+    /// Sets the simulated album cover art path directly.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_player_cover_art(&self, cover_art_path: Option<Box<str>>) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref mut p) = state.playback {
+            p.cover_art_path = cover_art_path;
+        }
+    }
+
+    /// Sets the simulated image handle and OBEX BIP PSM port.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_player_image_handle(&self, handle: Option<Box<str>>, port: Option<u16>) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref mut p) = state.playback {
+            p.image_handle = handle;
+            p.obex_port = port;
+        }
+    }
+
     fn player_play(&self) -> Result<(), BtError> {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
@@ -1914,7 +2237,15 @@ impl BluetoothDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(BtError::mock_fault(fault.clone()));
         }
-        Ok(state.playback.clone())
+        let mut pb = state.playback.clone();
+        if let Some(ref mut p) = pb {
+            if p.cover_art_path.is_none() {
+                if let (Some(addr), Some(handle)) = (p.device_address, &p.image_handle) {
+                    p.cover_art_path = cover_art_cached_path(addr, handle);
+                }
+            }
+        }
+        Ok(pb)
     }
 
     fn player_toggle(&self) -> Result<bool, BtError> {
@@ -2036,13 +2367,21 @@ impl BluetoothDeviceMock {
                 _ => return Err(BtError::adapter_not_found(target)),
             }
         }
+        let mut playback = state.playback.clone();
+        if let Some(ref mut p) = playback {
+            if p.cover_art_path.is_none() {
+                if let (Some(addr), Some(handle)) = (p.device_address, &p.image_handle) {
+                    p.cover_art_path = cover_art_cached_path(addr, handle);
+                }
+            }
+        }
         Ok(BluetoothStatus {
             services: state.services.clone(),
             adapter: state.adapter.clone(),
             devices: state.devices.clone().into_boxed_slice(),
             pcms: state.pcms.clone().into_boxed_slice(),
             hardware: BluetoothHardwareInfo::rpi3(),
-            playback: state.playback.clone(),
+            playback,
         })
     }
 
