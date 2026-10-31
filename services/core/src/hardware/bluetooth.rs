@@ -1427,6 +1427,23 @@ impl DbusClient {
         Ok(())
     }
 
+    pub(crate) fn player_toggle(&self) -> Result<(), BtError> {
+        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+            .destination("org.bluez")
+            .and_then(|b| b.path("/"))
+            .and_then(zbus::blocking::proxy::Builder::build)?;
+        let objects = proxy.get_managed_objects()?;
+        let (_, _, playback) = Self::parse_bluez_all(&objects, None)?;
+        let playback = playback
+            .ok_or_else(|| BtError::no_active_player("no active MediaPlayer1 found on D-Bus"))?;
+        let method = if playback.is_playing() {
+            "Pause"
+        } else {
+            "Play"
+        };
+        self.call_player_method(playback.player_path.as_deref(), method)
+    }
+
     pub(crate) fn query_bluealsa(
         &self,
         devices: &[BtDevice],
@@ -2228,14 +2245,7 @@ impl BluetoothDevice {
     pub fn player_toggle(&self) -> Result<(), BtError> {
         match &*self.backend {
             Backend::Mock(mock) => mock.player_toggle(),
-            Backend::Dbus(dbus) => {
-                let status = self.status()?;
-                if status.is_playing() {
-                    dbus.call_player_method(None, "Pause")
-                } else {
-                    dbus.call_player_method(None, "Play")
-                }
-            }
+            Backend::Dbus(dbus) => dbus.player_toggle(),
         }
     }
 
