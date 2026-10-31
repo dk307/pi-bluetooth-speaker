@@ -1421,11 +1421,8 @@ impl DbusClient {
         };
 
         let proxy =
-            zbus::blocking::Proxy::new(&self.conn, "org.bluez", path, "org.bluez.MediaPlayer1")
-                .map_err(|e| BtError::dbus(e.to_string()))?;
-        proxy
-            .call_method(method, &())
-            .map_err(|e| BtError::dbus(e.to_string()))?;
+            zbus::blocking::Proxy::new(&self.conn, "org.bluez", path, "org.bluez.MediaPlayer1")?;
+        proxy.call_method(method, &())?;
         Ok(())
     }
 
@@ -2265,8 +2262,14 @@ impl BluetoothDevice {
 
     /// Requests seeking to a specific playback position in milliseconds.
     ///
+    /// # Note
+    /// The Bluetooth AVRCP profile does not support arbitrary absolute position seeking
+    /// across Bluetooth controllers; `Position` on `org.bluez.MediaPlayer1` is strictly
+    /// read-only in the Linux `BlueZ` stack. In mock / preview mode, this simulates timeline
+    /// scrubbing.
+    ///
     /// # Errors
-    /// Returns [`BtError`] if D-Bus communication fails or no player is available.
+    /// Returns [`BtError`] if mock seeking fails or has an injected fault.
     pub fn player_seek(&self, position_ms: u32) -> Result<(), BtError> {
         match &*self.backend {
             Backend::Mock(mock) => mock.player_seek(position_ms),
