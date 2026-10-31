@@ -325,19 +325,36 @@ fn ui_shell_now_playing_callbacks() {
     shell.window().invoke_toggle_mute();
     assert!(!shell.is_muted());
 
-    // Seeking
+    // Seeking and position text sync
+    shell.set_playback_state(false, 0, 100_000);
     shell.window().invoke_seek(0.65);
     assert_eq!(shell.window().get_progress_ratio(), 0.65);
+    assert_eq!(shell.window().get_position_text(), "01:05");
     shell.window().invoke_seek(1.5);
     assert_eq!(shell.window().get_progress_ratio(), 1.0);
+    assert_eq!(shell.window().get_position_text(), "01:40");
     shell.window().invoke_seek(-0.2);
     assert_eq!(shell.window().get_progress_ratio(), 0.0);
+    assert_eq!(shell.window().get_position_text(), "00:00");
     shell.window().invoke_seek(f32::NAN);
     assert_eq!(shell.window().get_progress_ratio(), 0.0);
+    assert_eq!(shell.window().get_position_text(), "00:00");
 
-    // Callbacks without panicking
+    // Wire interactive bluetooth transport
+    let (bt, _) = speaker_core::hardware::BluetoothDevice::new_mocked();
+    shell.wire_bluetooth_transport(bt.clone());
+
+    // Initial mock state is playing
+    assert!(bt.status().unwrap().playback.unwrap().is_playing());
+    shell.window().invoke_toggle_play_pause();
+    assert!(!bt.status().unwrap().playback.unwrap().is_playing());
+
     shell.window().invoke_next_track();
     shell.window().invoke_previous_track();
+    shell.window().invoke_seek(0.5);
+    assert_eq!(bt.status().unwrap().playback.unwrap().position_ms, 50_000);
+
+    // Callbacks without panicking
     shell.window().invoke_stream_pill_clicked();
 }
 

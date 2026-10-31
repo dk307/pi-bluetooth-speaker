@@ -1414,10 +1414,11 @@ impl DbusClient {
                 .and_then(|b| b.path("/"))
                 .and_then(zbus::blocking::proxy::Builder::build)?;
             let objects = proxy.get_managed_objects()?;
-            let found = objects.iter().find_map(|(p, ifaces)| {
-                find_iface(ifaces, "org.bluez.MediaPlayer1").map(|_| p.as_str().to_string())
-            });
-            found.ok_or_else(|| BtError::no_active_player("no MediaPlayer1 found on D-Bus"))?
+            let (_, _, playback) = Self::parse_bluez_all(&objects, None)?;
+            playback
+                .and_then(|p| p.player_path)
+                .map(|p| p.to_string())
+                .ok_or_else(|| BtError::no_active_player("no active MediaPlayer1 found on D-Bus"))?
         };
 
         let proxy =

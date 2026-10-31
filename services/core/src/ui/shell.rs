@@ -8,6 +8,8 @@
 //! Follows Microsoft Pragmatic Rust Guidelines (`M-SERVICES-CLONE`, `M-STRONG-TYPES`).
 
 use std::fmt::{self, Debug, Formatter};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use slint::ComponentHandle;
 
@@ -17,6 +19,7 @@ use super::theme::ThemePreset;
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
+    duration_ms: Arc<AtomicU32>,
 }
 
 impl Debug for AppShell {
@@ -32,7 +35,10 @@ impl AppShell {
     /// Initializes an [`AppShell`] controller wrapping a [`MainWindow`] component.
     #[must_use]
     pub fn new(window: MainWindow) -> Self {
-        let shell = Self { window };
+        let shell = Self {
+            window,
+            duration_ms: Arc::new(AtomicU32::new(0)),
+        };
 
         shell.setup_callbacks();
         shell.apply_theme(ThemePreset::default());
@@ -146,6 +152,7 @@ impl AppShell {
 
     /// Updates playback state, elapsed position, and total duration.
     pub fn set_playback_state(&self, is_playing: bool, position_ms: u32, duration_ms: u32) {
+        self.duration_ms.store(duration_ms, Ordering::Relaxed);
         self.window.set_is_playing(is_playing);
         let ratio = if duration_ms == 0 {
             0.0
@@ -231,6 +238,52 @@ impl AppShell {
         next
     }
 
+    /// Wires the UI shell transport callbacks to an interactive [`crate::hardware::BluetoothDevice`].
+    pub fn wire_bluetooth_transport(&self, bt: crate::hardware::BluetoothDevice) {
+        let bt_toggle = bt.clone();
+        let win = self.window.as_weak();
+        self.window.on_toggle_play_pause(move || {
+            if let Some(w) = win.upgrade() {
+                let current = w.get_is_playing();
+                let _ = bt_toggle.player_toggle();
+                w.set_is_playing(!current);
+            }
+        });
+
+        let bt_next = bt.clone();
+        self.window.on_next_track(move || {
+            let _ = bt_next.player_next();
+        });
+
+        let bt_prev = bt.clone();
+        self.window.on_previous_track(move || {
+            let _ = bt_prev.player_previous();
+        });
+
+        let bt_seek = bt;
+        let dur_atomic = Arc::clone(&self.duration_ms);
+        let win = self.window.as_weak();
+        self.window.on_seek(move |ratio| {
+            if let Some(w) = win.upgrade() {
+                let clamped = if ratio.is_finite() {
+                    ratio.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                w.set_progress_ratio(clamped);
+                let dur = dur_atomic.load(Ordering::Relaxed);
+                #[expect(
+                    clippy::cast_sign_loss,
+                    clippy::cast_possible_truncation,
+                    reason = "clamped is non-negative <= 1.0 and dur is positive u32"
+                )]
+                let pos = (clamped * dur as f32).round() as u32;
+                w.set_position_text(crate::hardware::format_duration_ms(pos).into());
+                let _ = bt_seek.player_seek(pos);
+            }
+        });
+    }
+
     fn setup_callbacks(&self) {
         let win = self.window.as_weak();
         self.window.on_tab_selected(move |idx| {
@@ -278,6 +331,7 @@ impl AppShell {
             }
         });
 
+        let dur_atomic = Arc::clone(&self.duration_ms);
         let win = self.window.as_weak();
         self.window.on_seek(move |ratio| {
             if let Some(w) = win.upgrade() {
@@ -287,6 +341,14 @@ impl AppShell {
                     0.0
                 };
                 w.set_progress_ratio(clamped);
+                let dur = dur_atomic.load(Ordering::Relaxed);
+                #[expect(
+                    clippy::cast_sign_loss,
+                    clippy::cast_possible_truncation,
+                    reason = "clamped is non-negative <= 1.0 and dur is positive u32"
+                )]
+                let pos = (clamped * dur as f32).round() as u32;
+                w.set_position_text(crate::hardware::format_duration_ms(pos).into());
                 tracing::debug!("Seek to ratio: {clamped}");
             }
         });
