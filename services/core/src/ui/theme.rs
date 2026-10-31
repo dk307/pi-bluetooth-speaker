@@ -8,7 +8,7 @@ use std::fmt::{self, Display, Formatter};
 
 use slint::ComponentHandle;
 
-use super::generated::{MainWindow, Theme, ThemePalette};
+use super::generated::{MainWindow, SplashScreen, Theme, ThemePalette};
 
 /// Strongly typed theme preset identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -23,11 +23,13 @@ pub enum ThemePreset {
     CyberpunkNeon = 2,
     /// Minimalist Studio Carbon & Precision Monochrome (`#F0F0F0`).
     StudioDark = 3,
+    /// Classic `PeppyMeter` Vintage Gold, Incandescent Cream & Deep Walnut (`#F5B83D`).
+    Peppy = 4,
 }
 
 impl ThemePreset {
     /// Number of theme presets available.
-    pub const COUNT: usize = 4;
+    pub const COUNT: usize = 5;
 
     /// Returns the integer index corresponding to this preset.
     #[must_use]
@@ -41,13 +43,14 @@ impl ThemePreset {
         #[expect(
             clippy::cast_possible_wrap,
             clippy::cast_possible_truncation,
-            reason = "COUNT is small (4)"
+            reason = "COUNT is small (5)"
         )]
         match index.rem_euclid(Self::COUNT as i32) {
             0 => Self::McIntoshBlue,
             1 => Self::MarantzAmber,
             2 => Self::CyberpunkNeon,
-            _ => Self::StudioDark,
+            3 => Self::StudioDark,
+            _ => Self::Peppy,
         }
     }
 
@@ -65,6 +68,7 @@ impl ThemePreset {
             Self::MarantzAmber => "Marantz Amber",
             Self::CyberpunkNeon => "Retro Cyberpunk Neon",
             Self::StudioDark => "Minimalist Studio Dark",
+            Self::Peppy => "PeppyMeter Vintage Gold",
         }
     }
 
@@ -76,6 +80,7 @@ impl ThemePreset {
             Self::MarantzAmber => "marantz",
             Self::CyberpunkNeon => "cyberpunk",
             Self::StudioDark => "studio-dark",
+            Self::Peppy => "peppy",
         }
     }
 
@@ -87,6 +92,23 @@ impl ThemePreset {
             Self::MarantzAmber => "marantz_800x480",
             Self::CyberpunkNeon => "cyberpunk_800x480",
             Self::StudioDark => "studio_dark_800x480",
+            Self::Peppy => "peppy_800x480",
+        }
+    }
+
+    /// Returns the primary font family name for this theme preset.
+    #[must_use]
+    #[expect(
+        clippy::match_same_arms,
+        reason = "Explicit per-theme arm structure allows each theme preset to independently customize its typography"
+    )]
+    pub const fn font_family(self) -> &'static str {
+        match self {
+            Self::McIntoshBlue => "Inter",
+            Self::MarantzAmber => "Inter",
+            Self::CyberpunkNeon => "Inter",
+            Self::StudioDark => "Inter",
+            Self::Peppy => "Inter",
         }
     }
 
@@ -102,8 +124,11 @@ impl ThemePreset {
             "marantz" | "marantz-amber" | "accuphase" | "amber" | "1" => Ok(Self::MarantzAmber),
             "cyberpunk" | "cyberpunk-neon" | "synthwave" | "neon" | "2" => Ok(Self::CyberpunkNeon),
             "studio-dark" | "studio" | "dark" | "minimalist" | "mono" | "3" => Ok(Self::StudioDark),
+            "peppy" | "peepy" | "peppymeter" | "peppy-gold" | "peppy-vintage" | "gold" | "4" => {
+                Ok(Self::Peppy)
+            }
             other => Err(format!(
-                "unknown theme preset '{other}': expected 'mcintosh', 'marantz', 'cyberpunk', or 'studio-dark'"
+                "unknown theme preset '{other}': expected 'mcintosh', 'marantz', 'cyberpunk', 'studio-dark', or 'peppy'"
             )),
         }
     }
@@ -123,6 +148,7 @@ impl ThemePreset {
                 text_primary: slint::Color::from_rgb_u8(0xF0, 0xF6, 0xFC),
                 text_muted: slint::Color::from_rgb_u8(0x8B, 0x94, 0x9E),
                 meter_skin_id: self.meter_skin_id().into(),
+                font_family: self.font_family().into(),
             },
             Self::MarantzAmber => ThemePalette {
                 chassis: slint::Color::from_rgb_u8(0x12, 0x10, 0x0D),
@@ -135,6 +161,7 @@ impl ThemePreset {
                 text_primary: slint::Color::from_rgb_u8(0xFD, 0xFB, 0xF7),
                 text_muted: slint::Color::from_rgb_u8(0x9C, 0x92, 0x83),
                 meter_skin_id: self.meter_skin_id().into(),
+                font_family: self.font_family().into(),
             },
             Self::CyberpunkNeon => ThemePalette {
                 chassis: slint::Color::from_rgb_u8(0x0D, 0x0B, 0x18),
@@ -147,6 +174,7 @@ impl ThemePreset {
                 text_primary: slint::Color::from_rgb_u8(0xF5, 0xEE, 0xFD),
                 text_muted: slint::Color::from_rgb_u8(0xA3, 0x90, 0xC5),
                 meter_skin_id: self.meter_skin_id().into(),
+                font_family: self.font_family().into(),
             },
             Self::StudioDark => ThemePalette {
                 chassis: slint::Color::from_rgb_u8(0x12, 0x12, 0x12),
@@ -159,6 +187,20 @@ impl ThemePreset {
                 text_primary: slint::Color::from_rgb_u8(0xFF, 0xFF, 0xFF),
                 text_muted: slint::Color::from_rgb_u8(0x88, 0x88, 0x88),
                 meter_skin_id: self.meter_skin_id().into(),
+                font_family: self.font_family().into(),
+            },
+            Self::Peppy => ThemePalette {
+                chassis: slint::Color::from_rgb_u8(0x14, 0x11, 0x0D),
+                card_surface: slint::Color::from_rgb_u8(0x20, 0x1A, 0x14),
+                card_border: slint::Color::from_rgb_u8(0x48, 0x38, 0x24),
+                primary_accent: slint::Color::from_rgb_u8(0xF5, 0xB8, 0x3D),
+                secondary_accent: slint::Color::from_rgb_u8(0xFF, 0xDF, 0x85),
+                needle_peak: slint::Color::from_rgb_u8(0xE6, 0x39, 0x46),
+                dock_active_text: slint::Color::from_rgb_u8(0x14, 0x11, 0x0D),
+                text_primary: slint::Color::from_rgb_u8(0xFF, 0xFD, 0xF5),
+                text_muted: slint::Color::from_rgb_u8(0xA6, 0x9B, 0x8D),
+                meter_skin_id: self.meter_skin_id().into(),
+                font_family: self.font_family().into(),
             },
         }
     }
@@ -166,6 +208,13 @@ impl ThemePreset {
     /// Applies this theme preset to a [`MainWindow`] component.
     pub fn apply(self, window: &MainWindow) {
         let theme = window.global::<Theme>();
+        theme.set_active_preset(self.index());
+        theme.set_active(self.palette());
+    }
+
+    /// Applies this theme preset to a [`SplashScreen`] component.
+    pub fn apply_splash(self, splash: &SplashScreen) {
+        let theme = splash.global::<Theme>();
         theme.set_active_preset(self.index());
         theme.set_active(self.palette());
     }

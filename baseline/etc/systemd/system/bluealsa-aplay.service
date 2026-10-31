@@ -7,7 +7,7 @@ Wants=camilladsp.service
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/bluealsa-aplay -S -D default
+ExecStart=/usr/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"
 Restart=always
 RestartSec=2
 

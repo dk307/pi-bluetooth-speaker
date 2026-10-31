@@ -1,24 +1,69 @@
 import { Theme } from "theme.slint";
+import { NowPlayingView } from "now_playing.slint";
 
 export component MainViewport inherits Rectangle {
-    height: 380px;
     background: Theme.active.chassis;
 
     in-out property <int> active_tab: 0;
-    in-out property <string> track_title: "Waiting for Connection...";
+    in-out property <string> track_title: "Waiting for Bluetooth Connection...";
     in-out property <string> track_artist: "DietPi Audiophile Speaker";
     in-out property <string> track_album: "High-Resolution DSP Sink";
+    in-out property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit -> DSP 32-bit";
+    in-out property <string> position_text: "00:00";
+    in-out property <string> duration_text: "00:00";
+    in-out property <float> progress_ratio: 0.0;
     in-out property <float> volume_value: 75.0;
     in-out property <bool> is_playing: false;
+    in-out property <bool> is_muted: false;
+    in-out property <bool> has_cover_art: false;
+    in-out property <image> cover_image;
+    in-out property <float> left_peak_ratio: 0.0;
+    in-out property <float> right_peak_ratio: 0.0;
+    in-out property <string> track_or_device: "Waiting for Connection...";
 
     callback toggle_play_pause();
+    callback next_track();
+    callback previous_track();
+    callback seek(float);
+    callback toggle_mute();
     callback volume_changed(float);
+    callback stream_pill_clicked();
     callback cycle_theme();
     callback select_theme(int);
 
     // Tab 0: Now Playing
     if root.active_tab == 0 : Rectangle {
-        padding: 20px;
+        padding: 16px;
+
+        Rectangle {
+            background: @linear-gradient(150deg, Theme.active.card_surface 0%, Theme.active.chassis 100%);
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: Theme.active.card_border;
+            clip: true;
+
+            now_playing := NowPlayingView {
+                track_title: root.track_title;
+                track_artist: root.track_artist;
+                track_album: root.track_album;
+                position_text: root.position_text;
+                duration_text: root.duration_text;
+                progress_ratio: root.progress_ratio;
+                is_playing: root.is_playing;
+                has_cover_art: root.has_cover_art;
+                cover_image: root.cover_image;
+
+                toggle_play_pause => { root.toggle_play_pause(); }
+                next_track => { root.next_track(); }
+                previous_track => { root.previous_track(); }
+                seek(ratio) => { root.seek(ratio); }
+            }
+        }
+    }
+
+    // Tab 1: VU Meter (Authentic PeppyMeter Skin Picture)
+    if root.active_tab == 1 : Rectangle {
+        padding: 8px;
 
         Rectangle {
             background: Theme.active.card_surface;
@@ -27,166 +72,235 @@ export component MainViewport inherits Rectangle {
             border-color: Theme.active.card_border;
             clip: true;
 
-            VerticalLayout {
-                alignment: center;
-                spacing: 12px;
-                padding: 24px;
+            Image {
+                width: 100%;
+                height: 100%;
+                source: Theme.active_preset == 0 ? @image-url("../../../assets/skins/800x480/blue-bgr.png") :
+                        Theme.active_preset == 1 ? @image-url("../../../assets/skins/800x480/gold-bgr.png") :
+                        Theme.active_preset == 2 ? @image-url("../../../assets/skins/800x480/rainbow-bgr.png") :
+                        Theme.active_preset == 3 ? @image-url("../../../assets/skins/800x480/black-white-bgr.png") :
+                        @image-url("../../../assets/skins/800x480/vintage-bgr.png");
+                image-fit: contain;
+            }
+        }
+    }
 
-                Text {
-                    text: root.track_title;
-                    color: Theme.active.text_primary;
-                    font-size: 24px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                    overflow: elide;
-                }
+    // Tab 2: Bluetooth Status & Controller
+    if root.active_tab == 2 : Rectangle {
+        padding: 14px;
 
-                Text {
-                    text: root.track_artist;
-                    color: Theme.active.secondary_accent;
-                    font-size: 18px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    overflow: elide;
-                }
+        VerticalLayout {
+            spacing: 12px;
 
-                Text {
-                    text: root.track_album;
-                    color: Theme.active.text_muted;
-                    font-size: 14px;
-                    horizontal-alignment: center;
-                    overflow: elide;
-                }
+            HorizontalLayout {
+                spacing: 14px;
 
-                // Volume slider & indicator
-                HorizontalLayout {
-                    alignment: center;
-                    spacing: 16px;
-                    padding-top: 16px;
+                // Left Card: Connected Source & A2DP Sink
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: Theme.active.card_surface;
+                    border-radius: 14px;
+                    border-width: 1px;
+                    border-color: Theme.active.card_border;
+                    padding: 16px;
 
-                    Text {
-                        text: "VOL";
-                        color: Theme.active.text_muted;
-                        font-size: 13px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
+                    VerticalLayout {
+                        spacing: 10px;
 
-                    Rectangle {
-                        width: 280px;
-                        height: 8px;
-                        background: #1c2430;
-                        border-radius: 4px;
-                        y: 8px;
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 8px;
+
+                            Rectangle {
+                                width: 10px;
+                                height: 10px;
+                                border-radius: 5px;
+                                background: root.is_playing ? Theme.active.primary_accent : Theme.active.secondary_accent;
+                                y: 4px;
+                            }
+
+                            Text {
+                                text: "ACTIVE SOURCE / A2DP SINK";
+                                color: Theme.active.primary_accent;
+                                font-size: 14px;
+                                font-weight: 800;
+                            }
+                        }
+
+                        Text {
+                            text: root.track_or_device;
+                            color: Theme.active.text_primary;
+                            font-size: 20px;
+                            font-weight: 800;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: root.is_playing ? "Streaming High-Res Audio" : "Connected (Standby / Idle)";
+                            color: root.is_playing ? Theme.active.primary_accent : Theme.active.text_muted;
+                            font-size: 14px;
+                            font-weight: 600;
+                        }
 
                         Rectangle {
-                            x: 0px;
-                            y: 0px;
-                            width: parent.width * (root.volume_value >= 0.0 ? (root.volume_value <= 100.0 ? root.volume_value / 100.0 : 1.0) : 0.0);
-                            height: parent.height;
-                            background: Theme.active.primary_accent;
-                            border-radius: 4px;
+                            height: 32px;
+                            background: Theme.active.chassis;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: Theme.active.card_border;
+                            padding-left: 10px;
+                            padding-right: 10px;
+
+                            HorizontalLayout {
+                                alignment: start;
+                                spacing: 8px;
+
+                                Text {
+                                    text: "CODEC:";
+                                    color: Theme.active.secondary_accent;
+                                    font-size: 12px;
+                                    font-weight: 800;
+                                    vertical-alignment: center;
+                                }
+
+                                Text {
+                                    text: root.stream_details;
+                                    color: Theme.active.text_primary;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
                         }
 
-                        TouchArea {
-                            moved => {
-                                root.volume_value = Math.max(0.0, Math.min(100.0, self.mouse-x / self.width * 100.0));
-                                root.volume_changed(root.volume_value);
+                        Text {
+                            text: "Profile: A2DP Sink (Advanced Audio Distribution Profile)";
+                            color: Theme.active.text_muted;
+                            font-size: 12px;
+                        }
+
+                        Text {
+                            text: "Routing: BlueALSA -> CamillaDSP 96k/32-bit Active Crossover";
+                            color: Theme.active.text_muted;
+                            font-size: 12px;
+                        }
+                    }
+                }
+
+                // Right Card: Controller & Pairing
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: Theme.active.card_surface;
+                    border-radius: 14px;
+                    border-width: 1px;
+                    border-color: Theme.active.card_border;
+                    padding: 16px;
+
+                    VerticalLayout {
+                        spacing: 10px;
+
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 8px;
+
+                            Rectangle {
+                                width: 10px;
+                                height: 10px;
+                                border-radius: 5px;
+                                background: Theme.active.primary_accent;
+                                y: 4px;
                             }
-                            clicked => {
-                                root.volume_value = Math.max(0.0, Math.min(100.0, self.mouse-x / self.width * 100.0));
-                                root.volume_changed(root.volume_value);
+
+                            Text {
+                                text: "BLUETOOTH CONTROLLER";
+                                color: Theme.active.primary_accent;
+                                font-size: 14px;
+                                font-weight: 800;
                             }
                         }
+
+                        Text {
+                            text: "DietPi Audiophile Speaker";
+                            color: Theme.active.text_primary;
+                            font-size: 20px;
+                            font-weight: 800;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: "Hardware: TP-Link UB500 (RTL8761B / hci0)";
+                            color: Theme.active.secondary_accent;
+                            font-size: 14px;
+                            font-weight: 600;
+                        }
+
+                        Rectangle {
+                            height: 38px;
+                            background: Theme.active.primary_accent;
+                            border-radius: 8px;
+
+                            Text {
+                                text: "DISCOVERABLE & READY TO PAIR";
+                                color: #000000;
+                                font-size: 13px;
+                                font-weight: 800;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Text {
+                            text: "Agent Policy: Auto-Accept & Trust (No PIN prompt)";
+                            color: Theme.active.text_muted;
+                            font-size: 12px;
+                        }
+
+                        Text {
+                            text: "Software Stack: BlueZ 5.79 / BlueALSA v5.0.0";
+                            color: Theme.active.text_muted;
+                            font-size: 12px;
+                        }
+                    }
+                }
+            }
+
+            // Bottom Telemetry Strip
+            Rectangle {
+                height: 30px;
+                background: Theme.active.card_surface;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: Theme.active.card_border;
+                padding-left: 12px;
+                padding-right: 12px;
+
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    Text {
+                        text: "DSP Crossover: 96kHz / 32-bit Float Matrix";
+                        color: Theme.active.text_muted;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
                     }
 
                     Text {
-                        text: "\{Math.round(root.volume_value >= 0.0 ? (root.volume_value <= 100.0 ? root.volume_value : 100.0) : 0.0)}%";
-                        color: Theme.active.primary_accent;
-                        font-size: 14px;
-                        font-weight: 700;
+                        text: "BCM2837 Core Load: Nominal";
+                        color: Theme.active.text_muted;
+                        font-size: 12px;
+                        font-weight: 600;
                         vertical-alignment: center;
                     }
-                }
-            }
-        }
-    }
 
-    // Tab 1: VU Meter
-    if root.active_tab == 1 : Rectangle {
-        padding: 20px;
-
-        Rectangle {
-            background: Theme.active.card_surface;
-            border-radius: 16px;
-            border-width: 1px;
-            border-color: Theme.active.card_border;
-
-            VerticalLayout {
-                alignment: center;
-                spacing: 10px;
-
-                Text {
-                    text: "🎚️ PEPPYMETER DUAL VU VISUALIZER";
-                    color: Theme.active.primary_accent;
-                    font-size: 20px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                }
-
-                Text {
-                    text: "Active Skin: " + Theme.active.meter_skin_id;
-                    color: Theme.active.secondary_accent;
-                    font-size: 14px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                }
-
-                Text {
-                    text: "Channel 0: Subwoofer | Channel 1: Coaxial Satellite";
-                    color: Theme.active.text_muted;
-                    font-size: 13px;
-                    horizontal-alignment: center;
-                }
-            }
-        }
-    }
-
-    // Tab 2: Bluetooth Status
-    if root.active_tab == 2 : Rectangle {
-        padding: 20px;
-
-        Rectangle {
-            background: Theme.active.card_surface;
-            border-radius: 16px;
-            border-width: 1px;
-            border-color: Theme.active.card_border;
-
-            VerticalLayout {
-                alignment: center;
-                spacing: 10px;
-
-                Text {
-                    text: "📶 BLUETOOTH STATUS & CONTROLLER";
-                    color: Theme.active.primary_accent;
-                    font-size: 20px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                }
-
-                Text {
-                    text: "Broadcom BCM43438 UART / BlueZ 5 Stack";
-                    color: Theme.active.secondary_accent;
-                    font-size: 14px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                }
-
-                Text {
-                    text: "Tap Settings (Tab 5) to switch active appliance theme";
-                    color: Theme.active.text_muted;
-                    font-size: 13px;
-                    horizontal-alignment: center;
+                    Text {
+                        text: "Audio Latency: ~12ms";
+                        color: Theme.active.text_muted;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }
@@ -207,7 +321,7 @@ export component MainViewport inherits Rectangle {
                 spacing: 10px;
 
                 Text {
-                    text: "💿 OPTICAL CD PLAYER";
+                    text: "OPTICAL CD PLAYER";
                     color: Theme.active.primary_accent;
                     font-size: 20px;
                     font-weight: 800;
@@ -240,7 +354,7 @@ export component MainViewport inherits Rectangle {
                 spacing: 10px;
 
                 Text {
-                    text: "🎛️ CAMILLADSP ACTIVE CROSSOVER";
+                    text: "CAMILLADSP ACTIVE CROSSOVER";
                     color: Theme.active.primary_accent;
                     font-size: 20px;
                     font-weight: 800;
@@ -274,7 +388,7 @@ export component MainViewport inherits Rectangle {
                 padding: 16px;
 
                 Text {
-                    text: "⚙️ APPLIANCE THEME & PREFERENCES";
+                    text: "APPLIANCE THEME & PREFERENCES";
                     color: Theme.active.primary_accent;
                     font-size: 18px;
                     font-weight: 800;
@@ -288,14 +402,14 @@ export component MainViewport inherits Rectangle {
                     horizontal-alignment: center;
                 }
 
-                // 4 Theme preset buttons
+                // 5 Theme preset buttons
                 HorizontalLayout {
                     alignment: center;
-                    spacing: 10px;
+                    spacing: 8px;
 
                     // 1. McIntosh Blue
                     Rectangle {
-                        width: 160px;
+                        width: 136px;
                         height: 52px;
                         background: #090D12;
                         border-radius: 10px;
@@ -308,7 +422,7 @@ export component MainViewport inherits Rectangle {
                             Text {
                                 text: "1. McIntosh";
                                 color: #00C8FF;
-                                font-size: 13px;
+                                font-size: 12px;
                                 font-weight: 700;
                                 horizontal-alignment: center;
                             }
@@ -329,7 +443,7 @@ export component MainViewport inherits Rectangle {
 
                     // 2. Marantz Amber
                     Rectangle {
-                        width: 160px;
+                        width: 136px;
                         height: 52px;
                         background: #12100D;
                         border-radius: 10px;
@@ -342,7 +456,7 @@ export component MainViewport inherits Rectangle {
                             Text {
                                 text: "2. Marantz";
                                 color: #E5A93C;
-                                font-size: 13px;
+                                font-size: 12px;
                                 font-weight: 700;
                                 horizontal-alignment: center;
                             }
@@ -363,7 +477,7 @@ export component MainViewport inherits Rectangle {
 
                     // 3. Cyberpunk Neon
                     Rectangle {
-                        width: 160px;
+                        width: 136px;
                         height: 52px;
                         background: #0D0B18;
                         border-radius: 10px;
@@ -376,7 +490,7 @@ export component MainViewport inherits Rectangle {
                             Text {
                                 text: "3. Cyberpunk";
                                 color: #00F0FF;
-                                font-size: 13px;
+                                font-size: 12px;
                                 font-weight: 700;
                                 horizontal-alignment: center;
                             }
@@ -397,7 +511,7 @@ export component MainViewport inherits Rectangle {
 
                     // 4. Studio Dark
                     Rectangle {
-                        width: 160px;
+                        width: 136px;
                         height: 52px;
                         background: #121212;
                         border-radius: 10px;
@@ -410,7 +524,7 @@ export component MainViewport inherits Rectangle {
                             Text {
                                 text: "4. Studio Dark";
                                 color: #F0F0F0;
-                                font-size: 13px;
+                                font-size: 12px;
                                 font-weight: 700;
                                 horizontal-alignment: center;
                             }
@@ -428,6 +542,40 @@ export component MainViewport inherits Rectangle {
                             }
                         }
                     }
+
+                    // 5. PeppyMeter Gold
+                    Rectangle {
+                        width: 136px;
+                        height: 52px;
+                        background: #14110D;
+                        border-radius: 10px;
+                        border-width: Theme.active_preset == 4 ? 2px : 1px;
+                        border-color: #F5B83D;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                text: "5. PeppyMeter";
+                                color: #F5B83D;
+                                font-size: 12px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Vintage Gold";
+                                color: #FFDF85;
+                                font-size: 10px;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.select_theme(4);
+                            }
+                        }
+                    }
                 }
 
                 // Cycle Theme Button
@@ -442,7 +590,7 @@ export component MainViewport inherits Rectangle {
                         spacing: 8px;
 
                         Text {
-                            text: "🔄 Cycle Next Theme";
+                            text: "Cycle Next Theme";
                             color: Theme.active.dock_active_text;
                             font-size: 13px;
                             font-weight: 700;

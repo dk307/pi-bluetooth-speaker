@@ -70,6 +70,7 @@ fn mock_framebuffer_lifecycle() {
     assert_eq!(fb.pixel_count(), 384_000);
     assert_eq!(fb.byte_len(), 1_536_000);
     assert!(fb.is_mocked());
+    assert!(!fb.is_hardware_panel());
     assert_eq!(fb.unblank_count(), 0);
     assert_eq!(fb.render_count(), 0);
 

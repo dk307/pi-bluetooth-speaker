@@ -29,7 +29,8 @@ use std::sync::{Arc, Mutex};
 
 use slint::PhysicalSize;
 use slint::platform::software_renderer::{
-    MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, TargetPixel,
+    LineBufferProvider, MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
+    TargetPixel,
 };
 use slint::platform::{Platform, PlatformError};
 
@@ -390,6 +391,58 @@ const _: () = {
     assert!(Framebuffer::DEFAULT_WIDTH == 800 && Framebuffer::DEFAULT_HEIGHT == 480);
 };
 
+/// Line-by-line render target.
+///
+/// When `scratch` is non-empty (memory-mapped `/dev/fb0`), each line is rendered into a cached
+/// RAM row and then copied to the scanout buffer write-only. The framebuffer mapping is
+/// uncached device memory, so blending text directly into it (read-modify-write per pixel)
+/// is extremely slow and keeps the scanout buffer in a half-drawn state for most of a frame.
+struct FbLineBuffer<'a> {
+    pixels: &'a mut [Bgrx8888Pixel],
+    stride: usize,
+    scratch: Vec<Bgrx8888Pixel>,
+}
+
+impl<'a> FbLineBuffer<'a> {
+    /// Renders directly into `pixels` (cached RAM targets).
+    fn direct(pixels: &'a mut [Bgrx8888Pixel], stride: usize) -> Self {
+        Self {
+            pixels,
+            stride,
+            scratch: Vec::new(),
+        }
+    }
+
+    /// Renders via a cached scratch row, then copies to `pixels` (uncached device memory).
+    fn buffered(pixels: &'a mut [Bgrx8888Pixel], stride: usize) -> Self {
+        Self {
+            pixels,
+            stride,
+            scratch: vec![Bgrx8888Pixel::default(); stride],
+        }
+    }
+}
+
+impl LineBufferProvider for FbLineBuffer<'_> {
+    type TargetPixel = Bgrx8888Pixel;
+
+    fn process_line(
+        &mut self,
+        line: usize,
+        range: core::ops::Range<usize>,
+        render_fn: impl FnOnce(&mut [Self::TargetPixel]),
+    ) {
+        let offset = line * self.stride + range.start;
+        if self.scratch.is_empty() {
+            render_fn(&mut self.pixels[offset..offset + range.len()]);
+        } else {
+            let row = &mut self.scratch[range.clone()];
+            render_fn(row);
+            self.pixels[offset..offset + range.len()].copy_from_slice(row);
+        }
+    }
+}
+
 impl Framebuffer {
     /// Default display panel width in pixels (Freenove 4.3" DSI).
     pub const DEFAULT_WIDTH: u32 = 800;
@@ -481,11 +534,8 @@ impl Framebuffer {
         };
 
         let blank_path_str = blank_path.map(|p| p.as_ref().to_string_lossy().into());
-        let back_buffer = if mmap.is_some() {
-            Vec::new()
-        } else {
-            vec![Bgrx8888Pixel::default(); Self::SCANOUT_BYTE_LEN / Self::BYTES_PER_PIXEL]
-        };
+        let back_buffer =
+            vec![Bgrx8888Pixel::default(); Self::SCANOUT_BYTE_LEN / Self::BYTES_PER_PIXEL];
 
         Ok(Self {
             backend: Backend::Hardware {
@@ -736,7 +786,7 @@ impl Framebuffer {
                 if let Some(mmap_mut) = mmap {
                     let pixel_slice = Bgrx8888Pixel::try_from_bytes_mut(mmap_mut)?;
                     let did_draw = window.draw_if_needed(|renderer| {
-                        renderer.render(pixel_slice, width);
+                        renderer.render_by_line(FbLineBuffer::buffered(pixel_slice, width));
                     });
                     if did_draw {
                         mmap_mut
@@ -746,7 +796,7 @@ impl Framebuffer {
                     Ok(did_draw)
                 } else {
                     let did_draw = window.draw_if_needed(|renderer| {
-                        renderer.render(back_buffer, width);
+                        renderer.render_by_line(FbLineBuffer::direct(back_buffer, width));
                     });
                     if did_draw {
                         Self::flush_file_buffer(
@@ -767,7 +817,7 @@ impl Framebuffer {
                     ));
                 }
                 let did_draw = window.draw_if_needed(|renderer| {
-                    renderer.render(buffer, width);
+                    renderer.render_by_line(FbLineBuffer::direct(buffer, width));
                 });
                 if did_draw {
                     state.render_calls += 1;
@@ -826,6 +876,15 @@ impl Framebuffer {
     #[must_use]
     pub const fn is_mocked(&self) -> bool {
         matches!(self.backend, Backend::Mock { .. })
+    }
+
+    /// Whether this controller is targeting the physical appliance panel `/dev/fb0`.
+    #[must_use]
+    pub fn is_hardware_panel(&self) -> bool {
+        match &self.backend {
+            Backend::Hardware { dev_path, .. } => dev_path.as_ref() == Self::DEFAULT_FB_PATH,
+            Backend::Mock { .. } => false,
+        }
     }
 
     /// Returns the number of unblank operations recorded on the mock backend.
