@@ -114,6 +114,9 @@ fn ui_shell_theme_cycling_and_hot_swapping() {
     assert_eq!(shell.cycle_theme(), ThemePreset::StudioDark);
     assert_eq!(shell.current_theme(), ThemePreset::StudioDark);
 
+    assert_eq!(shell.cycle_theme(), ThemePreset::Peppy);
+    assert_eq!(shell.current_theme(), ThemePreset::Peppy);
+
     assert_eq!(shell.cycle_theme(), ThemePreset::McIntoshBlue);
     assert_eq!(shell.current_theme(), ThemePreset::McIntoshBlue);
 

@@ -9,13 +9,15 @@ fn theme_preset_indexing_and_cyclic_next() {
     assert_eq!(ThemePreset::from_index(1), ThemePreset::MarantzAmber);
     assert_eq!(ThemePreset::from_index(2), ThemePreset::CyberpunkNeon);
     assert_eq!(ThemePreset::from_index(3), ThemePreset::StudioDark);
-    assert_eq!(ThemePreset::from_index(4), ThemePreset::McIntoshBlue);
-    assert_eq!(ThemePreset::from_index(-1), ThemePreset::StudioDark);
+    assert_eq!(ThemePreset::from_index(4), ThemePreset::Peppy);
+    assert_eq!(ThemePreset::from_index(5), ThemePreset::McIntoshBlue);
+    assert_eq!(ThemePreset::from_index(-1), ThemePreset::Peppy);
 
     assert_eq!(ThemePreset::McIntoshBlue.next(), ThemePreset::MarantzAmber);
     assert_eq!(ThemePreset::MarantzAmber.next(), ThemePreset::CyberpunkNeon);
     assert_eq!(ThemePreset::CyberpunkNeon.next(), ThemePreset::StudioDark);
-    assert_eq!(ThemePreset::StudioDark.next(), ThemePreset::McIntoshBlue);
+    assert_eq!(ThemePreset::StudioDark.next(), ThemePreset::Peppy);
+    assert_eq!(ThemePreset::Peppy.next(), ThemePreset::McIntoshBlue);
 }
 
 #[test]
@@ -37,6 +39,18 @@ fn slug_parsing_valid_and_invalid() {
         ThemePreset::StudioDark
     );
     assert_eq!(
+        ThemePreset::parse_slug("peppy").unwrap(),
+        ThemePreset::Peppy
+    );
+    assert_eq!(
+        ThemePreset::parse_slug("peepy").unwrap(),
+        ThemePreset::Peppy
+    );
+    assert_eq!(
+        ThemePreset::parse_slug("peppymeter").unwrap(),
+        ThemePreset::Peppy
+    );
+    assert_eq!(
         ThemePreset::parse_slug("0").unwrap(),
         ThemePreset::McIntoshBlue
     );
@@ -44,6 +58,7 @@ fn slug_parsing_valid_and_invalid() {
         ThemePreset::parse_slug("3").unwrap(),
         ThemePreset::StudioDark
     );
+    assert_eq!(ThemePreset::parse_slug("4").unwrap(), ThemePreset::Peppy);
 
     ThemePreset::parse_slug("unknown-theme").unwrap_err();
     ThemePreset::parse_slug("").unwrap_err();
@@ -56,6 +71,7 @@ fn display_and_meter_skin_id_consistency() {
         ThemePreset::MarantzAmber,
         ThemePreset::CyberpunkNeon,
         ThemePreset::StudioDark,
+        ThemePreset::Peppy,
     ] {
         assert_ne!(preset.display_name(), "");
         assert_ne!(preset.slug(), "");

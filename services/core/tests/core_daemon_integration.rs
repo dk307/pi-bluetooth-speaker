@@ -7,12 +7,12 @@ use std::sync::Mutex;
 
 use speaker_core::cli::core_daemon::{
     CoreCliOptions, ScreenTarget, headless_requested, parse_cli_args_from, parse_preview_secs,
-    print_usage,
+    parse_tab_arg, print_usage,
 };
 #[cfg(feature = "ui")]
 use speaker_core::cli::core_daemon::{
-    report_display, run_app, run_render_loop, run_shell_on, run_splash_on, run_ui_display,
-    run_ui_display_on_path, run_ui_lifecycle,
+    init_shell, report_display, run_app, run_render_loop, run_shell_on, run_splash_on,
+    run_ui_display, run_ui_display_on_path, run_ui_lifecycle,
 };
 use speaker_core::diag::CliParse;
 #[cfg(feature = "ui")]
@@ -56,6 +56,48 @@ fn parse_preview_secs_rejects_sign_prefixes_and_non_numeric() {
     );
 }
 
+#[test]
+fn parse_tab_arg_valid_and_invalid() {
+    assert_eq!(parse_tab_arg("0").unwrap(), 0);
+    assert_eq!(parse_tab_arg("player").unwrap(), 0);
+    assert_eq!(parse_tab_arg("now-playing").unwrap(), 0);
+    assert_eq!(parse_tab_arg("nowplaying").unwrap(), 0);
+
+    assert_eq!(parse_tab_arg("1").unwrap(), 1);
+    assert_eq!(parse_tab_arg("vu").unwrap(), 1);
+    assert_eq!(parse_tab_arg("vumeter").unwrap(), 1);
+    assert_eq!(parse_tab_arg("meter").unwrap(), 1);
+    assert_eq!(parse_tab_arg("peppy").unwrap(), 1);
+    assert_eq!(parse_tab_arg("peepy").unwrap(), 1);
+    assert_eq!(parse_tab_arg("peppymeter").unwrap(), 1);
+
+    assert_eq!(parse_tab_arg("2").unwrap(), 2);
+    assert_eq!(parse_tab_arg("bt").unwrap(), 2);
+    assert_eq!(parse_tab_arg("bluetooth").unwrap(), 2);
+
+    assert_eq!(parse_tab_arg("3").unwrap(), 3);
+    assert_eq!(parse_tab_arg("cd").unwrap(), 3);
+    assert_eq!(parse_tab_arg("optical").unwrap(), 3);
+
+    assert_eq!(parse_tab_arg("4").unwrap(), 4);
+    assert_eq!(parse_tab_arg("dsp").unwrap(), 4);
+    assert_eq!(parse_tab_arg("tone").unwrap(), 4);
+    assert_eq!(parse_tab_arg("camilla").unwrap(), 4);
+
+    assert_eq!(parse_tab_arg("5").unwrap(), 5);
+    assert_eq!(parse_tab_arg("settings").unwrap(), 5);
+    assert_eq!(parse_tab_arg("prefs").unwrap(), 5);
+    assert_eq!(parse_tab_arg("preferences").unwrap(), 5);
+    assert_eq!(parse_tab_arg("theme").unwrap(), 5);
+
+    assert!(parse_tab_arg("6").unwrap_err().contains("invalid tab"));
+    assert!(
+        parse_tab_arg("invalid")
+            .unwrap_err()
+            .contains("invalid tab")
+    );
+}
+
 #[cfg(feature = "ui")]
 #[test]
 fn headless_requested_requires_explicit_one() {
@@ -85,9 +127,9 @@ fn run_ui_display_headless_short_circuits() {
     // SPEAKER_CORE_HEADLESS while this guard is held.
     unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "1") };
     // The headless guard in run_ui_display must return before any framebuffer/sysfs access.
-    run_ui_display(ScreenTarget::Splash, Some(1), true, false);
-    run_ui_display(ScreenTarget::Shell, Some(1), true, false);
-    run_ui_display(ScreenTarget::Shell, Some(1), true, true);
+    run_ui_display(ScreenTarget::Splash, Some(1), true, false, None, None);
+    run_ui_display(ScreenTarget::Shell, Some(1), true, false, None, None);
+    run_ui_display(ScreenTarget::Shell, Some(1), true, true, None, None);
     // SAFETY: same serialized-guard invariant as above.
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
 }
@@ -101,9 +143,33 @@ fn run_ui_display_missing_device_returns_early() {
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
     let dir = ScopedTempDir::new("fb-boot-splash-missing");
     let missing = dir.path().join("fb0");
-    run_ui_display_on_path(&missing, ScreenTarget::Splash, Some(1), true, false);
-    run_ui_display_on_path(&missing, ScreenTarget::Shell, Some(1), true, false);
-    run_ui_display_on_path(&missing, ScreenTarget::Shell, Some(1), true, true);
+    run_ui_display_on_path(
+        &missing,
+        ScreenTarget::Splash,
+        Some(1),
+        true,
+        false,
+        None,
+        None,
+    );
+    run_ui_display_on_path(
+        &missing,
+        ScreenTarget::Shell,
+        Some(1),
+        true,
+        false,
+        None,
+        None,
+    );
+    run_ui_display_on_path(
+        &missing,
+        ScreenTarget::Shell,
+        Some(1),
+        true,
+        true,
+        None,
+        None,
+    );
 }
 
 #[cfg(feature = "ui")]
@@ -152,7 +218,7 @@ fn run_splash_on_mocked_render_error_skips_loop() {
 fn run_shell_on_mocked_renders_and_tracks_counters() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     assert!(fb.is_mocked());
-    run_shell_on(&mut fb, None, false, false);
+    run_shell_on(&mut fb, None, false, false, None, None);
     assert_eq!(fb.unblank_count(), 1);
     assert_eq!(fb.render_count(), 1);
     assert_eq!(ctrl.counters(), (1, 1));
@@ -163,7 +229,7 @@ fn run_shell_on_mocked_renders_and_tracks_counters() {
 fn run_shell_on_mocked_reports_unblank_failure_and_continues() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     ctrl.set_unblank_error("simulated unblank failure");
-    run_shell_on(&mut fb, None, false, false);
+    run_shell_on(&mut fb, None, false, false, None, None);
     assert_eq!(fb.unblank_count(), 0);
     assert_eq!(fb.render_count(), 1);
 }
@@ -173,7 +239,7 @@ fn run_shell_on_mocked_reports_unblank_failure_and_continues() {
 fn run_shell_on_mocked_render_error_skips_loop() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     ctrl.set_render_error("simulated render failure");
-    run_shell_on(&mut fb, Some(0), false, false);
+    run_shell_on(&mut fb, Some(0), false, false, None, None);
     assert_eq!(fb.render_count(), 0);
     assert_eq!(ctrl.counters(), (1, 0));
 }
@@ -182,7 +248,14 @@ fn run_shell_on_mocked_render_error_skips_loop() {
 #[test]
 fn run_shell_on_mocked_with_demo_playback() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
-    run_shell_on(&mut fb, Some(0), false, true);
+    run_shell_on(
+        &mut fb,
+        Some(0),
+        false,
+        true,
+        Some(speaker_core::ui::ThemePreset::Peppy),
+        Some(1),
+    );
     assert_eq!(fb.render_count(), 1);
     assert_eq!(ctrl.counters(), (1, 1));
 }
@@ -205,6 +278,13 @@ fn run_render_loop_demo_playback_and_bluetooth_paths() {
     let (bt, _) = speaker_core::hardware::BluetoothDevice::new_mocked();
     ctrl.set_render_error("simulated bt loop failure");
     run_render_loop(&mut fb, &window, &shell, Some(&bt), Some(10), true, false);
+
+    // 3. Demo playback when paused zeroes peak levels
+    shell.set_playing(false);
+    ctrl.set_render_error("simulated demo paused loop failure");
+    run_render_loop(&mut fb, &window, &shell, None, Some(10), true, true);
+    assert_eq!(shell.window().get_left_peak_ratio(), 0.0);
+    assert_eq!(shell.window().get_right_peak_ratio(), 0.0);
 }
 
 #[test]
@@ -240,6 +320,43 @@ fn parse_cli_args_flags_and_values() {
         other => panic!("expected Options, got {other:?}"),
     }
 
+    match parsed(&["--theme", "peppy", "-T", "vu"]).unwrap() {
+        CliParse::Options(o) => {
+            assert_eq!(o.theme, Some(speaker_core::ui::ThemePreset::Peppy));
+            assert_eq!(o.tab, Some(1));
+        }
+        other => panic!("expected Options, got {other:?}"),
+    }
+
+    match parsed(&["-t", "marantz", "--tab", "settings"]).unwrap() {
+        CliParse::Options(o) => {
+            assert_eq!(o.theme, Some(speaker_core::ui::ThemePreset::MarantzAmber));
+            assert_eq!(o.tab, Some(5));
+        }
+        other => panic!("expected Options, got {other:?}"),
+    }
+
+    match parsed(&["--tab", "bt"]).unwrap() {
+        CliParse::Options(o) => {
+            assert_eq!(o.tab, Some(2));
+        }
+        other => panic!("expected Options, got {other:?}"),
+    }
+
+    match parsed(&["--tab", "cd"]).unwrap() {
+        CliParse::Options(o) => {
+            assert_eq!(o.tab, Some(3));
+        }
+        other => panic!("expected Options, got {other:?}"),
+    }
+
+    match parsed(&["--tab", "dsp"]).unwrap() {
+        CliParse::Options(o) => {
+            assert_eq!(o.tab, Some(4));
+        }
+        other => panic!("expected Options, got {other:?}"),
+    }
+
     match parsed(&["--demo-playback"]).unwrap() {
         CliParse::Options(o) => {
             assert!(o.demo_playback);
@@ -264,6 +381,10 @@ fn parse_cli_args_flags_and_values() {
         &["-p", "nan"][..],
         &["-s"][..],
         &["-s", "invalid"][..],
+        &["-t"][..],
+        &["-t", "unknown"][..],
+        &["-T"][..],
+        &["-T", "invalid"][..],
         &["-x"][..],
         &["--loop", "--preview", "1", "extra"][..],
     ] {
@@ -284,6 +405,8 @@ fn run_app_headless_executes_successfully() {
         run_loop: false,
         screen: ScreenTarget::Splash,
         demo_playback: false,
+        theme: None,
+        tab: None,
     });
     assert_eq!(code, std::process::ExitCode::SUCCESS);
 
@@ -292,6 +415,8 @@ fn run_app_headless_executes_successfully() {
         run_loop: false,
         screen: ScreenTarget::Shell,
         demo_playback: true,
+        theme: Some(speaker_core::ui::ThemePreset::Peppy),
+        tab: Some(1),
     });
     assert_eq!(code_demo, std::process::ExitCode::SUCCESS);
 
@@ -322,14 +447,30 @@ fn run_ui_display_on_valid_and_invalid_file_paths() {
     let dev = dir.path().join("fake_fb");
     fs::write(&dev, vec![0u8; 800 * 480 * 4]).unwrap();
 
-    run_ui_display_on_path(&dev, ScreenTarget::Splash, None, false, false);
-    run_ui_display_on_path(&dev, ScreenTarget::Shell, None, false, false);
-    run_ui_display_on_path(&dev, ScreenTarget::Shell, None, false, true);
+    run_ui_display_on_path(&dev, ScreenTarget::Splash, None, false, false, None, None);
+    run_ui_display_on_path(&dev, ScreenTarget::Shell, None, false, false, None, None);
+    run_ui_display_on_path(
+        &dev,
+        ScreenTarget::Shell,
+        None,
+        false,
+        true,
+        Some(speaker_core::ui::ThemePreset::Peppy),
+        Some(1),
+    );
 
     // Invalid file (too short) to trigger Framebuffer::open failure path
     let bad_dev = dir.path().join("bad_fb");
     fs::write(&bad_dev, [0u8; 10]).unwrap();
-    run_ui_display_on_path(&bad_dev, ScreenTarget::Splash, None, false, false);
+    run_ui_display_on_path(
+        &bad_dev,
+        ScreenTarget::Splash,
+        None,
+        false,
+        false,
+        None,
+        None,
+    );
 }
 
 #[cfg(feature = "ui")]
@@ -371,10 +512,70 @@ fn run_ui_display_with_headless_disabled_checks_device() {
 
     let dir = ScopedTempDir::new("fb-headless-disabled");
     let missing = dir.path().join("fb0");
-    run_ui_display_on_path(&missing, ScreenTarget::Splash, None, false, false);
-    run_ui_display_on_path(&missing, ScreenTarget::Shell, None, false, false);
-    run_ui_display_on_path(&missing, ScreenTarget::Shell, None, false, true);
+    run_ui_display_on_path(
+        &missing,
+        ScreenTarget::Splash,
+        None,
+        false,
+        false,
+        None,
+        None,
+    );
+    run_ui_display_on_path(
+        &missing,
+        ScreenTarget::Shell,
+        None,
+        false,
+        false,
+        None,
+        None,
+    );
+    run_ui_display_on_path(&missing, ScreenTarget::Shell, None, false, true, None, None);
 
     // SAFETY: serialized test guard
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn test_core_daemon_main_entrypoint() {
+    let _guard = lock_env();
+    // SAFETY: serialized test guard
+    unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "1") };
+    assert_eq!(
+        speaker_core::cli::core_daemon::main(),
+        std::process::ExitCode::SUCCESS
+    );
+    // SAFETY: serialized test guard
+    unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
+    use speaker_core::ui::{Framebuffer, MainWindow};
+
+    // 1. run_ui_display with headless disabled calls run_ui_display_on_path
+    let _guard = lock_env();
+    // SAFETY: serialized test guard
+    unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "0") };
+    run_ui_display(ScreenTarget::Splash, None, false, false, None, None);
+    run_ui_display(ScreenTarget::Shell, None, false, false, None, None);
+    // SAFETY: serialized test guard
+    unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
+
+    // 2. init_shell with mocked_device = false exercises production Bluetooth connection path
+    let (fb, _) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    let main_window = MainWindow::new().unwrap();
+    let (shell, _) = init_shell(
+        false,
+        main_window,
+        false,
+        Some(speaker_core::ui::ThemePreset::Peppy),
+        Some(1),
+    );
+    assert!(!shell.is_playing());
+    assert_eq!(shell.current_theme(), speaker_core::ui::ThemePreset::Peppy);
+    assert_eq!(shell.current_tab(), 1);
 }

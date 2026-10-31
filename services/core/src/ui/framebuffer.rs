@@ -828,6 +828,15 @@ impl Framebuffer {
         matches!(self.backend, Backend::Mock { .. })
     }
 
+    /// Whether this controller is targeting the physical appliance panel `/dev/fb0`.
+    #[must_use]
+    pub fn is_hardware_panel(&self) -> bool {
+        match &self.backend {
+            Backend::Hardware { dev_path, .. } => dev_path.as_ref() == Self::DEFAULT_FB_PATH,
+            Backend::Mock { .. } => false,
+        }
+    }
+
     /// Returns the number of unblank operations recorded on the mock backend.
     ///
     /// # Panics

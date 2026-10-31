@@ -297,8 +297,8 @@ export component NowPlayingView inherits Rectangle {
                     border-color: Theme.active.card_border;
 
                     Text {
-                        text: "⏮";
-                        font-size: 20px;
+                        text: "◀◀";
+                        font-size: 16px;
                         color: Theme.active.text_primary;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -319,8 +319,8 @@ export component NowPlayingView inherits Rectangle {
                     background: Theme.active.primary_accent;
 
                     Text {
-                        text: root.is_playing ? "⏸" : "▶";
-                        font-size: 24px;
+                        text: root.is_playing ? "❚❚" : "▶";
+                        font-size: 20px;
                         color: Theme.active.dock_active_text;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -343,8 +343,8 @@ export component NowPlayingView inherits Rectangle {
                     border-color: Theme.active.card_border;
 
                     Text {
-                        text: "⏭";
-                        font-size: 20px;
+                        text: "▶▶";
+                        font-size: 16px;
                         color: Theme.active.text_primary;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -367,8 +367,9 @@ export component NowPlayingView inherits Rectangle {
                     border-color: root.is_muted ? Theme.active.needle_peak : Theme.active.card_border;
 
                     Text {
-                        text: root.is_muted ? "🔇" : "🔊";
-                        font-size: 20px;
+                        text: root.is_muted ? "MUTED" : "VOL";
+                        font-size: 11px;
+                        font-weight: 700;
                         color: root.is_muted ? Theme.active.needle_peak : Theme.active.secondary_accent;
                         horizontal-alignment: center;
                         vertical-alignment: center;

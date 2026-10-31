@@ -41,6 +41,11 @@ pub struct CoreCliOptions {
     pub screen: ScreenTarget,
     /// Whether to populate the Bluetooth Playing screen with a demo track.
     pub demo_playback: bool,
+    /// Theme preset to apply on startup.
+    #[cfg(feature = "ui")]
+    pub theme: Option<crate::ui::ThemePreset>,
+    /// Navigation dock tab to open on startup (0 to 5).
+    pub tab: Option<i32>,
 }
 
 /// Prints usage text for the core daemon executable.
@@ -52,6 +57,12 @@ pub fn print_usage(bin_name: &str) {
     println!("Options:");
     println!("  -s, --screen <splash|shell> Target screen to render (default: splash)");
     println!("  -d, --demo-playback         Render Bluetooth Playing screen with demo track");
+    println!(
+        "  -t, --theme <PRESET>        Appliance theme preset (mcintosh, marantz, cyberpunk, studio-dark, peppy)"
+    );
+    println!(
+        "  -T, --tab <TAB>             Active UI tab on startup (0-5 or name: player, vu, bt, cd, dsp, settings)"
+    );
     println!("  -p, --preview <SECS>        Render UI for SECS seconds");
     println!("  -l, --loop                  Hold UI on screen continuously");
     println!("  -V, --version               Print version and exit");
@@ -73,6 +84,27 @@ pub fn parse_preview_secs(val: &str) -> Result<u64, String> {
         .map_err(|e| format!("invalid preview seconds '{val}': {e}"))
 }
 
+/// Parses and validates a `--tab <TAB>` argument value.
+///
+/// Accepts integer tab indices (0 to 5) or standard tab slug names:
+/// `player`, `vu` / `peppy`, `bluetooth`, `cd`, `dsp`, `settings`.
+///
+/// # Errors
+/// Returns a descriptive error string if `val` is invalid.
+pub fn parse_tab_arg(val: &str) -> Result<i32, String> {
+    match val.trim().to_ascii_lowercase().as_str() {
+        "0" | "player" | "now-playing" | "nowplaying" => Ok(0),
+        "1" | "vu" | "vumeter" | "meter" | "peppy" | "peepy" | "peppymeter" => Ok(1),
+        "2" | "bt" | "bluetooth" => Ok(2),
+        "3" | "cd" | "optical" => Ok(3),
+        "4" | "dsp" | "tone" | "camilla" => Ok(4),
+        "5" | "settings" | "prefs" | "preferences" | "theme" => Ok(5),
+        other => Err(format!(
+            "invalid tab '{other}': expected 0-5 or 'player', 'vu', 'bluetooth', 'cd', 'dsp', 'settings'"
+        )),
+    }
+}
+
 /// Parses command-line arguments into structured [`CoreCliOptions`].
 ///
 /// # Errors
@@ -91,6 +123,20 @@ where
             "-d" | "--demo" | "--demo-playback" => {
                 opts.demo_playback = true;
                 opts.screen = ScreenTarget::Shell;
+            }
+            "-t" | "--theme" => {
+                let val = next_arg_value(&mut iter, "--theme")?;
+                #[cfg(feature = "ui")]
+                {
+                    let preset = crate::ui::ThemePreset::parse_slug(&val)?;
+                    opts.theme = Some(preset);
+                }
+                #[cfg(not(feature = "ui"))]
+                let _ = val;
+            }
+            "-T" | "--tab" => {
+                let val = next_arg_value(&mut iter, "--tab")?;
+                opts.tab = Some(parse_tab_arg(&val)?);
             }
             "-s" | "--screen" => {
                 let val = next_arg_value(&mut iter, "--screen")?;
@@ -137,6 +183,8 @@ pub fn run_ui_display(
     preview_secs: Option<u64>,
     run_loop: bool,
     demo_playback: bool,
+    theme: Option<crate::ui::ThemePreset>,
+    tab: Option<i32>,
 ) {
     if headless_requested() {
         tracing::info!("Headless mode requested via SPEAKER_CORE_HEADLESS=1");
@@ -149,6 +197,8 @@ pub fn run_ui_display(
         preview_secs,
         run_loop,
         demo_playback,
+        theme,
+        tab,
     );
 }
 
@@ -167,6 +217,8 @@ pub fn run_ui_display_on_path(
     preview_secs: Option<u64>,
     run_loop: bool,
     demo_playback: bool,
+    theme: Option<crate::ui::ThemePreset>,
+    tab: Option<i32>,
 ) {
     if !fb_path.exists() {
         tracing::info!("Headless/simulated environment (no /dev/fb0 detected)");
@@ -188,7 +240,9 @@ pub fn run_ui_display_on_path(
 
     match screen {
         ScreenTarget::Splash => run_splash_on(&mut fb, preview_secs, run_loop),
-        ScreenTarget::Shell => run_shell_on(&mut fb, preview_secs, run_loop, demo_playback),
+        ScreenTarget::Shell => {
+            run_shell_on(&mut fb, preview_secs, run_loop, demo_playback, theme, tab);
+        }
     }
 }
 
@@ -274,16 +328,30 @@ pub fn run_splash_on(fb: &mut Framebuffer, preview_secs: Option<u64>, run_loop: 
 }
 
 #[cfg(feature = "ui")]
-fn init_shell(
+#[must_use]
+pub fn init_shell(
     demo_playback: bool,
     main_window: MainWindow,
+    mocked_device: bool,
+    theme: Option<crate::ui::ThemePreset>,
+    tab: Option<i32>,
 ) -> (AppShell, Option<crate::hardware::BluetoothDevice>) {
     let shell = AppShell::new(main_window);
-    if demo_playback {
+    if let Some(t) = theme {
+        shell.apply_theme(t);
+    }
+    let maybe_bt = if demo_playback {
         let (mock_bt, _) = crate::hardware::BluetoothDevice::new_mocked();
         shell.wire_bluetooth_transport(mock_bt);
         shell.apply_demo_playback();
-        (shell, None)
+        None
+    } else if mocked_device {
+        let (mock_bt, _) = crate::hardware::BluetoothDevice::new_mocked();
+        if let Ok(Some(ref pb)) = mock_bt.playback_state() {
+            shell.apply_bluetooth_playback(pb);
+        }
+        shell.wire_bluetooth_transport(mock_bt.clone());
+        Some(mock_bt)
     } else {
         match crate::hardware::BluetoothDevice::new() {
             Ok(bt) => {
@@ -291,7 +359,7 @@ fn init_shell(
                     shell.apply_bluetooth_playback(pb);
                 }
                 shell.wire_bluetooth_transport(bt.clone());
-                (shell, Some(bt))
+                Some(bt)
             }
             Err(e) => {
                 report_display(
@@ -299,10 +367,14 @@ fn init_shell(
                     "Failed to connect to Bluetooth D-Bus for UI transport",
                     &e,
                 );
-                (shell, None)
+                None
             }
         }
+    };
+    if let Some(tb) = tab {
+        shell.set_tab(tb);
     }
+    (shell, maybe_bt)
 }
 
 #[cfg(feature = "ui")]
@@ -329,12 +401,16 @@ pub fn run_render_loop(
 
     while run_loop || duration.is_some_and(|d| start.elapsed() < d) {
         if demo_playback {
-            sim_pos_ms = (sim_pos_ms + 16) % sim_dur_ms;
-            sim_tick = sim_tick.wrapping_add(1);
-            shell.set_playback_state(true, sim_pos_ms, sim_dur_ms);
-            let l_peak = 0.65 + 0.15 * ((sim_tick as f32 * 0.1).sin()).abs();
-            let r_peak = 0.60 + 0.18 * ((sim_tick as f32 * 0.12).cos()).abs();
-            shell.set_peak_levels(l_peak, r_peak);
+            if shell.is_playing() {
+                sim_pos_ms = (sim_pos_ms + 16) % sim_dur_ms;
+                sim_tick = sim_tick.wrapping_add(1);
+                shell.set_playback_state(true, sim_pos_ms, sim_dur_ms);
+                let l_peak = 0.65 + 0.15 * ((sim_tick as f32 * 0.1).sin()).abs();
+                let r_peak = 0.60 + 0.18 * ((sim_tick as f32 * 0.12).cos()).abs();
+                shell.set_peak_levels(l_peak, r_peak);
+            } else {
+                shell.set_peak_levels(0.0, 0.0);
+            }
             window.request_redraw();
         } else if let Some(bt) = maybe_bt {
             if last_bt_sync.elapsed() >= Duration::from_millis(500) {
@@ -364,6 +440,8 @@ pub fn run_shell_on(
     preview_secs: Option<u64>,
     run_loop: bool,
     demo_playback: bool,
+    theme: Option<crate::ui::ThemePreset>,
+    tab: Option<i32>,
 ) {
     if let Err(e) = fb.unblank() {
         report_display(tracing::Level::WARN, "Failed to unblank display", &e);
@@ -389,7 +467,13 @@ pub fn run_shell_on(
         }
     };
 
-    let (shell, maybe_bt) = init_shell(demo_playback, main_window);
+    let (shell, maybe_bt) = init_shell(
+        demo_playback,
+        main_window,
+        !fb.is_hardware_panel(),
+        theme,
+        tab,
+    );
     if let Err(e) = shell.window().show() {
         report_display(
             tracing::Level::ERROR,
@@ -399,20 +483,12 @@ pub fn run_shell_on(
         return;
     }
 
-    match fb.render_frame(&window) {
-        Ok(true) => {
-            tracing::info!("UI Shell rendered to /dev/fb0 successfully");
-            println!("  Display: UI Shell rendered to /dev/fb0 successfully!");
-        }
-        Ok(false) => {
-            tracing::debug!("Screen buffer already current");
-            println!("  Display: Screen buffer already current.");
-        }
-        Err(e) => {
-            report_display(tracing::Level::ERROR, "Failed to render frame", &e);
-            return;
-        }
+    if let Err(e) = fb.render_frame(&window) {
+        report_display(tracing::Level::ERROR, "Failed to render frame", &e);
+        return;
     }
+    tracing::info!("UI Shell rendered to /dev/fb0 successfully");
+    println!("  Display: UI Shell rendered to /dev/fb0 successfully!");
 
     if run_loop || preview_secs.is_some() {
         run_render_loop(
@@ -443,6 +519,8 @@ pub fn run_app(opts: CoreCliOptions) -> ExitCode {
         opts.preview_secs,
         opts.run_loop,
         opts.demo_playback,
+        opts.theme,
+        opts.tab,
     );
 
     #[cfg(not(feature = "ui"))]
@@ -451,6 +529,7 @@ pub fn run_app(opts: CoreCliOptions) -> ExitCode {
         opts.preview_secs,
         opts.run_loop,
         opts.demo_playback,
+        opts.tab,
     );
     #[cfg(not(feature = "ui"))]
     println!("  Display: UI feature disabled at compile-time.");
