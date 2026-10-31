@@ -2,6 +2,7 @@
 //! Integration tests for the Linux Framebuffer driver and Slint platform backend.
 
 use std::fs;
+use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::rc::Rc;
@@ -167,6 +168,38 @@ fn framebuffer_hardware_tempfile_mmap() {
     let drawn = fb.render_frame(&window).unwrap();
     assert!(drawn);
     assert_eq!(fb.pixels().len(), 384_000);
+
+    // `RepaintBufferType::ReusedBuffer`: an unchanged scene must not redraw or blit.
+    let unchanged = fb.render_frame(&window).unwrap();
+    assert!(!unchanged);
+
+    window.request_redraw();
+    assert!(fb.render_frame(&window).unwrap());
+}
+
+#[test]
+fn framebuffer_mmap_blits_dirty_rect_only_into_scanout() {
+    let temp = ScopedTempDir::try_new("fb_blit_test").unwrap();
+    let dev_file = temp.path().join("fake_fb");
+    fs::write(&dev_file, vec![0u8; 800 * 480 * 4]).unwrap();
+
+    let mut fb = Framebuffer::open(&dev_file, None::<&Path>).unwrap();
+    let window = fb.init_platform().unwrap();
+    window.request_redraw();
+    assert!(fb.render_frame(&window).unwrap());
+
+    // The blitted scanout must match the cached shadow buffer exactly after a render.
+    assert_eq!(fb.pixels(), fb.shadow_buffer());
+}
+
+#[test]
+fn framebuffer_vsync_probe_fails_gracefully_on_regular_file() {
+    let temp = ScopedTempDir::try_new("fb_vsync_test").unwrap();
+    let dev_file = temp.path().join("fake_fb");
+    fs::write(&dev_file, vec![0u8; 16]).unwrap();
+
+    let file = File::open(&dev_file).unwrap();
+    assert!(!Framebuffer::wait_for_vsync(&file));
 }
 
 #[test]

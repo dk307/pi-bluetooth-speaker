@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use std::fmt::{self, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::rc::Rc;
@@ -34,8 +35,21 @@ use slint::platform::software_renderer::{
 };
 use slint::platform::{Platform, PlatformError};
 
+/// `FBIO_WAITFORVSYNC` ioctl request number (`_IOW('F', 0x20, u32)`), blocks until the
+/// display controller's next vertical blanking interval.
+const FBIO_WAITFORVSYNC: libc::c_ulong = 0x4004_4620;
+
 thread_local! {
     static ACTIVE_WINDOW: RefCell<Option<Rc<MinimalSoftwareWindow>>> = const { RefCell::new(None) };
+    /// Whether the primary appliance window has already been claimed by a component.
+    /// The first component created after [`Framebuffer::init_platform`] binds to the
+    /// primary window; later components (offscreen marquee strip rasterizers) receive
+    /// independent throwaway windows.
+    static ACTIVE_WINDOW_CLAIMED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// The most recently created secondary (offscreen) window, kept as a weak reference so
+    /// callers can bind freshly created offscreen components to their own window.
+    static LAST_SECONDARY_WINDOW: RefCell<Option<std::rc::Weak<MinimalSoftwareWindow>>> =
+        const { RefCell::new(None) };
 }
 
 /// A 32-bit little-endian BGRX pixel matching the Raspberry Pi 3 `/dev/fb0` format.
@@ -259,6 +273,19 @@ fn invalid_panel_geometry(message: impl Into<Box<str>>) -> FramebufferError {
     )
 }
 
+/// Output synchronization strategy selected when a hardware device is opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanoutSync {
+    /// Real fbdev character device (`bcm2708_fb`): rendering targets the cached RAM
+    /// shadow buffer and only the dirty rectangle is blitted into the uncached scanout
+    /// mapping, optionally paced to the hardware vertical blanking interval
+    /// (`vsync` probe succeeded).
+    CharDevice { vsync: bool },
+    /// Regular file mapping (host test/dev fallback): legacy buffered line path with
+    /// an `msync` flush to persist the mapping.
+    FileMapped,
+}
+
 /// Backend implementation for the framebuffer sink.
 #[derive(Debug)]
 enum Backend {
@@ -268,6 +295,7 @@ enum Backend {
         dev_path: Box<str>,
         blank_path: Option<Box<str>>,
         back_buffer: Vec<Bgrx8888Pixel>,
+        sync: ScanoutSync,
     },
     Mock {
         buffer: Vec<Bgrx8888Pixel>,
@@ -371,8 +399,23 @@ impl Platform for FramebufferPlatform {
     fn create_window_adapter(
         &self,
     ) -> Result<Rc<dyn slint::platform::WindowAdapter>, PlatformError> {
-        Ok(get_or_create_active_window(None) as Rc<dyn slint::platform::WindowAdapter>)
+        let claimed = ACTIVE_WINDOW_CLAIMED.with(core::cell::Cell::get);
+        if !claimed {
+            ACTIVE_WINDOW_CLAIMED.with(|cell| cell.set(true));
+            return Ok(get_or_create_active_window(None) as Rc<dyn slint::platform::WindowAdapter>);
+        }
+        // Secondary components get their own offscreen window (full redraw is fine for
+        // the tiny single-frame rasterizer surfaces).
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        LAST_SECONDARY_WINDOW.with(|cell| *cell.borrow_mut() = Some(Rc::downgrade(&window)));
+        Ok(window)
     }
+}
+
+/// Returns the most recently created secondary (offscreen) window, if it is still alive.
+#[must_use]
+pub(crate) fn take_last_secondary_window() -> Option<Rc<MinimalSoftwareWindow>> {
+    LAST_SECONDARY_WINDOW.with(|cell| cell.borrow_mut().take().and_then(|weak| weak.upgrade()))
 }
 
 /// Linux framebuffer display controller managing memory-mapped video RAM and sysfs unblanking.
@@ -391,35 +434,20 @@ const _: () = {
     assert!(Framebuffer::DEFAULT_WIDTH == 800 && Framebuffer::DEFAULT_HEIGHT == 480);
 };
 
-/// Line-by-line render target.
+/// Line-by-line render target into cached RAM pixels.
 ///
-/// When `scratch` is non-empty (memory-mapped `/dev/fb0`), each line is rendered into a cached
-/// RAM row and then copied to the scanout buffer write-only. The framebuffer mapping is
-/// uncached device memory, so blending text directly into it (read-modify-write per pixel)
-/// is extremely slow and keeps the scanout buffer in a half-drawn state for most of a frame.
+/// The hardware scanout mapping is uncached device memory, so all Slint rendering is
+/// routed through the persistent cached shadow buffer ([`FbLineBuffer::direct`]) and
+/// only the resulting dirty rectangle is copied into video RAM afterwards.
 struct FbLineBuffer<'a> {
     pixels: &'a mut [Bgrx8888Pixel],
     stride: usize,
-    scratch: Vec<Bgrx8888Pixel>,
 }
 
 impl<'a> FbLineBuffer<'a> {
-    /// Renders directly into `pixels` (cached RAM targets).
+    /// Renders directly into cached RAM `pixels` (shadow buffer, mocks, file backends).
     fn direct(pixels: &'a mut [Bgrx8888Pixel], stride: usize) -> Self {
-        Self {
-            pixels,
-            stride,
-            scratch: Vec::new(),
-        }
-    }
-
-    /// Renders via a cached scratch row, then copies to `pixels` (uncached device memory).
-    fn buffered(pixels: &'a mut [Bgrx8888Pixel], stride: usize) -> Self {
-        Self {
-            pixels,
-            stride,
-            scratch: vec![Bgrx8888Pixel::default(); stride],
-        }
+        Self { pixels, stride }
     }
 }
 
@@ -433,13 +461,7 @@ impl LineBufferProvider for FbLineBuffer<'_> {
         render_fn: impl FnOnce(&mut [Self::TargetPixel]),
     ) {
         let offset = line * self.stride + range.start;
-        if self.scratch.is_empty() {
-            render_fn(&mut self.pixels[offset..offset + range.len()]);
-        } else {
-            let row = &mut self.scratch[range.clone()];
-            render_fn(row);
-            self.pixels[offset..offset + range.len()].copy_from_slice(row);
-        }
+        render_fn(&mut self.pixels[offset..offset + range.len()]);
     }
 }
 
@@ -537,6 +559,17 @@ impl Framebuffer {
         let back_buffer =
             vec![Bgrx8888Pixel::default(); Self::SCANOUT_BYTE_LEN / Self::BYTES_PER_PIXEL];
 
+        // Real fbdev character devices render through the cached RAM shadow buffer and
+        // pace blits to the hardware VBlank when the driver supports `FBIO_WAITFORVSYNC`.
+        // Regular-file mappings keep the legacy buffered line path with an msync flush.
+        let sync = if is_fb_char_device {
+            ScanoutSync::CharDevice {
+                vsync: Self::wait_for_vsync(&file),
+            }
+        } else {
+            ScanoutSync::FileMapped
+        };
+
         Ok(Self {
             backend: Backend::Hardware {
                 file,
@@ -544,6 +577,7 @@ impl Framebuffer {
                 dev_path: dev_path_str,
                 blank_path: blank_path_str,
                 back_buffer,
+                sync,
             },
         })
     }
@@ -735,6 +769,9 @@ impl Framebuffer {
             Self::DEFAULT_WIDTH,
             Self::DEFAULT_HEIGHT,
         )));
+        // A fresh platform registration cycle re-arms the primary-window claim so the
+        // next component binds to the primary appliance window.
+        ACTIVE_WINDOW_CLAIMED.with(|cell| cell.set(false));
 
         // Set platform once per thread; AlreadySet is expected across multiple component cycles.
         match slint::platform::set_platform(Box::new(FramebufferPlatform)) {
@@ -760,6 +797,12 @@ impl Framebuffer {
 
     /// Renders a pending frame into the framebuffer if redraw was requested.
     ///
+    /// On hardware (`/dev/fb0` character device), Slint renders into the cached RAM
+    /// shadow buffer, the frame is paced to the hardware vertical blanking interval
+    /// when supported, and only the dirty rectangle is blitted into the uncached
+    /// scanout mapping. On regular-file mappings, the dirty rectangle is blitted and
+    /// the mapping is flushed with `msync`.
+    ///
     /// Returns `true` if a frame was rendered, or `false` if no redraw was pending.
     ///
     /// # Errors
@@ -781,17 +824,44 @@ impl Framebuffer {
                 mmap,
                 dev_path,
                 back_buffer,
+                sync,
                 ..
             } => {
                 if let Some(mmap_mut) = mmap {
                     let pixel_slice = Bgrx8888Pixel::try_from_bytes_mut(mmap_mut)?;
+                    let mut dirty = (0_usize, 0_usize, 0_usize, 0_usize);
                     let did_draw = window.draw_if_needed(|renderer| {
-                        renderer.render_by_line(FbLineBuffer::buffered(pixel_slice, width));
+                        let region =
+                            renderer.render_by_line(FbLineBuffer::direct(back_buffer, width));
+                        let origin = region.bounding_box_origin();
+                        let size = region.bounding_box_size();
+                        dirty = (
+                            usize::try_from(origin.x).unwrap_or(0),
+                            usize::try_from(origin.y).unwrap_or(0),
+                            usize::try_from(size.width).unwrap_or(0),
+                            usize::try_from(size.height).unwrap_or(0),
+                        );
                     });
                     if did_draw {
-                        mmap_mut
-                            .flush()
-                            .map_err(|e| FramebufferError::io(dev_path.clone(), e))?;
+                        if matches!(*sync, ScanoutSync::CharDevice { vsync: true }) {
+                            // The vsync wait itself paces this frame to the hardware
+                            // refresh; the boolean result is informational only.
+                            let _ = Self::wait_for_vsync(file);
+                        }
+                        Self::blit_dirty_rect(
+                            back_buffer,
+                            pixel_slice,
+                            width,
+                            dirty.0,
+                            dirty.1,
+                            dirty.2,
+                            dirty.3,
+                        );
+                        if *sync == ScanoutSync::FileMapped {
+                            mmap_mut
+                                .flush()
+                                .map_err(|e| FramebufferError::io(dev_path.clone(), e))?;
+                        }
                     }
                     Ok(did_draw)
                 } else {
@@ -827,6 +897,46 @@ impl Framebuffer {
         }
     }
 
+    /// Blocks until the display controller's next vertical blanking interval.
+    ///
+    /// Issues the `FBIO_WAITFORVSYNC` ioctl on the framebuffer file descriptor so the
+    /// render loop is paced by the panel's hardware refresh clock instead of drifting
+    /// software timers.
+    ///
+    /// Returns `true` if the hardware `VBlank` wait succeeded, or `false` when the file
+    /// descriptor does not support the ioctl (regular files, mocks, other fb drivers).
+    #[must_use]
+    pub fn wait_for_vsync(file: &File) -> bool {
+        // `FBIO_WAITFORVSYNC` copies a `u32` CRTC index from userspace; `0` selects the
+        // primary display output on `bcm2708_fb`.
+        let crtc: libc::c_uint = 0;
+        // SAFETY: `file` is an open file descriptor and `crtc` outlives the syscall.
+        unsafe { libc::ioctl(file.as_raw_fd(), FBIO_WAITFORVSYNC, &crtc) == 0 }
+    }
+
+    /// Copies the dirty rectangle scanlines from the cached shadow buffer into the
+    /// uncached scanout mapping (write-only, no read-modify-write bus traffic).
+    fn blit_dirty_rect(
+        back_buffer: &[Bgrx8888Pixel],
+        scanout: &mut [Bgrx8888Pixel],
+        stride: usize,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    ) {
+        let x_end = x.saturating_add(width).min(stride);
+        let y_end = y.saturating_add(height).min(scanout.len() / stride);
+        if x >= x_end || y >= y_end {
+            return;
+        }
+        for row in y..y_end {
+            let offset = row * stride;
+            let dest = &mut scanout[offset + x..offset + x_end];
+            dest.copy_from_slice(&back_buffer[offset + x..offset + x_end]);
+        }
+    }
+
     /// Returns the fixed display panel width in pixels.
     #[must_use]
     pub const fn width(&self) -> u32 {
@@ -849,6 +959,21 @@ impl Framebuffer {
     #[must_use]
     pub const fn byte_len(&self) -> usize {
         Self::SCANOUT_BYTE_LEN
+    }
+
+    /// Returns a slice of the cached RAM shadow render buffer.
+    ///
+    /// On hardware backends this is the persistent buffer Slint renders into before
+    /// the dirty rectangle is blitted into the scanout mapping.
+    #[must_use]
+    pub fn shadow_buffer(&self) -> &[Bgrx8888Pixel] {
+        match &self.backend {
+            Backend::Hardware { back_buffer, .. }
+            | Backend::Mock {
+                buffer: back_buffer,
+                ..
+            } => back_buffer,
+        }
     }
 
     /// Returns a slice of the rendered pixels.

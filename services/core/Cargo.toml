@@ -87,9 +87,12 @@ tracing-subscriber = "=0.3.23"
 async-trait = "=0.1.86"
 memmap2 = { version = "=0.9.12", optional = true }
 
+# Raw `ioctl` syscalls for framebuffer VSync pacing (`FBIO_WAITFORVSYNC`)
+libc = { version = "=0.2.191", optional = true }
+
 [features]
 default = ["ui"]
-ui = ["dep:slint", "dep:slint-build", "dep:memmap2"]
+ui = ["dep:slint", "dep:slint-build", "dep:memmap2", "dep:libc"]
 linuxkms = ["ui", "slint/backend-linuxkms"]
 simulator = ["ui", "slint/backend-winit", "slint/renderer-femtovg"]
 test-util = []

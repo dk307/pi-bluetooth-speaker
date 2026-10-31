@@ -7,18 +7,21 @@
 //!
 //! Follows Microsoft Pragmatic Rust Guidelines (`M-SERVICES-CLONE`, `M-STRONG-TYPES`).
 
+use std::cell::RefCell;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::{Arc, Mutex};
 
 use slint::ComponentHandle;
 
 use super::generated::{MainWindow, Theme};
+use super::marquee::{MarqueeStripCache, MarqueeTypography, StripRequest};
 use super::theme::ThemePreset;
 
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
     last_cover_path: Arc<Mutex<Option<Box<str>>>>,
+    strips: RefCell<MarqueeStripCache>,
 }
 
 impl Debug for AppShell {
@@ -37,6 +40,7 @@ impl AppShell {
         let shell = Self {
             window,
             last_cover_path: Arc::new(Mutex::new(None)),
+            strips: RefCell::new(MarqueeStripCache::default()),
         };
 
         shell.setup_callbacks();
@@ -115,6 +119,7 @@ impl AppShell {
         self.window.set_track_title(title.into());
         self.window.set_track_artist(artist.into());
         self.window.set_track_album(album.into());
+        self.refresh_marquee_strips();
     }
 
     /// Returns the current volume percentage (0.0–100.0).
@@ -263,6 +268,7 @@ impl AppShell {
     /// Applies state from a [`crate::hardware::BtPlaybackState`] point-in-time snapshot.
     pub fn apply_bluetooth_playback(&self, playback: &crate::hardware::BtPlaybackState) {
         Self::apply_playback_to_window(&self.window, &self.last_cover_path, playback);
+        self.refresh_marquee_strips();
     }
 
     fn apply_playback_to_window(
@@ -270,15 +276,30 @@ impl AppShell {
         cover_cache: &Mutex<Option<Box<str>>>,
         playback: &crate::hardware::BtPlaybackState,
     ) {
-        w.set_track_title(playback.title.as_ref().into());
-        w.set_track_artist(playback.artist.as_ref().into());
-        w.set_track_album(playback.album.as_ref().into());
+        // Only notify Slint property bindings when the value actually changed: the
+        // Bluetooth worker re-applies state every 250 ms position tick, and
+        // unconditional `set_track_*` calls invalidate `MarqueeText` layout bindings
+        // and force text re-shaping four times per second during active scrolling.
+        if w.get_track_title().as_str() != playback.title.as_ref() {
+            w.set_track_title(playback.title.as_ref().into());
+        }
+        if w.get_track_artist().as_str() != playback.artist.as_ref() {
+            w.set_track_artist(playback.artist.as_ref().into());
+        }
+        if w.get_track_album().as_str() != playback.album.as_ref() {
+            w.set_track_album(playback.album.as_ref().into());
+        }
         #[expect(
             clippy::cast_possible_wrap,
             reason = "duration_ms up to i32::MAX fits cleanly in slint int"
         )]
-        w.set_duration_ms(playback.duration_ms as i32);
-        w.set_is_playing(playback.is_playing());
+        if w.get_duration_ms() != playback.duration_ms as i32 {
+            w.set_duration_ms(playback.duration_ms as i32);
+        }
+        let playing = playback.is_playing();
+        if w.get_is_playing() != playing {
+            w.set_is_playing(playing);
+        }
         let ratio = if playback.duration_ms == 0 {
             0.0
         } else {
@@ -286,8 +307,13 @@ impl AppShell {
         };
         w.set_progress_ratio(ratio);
         w.set_position_text(crate::hardware::format_duration_ms(playback.position_ms).into());
-        w.set_duration_text(crate::hardware::format_duration_ms(playback.duration_ms).into());
-        if !playback.device_name.is_empty() {
+        let duration_text = crate::hardware::format_duration_ms(playback.duration_ms);
+        if w.get_duration_text().as_str() != duration_text.as_str() {
+            w.set_duration_text(duration_text.into());
+        }
+        if !playback.device_name.is_empty()
+            && w.get_track_or_device().as_str() != playback.device_name.as_ref()
+        {
             w.set_track_or_device(playback.device_name.as_ref().into());
         }
 
@@ -314,6 +340,43 @@ impl AppShell {
     /// Applies a theme preset to the UI shell.
     pub fn apply_theme(&self, preset: ThemePreset) {
         preset.apply(&self.window);
+        self.refresh_marquee_strips();
+    }
+
+    /// Re-rasterizes the marquee strips when their text, color, or typography changed.
+    ///
+    /// Cached strips make this a no-op while metadata, theme, and typography are stable,
+    /// so repeated playback-state ticks perform no offscreen rasterization.
+    fn refresh_marquee_strips(&self) {
+        let w = &self.window;
+        let preset = self.current_theme();
+        let palette = preset.palette();
+        let rgb = |color: slint::Color| (color.red(), color.green(), color.blue());
+
+        let title_request = StripRequest {
+            text: w.get_track_title().as_str().into(),
+            color: rgb(palette.text_primary),
+            font_size_px: MarqueeTypography::TITLE_FONT_SIZE_PX,
+            font_weight: MarqueeTypography::TITLE_FONT_WEIGHT,
+            font_family: preset.font_family().into(),
+        };
+        let artist_request = StripRequest {
+            text: w.get_artist_marquee_text().as_str().into(),
+            color: rgb(palette.secondary_accent),
+            font_size_px: MarqueeTypography::ARTIST_FONT_SIZE_PX,
+            font_weight: MarqueeTypography::ARTIST_FONT_WEIGHT,
+            font_family: preset.font_family().into(),
+        };
+
+        let (title_strip, artist_strip) = {
+            let mut cache = self.strips.borrow_mut();
+            (
+                cache.rasterize_title(&title_request),
+                cache.rasterize_artist(&artist_request),
+            )
+        };
+        w.set_title_marquee_strip(title_strip.image().clone());
+        w.set_artist_marquee_strip(artist_strip.image().clone());
     }
 
     /// Cycles to the next available theme preset in cyclic order.

@@ -15,16 +15,16 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "ui")]
 use std::time::{Duration, Instant};
 
-use crate::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts};
+use crate::diag::{env_args, next_arg_value, resolve_cli_opts, CliParse};
 use crate::hardware::TempSensor;
 #[cfg(feature = "ui")]
 use crate::ui::{AppShell, Framebuffer, MainWindow, SplashScreen};
 #[cfg(feature = "ui")]
-use slint::ComponentHandle;
+use slint::platform::software_renderer::MinimalSoftwareWindow;
 #[cfg(feature = "ui")]
 use slint::platform::WindowAdapter;
 #[cfg(feature = "ui")]
-use slint::platform::software_renderer::MinimalSoftwareWindow;
+use slint::ComponentHandle;
 
 /// Target screen to render on the framebuffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -461,10 +461,10 @@ pub fn run_render_loop(
             }
         }
 
+        // No unconditional `request_redraw()` here: the marquee timers and real Slint
+        // animations mark the window dirty themselves, so the loop idles when the UI is
+        // static instead of burning a full render pass every 16.7 ms frame.
         let is_animating = shell.window().get_is_animating();
-        if is_animating {
-            window.window().request_redraw();
-        }
 
         slint::platform::update_timers_and_animations();
         let did_render = match fb.render_frame(window) {

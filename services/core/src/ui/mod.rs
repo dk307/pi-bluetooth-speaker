@@ -19,6 +19,7 @@ mod generated {
 }
 
 pub(crate) mod framebuffer;
+pub(crate) mod marquee;
 pub(crate) mod shell;
 pub(crate) mod theme;
 
@@ -26,6 +27,11 @@ pub(crate) mod theme;
 pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError, FramebufferMockCtrl};
 #[doc(inline)]
 pub use generated::{MainWindow, SplashScreen, Theme, ThemePalette};
+#[doc(inline)]
+pub use marquee::{
+    MarqueeStrip, MarqueeStripCache, MarqueeStripRasterizer, MarqueeTypography, RgbaPremulPixel,
+    StripRequest,
+};
 #[doc(inline)]
 pub use shell::AppShell;
 #[doc(inline)]

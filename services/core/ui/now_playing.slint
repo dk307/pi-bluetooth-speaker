@@ -1,52 +1,60 @@
 import { Theme } from "theme.slint";
 
+// Scrolling marquee over a pre-rasterized text strip image.
+//
+// The strip image is rendered offscreen (see `marquee_rasterizer.slint`) only when its
+// text, color, or typography changes; per-frame work here is a cheap pixel blit instead
+// of glyph shaping and rasterization. `strip` is empty until the first raster completes.
 component MarqueeText inherits Rectangle {
-    in property <string> text;
-    in property <color> text_color;
-    in property <length> font-size: 16px;
-    in property <int> font-weight: 400;
-
+    in property <image> strip;
     clip: true;
-    height: txt1.preferred-height;
+    height: strip_item.preferred-height;
     horizontal-stretch: 1;
     preferred-width: 0px;
 
-    property <length> text_width: txt1.preferred-width;
+    strip_item := Image {
+        x: root.scroll_offset;
+        source: root.strip;
+    }
+
+    property <length> text_width: strip_item.width;
     out property <bool> is_overflow: text_width > root.width;
     property <length> gap: 80px;
     property <length> cycle_distance: text_width + gap;
 
-    // Unidirectional marquee: 2.0s stationary pause at start, then constant-speed leftward scroll.
-    // The software renderer snaps text to whole pixels, so the speed is ~1 physical px per
-    // 60 fps frame (60px/s) to avoid uneven 0/1/0/1 px steps that read as judder.
-    property <length> speed: 60px;
+    // Unidirectional marquee: 2.0s stationary pause at start, then constant-speed leftward
+    // scroll. The offset derives from a self-advancing integer frame counter: 1 tick = 1
+    // physical px step at the panel's measured 60.06 Hz hardware refresh (16.65 ms), giving
+    // deterministic 1 px/frame motion. Reading `animation-tick()` was deliberately avoided:
+    // it permanently marks Slint's animation driver active, pinning the render loop at
+    // 60 fps (and ~60% CPU) even while the marquee is paused or the text does not overflow.
+    property <int> cycle_frames: Math.max(1, Math.round(cycle_distance / 1px));
+    property <int> pause_frames: Math.round(pause_secs * 60);
+    property <int> total_frames: Math.max(pause_frames + cycle_frames, 1);
+    property <int> scroll_frame: 0;
     property <float> pause_secs: 2.0;
-    property <float> scroll_secs: Math.max(1.0, (cycle_distance / speed));
-    property <float> period: is_overflow ? (pause_secs + scroll_secs) : 1000.0;
-
-    property <float> phase_t: is_overflow ? Math.mod(animation-tick() / 1s, period) : 0.0;
-    property <float> progress: (phase_t < pause_secs) ? 0.0 : ((phase_t - pause_secs) / scroll_secs);
-    // Smooth continuous subpixel scroll offset (no integer truncation):
+    property <float> progress: scroll_frame < pause_frames ?
+        0.0 : ((scroll_frame - pause_frames) * 1.0 / cycle_frames);
     property <length> scroll_offset: is_overflow ? (-cycle_distance * progress) : 0px;
 
-    txt1 := Text {
-        x: root.scroll_offset;
-        width: root.is_overflow ? root.text_width : parent.width;
-        text: root.text;
-        color: root.text_color;
-        font-size: root.font-size;
-        font-weight: root.font-weight;
-        vertical-alignment: center;
+    Timer {
+        interval: 16.65ms;
+        running: root.is_overflow;
+        triggered() => {
+            root.scroll_frame = Math.mod(root.scroll_frame + 1, root.total_frames);
+        }
     }
 
-    if root.is_overflow : Text {
+    changed strip => {
+        root.scroll_frame = 0;
+    }
+
+    // The wrap-around copy is only ever visible once the trailing gap of the first
+    // copy has entered the viewport's right edge; skipping it otherwise halves the
+    // per-frame image blit area.
+    if root.is_overflow && root.scroll_offset + root.cycle_distance < root.width : Image {
         x: root.scroll_offset + root.cycle_distance;
-        width: root.text_width;
-        text: root.text;
-        color: root.text_color;
-        font-size: root.font-size;
-        font-weight: root.font-weight;
-        vertical-alignment: center;
+        source: root.strip;
     }
 }
 
@@ -112,6 +120,9 @@ export component NowPlayingView inherits Rectangle {
     in property <string> track_title: "Waiting for Bluetooth Connection...";
     in property <string> track_artist: "DietPi Audiophile Speaker";
     in property <string> track_album: "";
+    in property <string> artist_marquee_text;
+    in property <image> title_marquee_strip;
+    in property <image> artist_marquee_strip;
     in property <string> position_text: "00:00";
     in property <string> duration_text: "00:00";
     in property <float> progress_ratio: 0.0;
@@ -185,10 +196,7 @@ export component NowPlayingView inherits Rectangle {
                 spacing: 6px;
 
                 title_marquee := MarqueeText {
-                    text: root.track_title;
-                    font-size: 30px;
-                    font-weight: 800;
-                    text_color: Theme.active.text_primary;
+                    strip: root.title_marquee_strip;
                 }
 
                 HorizontalLayout {
@@ -196,11 +204,7 @@ export component NowPlayingView inherits Rectangle {
 
                     artist_marquee := MarqueeText {
                         horizontal-stretch: 1;
-                        text: (root.track_album != "" && root.track_album != "High-Resolution DSP Sink" && root.track_album != "Audiophile DSP Sink") ? 
-                              (root.track_artist + " • " + root.track_album) : root.track_artist;
-                        font-size: 22px;
-                        font-weight: 700;
-                        text_color: Theme.active.secondary_accent;
+                        strip: root.artist_marquee_strip;
                     }
 
                     if root.is_playing : AmbientWaveIndicator {

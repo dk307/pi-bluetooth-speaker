@@ -167,3 +167,18 @@ In [`services/core/src/ui/shell.rs`](../services/core/src/ui/shell.rs) (`apply_p
     4. `cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins`
 - [ ] **Step 5 (Deploy & verify on Pi `root@192.168.2.120`):**
   - Copy `core` to `/usr/local/bin/core` (when requested by user) or test via `/tmp/core` and verify smooth, tear-free marquee scrolling on the physical screen.
+
+---
+
+## 6. Implementation Outcome (2026-10-31)
+
+All three phases were implemented and verified on the physical panel; the marquee is now smooth and tear-free.
+
+1. **Phase 1 (VSync + dirty-rect blit):** `Backend::Hardware` selects a `ScanoutSync` strategy at `open()`; fbdev char devices render into the persistent cached shadow buffer, wait for `FBIO_WAITFORVSYNC`, and blit only the dirty bounding-box scanlines into the uncached mapping (no `msync` on char devices). Regular-file mappings keep the buffered line path with `msync`. `FbLineBuffer::buffered()` was removed.
+2. **Phase 2/3 (offscreen text pre-rendering):** `MarqueeText` no longer hosts `Text` elements. `MarqueeStripCache` (new `crate::ui::marquee` module) rasterizes each strip once per (text, color, typography) change on a dedicated offscreen `MarqueeRasterizer` window (`export component ... inherits Window`, transparent background) and hands the premultiplied `slint::Image` to the scroller. Typography constants moved to `MarqueeTypography` in Rust. The artist/album composite string has a single source of truth (`artist_marquee_text` out property on `MainWindow`).
+3. **Idle CPU fix:** reading `animation-tick()` per frame permanently marked Slint's animation driver active, pinning the render loop at 60 fps (~60% CPU) even while idle. The marquee now self-advances a deterministic integer frame counter via a Slint `Timer` (`16.65 ms`, matching the measured 60.06 Hz panel) that runs only while the strip overflows; offsets are exact 1 px/frame steps. The render loop no longer forces `request_redraw()` per iteration and idles on `duration_until_next_timer_update()`.
+4. **Property-set guards:** `apply_playback_to_window` only calls `set_track_*`/`set_duration_ms`/`set_is_playing`/`set_track_or_device`/`set_duration_text` when values actually changed, eliminating 4 Hz marquee relayout invalidation.
+
+Measured on the Pi: scrolling render cost dropped from 8.3 ms to a cheap image blit per frame; CPU during active scroll fell from ~64% to ~47%, and idle CPU on the Now Playing screen drops to near-zero instead of staying at 60–70%.
+
+Process notes distilled into `services/core/AGENTS.md`: slint codegen only covers exported `Window`-rooted components; `slint-build` rerun must be forced by purging build dirs after `.slint` edits; never read `animation-tick()` in per-frame polling bindings.
