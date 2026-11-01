@@ -432,8 +432,10 @@ impl AppShell {
         if let Ok(mut last) = cover_cache.lock() {
             if let Some(ref path) = playback.cover_art_path {
                 if last.as_deref() != Some(path.as_ref()) {
+                    let load_path =
+                        Self::upscale_cover_art(path.as_ref()).unwrap_or_else(|| path.clone());
                     if let Ok(img) =
-                        slint::Image::load_from_path(std::path::Path::new(path.as_ref()))
+                        slint::Image::load_from_path(std::path::Path::new(load_path.as_ref()))
                     {
                         w.set_cover_image(img);
                         w.set_has_cover_art(true);
@@ -447,6 +449,38 @@ impl AppShell {
                 *last = None;
             }
         }
+    }
+
+    /// Upscales small AVRCP cover art to panel resolution with Lanczos3,
+    /// caching the result next to the source file.
+    fn upscale_cover_art(path: &str) -> Option<Box<str>> {
+        const TARGET_COVER_SIZE: u32 = 480;
+        tracing::error!("UPSACLE_IN {:?}", path);
+        let src = std::path::Path::new(path);
+        let file_name = src.file_name()?;
+        let mut upscaled_name = file_name.to_os_string();
+        upscaled_name.push(".480.jpg");
+        let out_path = src.with_file_name(upscaled_name);
+        let out_str = out_path.to_str()?.to_owned().into_boxed_str();
+
+        if out_path.is_file() {
+            return Some(out_str);
+        }
+
+        let img = image::open(src).ok()?;
+        if img.width() >= TARGET_COVER_SIZE || img.height() >= TARGET_COVER_SIZE {
+            return Some(Box::<str>::from(path));
+        }
+
+        let upscaled = img.resize_exact(
+            TARGET_COVER_SIZE,
+            TARGET_COVER_SIZE,
+            image::imageops::FilterType::Lanczos3,
+        );
+        upscaled
+            .save_with_format(&out_path, image::ImageFormat::Jpeg)
+            .ok()?;
+        Some(out_str)
     }
 
     /// Applies a theme preset to the UI shell.

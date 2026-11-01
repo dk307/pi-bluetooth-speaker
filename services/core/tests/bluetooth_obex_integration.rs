@@ -6,6 +6,7 @@
     clippy::used_underscore_binding,
     clippy::needless_pass_by_value,
     clippy::struct_excessive_bools,
+    clippy::unused_self,
     reason = "zbus interface macros dictate by-value, underscore-named D-Bus method arguments; the fake service mirrors BlueZ D-Bus signatures and independent behaviour flags"
 )]
 
@@ -15,6 +16,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use speaker_core::diag::ScopedTempDir;
 use speaker_core::hardware::BluetoothDevice;
 use zbus::fdo;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
@@ -25,11 +27,21 @@ struct Behavior {
     handle: String,
     create_ok: bool,
     session_alive: bool,
+    properties_ok: bool,
+    descriptors: Vec<HashMap<String, OwnedValue>>,
     thumbnail_ok: bool,
     get_ok: bool,
+    /// Accepts zero-descriptor `Get` (Strategy A native pull) requests.
+    native_get_ok: bool,
     write_file: bool,
     status: String,
+    /// Value reported by the `Transferred` property of `Transfer1`.
+    transferred: u64,
     create_calls: AtomicUsize,
+    /// Number of zero-descriptor (native) `Get` calls observed.
+    native_get_calls: AtomicUsize,
+    last_get_pixel: String,
+    device_connected: bool,
 }
 
 type Shared = Arc<Mutex<Behavior>>;
@@ -39,6 +51,44 @@ fn jpeg_bytes() -> Vec<u8> {
     data.extend(std::iter::repeat_n(0u8, 200));
     data.extend([0xFF, 0xD9]);
     data
+}
+
+fn descriptor(kv: &[(&str, Value<'_>)]) -> HashMap<String, OwnedValue> {
+    kv.iter()
+        .map(|(k, v)| {
+            (
+                (*k).to_owned(),
+                v.try_to_owned().expect("static descriptor value"),
+            )
+        })
+        .collect()
+}
+
+/// Mirrors the real-phone descriptors observed over OBEX BIP (200x200 only).
+fn baseline_descriptors() -> Vec<HashMap<String, OwnedValue>> {
+    vec![
+        descriptor(&[
+            ("type", Value::from("native")),
+            ("encoding", Value::from("JPEG")),
+            ("pixel", Value::from("200*200")),
+        ]),
+        descriptor(&[
+            ("type", Value::from("variant")),
+            ("encoding", Value::from("PNG")),
+            ("pixel", Value::from("200*200")),
+            ("maxsize", Value::from(200u64)),
+        ]),
+    ]
+}
+
+/// Open-ended BIP pixel range descriptor (Android-style `0*0-65535*65535`).
+fn range_descriptors() -> Vec<HashMap<String, OwnedValue>> {
+    vec![descriptor(&[
+        ("type", Value::from("native")),
+        ("encoding", Value::from("JPEG")),
+        ("pixel", Value::from("0*0-65535*65535")),
+        ("maxsize", Value::from(250u64)),
+    ])]
 }
 
 struct ObjectManager(Shared);
@@ -108,6 +158,18 @@ impl Session {
 
 struct Image(Shared);
 
+struct Device(Shared);
+
+#[zbus::interface(name = "org.bluez.Device1")]
+impl Device {
+    #[zbus(property)]
+    fn connected(&self) -> bool {
+        self.0.lock().unwrap().device_connected
+    }
+
+    fn connect(&self) {}
+}
+
 impl Image {
     fn transfer(
         &self,
@@ -143,10 +205,31 @@ impl Image {
         &self,
         file: String,
         _handle: String,
-        _props: HashMap<String, OwnedValue>,
+        props: HashMap<String, OwnedValue>,
     ) -> fdo::Result<(OwnedObjectPath, HashMap<String, OwnedValue>)> {
-        let ok = self.0.lock().unwrap().get_ok;
+        let mut b = self.0.lock().unwrap();
+        if let Some(pixel) = props
+            .get("Pixel")
+            .and_then(|v| v.downcast_ref::<&str>().ok())
+        {
+            pixel.clone_into(&mut b.last_get_pixel);
+            let ok = b.get_ok;
+            drop(b);
+            return self.transfer(&file, ok);
+        }
+        // Empty properties = zero-descriptor native `Get` (Strategy A).
+        b.native_get_calls.fetch_add(1, Ordering::SeqCst);
+        let ok = b.native_get_ok;
+        drop(b);
         self.transfer(&file, ok)
+    }
+
+    fn properties(&self, _handle: String) -> fdo::Result<Vec<HashMap<String, OwnedValue>>> {
+        let b = self.0.lock().unwrap();
+        if !b.properties_ok {
+            return Err(fdo::Error::Failed("properties failed".into()));
+        }
+        Ok(b.descriptors.clone())
     }
 }
 
@@ -158,6 +241,13 @@ impl Transfer {
     fn status(&self) -> String {
         self.0.lock().unwrap().status.clone()
     }
+
+    #[zbus(property)]
+    fn transferred(&self) -> u64 {
+        self.0.lock().unwrap().transferred
+    }
+
+    fn cancel(&self) {}
 }
 
 /// Private bus daemon plus fake service; killed on drop.
@@ -167,6 +257,7 @@ struct Harness {
     device: BluetoothDevice,
     state: Shared,
     mac_prefix: String,
+    caps_dir: ScopedTempDir,
 }
 
 impl Harness {
@@ -188,13 +279,21 @@ impl Harness {
             handle: format!("h{mac_us}"),
             create_ok: true,
             session_alive: true,
+            properties_ok: true,
+            descriptors: baseline_descriptors(),
             thumbnail_ok: true,
             get_ok: true,
+            native_get_ok: true,
             write_file: true,
             status: "complete".into(),
+            transferred: 0,
             create_calls: AtomicUsize::new(0),
+            native_get_calls: AtomicUsize::new(0),
+            last_get_pixel: String::new(),
+            device_connected: true,
         };
         behavior(&mut b);
+        let mac_path = b.mac_path.clone();
         let state: Shared = Arc::new(Mutex::new(b));
 
         let server = zbus::blocking::connection::Builder::address(addr.as_str())
@@ -215,6 +314,8 @@ impl Harness {
                 Transfer(Arc::clone(&state)),
             )
             .unwrap()
+            .serve_at(mac_path, Device(Arc::clone(&state)))
+            .unwrap()
             .name("org.bluez")
             .unwrap()
             .name("org.bluez.obex")
@@ -226,24 +327,31 @@ impl Harness {
             .unwrap()
             .build()
             .unwrap();
+        let caps_dir = ScopedTempDir::new("obex_caps");
         let harness = Self {
             daemon,
             _server: server,
-            device: BluetoothDevice::with_connection(client),
+            device: BluetoothDevice::with_connection(client).with_device_caps_dir(caps_dir.path()),
             state,
             mac_prefix: format!("speaker-cover-{mac_us}-"),
+            caps_dir,
         };
         harness.remove_cover_files();
         harness
     }
 
     fn remove_cover_files(&self) {
-        for e in std::fs::read_dir("/tmp").unwrap().flatten() {
-            if e.file_name()
-                .to_string_lossy()
-                .starts_with(&self.mac_prefix)
-            {
-                let _ = std::fs::remove_file(e.path());
+        for dir in ["/tmp", speaker_core::hardware::COVER_ART_CACHE_DIR] {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                if e.file_name()
+                    .to_string_lossy()
+                    .starts_with(&self.mac_prefix)
+                {
+                    let _ = std::fs::remove_file(e.path());
+                }
             }
         }
     }
@@ -262,6 +370,22 @@ impl Harness {
             .unwrap()
             .create_calls
             .load(Ordering::SeqCst)
+    }
+
+    fn last_get_pixel(&self) -> String {
+        self.state.lock().unwrap().last_get_pixel.clone()
+    }
+
+    fn native_get_calls(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .native_get_calls
+            .load(Ordering::SeqCst)
+    }
+
+    fn caps_dir_path(&self) -> std::path::PathBuf {
+        self.caps_dir.path().to_path_buf()
     }
 }
 
@@ -301,13 +425,15 @@ fn cover_art_none_when_thumbnail_and_get_fail_and_session_cleared() {
     let h = Harness::new("11:00:00:00:00:03", |b| {
         b.thumbnail_ok = false;
         b.get_ok = false;
+        b.native_get_ok = false;
     });
     assert!(h.cover().is_none());
+    assert_eq!(h.create_calls(), 1);
     assert!(h.cover().is_none());
     assert_eq!(
         h.create_calls(),
-        4,
-        "each failed fetch drops the cached session and recreates it for the thumbnail fallback"
+        2,
+        "each failed fetch drops the cached session and the next fetch recreates it"
     );
 }
 
@@ -331,4 +457,71 @@ fn cover_art_none_when_transfer_never_completes() {
         b.write_file = false;
     });
     assert!(h.cover().is_none());
+}
+
+#[test]
+fn cover_art_fetched_via_bip_get_when_range_advertised() {
+    let h = Harness::new("11:00:00:00:00:07", |b| {
+        b.descriptors = range_descriptors();
+        b.native_get_ok = false;
+    });
+    let path = h.cover().expect("high-res cover fetched via BIP Get");
+    assert!(std::path::Path::new(&*path).exists());
+    assert_eq!(h.last_get_pixel(), "800*800");
+    assert_eq!(h.create_calls(), 1);
+}
+
+#[test]
+fn cover_art_falls_back_to_thumbnail_when_bip_get_refused() {
+    let h = Harness::new("11:00:00:00:00:08", |b| {
+        b.descriptors = range_descriptors();
+        b.native_get_ok = false;
+        b.get_ok = false;
+    });
+    assert!(h.cover().is_some());
+}
+
+#[test]
+fn cover_art_fetched_via_native_zero_descriptor_pull() {
+    let h = Harness::new("11:00:00:00:00:09", |_| {});
+    let path = h.cover().expect("native cover fetched over OBEX");
+    assert!(std::path::Path::new(&*path).exists());
+    assert_eq!(h.native_get_calls(), 1);
+    assert_eq!(
+        h.last_get_pixel(),
+        "",
+        "variant loop must not run after a successful native pull"
+    );
+    assert_eq!(h.create_calls(), 1);
+}
+
+#[test]
+fn cover_art_native_pull_skipped_when_advertised_size_exceeds_cap() {
+    let h = Harness::new("11:00:00:00:00:10", |b| {
+        b.descriptors = vec![descriptor(&[
+            ("type", Value::from("native")),
+            ("encoding", Value::from("JPEG")),
+            ("pixel", Value::from("1000*1000")),
+            ("size", Value::from(2_000_000u64)),
+        ])];
+    });
+    let path = h.cover().expect("thumbnail fallback after native skip");
+    assert!(std::path::Path::new(&*path).exists());
+    assert_eq!(h.native_get_calls(), 0);
+}
+
+#[test]
+fn native_cap_persisted_after_native_pull_refusal() {
+    let h = Harness::new("11:00:00:00:00:12", |b| {
+        b.descriptors = vec![descriptor(&[
+            ("type", Value::from("native")),
+            ("encoding", Value::from("JPEG")),
+            ("pixel", Value::from("1000*1000")),
+            ("size", Value::from(500_000u64)),
+        ])];
+        b.native_get_ok = false;
+    });
+    assert!(h.cover().is_some());
+    let caps = speaker_core::hardware::load_native_caps_in(&h.caps_dir_path());
+    assert_eq!(caps.get("11_00_00_00_00_12"), Some(&499_999));
 }

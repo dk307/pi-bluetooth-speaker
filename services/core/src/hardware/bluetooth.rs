@@ -14,7 +14,7 @@
 //! - Non-blocking async queries via [`crate::runtime::run_blocking`] (`M-SERVICES-CLONE`)
 
 use std::backtrace::Backtrace;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -521,12 +521,12 @@ impl BluetoothControllerInfo {
 }
 
 /// Runs `hciconfig <adapter> version` with a hard deadline, capturing stdout.
-fn run_hciconfig_version(adapter: &str) -> Option<String> {
+fn run_probe_command(program: &str, args: &[&str]) -> Option<String> {
     const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-    let mut child = Command::new("hciconfig")
-        .args([adapter, "version"])
+    let mut child = Command::new(program)
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -551,6 +551,10 @@ fn run_hciconfig_version(adapter: &str) -> Option<String> {
     let mut stdout = Vec::new();
     child.stdout.take()?.read_to_end(&mut stdout).ok()?;
     String::from_utf8(stdout).ok()
+}
+
+fn run_hciconfig_version(adapter: &str) -> Option<String> {
+    run_probe_command("hciconfig", &[adapter, "version"])
 }
 
 /// Parses `hciconfig <adapter> version` output into controller identity fields.
@@ -940,6 +944,8 @@ pub(crate) trait ObexImage {
         file: &str,
         handle: &str,
     ) -> zbus::Result<(OwnedObjectPath, HashMap<String, OwnedValue>)>;
+
+    fn properties(&self, handle: &str) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
 }
 
 #[zbus::proxy(
@@ -951,6 +957,25 @@ pub(crate) trait ObexImage {
 pub(crate) trait ObexTransfer {
     #[zbus(property)]
     fn status(&self) -> zbus::Result<String>;
+
+    #[zbus(property)]
+    fn transferred(&self) -> zbus::Result<u64>;
+
+    fn cancel(&self) -> zbus::Result<()>;
+}
+
+/// Minimal `org.bluez.Device1` proxy for ACL-link recovery after OBEX failures.
+#[zbus::proxy(
+    default_service = "org.bluez",
+    interface = "org.bluez.Device1",
+    gen_async = false,
+    blocking_name = "ObexDeviceProxyBlocking"
+)]
+pub(crate) trait ObexDevice {
+    #[zbus(property)]
+    fn connected(&self) -> zbus::Result<bool>;
+
+    fn connect(&self) -> zbus::Result<()>;
 }
 
 /// Type alias for D-Bus `ObjectManager` `GetManagedObjects` map.
@@ -1215,6 +1240,9 @@ pub fn is_service_absent_fdo_error(err: &zbus::fdo::Error) -> bool {
 pub struct DbusClient {
     conn: Connection,
     obex_session: Arc<Mutex<Option<(BtAddress, OwnedObjectPath)>>>,
+    device_caps_dir: std::path::PathBuf,
+    acl_tuned: Arc<Mutex<HashSet<BtAddress>>>,
+    socket_tuned: Arc<Mutex<bool>>,
 }
 
 /// Snapshot of `BlueZ` adapter, connected/paired devices, and media player state.
@@ -1226,6 +1254,9 @@ impl DbusClient {
         Self {
             conn,
             obex_session: Arc::new(Mutex::new(None)),
+            device_caps_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
+            acl_tuned: Arc::new(Mutex::new(HashSet::new())),
+            socket_tuned: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -1452,6 +1483,61 @@ impl DbusClient {
         }
     }
 
+    /// Raises kernel Bluetooth socket read-buffer limits once per process (`sysctl`).
+    fn tune_bt_socket_buffers(&self) {
+        let Ok(mut tuned) = self.socket_tuned.lock() else {
+            return;
+        };
+        if *tuned {
+            return;
+        }
+        let rmem_max_arg = format!("net.core.rmem_max={BT_SOCKET_RMEM_MAX}");
+        let rmem_default_arg = format!("net.core.rmem_default={BT_SOCKET_RMEM_DEFAULT}");
+        let ok = run_probe_command("sysctl", &["-w", rmem_max_arg.as_str()]).is_some()
+            && run_probe_command("sysctl", &["-w", rmem_default_arg.as_str()]).is_some();
+        if ok {
+            tracing::info!(
+                rmem_max = BT_SOCKET_RMEM_MAX,
+                rmem_default = BT_SOCKET_RMEM_DEFAULT,
+                "Raised kernel Bluetooth socket read buffers"
+            );
+            *tuned = true;
+        } else {
+            tracing::warn!("sysctl socket buffer tuning failed; will retry on next transfer");
+        }
+    }
+
+    /// Switches the phone to Slave role and raises the supervision timeout once per MAC
+    /// (`hcitool sr` + `hcitool lst`) to avoid L2CAP flow-control starvation (0x08).
+    fn tune_acl_link(&self, addr: BtAddress) {
+        let mac = addr.to_string();
+        let Ok(mut tuned) = self.acl_tuned.lock() else {
+            return;
+        };
+        if tuned.contains(&addr) {
+            return;
+        }
+        let slot_arg = HCI_SUPERVISION_TIMEOUT_SLOTS.to_string();
+        let sr_ok = run_probe_command("hcitool", &["sr", mac.as_str(), "master"]).is_some();
+        let lst_ok =
+            run_probe_command("hcitool", &["lst", mac.as_str(), slot_arg.as_str()]).is_some();
+        if sr_ok && lst_ok {
+            tracing::info!(
+                mac,
+                slots = HCI_SUPERVISION_TIMEOUT_SLOTS,
+                "Tuned ACL link (role switch + supervision timeout)"
+            );
+            tuned.insert(addr);
+        } else {
+            tracing::warn!(
+                mac,
+                sr_ok,
+                lst_ok,
+                "hcitool ACL link tuning failed; will retry on next transfer"
+            );
+        }
+    }
+
     fn fetch_cover_art(&self, addr: BtAddress, handle: &str) -> Option<Box<str>> {
         if let Some(cached) = cover_art_cached_path(addr, handle) {
             return Some(cached);
@@ -1462,72 +1548,331 @@ impl DbusClient {
             return None;
         }
 
+        let session_path = self.prepare_bip_transfer(addr)?;
+        let image_proxy = self.build_image_proxy(session_path.as_str())?;
+
         let (cache_path, sanitized_mac, sanitized_handle) = cover_art_path_for(addr, handle)?;
         let cache_path_buf = std::path::PathBuf::from(&cache_path);
         let _ = std::fs::remove_file(&cache_path_buf);
 
-        let session_path = {
-            let session_lock = self.obex_session.lock().ok()?;
-            session_lock.as_ref().map(|(_, p)| p.clone())?
-        };
+        // Tier 1: adaptive resolution step-down over the advertised BIP variants.
+        let mut cap = load_device_caps_in(&self.device_caps_dir)
+            .get(&sanitized_mac)
+            .copied()
+            .unwrap_or(BIP_DEFAULT_CAP_PX);
+        if let Ok(descriptors) = image_proxy.properties(handle) {
+            // Strategy A: Zero-descriptor native pull (raw pre-compressed native bytes).
+            if let Some(path) = self.try_native_pull(
+                &image_proxy,
+                &descriptors,
+                handle,
+                &sanitized_mac,
+                &sanitized_handle,
+                &cache_path,
+            ) {
+                return Some(path);
+            }
 
-        let image_proxy = ObexImageProxyBlocking::builder(&self.conn)
-            .path(session_path.as_str())
+            for candidate in select_bip_candidates(&descriptors, cap) {
+                let tmp_path = format!("{cache_path}.tmp.jpg");
+                let tmp_path_buf = std::path::PathBuf::from(&tmp_path);
+                let mut props: HashMap<&str, Value<'_>> = HashMap::new();
+                props.insert("Pixel", Value::from(candidate.pixel.as_str()));
+                props.insert("Encoding", Value::from(candidate.encoding.as_str()));
+                let transfer_res = image_proxy.get(&tmp_path, handle, &props);
+                let Ok((transfer_path, _)) = transfer_res else {
+                    tracing::debug!(
+                        "OBEX Image1 Get({}) failed for handle {handle}",
+                        candidate.pixel
+                    );
+                    if let Ok(mut lock) = self.obex_session.lock() {
+                        *lock = None;
+                    }
+                    cap = candidate.area - 1;
+                    let _ = store_device_cap_in(&self.device_caps_dir, &sanitized_mac, cap);
+                    if !self.ensure_device_acl_connected(addr) {
+                        return None;
+                    }
+                    break;
+                };
+                let settled =
+                    self.wait_for_transfer(transfer_path.as_str(), BIP_VARIANT_TIMEOUT_MS);
+                let completed = settled == Some(true) && is_complete_jpeg(&tmp_path_buf);
+                if completed && std::fs::rename(&tmp_path_buf, &cache_path_buf).is_ok() {
+                    clean_old_cover_art(&sanitized_mac, &sanitized_handle);
+                    return Some(Box::<str>::from(cache_path));
+                }
+                let _ = std::fs::remove_file(&tmp_path_buf);
+                tracing::debug!(
+                    "OBEX Image1 Get({}) did not complete for handle {handle}",
+                    candidate.pixel
+                );
+                cap = candidate.area - 1;
+                let _ = store_device_cap_in(&self.device_caps_dir, &sanitized_mac, cap);
+                if !self.ensure_device_acl_connected(addr) {
+                    return None;
+                }
+            }
+        }
+
+        // Tier 2: baseline 200x200 BIP thumbnail fallback, with a plain-Get last resort
+        // for phones that refuse the thumbnail PDU.
+        self.try_thumbnail_fallback(
+            &image_proxy,
+            handle,
+            &sanitized_mac,
+            &sanitized_handle,
+            &cache_path,
+        )
+    }
+
+    /// Runs one-time socket/HCI link tuning, waits for the phone's AVRCP `TrackChanged`
+    /// state machine to settle, and returns the cached-or-new BIP OBEX session path.
+    fn prepare_bip_transfer(&self, addr: BtAddress) -> Option<OwnedObjectPath> {
+        self.tune_bt_socket_buffers();
+        self.tune_acl_link(addr);
+
+        // Settle wait: let the phone finish its AVRCP TrackChanged state machine
+        // before we hammer it with OBEX session/transfer requests.
+        thread::sleep(Duration::from_millis(BIP_TRACK_SETTLE_MS));
+
+        let session_lock = self.obex_session.lock().ok()?;
+        session_lock.as_ref().map(|(_, p)| p.clone())
+    }
+
+    /// Builds a blocking `Image1` proxy on top of an existing BIP OBEX session path.
+    fn build_image_proxy<'a>(
+        &'a self,
+        session_path: &'a str,
+    ) -> Option<ObexImageProxyBlocking<'a>> {
+        ObexImageProxyBlocking::builder(&self.conn)
+            .path(session_path)
             .ok()?
             .build()
-            .ok()?;
+            .ok()
+    }
 
-        let empty_props = HashMap::new();
+    /// Strategy A: zero-descriptor native BIP pull (raw pre-compressed native bytes).
+    ///
+    /// Passes an empty dictionary so obexd omits the `x-bt/img-Description` header and the
+    /// phone streams the raw pre-compressed native bytes without re-encoding. Only attempts
+    /// when the advertised native `Size` is unknown (0) or within the per-device byte cap.
+    /// On success the payload is promoted to `cache_path` and returned; on Get failure the
+    /// per-device byte cap is lowered and persisted. Returns `None` when the caller should
+    /// fall through to the explicit variant loop.
+    fn try_native_pull(
+        &self,
+        image_proxy: &ObexImageProxyBlocking<'_>,
+        descriptors: &[HashMap<String, OwnedValue>],
+        handle: &str,
+        sanitized_mac: &str,
+        sanitized_handle: &str,
+        cache_path: &str,
+    ) -> Option<Box<str>> {
+        let cache_path_buf = std::path::Path::new(cache_path);
+        let native_size = native_image_size(descriptors);
+        let native_cap = load_native_caps_in(&self.device_caps_dir)
+            .get(sanitized_mac)
+            .copied()
+            .unwrap_or(BIP_DEFAULT_NATIVE_BYTES_CAP);
+        if native_size > native_cap {
+            tracing::debug!(
+                handle,
+                native_size,
+                cap = native_cap,
+                "Skipping native BIP pull: advertised size exceeds byte cap"
+            );
+            return None;
+        }
+
+        let tmp_path = format!("{cache_path}.native.tmp.jpg");
+        let tmp_path_buf = std::path::PathBuf::from(&tmp_path);
+        let empty_props: HashMap<&str, Value<'_>> = HashMap::new();
+        tracing::info!(
+            handle,
+            native_size,
+            "Attempting zero-descriptor native BIP pull"
+        );
+        match image_proxy.get(&tmp_path, handle, &empty_props) {
+            Ok((transfer_path, _)) => {
+                let settled = self.wait_for_transfer(transfer_path.as_str(), BIP_NATIVE_TIMEOUT_MS);
+                let completed = settled == Some(true) && is_complete_jpeg(&tmp_path_buf);
+                if completed && std::fs::rename(&tmp_path_buf, cache_path_buf).is_ok() {
+                    clean_old_cover_art(sanitized_mac, sanitized_handle);
+                    tracing::info!(handle, "Native BIP pull succeeded for handle {handle}");
+                    return Some(Box::<str>::from(cache_path));
+                }
+                let _ = std::fs::remove_file(&tmp_path_buf);
+                tracing::debug!(
+                    handle,
+                    "Native BIP pull did not complete for handle {handle}"
+                );
+                None
+            }
+            Err(err) => {
+                tracing::debug!(
+                    handle,
+                    error = %err,
+                    "Native BIP pull Get failed for handle {handle}"
+                );
+                if native_size > 0 {
+                    let new_cap = native_size - 1;
+                    if let Err(store_err) =
+                        store_native_cap_in(&self.device_caps_dir, sanitized_mac, new_cap)
+                    {
+                        tracing::warn!(
+                            handle,
+                            error = %store_err,
+                            "Failed to persist native byte cap"
+                        );
+                    } else {
+                        tracing::info!(
+                            handle,
+                            new_cap,
+                            "Persisted native byte cap after native pull failure"
+                        );
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Tier 2: baseline 200x200 BIP thumbnail fallback, with a plain-Get last resort for
+    /// phones that refuse the thumbnail PDU. Clears the OBEX session on failure so the
+    /// next track starts with a fresh session.
+    fn try_thumbnail_fallback(
+        &self,
+        image_proxy: &ObexImageProxyBlocking<'_>,
+        handle: &str,
+        sanitized_mac: &str,
+        sanitized_handle: &str,
+        cache_path: &str,
+    ) -> Option<Box<str>> {
+        let cache_path_buf = std::path::Path::new(cache_path);
+        let empty_props: HashMap<&str, Value<'_>> = HashMap::new();
         let transfer_res = image_proxy
-            .get_thumbnail(&cache_path, handle)
-            .or_else(|_| image_proxy.get(&cache_path, handle, &empty_props));
-
-        let (transfer_path, _) = match transfer_res {
-            Ok(res) => res,
-            Err(e) => {
-                tracing::debug!("OBEX Image1 GetThumbnail/Get failed for handle {handle}: {e}");
+            .get_thumbnail(cache_path, handle)
+            .or_else(|_| image_proxy.get(cache_path, handle, &empty_props));
+        let Ok((transfer_path, _)) = transfer_res else {
+            tracing::debug!("OBEX Image1 GetThumbnail/Get failed for handle {handle}");
+            if let Ok(mut lock) = self.obex_session.lock() {
+                *lock = None;
+            }
+            return None;
+        };
+        match self.wait_for_transfer(transfer_path.as_str(), BIP_THUMBNAIL_TIMEOUT_MS) {
+            Some(true) if is_complete_jpeg(cache_path_buf) => {
+                clean_old_cover_art(sanitized_mac, sanitized_handle);
+                Some(Box::<str>::from(cache_path))
+            }
+            _ => {
+                let _ = std::fs::remove_file(cache_path_buf);
                 if let Ok(mut lock) = self.obex_session.lock() {
                     *lock = None;
                 }
+                None
+            }
+        }
+    }
+
+    /// Waits for an async OBEX transfer to settle, enforcing a progress-aware watchdog.
+    ///
+    /// Polls `org.bluez.obex.Transfer1` every [`BIP_POLL_INTERVAL_MS`] reading `Status`
+    /// and the `Transferred` byte counter. A transfer is kept alive while its byte
+    /// counter advances; `Cancel` is issued only after [`BIP_STALL_TIMEOUT_MS`] of
+    /// zero byte progress or once the total [`timeout_ms`] budget is exceeded.
+    ///
+    /// Returns `Some(true)` when the transfer reports `complete`, `Some(false)` on error
+    /// or D-Bus failure, and `None` when the watchdog expired (after issuing `Cancel`).
+    fn wait_for_transfer(&self, transfer_path: &str, timeout_ms: u64) -> Option<bool> {
+        let proxy = ObexTransferProxyBlocking::builder(&self.conn)
+            .path(transfer_path)
+            .ok()
+            .and_then(|b| b.build().ok())?;
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let mut last_bytes: Option<u64> = None;
+        let mut last_progress: Option<Instant> = Some(Instant::now());
+        while Instant::now() < deadline {
+            match proxy.status() {
+                Ok(status) if status == "complete" => {
+                    tracing::info!(
+                        transfer = transfer_path,
+                        bytes = last_bytes.unwrap_or(0),
+                        "obex transfer complete"
+                    );
+                    return Some(true);
+                }
+                Ok(status) if status == "error" => {
+                    tracing::warn!(transfer = transfer_path, "obex transfer reported error");
+                    return Some(false);
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(transfer = transfer_path, error = %err, "obex transfer status read failed");
+                    return Some(false);
+                }
+            }
+            match proxy.transferred() {
+                Ok(bytes) => {
+                    if last_bytes.is_none_or(|prev| bytes > prev) {
+                        last_progress = Some(Instant::now());
+                        tracing::trace!(transfer = transfer_path, bytes, "obex transfer progress");
+                    }
+                    last_bytes = Some(bytes);
+                }
+                Err(err) => {
+                    tracing::debug!(transfer = transfer_path, error = %err, "obex transferred read failed");
+                }
+            }
+            if last_progress.is_none_or(|started_at| {
+                started_at.elapsed() >= Duration::from_millis(BIP_STALL_TIMEOUT_MS)
+            }) {
+                tracing::warn!(
+                    transfer = transfer_path,
+                    stall_ms = BIP_STALL_TIMEOUT_MS,
+                    bytes = last_bytes.unwrap_or(0),
+                    "obex transfer stalled; cancelling"
+                );
+                let _ = proxy.cancel();
                 return None;
             }
-        };
+            thread::sleep(Duration::from_millis(BIP_POLL_INTERVAL_MS));
+        }
+        tracing::warn!(
+            transfer = transfer_path,
+            timeout_ms,
+            bytes = last_bytes.unwrap_or(0),
+            "obex transfer watchdog expired; cancelling"
+        );
+        let _ = proxy.cancel();
+        None
+    }
 
-        let transfer_proxy = ObexTransferProxyBlocking::builder(&self.conn)
-            .path(transfer_path.as_str())
+    /// Ensures the phone ACL link is alive; reconnects and waits for A2DP recovery.
+    ///
+    /// Returns `true` when the link is (or was already) connected, `false` when the
+    /// device had to be reconnected (the caller must break out of the high-res loop).
+    fn ensure_device_acl_connected(&self, addr: BtAddress) -> bool {
+        let dev_path = format!("/org/bluez/hci0/dev_{}", addr.to_string().replace(':', "_"));
+        let proxy = ObexDeviceProxyBlocking::builder(&self.conn)
+            .path(dev_path.as_str())
             .ok()
             .and_then(|b| b.build().ok());
-
-        let deadline = Instant::now() + Duration::from_millis(3500);
-        while Instant::now() < deadline {
-            let is_finished = if let Some(ref tp) = transfer_proxy {
-                match tp.status() {
-                    Ok(status) => match status.as_str() {
-                        "complete" => true,
-                        "error" => {
-                            tracing::debug!("OBEX transfer reported error for handle {handle}");
-                            break;
-                        }
-                        _ => false,
-                    },
-                    Err(_) => true,
+        let Some(proxy) = proxy else {
+            return false;
+        };
+        match proxy.connected() {
+            Ok(true) => true,
+            Ok(false) => {
+                if proxy.connect().is_err() {
+                    return false;
                 }
-            } else {
-                true
-            };
-
-            if is_finished && is_complete_jpeg(&cache_path_buf) {
-                clean_old_cover_art(&sanitized_mac, &sanitized_handle);
-                return Some(Box::<str>::from(cache_path));
+                thread::sleep(Duration::from_millis(1500));
+                false
             }
-            thread::sleep(Duration::from_millis(50));
+            Err(_) => false,
         }
-
-        let _ = std::fs::remove_file(&cache_path_buf);
-        if let Ok(mut lock) = self.obex_session.lock() {
-            *lock = None;
-        }
-        None
     }
 }
 
@@ -1559,6 +1904,232 @@ pub fn is_complete_jpeg(path: &std::path::Path) -> bool {
         return false;
     }
     footer == [0xFF, 0xD9]
+}
+
+/// Maximum accepted OBEX native image size in bytes.
+///
+/// Larger descriptors risk Android `TransactionTooLargeException` crashes on the
+/// phone side when the bitmaps are scaled during the Binder IPC reply.
+pub const BIP_MAX_NATIVE_BYTES: u64 = 280_000;
+
+/// Default per-device resolution ceiling in pixels (800x800).
+pub const BIP_DEFAULT_CAP_PX: u32 = 640_000;
+
+/// Minimum pixel area for a Tier-1 candidate; 200x200 is reserved for the thumbnail tier.
+pub const BIP_MIN_HIGHRES_PX: u32 = 40_000;
+
+/// Poll interval for OBEX `Transfer1` progress watchdogs, in milliseconds.
+pub const BIP_POLL_INTERVAL_MS: u64 = 80;
+
+/// Stall watchdog: abort a transfer only after this many milliseconds with zero byte progress.
+pub const BIP_STALL_TIMEOUT_MS: u64 = 2_500;
+
+/// Total watchdog for the zero-descriptor native pull, in milliseconds.
+pub const BIP_NATIVE_TIMEOUT_MS: u64 = 8_000;
+
+/// Total watchdog for an explicit high-res variant transfer, in milliseconds.
+pub const BIP_VARIANT_TIMEOUT_MS: u64 = 4_000;
+
+/// Total watchdog for the baseline `Image1.GetThumbnail` transfer, in milliseconds.
+pub const BIP_THUMBNAIL_TIMEOUT_MS: u64 = 2_500;
+
+/// Settle wait after `TrackChanged` before any OBEX traffic, in milliseconds.
+pub const BIP_TRACK_SETTLE_MS: u64 = 650;
+
+/// Default per-device maximum safe native image size in bytes for the zero-descriptor pull.
+pub const BIP_DEFAULT_NATIVE_BYTES_CAP: u64 = 1_500_000;
+
+/// ACL link supervision timeout in Bluetooth clock slots (32000 slots = 20 s).
+pub const HCI_SUPERVISION_TIMEOUT_SLOTS: u32 = 32_000;
+
+/// Raised kernel socket receive buffer ceiling (`net.core.rmem_max`), in bytes.
+pub const BT_SOCKET_RMEM_MAX: u32 = 2_097_152;
+
+/// Raised kernel socket receive buffer default (`net.core.rmem_default`), in bytes.
+pub const BT_SOCKET_RMEM_DEFAULT: u32 = 1_048_576;
+
+/// Synthetic explicit targets used when a BIP descriptor advertises an open range.
+pub const BIP_SYNTHETIC_TARGETS: [(u32, u32); 3] = [(800, 800), (600, 600), (400, 400)];
+
+/// A concrete BIP image variant selected for an `Image1.Get` transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BipImageCandidate {
+    /// BIP `Pixel` descriptor string, e.g. `600*600`.
+    pub pixel: String,
+    /// BIP `Encoding` string, e.g. `JPEG`.
+    pub encoding: String,
+    /// Pixel area `width * height` used for step-down ordering.
+    pub area: u32,
+}
+
+/// Parses a BIP `Pixel` descriptor like `600*600` or a range `0*0-65535*65535`.
+#[must_use]
+pub fn parse_bip_pixel(s: &str) -> Option<(u32, u32)> {
+    let first = s.split('-').next()?;
+    let (w, h) = first.split_once('*')?;
+    let w = w.trim().parse::<u32>().ok()?;
+    let h = h.trim().parse::<u32>().ok()?;
+    Some((w, h))
+}
+
+/// Whether a BIP `Pixel` descriptor is an open-ended range (min `0*0`).
+#[must_use]
+pub fn is_bip_pixel_range(s: &str) -> bool {
+    s.split('-').next() == Some("0*0")
+}
+
+/// Returns the maximum advertised native image `Size` in bytes across all descriptors.
+///
+/// Compares the `Size` key case-insensitively (BIP descriptors are case-insensitive in
+/// practice) and returns 0 when no descriptor advertises a parseable byte count, meaning
+/// the native size is unknown and a zero-descriptor pull is safe to attempt.
+#[must_use]
+pub fn native_image_size<S: ::std::hash::BuildHasher>(
+    descriptors: &[HashMap<String, OwnedValue, S>],
+) -> u64 {
+    descriptors
+        .iter()
+        .filter_map(|descriptor| {
+            descriptor
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("Size"))
+                .and_then(|(_, v)| v.downcast_ref::<u64>().ok())
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// Selects BIP `Get` candidates from `Image1.Properties` descriptors, descending by pixel area.
+///
+/// Descriptors advertising `Size` above [`BIP_MAX_NATIVE_BYTES`] are discarded, as are
+/// candidates above the per-device pixel ceiling or at/below [`BIP_MIN_HIGHRES_PX`]
+/// (the 200x200 baseline is reserved for the thumbnail fallback tier). Open range
+/// descriptors are expanded into the explicit [`BIP_SYNTHETIC_TARGETS`] that fit the ceiling.
+#[must_use]
+pub fn select_bip_candidates(
+    descriptors: &[HashMap<String, OwnedValue>],
+    max_cap_px: u32,
+) -> Vec<BipImageCandidate> {
+    let mut out: Vec<BipImageCandidate> = Vec::new();
+    for descriptor in descriptors {
+        // BIP descriptors are case-insensitive in practice (obexd emits lowercase keys).
+        let get_value = |key: &str| -> Option<&OwnedValue> {
+            descriptor
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                .map(|(_, v)| v)
+        };
+        let get_str = |key: &str| -> Option<String> {
+            get_value(key)
+                .and_then(|v| v.downcast_ref::<&str>().ok())
+                .map(str::to_owned)
+        };
+        let (Some(pixel), Some(encoding)) = (get_str("Pixel"), get_str("Encoding")) else {
+            continue;
+        };
+        // `Size` is in bytes; BIP `MaxSize` is in kilobytes.
+        let size_bytes = get_value("Size")
+            .and_then(|v| v.downcast_ref::<u64>().ok())
+            .unwrap_or(0);
+        let max_size_kb = get_value("MaxSize")
+            .and_then(|v| v.downcast_ref::<u64>().ok())
+            .unwrap_or(0);
+        if size_bytes > BIP_MAX_NATIVE_BYTES || max_size_kb > BIP_MAX_NATIVE_BYTES / 1024 {
+            continue;
+        }
+        if is_bip_pixel_range(&pixel) {
+            for (w, h) in BIP_SYNTHETIC_TARGETS {
+                let area = w * h;
+                if area <= max_cap_px && area > BIP_MIN_HIGHRES_PX {
+                    out.push(BipImageCandidate {
+                        pixel: format!("{w}*{h}"),
+                        encoding: encoding.clone(),
+                        area,
+                    });
+                }
+            }
+            continue;
+        }
+        let Some((w, h)) = parse_bip_pixel(&pixel) else {
+            continue;
+        };
+        let area = w * h;
+        if area > max_cap_px || area <= BIP_MIN_HIGHRES_PX {
+            continue;
+        }
+        out.push(BipImageCandidate {
+            pixel,
+            encoding,
+            area,
+        });
+    }
+    out.sort_by_key(|a| std::cmp::Reverse(a.area));
+    out.dedup_by(|a, b| a.pixel == b.pixel && a.encoding == b.encoding);
+    out
+}
+
+/// Per-device resolution ceilings keyed by sanitized MAC address.
+pub type DeviceCaps = HashMap<String, u32>;
+
+/// Name of the persistent per-device BIP resolution ceiling file.
+pub const DEVICE_CAPS_FILENAME: &str = "device_caps.json";
+
+/// Loads per-device BIP pixel ceilings from a directory (hermetic variant).
+#[must_use]
+pub fn load_device_caps_in(dir: &std::path::Path) -> DeviceCaps {
+    std::fs::read_to_string(dir.join(DEVICE_CAPS_FILENAME))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<DeviceCaps>(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Persists a single device ceiling into a caps file (read-modify-write).
+///
+/// # Errors
+/// Returns an error string when the file cannot be written.
+pub fn store_device_cap_in(
+    dir: &std::path::Path,
+    sanitized_mac: &str,
+    max_px: u32,
+) -> Result<(), Box<str>> {
+    let mut caps = load_device_caps_in(dir);
+    caps.insert(sanitized_mac.to_owned(), max_px);
+    let raw =
+        serde_json::to_string(&caps).map_err(|e| Box::<str>::from(format!("caps encode: {e}")))?;
+    std::fs::write(dir.join(DEVICE_CAPS_FILENAME), raw)
+        .map_err(|e| Box::<str>::from(format!("cannot write {DEVICE_CAPS_FILENAME}: {e}")))
+}
+
+/// Per-device native-pull byte ceilings keyed by sanitized MAC address.
+pub type NativeCaps = HashMap<String, u64>;
+
+/// Name of the persistent per-device native byte ceiling file.
+pub const NATIVE_CAPS_FILENAME: &str = "native_caps.json";
+
+/// Loads per-device native byte ceilings from a directory (hermetic variant).
+#[must_use]
+pub fn load_native_caps_in(dir: &std::path::Path) -> NativeCaps {
+    std::fs::read_to_string(dir.join(NATIVE_CAPS_FILENAME))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<NativeCaps>(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Persists a single native byte ceiling into a caps file (read-modify-write).
+///
+/// # Errors
+/// Returns an error string when the file cannot be written.
+pub fn store_native_cap_in(
+    dir: &std::path::Path,
+    sanitized_mac: &str,
+    max_bytes: u64,
+) -> Result<(), Box<str>> {
+    let mut caps = load_native_caps_in(dir);
+    caps.insert(sanitized_mac.to_owned(), max_bytes);
+    let raw = serde_json::to_string(&caps)
+        .map_err(|e| Box::<str>::from(format!("native caps encode: {e}")))?;
+    std::fs::write(dir.join(NATIVE_CAPS_FILENAME), raw)
+        .map_err(|e| Box::<str>::from(format!("cannot write {NATIVE_CAPS_FILENAME}: {e}")))
 }
 
 /// Root-only spool directory for OBEX cover art cache files.
@@ -2514,6 +3085,17 @@ impl BluetoothDevice {
         Self {
             backend: Arc::new(Backend::Dbus(DbusClient::new(conn))),
         }
+    }
+
+    /// Overrides the directory holding persistent per-device BIP resolution caps.
+    ///
+    /// Used by hermetic tests to avoid polluting the production cache directory.
+    #[must_use]
+    pub fn with_device_caps_dir(mut self, dir: &std::path::Path) -> Self {
+        if let Some(Backend::Dbus(dbus)) = Arc::get_mut(&mut self.backend) {
+            dir.clone_into(&mut dbus.device_caps_dir);
+        }
+        self
     }
 
     /// Inspects the status for a specific adapter (or default if `None`) synchronously.
