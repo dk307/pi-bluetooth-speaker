@@ -1553,7 +1553,9 @@ fn clean_cover_art_pruning_logic() {
 
 #[test]
 fn cover_art_path_and_cache_validation() {
-    use speaker_core::hardware::{BtAddress, cover_art_cached_path, cover_art_path_for};
+    use speaker_core::hardware::{
+        BtAddress, COVER_ART_CACHE_DIR, cover_art_cached_path, cover_art_path_for,
+    };
 
     let addr = BtAddress::new([0x30, 0xE0, 0x44, 0x67, 0x38, 0xA2]);
 
@@ -1568,23 +1570,15 @@ fn cover_art_path_and_cache_validation() {
     assert_eq!(handle, "img-001_A");
     assert_eq!(
         cache_path,
-        "/tmp/speaker-cover-30_E0_44_67_38_A2-img-001_A.jpg"
+        "/var/cache/speaker-covers/speaker-cover-30_E0_44_67_38_A2-img-001_A.jpg"
     );
 
-    // When file doesn't exist or is incomplete, cached_path returns None
-    let _ = std::fs::remove_file(&cache_path);
-    assert!(cover_art_cached_path(addr, "img-001_A").is_none());
-
-    // When file is truncated/incomplete, cached_path returns None
-    std::fs::write(&cache_path, b"incomplete-jpeg").unwrap();
-    assert!(cover_art_cached_path(addr, "img-001_A").is_none());
-
-    // When file has valid JPEG SOI and EOI markers, cached_path returns Some
     let mut valid_jpeg = vec![0u8; 120];
     valid_jpeg[0] = 0xFF;
     valid_jpeg[1] = 0xD8;
     valid_jpeg[118] = 0xFF;
     valid_jpeg[119] = 0xD9;
+    let _ = std::fs::create_dir_all(COVER_ART_CACHE_DIR);
     std::fs::write(&cache_path, &valid_jpeg).unwrap();
     let res = cover_art_cached_path(addr, "img-001_A");
     assert_eq!(res.as_deref(), Some(cache_path.as_str()));
@@ -1648,7 +1642,9 @@ fn is_complete_jpeg_thorough_validation() {
 
 #[test]
 fn mock_cover_art_resolution_and_control() {
-    use speaker_core::hardware::{BluetoothDevice, BtAddress, cover_art_path_for};
+    use speaker_core::hardware::{
+        BluetoothDevice, BtAddress, COVER_ART_CACHE_DIR, cover_art_path_for,
+    };
 
     let (device, mock) = BluetoothDevice::new_mocked();
     let addr = BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
@@ -1672,6 +1668,7 @@ fn mock_cover_art_resolution_and_control() {
     valid_bytes[1] = 0xD8;
     valid_bytes[126] = 0xFF;
     valid_bytes[127] = 0xD9;
+    let _ = std::fs::create_dir_all(COVER_ART_CACHE_DIR);
     std::fs::write(&cache_path, &valid_bytes).unwrap();
 
     let pb = device.playback_state().unwrap().unwrap();

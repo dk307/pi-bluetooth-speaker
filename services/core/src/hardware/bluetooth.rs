@@ -366,7 +366,7 @@ pub struct BtPlaybackState {
     pub obex_port: Option<u16>,
     /// Track image handle (e.g. "1000001") for AVRCP Cover Art over OBEX BIP.
     pub image_handle: Option<Box<str>>,
-    /// Local cache path to downloaded cover art image (e.g. `/tmp/speaker-cover-...jpg`).
+    /// Local cache path to downloaded cover art image (e.g. `/var/cache/speaker-covers/...jpg`).
     pub cover_art_path: Option<Box<str>>,
 }
 
@@ -702,6 +702,7 @@ pub(crate) enum BtErrorKind {
     NoActivePlayer { details: Box<str> },
     Cancelled { message: Box<str> },
     MockFault { message: Box<str> },
+    Unsupported { action: Box<str>, reason: Box<str> },
 }
 
 /// Subsystem error type for Bluetooth driver and diagnostic operations.
@@ -756,6 +757,13 @@ impl BtError {
         })
     }
 
+    pub(crate) fn unsupported(action: impl Into<Box<str>>, reason: impl Into<Box<str>>) -> Self {
+        Self::new(BtErrorKind::Unsupported {
+            action: action.into(),
+            reason: reason.into(),
+        })
+    }
+
     /// Returns `true` if this error represents a D-Bus communication error.
     #[must_use]
     pub const fn is_dbus(&self) -> bool {
@@ -786,6 +794,12 @@ impl BtError {
         matches!(self.kind, BtErrorKind::Cancelled { .. })
     }
 
+    /// Returns `true` if the operation is not supported by the underlying subsystem.
+    #[must_use]
+    pub const fn is_unsupported(&self) -> bool {
+        matches!(self.kind, BtErrorKind::Unsupported { .. })
+    }
+
     /// Returns `true` if this error was injected by a mock controller.
     #[must_use]
     pub const fn is_mock_fault(&self) -> bool {
@@ -814,6 +828,9 @@ impl BtError {
             }
             BtErrorKind::Cancelled { message } => write!(f, "task cancelled: {message}"),
             BtErrorKind::MockFault { message } => write!(f, "injected mock fault: {message}"),
+            BtErrorKind::Unsupported { action, reason } => {
+                write!(f, "'{action}' is not supported: {reason}")
+            }
         }
     }
 }
@@ -1440,6 +1457,11 @@ impl DbusClient {
             return Some(cached);
         }
 
+        if let Err(reason) = ensure_cover_art_cache_dir() {
+            tracing::warn!("Cover art cache unavailable: {reason}");
+            return None;
+        }
+
         let (cache_path, sanitized_mac, sanitized_handle) = cover_art_path_for(addr, handle)?;
         let cache_path_buf = std::path::PathBuf::from(&cache_path);
         let _ = std::fs::remove_file(&cache_path_buf);
@@ -1500,7 +1522,7 @@ impl DbusClient {
 
             if is_finished && is_complete_jpeg(&cache_path_buf) {
                 clean_old_cover_art(&sanitized_mac, &sanitized_handle);
-                return Some(cache_path.into_boxed_str());
+                return Some(Box::<str>::from(cache_path));
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -1543,6 +1565,31 @@ pub fn is_complete_jpeg(path: &std::path::Path) -> bool {
     footer == [0xFF, 0xD9]
 }
 
+/// Root-only spool directory for OBEX cover art cache files.
+///
+/// A predictable path under the world-writable `/tmp` would let a local process
+/// win a TOCTOU symlink race against the privileged `obexd` transfer write; a
+/// root-owned `0700` directory closes that window.
+pub const COVER_ART_CACHE_DIR: &str = "/var/cache/speaker-covers";
+
+/// Creates [`COVER_ART_CACHE_DIR`] with `0700` permissions if needed.
+///
+/// # Errors
+/// Returns an error string when the directory cannot be created or locked down.
+fn ensure_cover_art_cache_dir() -> Result<(), Box<str>> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::path::Path::new(COVER_ART_CACHE_DIR);
+    std::fs::create_dir_all(dir)
+        .map_err(|e| Box::<str>::from(format!("cannot create {COVER_ART_CACHE_DIR}: {e}")))?;
+    let mut perms = std::fs::metadata(dir)
+        .map_err(|e| Box::<str>::from(format!("cannot stat {COVER_ART_CACHE_DIR}: {e}")))?
+        .permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(dir, perms)
+        .map_err(|e| Box::<str>::from(format!("cannot chmod {COVER_ART_CACHE_DIR}: {e}")))?;
+    Ok(())
+}
+
 /// Returns the deterministic cache path and sanitized MAC/handle for an OBEX cover art handle.
 #[must_use]
 pub fn cover_art_path_for(addr: BtAddress, handle: &str) -> Option<(String, String, String)> {
@@ -1554,7 +1601,8 @@ pub fn cover_art_path_for(addr: BtAddress, handle: &str) -> Option<(String, Stri
     if sanitized_handle.is_empty() {
         return None;
     }
-    let cache_path = format!("/tmp/speaker-cover-{sanitized_mac}-{sanitized_handle}.jpg");
+    let cache_path =
+        format!("{COVER_ART_CACHE_DIR}/speaker-cover-{sanitized_mac}-{sanitized_handle}.jpg");
     Some((cache_path, sanitized_mac, sanitized_handle))
 }
 
@@ -1562,10 +1610,27 @@ pub fn cover_art_path_for(addr: BtAddress, handle: &str) -> Option<(String, Stri
 #[must_use]
 pub fn cover_art_cached_path(addr: BtAddress, handle: &str) -> Option<Box<str>> {
     let (cache_path, sanitized_mac, sanitized_handle) = cover_art_path_for(addr, handle)?;
-    let cache_path_buf = std::path::PathBuf::from(&cache_path);
+    cover_art_cached_path_in(
+        std::path::Path::new(COVER_ART_CACHE_DIR),
+        &cache_path,
+        &sanitized_mac,
+        &sanitized_handle,
+    )
+}
+
+/// Directory-parametrized variant of [`cover_art_cached_path`] (testable without the
+/// production cache directory).
+#[must_use]
+pub fn cover_art_cached_path_in(
+    dir: &std::path::Path,
+    cache_path: &str,
+    sanitized_mac: &str,
+    sanitized_handle: &str,
+) -> Option<Box<str>> {
+    let cache_path_buf = std::path::PathBuf::from(cache_path);
     if is_complete_jpeg(&cache_path_buf) {
-        clean_old_cover_art(&sanitized_mac, &sanitized_handle);
-        return Some(cache_path.into_boxed_str());
+        clean_cover_art_in_dir(dir, sanitized_mac, sanitized_handle);
+        return Some(Box::<str>::from(cache_path));
     }
     None
 }
@@ -1590,9 +1655,13 @@ pub fn clean_cover_art_in_dir(dir: &std::path::Path, sanitized_mac: &str, curren
     }
 }
 
-/// Cleans old cover art files in `/tmp` for a device address except the active handle.
+/// Cleans old cover art files in the cache directory for a device address except the active handle.
 pub fn clean_old_cover_art(sanitized_mac: &str, current_handle: &str) {
-    clean_cover_art_in_dir(std::path::Path::new("/tmp"), sanitized_mac, current_handle);
+    clean_cover_art_in_dir(
+        std::path::Path::new(COVER_ART_CACHE_DIR),
+        sanitized_mac,
+        current_handle,
+    );
 }
 
 impl DbusClient {
@@ -2653,7 +2722,11 @@ impl BluetoothDevice {
     pub fn player_seek(&self, position_ms: u32) -> Result<(), BtError> {
         match &*self.backend {
             Backend::Mock(mock) => mock.player_seek(position_ms),
-            Backend::Dbus(_) => Ok(()),
+            Backend::Dbus(_) => Err(BtError::unsupported(
+                "seek",
+                "BlueZ MediaPlayer1 exposes no absolute seek method; AVRCP only offers coarse \
+                 FastForward/Rewind presses",
+            )),
         }
     }
 
