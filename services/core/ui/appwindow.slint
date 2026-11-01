@@ -25,15 +25,14 @@ export component MainWindow inherits Window {
     default-font-family: Theme.active.font_family;
 
     in-out property <int> active_tab: 0;
-    in-out property <string> active_source: "Bluetooth";
     in-out property <string> track_or_device: "Waiting for Connection...";
     in-out property <string> stream_codec: "aptX-HD";
     in-out property <string> stream_sample_rate: "48 kHz";
     in-out property <string> stream_bit_depth: "16-bit";
     in-out property <bool> show_stream_specs <=> status_bar.show_stream_specs;
     in-out property <string> track_title: "Waiting for Bluetooth Connection...";
-    in-out property <string> track_artist: "DietPi Speaker";
-    in-out property <string> track_album: "Audiophile DSP Sink";
+    in-out property <string> track_artist: "";
+    in-out property <string> track_album: "";
     in-out property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit -> DSP 32-bit";
     in-out property <string> position_text: "00:00";
     in-out property <string> duration_text: "00:00";
@@ -63,9 +62,7 @@ export component MainWindow inherits Window {
     callback previous_track();
     callback seek(float);
     callback toggle_mute();
-    callback stream_pill_clicked();
     callback volume_changed(float);
-    callback source_clicked();
     callback night_mode_clicked();
     callback tab_selected(int);
     callback select_theme(int);
@@ -77,14 +74,12 @@ export component MainWindow inherits Window {
 
         // Top Status Bar: 800 x 42
         status_bar := TopStatusBar {
-            active_source: root.active_source;
             track_or_device: root.track_or_device;
             stream_codec: root.stream_codec;
             stream_sample_rate: root.stream_sample_rate;
             stream_bit_depth: root.stream_bit_depth;
             volume_value: root.volume_value;
             is_muted: root.is_muted;
-            source_clicked => { root.source_clicked(); }
             night_mode_clicked => { root.night_mode_clicked(); }
             volume_clicked => { root.toggle_mute(); }
         }
@@ -115,7 +110,6 @@ export component MainWindow inherits Window {
             previous_track => { root.previous_track(); }
             seek(ratio) => { root.seek(ratio); }
             toggle_mute => { root.toggle_mute(); }
-            stream_pill_clicked => { root.stream_pill_clicked(); }
             volume_changed(val) => { root.volume_changed(val); }
             select_theme(idx) => { root.select_theme(idx); }
             cycle_theme => { root.cycle_theme(); }

@@ -4,7 +4,6 @@ export component TopStatusBar inherits Rectangle {
     height: 60px;
     background: Theme.active.chassis;
 
-    in property <string> active_source: "Bluetooth";
     in property <string> track_or_device: "Waiting for Connection...";
     in property <string> stream_codec: "aptX-HD";
     in property <string> stream_sample_rate: "48 kHz";
@@ -30,7 +29,6 @@ export component TopStatusBar inherits Rectangle {
     // Display stream specs (sample rate & bit depth) only for codecs where specifications can vary
     in property <bool> show_stream_specs: !root.is_fixed_spec_codec;
 
-    callback source_clicked();
     callback night_mode_clicked();
     callback volume_clicked();
 
@@ -39,57 +37,16 @@ export component TopStatusBar inherits Rectangle {
         padding-right: 18px;
         alignment: space-between;
 
-        // Left: Source Pill (Vertically centered in 60px status bar)
-        VerticalLayout {
-            alignment: center;
-            Rectangle {
-                height: 42px;
-                background: Theme.active.card_surface;
-                border-radius: self.height / 2;
-                border-width: 1px;
-                border-color: Theme.active.card_border;
-
-                HorizontalLayout {
-                    padding-left: 14px;
-                    padding-right: 16px;
-                    spacing: 8px;
-
-                    // Bluetooth Source Icon
-                    Image {
-                        source: @image-url("../../../assets/icons/bluetooth-rune.svg");
-                        colorize: Theme.active.primary_accent;
-                        width: 15px;
-                        image-fit: contain;
-                    }
-
-                    Text {
-                        text: root.active_source;
-                        color: Theme.active.primary_accent;
-                        font-size: 17px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-                }
-
-                TouchArea {
-                    clicked => {
-                        root.source_clicked();
-                    }
-                }
-            }
-        }
-
-        // Center: Track / Client Quick Info (Vertically centered in 60px status bar)
+        // Left: Device / Track Info (Fills the remaining status bar area)
         VerticalLayout {
             alignment: center;
             Text {
                 text: root.track_or_device;
                 color: Theme.active.text_primary;
-                font-size: 20px;
-                font-weight: 700;
+                font-size: 26px;
+                font-weight: 800;
                 vertical-alignment: center;
                 overflow: elide;
-                max-width: 360px;
             }
         }
 

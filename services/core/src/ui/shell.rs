@@ -191,11 +191,6 @@ impl AppShell {
         self.window.set_active_tab(tab);
     }
 
-    /// Updates the active audio source name shown in the top status bar.
-    pub fn set_source(&self, source: impl Into<slint::SharedString>) {
-        self.window.set_active_source(source.into());
-    }
-
     /// Updates the track or connected device name displayed in the top status bar.
     pub fn set_track_or_device(&self, info: impl Into<slint::SharedString>) {
         self.window.set_track_or_device(info.into());
@@ -391,14 +386,29 @@ impl AppShell {
         // Bluetooth worker re-applies state every 250 ms position tick, and
         // unconditional `set_track_*` calls invalidate `MarqueeText` layout bindings
         // and force text re-shaping four times per second during active scrolling.
+        // Stale-data clearing on disconnect: the hardware worker publishes the
+        // placeholder default state when no player is connected. Detecting the
+        // placeholder title allows the shell to clear the stale artist and album
+        // lines so the UI does not show metadata from the previous session.
+        let is_placeholder = playback.title.as_ref() == "Waiting for Bluetooth Connection...";
+        let artist_val: &str = if is_placeholder {
+            ""
+        } else {
+            playback.artist.as_ref()
+        };
+        let album_val: &str = if is_placeholder {
+            ""
+        } else {
+            playback.album.as_ref()
+        };
         if w.get_track_title().as_str() != playback.title.as_ref() {
             w.set_track_title(playback.title.as_ref().into());
         }
-        if w.get_track_artist().as_str() != playback.artist.as_ref() {
-            w.set_track_artist(playback.artist.as_ref().into());
+        if w.get_track_artist().as_str() != artist_val {
+            w.set_track_artist(artist_val.into());
         }
-        if w.get_track_album().as_str() != playback.album.as_ref() {
-            w.set_track_album(playback.album.as_ref().into());
+        if w.get_track_album().as_str() != album_val {
+            w.set_track_album(album_val.into());
         }
         #[expect(
             clippy::cast_possible_wrap,
@@ -591,14 +601,6 @@ impl AppShell {
 
         self.window.on_previous_track(|| {
             tracing::info!("Previous track requested");
-        });
-
-        self.window.on_stream_pill_clicked(|| {
-            tracing::info!("Stream inspector pill clicked");
-        });
-
-        self.window.on_source_clicked(|| {
-            tracing::info!("Source pill clicked");
         });
 
         self.window.on_night_mode_clicked(|| {

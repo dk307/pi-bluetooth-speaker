@@ -331,9 +331,9 @@ export component NowPlayingView inherits Rectangle {
                         x: 0px;
                         y: (parent.height - self.height) / 2;
                         width: parent.width;
-                        height: 14px;
+                        height: 17px;
                         background: #1c2430;
-                        border-radius: 7px;
+                        border-radius: 8.5px;
 
                         // Filled played position bar
                         Rectangle {
@@ -342,7 +342,7 @@ export component NowPlayingView inherits Rectangle {
                             width: parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio));
                             height: parent.height;
                             background: Theme.active.primary_accent;
-                            border-radius: 7px;
+                            border-radius: 8.5px;
                         }
                     }
 
@@ -350,11 +350,11 @@ export component NowPlayingView inherits Rectangle {
                     Rectangle {
                         x: Math.max(0px, Math.min(parent.width - self.width, parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio)) - self.width / 2));
                         y: (parent.height - self.height) / 2;
-                        width: 24px;
-                        height: 24px;
-                        border-radius: 12px;
+                        width: 29px;
+                        height: 29px;
+                        border-radius: 14.5px;
                         background: Theme.active.text_primary;
-                        border-width: 3px;
+                        border-width: 4px;
                         border-color: Theme.active.primary_accent;
                     }
 
