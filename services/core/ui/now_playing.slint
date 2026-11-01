@@ -140,19 +140,23 @@ export component NowPlayingView inherits Rectangle {
     in property <bool> has_cover_art: false;
     in property <image> cover_image;
     // Marquee scroll rate in ticks per second (30 or 60; default 60). One shared
-    // 16.65 ms timer advances `marquee_clock` by `step_frames` every trigger, so
-    // both marquees scroll in lockstep and the render loop receives exactly one
-    // dirty event per effective animation frame regardless of the configured rate.
+    // 16.65 ms timer advances `marquee_clock` by one scroll step every
+    // `step_frames` triggers, so both marquees scroll in lockstep and the render
+    // loop receives exactly one dirty event per effective animation frame.
     in property <int> marquee_fps: 60;
     property <int> marquee_clock: 0;
     property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
+    property <int> raw_tick: 0;
     out property <bool> is_animating: title_marquee.is_overflow || artist_marquee.is_overflow || root.is_playing;
 
     Timer {
         interval: 16.65ms;
         running: title_marquee.is_overflow || artist_marquee.is_overflow;
         triggered() => {
-            root.marquee_clock += root.step_frames;
+            root.raw_tick += 1;
+            if (Math.mod(root.raw_tick, root.step_frames) == 0) {
+                root.marquee_clock += 1;
+            }
         }
     }
 
