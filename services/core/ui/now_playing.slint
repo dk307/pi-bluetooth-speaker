@@ -7,6 +7,13 @@ import { Theme } from "theme.slint";
 // of glyph shaping and rasterization. `strip` is empty until the first raster completes.
 component MarqueeText inherits Rectangle {
     in property <image> strip;
+    // Shared marquee clock (ticks of the parent's single 16.65 ms timer) and the
+    // configured marquee frame rate in ticks per second (60 = 1 px per tick, 30 =
+    // 2 px every other tick). One shared timer guarantees title and artist scroll
+    // in lockstep; independent per-instance timers drift apart and double the
+    // number of dirty events fed to the render loop.
+    in property <int> clock_frame: 0;
+    in property <int> marquee_fps: 60;
     clip: true;
     height: strip_item.preferred-height;
     horizontal-stretch: 1;
@@ -23,31 +30,24 @@ component MarqueeText inherits Rectangle {
     property <length> cycle_distance: text_width + gap;
 
     // Unidirectional marquee: 2.0s stationary pause at start, then constant-speed leftward
-    // scroll. The offset derives from a self-advancing integer frame counter: 1 tick = 1
-    // physical px step at the panel's measured 60.06 Hz hardware refresh (16.65 ms), giving
-    // deterministic 1 px/frame motion. Reading `animation-tick()` was deliberately avoided:
+    // scroll. The offset derives from the shared integer frame clock: each clock tick
+    // advances the scroll by `step_frames` physical px, so 60 fps = 1 px per 16.65 ms and
+    // 30 fps = 2 px per 33.3 ms at identical on-screen speed. Halving the effective frame
+    // rate halves the per-second software-renderer cost of scrolling the large
+    // pre-rasterized strips (~34k dirty px/frame). Reading `animation-tick()` was
+    // deliberately avoided:
     // it permanently marks Slint's animation driver active, pinning the render loop at
     // 60 fps (and ~60% CPU) even while the marquee is paused or the text does not overflow.
-    property <int> cycle_frames: Math.max(1, Math.round(cycle_distance / 1px));
-    property <int> pause_frames: Math.round(pause_secs * 60);
+    property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
+    property <length> step: root.step_frames * 1px;
+    property <int> cycle_frames: Math.max(1, Math.round(cycle_distance / root.step));
+    property <int> pause_frames: Math.round(pause_secs * root.marquee_fps);
     property <int> total_frames: Math.max(pause_frames + cycle_frames, 1);
-    property <int> scroll_frame: 0;
+    property <int> scroll_frame: Math.mod(root.clock_frame, root.total_frames);
     property <float> pause_secs: 2.0;
     property <float> progress: scroll_frame < pause_frames ?
         0.0 : ((scroll_frame - pause_frames) * 1.0 / cycle_frames);
     property <length> scroll_offset: is_overflow ? (-cycle_distance * progress) : 0px;
-
-    Timer {
-        interval: 16.65ms;
-        running: root.is_overflow;
-        triggered() => {
-            root.scroll_frame = Math.mod(root.scroll_frame + 1, root.total_frames);
-        }
-    }
-
-    changed strip => {
-        root.scroll_frame = 0;
-    }
 
     // The wrap-around copy is only ever visible once the trailing gap of the first
     // copy has entered the viewport's right edge; skipping it otherwise halves the
@@ -60,7 +60,7 @@ component MarqueeText inherits Rectangle {
     // full-window redraw (~30 ms) in Slint's partial renderer
     // (`free_graphics_resources` -> `force_screen_refresh`), causing a ~70% CPU storm.
     property <bool> wrap_visible: root.is_overflow
-        && (root.scroll_frame - root.pause_frames) > root.cycle_frames - Math.round(root.width / 1px);
+        && (root.scroll_frame - root.pause_frames) > root.cycle_frames - Math.round(root.width / root.step);
 
     // The wrap-around copy is only ever visible once the trailing gap of the first
     // copy has entered the viewport's right edge; skipping it otherwise halves the
@@ -139,7 +139,29 @@ export component NowPlayingView inherits Rectangle {
     in property <bool> is_playing: false;
     in property <bool> has_cover_art: false;
     in property <image> cover_image;
+    // Marquee scroll rate in ticks per second (30 or 60; default 60). One shared
+    // 16.65 ms timer advances `marquee_clock` by `step_frames` every trigger, so
+    // both marquees scroll in lockstep and the render loop receives exactly one
+    // dirty event per effective animation frame regardless of the configured rate.
+    in property <int> marquee_fps: 60;
+    property <int> marquee_clock: 0;
+    property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
     out property <bool> is_animating: title_marquee.is_overflow || artist_marquee.is_overflow || root.is_playing;
+
+    Timer {
+        interval: 16.65ms;
+        running: title_marquee.is_overflow || artist_marquee.is_overflow;
+        triggered() => {
+            root.marquee_clock += root.step_frames;
+        }
+    }
+
+    changed title_marquee_strip => {
+        root.marquee_clock = 0;
+    }
+    changed artist_marquee_strip => {
+        root.marquee_clock = 0;
+    }
 
     callback toggle_play_pause();
     callback next_track();
@@ -207,6 +229,8 @@ export component NowPlayingView inherits Rectangle {
 
                 title_marquee := MarqueeText {
                     strip: root.title_marquee_strip;
+                    clock_frame: root.marquee_clock;
+                    marquee_fps: root.marquee_fps;
                 }
 
                 HorizontalLayout {
@@ -215,6 +239,8 @@ export component NowPlayingView inherits Rectangle {
                     artist_marquee := MarqueeText {
                         horizontal-stretch: 1;
                         strip: root.artist_marquee_strip;
+                        clock_frame: root.marquee_clock;
+                        marquee_fps: root.marquee_fps;
                     }
 
                     if root.is_playing : AmbientWaveIndicator {

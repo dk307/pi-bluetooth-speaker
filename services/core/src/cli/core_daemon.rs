@@ -50,6 +50,8 @@ pub struct CoreCliOptions {
     pub theme: Option<crate::ui::ThemePreset>,
     /// Navigation dock tab to open on startup (0 to 5).
     pub tab: Option<i32>,
+    /// Marquee scroll rate in fps; `None` means the 60 fps default.
+    pub marquee_fps: Option<u32>,
 }
 
 /// Prints usage text for the core daemon executable.
@@ -69,6 +71,7 @@ pub fn print_usage(bin_name: &str) {
         "  -T, --tab <TAB>             Active UI tab on startup (0-5 or name: player, vu, bt, cd, dsp, settings)"
     );
     println!("  -p, --preview <SECS>        Render UI for SECS seconds (preview/testing mode)");
+    println!("  -m, --marquee-fps <30|60>   Marquee scroll rate in fps (default: 60)");
     println!("  -V, --version               Print version and exit");
     println!("  -h, --help                  Print this help text and exit");
 }
@@ -106,6 +109,21 @@ pub fn parse_tab_arg(val: &str) -> Result<i32, String> {
         other => Err(format!(
             "invalid tab '{other}': expected 0-5 or 'player', 'vu', 'bluetooth', 'cd', 'dsp', 'settings'"
         )),
+    }
+}
+
+/// Parses and validates a `--marquee-fps <N>` argument value.
+///
+/// Only 30 and 60 are accepted: 60 is the production default and 30 halves the
+/// render load by scrolling 2 px per 33.3 ms tick at identical on-screen speed.
+///
+/// # Errors
+/// Returns an error message for any value other than `30` or `60`.
+pub fn parse_marquee_fps(val: &str) -> Result<u32, String> {
+    match val {
+        "30" => Ok(30),
+        "60" => Ok(60),
+        other => Err(format!("invalid marquee fps '{other}': expected 30 or 60")),
     }
 }
 
@@ -150,6 +168,10 @@ where
                     }
                 }
             }
+            "-m" | "--marquee-fps" => {
+                let val = next_arg_value(&mut iter, "--marquee-fps")?;
+                opts.marquee_fps = Some(parse_marquee_fps(&val)?);
+            }
             "-p" | "--preview" => {
                 let val = next_arg_value(&mut iter, "--preview")?;
                 opts.preview_secs = Some(parse_preview_secs(&val)?);
@@ -183,6 +205,7 @@ pub fn run_ui_display(
     preview_secs: Option<u64>,
     theme: Option<crate::ui::ThemePreset>,
     tab: Option<i32>,
+    marquee_fps: u32,
 ) {
     if headless_requested() {
         tracing::info!("Headless mode requested via SPEAKER_CORE_HEADLESS=1");
@@ -195,6 +218,7 @@ pub fn run_ui_display(
         preview_secs,
         theme,
         tab,
+        marquee_fps,
     );
 }
 
@@ -213,6 +237,7 @@ pub fn run_ui_display_on_path(
     preview_secs: Option<u64>,
     theme: Option<crate::ui::ThemePreset>,
     tab: Option<i32>,
+    marquee_fps: u32,
 ) {
     if !fb_path.exists() {
         tracing::info!("Headless/simulated environment (no /dev/fb0 detected)");
@@ -238,14 +263,14 @@ pub fn run_ui_display_on_path(
             let splash_secs = preview_secs.map_or(2, |p| p.min(2));
             run_splash_on(&mut fb, Some(splash_secs), theme);
             let remaining_preview = preview_secs.and_then(|p| p.checked_sub(splash_secs));
-            run_shell_on(&mut fb, remaining_preview, theme, tab);
+            run_shell_on(&mut fb, remaining_preview, theme, tab, marquee_fps);
         }
         ScreenTarget::Splash => {
             let splash_secs = preview_secs.or(Some(2));
             run_splash_on(&mut fb, splash_secs, theme);
         }
         ScreenTarget::Shell => {
-            run_shell_on(&mut fb, preview_secs, theme, tab);
+            run_shell_on(&mut fb, preview_secs, theme, tab, marquee_fps);
         }
     }
 }
@@ -342,8 +367,10 @@ pub fn init_shell(
     mocked_device: bool,
     theme: Option<crate::ui::ThemePreset>,
     tab: Option<i32>,
+    marquee_fps: u32,
 ) -> (AppShell, Option<crate::hardware::BluetoothDevice>) {
     let shell = AppShell::new(main_window);
+    shell.set_marquee_fps(marquee_fps);
     if let Some(t) = theme {
         shell.apply_theme(t);
     }
@@ -572,6 +599,7 @@ pub fn run_shell_on(
     preview_secs: Option<u64>,
     theme: Option<crate::ui::ThemePreset>,
     tab: Option<i32>,
+    marquee_fps: u32,
 ) {
     if let Err(e) = fb.unblank() {
         report_display(tracing::Level::WARN, "Failed to unblank display", &e);
@@ -597,7 +625,13 @@ pub fn run_shell_on(
         }
     };
 
-    let (shell, maybe_bt) = init_shell(main_window, !fb.is_hardware_panel(), theme, tab);
+    let (shell, maybe_bt) = init_shell(
+        main_window,
+        !fb.is_hardware_panel(),
+        theme,
+        tab,
+        marquee_fps,
+    );
     if let Err(e) = shell.window().show() {
         report_display(
             tracing::Level::ERROR,
@@ -628,7 +662,13 @@ pub fn run_app(opts: CoreCliOptions) -> ExitCode {
     println!("  Thermal Sensor: {}", temp_sensor.gpio_info());
 
     #[cfg(feature = "ui")]
-    run_ui_display(opts.screen, opts.preview_secs, opts.theme, opts.tab);
+    run_ui_display(
+        opts.screen,
+        opts.preview_secs,
+        opts.theme,
+        opts.tab,
+        opts.marquee_fps.unwrap_or(60),
+    );
 
     #[cfg(not(feature = "ui"))]
     let _ = opts;

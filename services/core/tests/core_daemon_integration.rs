@@ -6,8 +6,8 @@ use std::fs;
 use std::sync::Mutex;
 
 use speaker_core::cli::core_daemon::{
-    CoreCliOptions, ScreenTarget, headless_requested, parse_cli_args_from, parse_preview_secs,
-    parse_tab_arg, print_usage,
+    CoreCliOptions, ScreenTarget, headless_requested, parse_cli_args_from, parse_marquee_fps,
+    parse_preview_secs, parse_tab_arg, print_usage,
 };
 #[cfg(feature = "ui")]
 use speaker_core::cli::core_daemon::{
@@ -54,6 +54,40 @@ fn parse_preview_secs_rejects_sign_prefixes_and_non_numeric() {
             .unwrap_err()
             .contains("invalid preview seconds")
     );
+}
+
+#[test]
+fn parse_marquee_fps_accepts_only_30_and_60() {
+    assert_eq!(parse_marquee_fps("30").unwrap(), 30);
+    assert_eq!(parse_marquee_fps("60").unwrap(), 60);
+    for bad in [
+        "0", "1", "15", "45", "90", "120", "+30", "-30", "abc", "", "30.0",
+    ] {
+        assert!(
+            parse_marquee_fps(bad)
+                .unwrap_err()
+                .contains("expected 30 or 60"),
+            "'{bad}' must be rejected"
+        );
+    }
+}
+
+#[test]
+fn parse_cli_args_marquee_fps_flag() {
+    let _guard = lock_env();
+    let parsed = parse_cli_args_from(["--marquee-fps".into(), "30".into()]).unwrap();
+    let CliParse::Options(opts) = parsed else {
+        panic!("expected options");
+    };
+    assert_eq!(opts.marquee_fps, Some(30));
+    let parsed = parse_cli_args_from(["-m".into(), "60".into()]).unwrap();
+    let CliParse::Options(opts) = parsed else {
+        panic!("expected options");
+    };
+    assert_eq!(opts.marquee_fps, Some(60));
+    let err = parse_cli_args_from(["--marquee-fps".into(), "45".into()]).unwrap_err();
+    assert!(err.contains("expected 30 or 60"));
+    assert!(!err.contains("Backtrace") && !err.contains("panicked"));
 }
 
 #[test]
@@ -127,9 +161,9 @@ fn run_ui_display_headless_short_circuits() {
     // SPEAKER_CORE_HEADLESS while this guard is held.
     unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "1") };
     // The headless guard in run_ui_display must return before any framebuffer/sysfs access.
-    run_ui_display(ScreenTarget::Appliance, Some(1), None, None);
-    run_ui_display(ScreenTarget::Splash, Some(1), None, None);
-    run_ui_display(ScreenTarget::Shell, Some(1), None, None);
+    run_ui_display(ScreenTarget::Appliance, Some(1), None, None, 60);
+    run_ui_display(ScreenTarget::Splash, Some(1), None, None, 60);
+    run_ui_display(ScreenTarget::Shell, Some(1), None, None, 60);
     // SAFETY: same serialized-guard invariant as above.
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
 }
@@ -143,9 +177,9 @@ fn run_ui_display_missing_device_returns_early() {
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
     let dir = ScopedTempDir::new("fb-boot-splash-missing");
     let missing = dir.path().join("fb0");
-    run_ui_display_on_path(&missing, ScreenTarget::Appliance, Some(1), None, None);
-    run_ui_display_on_path(&missing, ScreenTarget::Splash, Some(1), None, None);
-    run_ui_display_on_path(&missing, ScreenTarget::Shell, Some(1), None, None);
+    run_ui_display_on_path(&missing, ScreenTarget::Appliance, Some(1), None, None, 60);
+    run_ui_display_on_path(&missing, ScreenTarget::Splash, Some(1), None, None, 60);
+    run_ui_display_on_path(&missing, ScreenTarget::Shell, Some(1), None, None, 60);
 }
 
 #[cfg(feature = "ui")]
@@ -194,7 +228,7 @@ fn run_splash_on_mocked_render_error_skips_loop() {
 fn run_shell_on_mocked_renders_and_tracks_counters() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     assert!(fb.is_mocked());
-    run_shell_on(&mut fb, Some(0), None, None);
+    run_shell_on(&mut fb, Some(0), None, None, 60);
     assert_eq!(fb.unblank_count(), 1);
     assert_eq!(fb.render_count(), 1);
     assert_eq!(ctrl.counters(), (1, 1));
@@ -205,7 +239,7 @@ fn run_shell_on_mocked_renders_and_tracks_counters() {
 fn run_shell_on_mocked_reports_unblank_failure_and_continues() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     ctrl.set_unblank_error("simulated unblank failure");
-    run_shell_on(&mut fb, Some(0), None, None);
+    run_shell_on(&mut fb, Some(0), None, None, 60);
     assert_eq!(fb.unblank_count(), 0);
     assert_eq!(fb.render_count(), 1);
 }
@@ -215,7 +249,7 @@ fn run_shell_on_mocked_reports_unblank_failure_and_continues() {
 fn run_shell_on_mocked_render_error_skips_loop() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     ctrl.set_render_error("simulated render failure");
-    run_shell_on(&mut fb, Some(0), None, None);
+    run_shell_on(&mut fb, Some(0), None, None, 60);
     assert_eq!(fb.render_count(), 0);
     assert_eq!(ctrl.counters(), (1, 0));
 }
@@ -229,6 +263,7 @@ fn run_shell_on_mocked_with_theme_and_tab() {
         Some(0),
         Some(speaker_core::ui::ThemePreset::Peppy),
         Some(1),
+        30,
     );
     assert_eq!(fb.render_count(), 1);
     assert_eq!(ctrl.counters(), (1, 1));
@@ -259,12 +294,12 @@ fn run_render_loop_mocked_and_bluetooth_paths() {
 
     // 4. run_shell_on with render error
     ctrl.set_render_error("simulated shell render error");
-    run_shell_on(&mut fb, Some(0), None, None);
+    run_shell_on(&mut fb, Some(0), None, None, 60);
 
     // 5. run_shell_on with unblank error
     ctrl.clear_render_error();
     ctrl.set_unblank_error("simulated unblank error");
-    run_shell_on(&mut fb, Some(0), None, None);
+    run_shell_on(&mut fb, Some(0), None, None, 60);
     ctrl.clear_unblank_error();
 }
 
@@ -395,6 +430,7 @@ fn run_app_headless_executes_successfully() {
     unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "1") };
 
     let code = run_app(CoreCliOptions {
+        marquee_fps: None,
         preview_secs: Some(1),
         screen: ScreenTarget::Splash,
         theme: None,
@@ -403,6 +439,7 @@ fn run_app_headless_executes_successfully() {
     assert_eq!(code, std::process::ExitCode::SUCCESS);
 
     let code_appliance = run_app(CoreCliOptions {
+        marquee_fps: None,
         preview_secs: Some(1),
         screen: ScreenTarget::Appliance,
         theme: Some(speaker_core::ui::ThemePreset::Peppy),
@@ -411,6 +448,7 @@ fn run_app_headless_executes_successfully() {
     assert_eq!(code_appliance, std::process::ExitCode::SUCCESS);
 
     let code_shell = run_app(CoreCliOptions {
+        marquee_fps: None,
         preview_secs: Some(1),
         screen: ScreenTarget::Shell,
         theme: Some(speaker_core::ui::ThemePreset::Peppy),
@@ -445,18 +483,19 @@ fn run_ui_display_on_valid_and_invalid_file_paths() {
     let dev = dir.path().join("fake_fb");
     fs::write(&dev, vec![0u8; 800 * 480 * 4]).unwrap();
 
-    run_ui_display_on_path(&dev, ScreenTarget::Appliance, Some(0), None, None);
-    run_ui_display_on_path(&dev, ScreenTarget::Splash, Some(0), None, None);
+    run_ui_display_on_path(&dev, ScreenTarget::Appliance, Some(0), None, None, 60);
+    run_ui_display_on_path(&dev, ScreenTarget::Splash, Some(0), None, None, 60);
     run_ui_display_on_path(
         &dev,
         ScreenTarget::Shell,
         Some(0),
         Some(speaker_core::ui::ThemePreset::Peppy),
         Some(1),
+        60,
     );
 
     // Directory path to trigger Framebuffer::open failure path
-    run_ui_display_on_path(dir.path(), ScreenTarget::Splash, Some(0), None, None);
+    run_ui_display_on_path(dir.path(), ScreenTarget::Splash, Some(0), None, None, 60);
 }
 
 #[cfg(feature = "ui")]
@@ -498,9 +537,9 @@ fn run_ui_display_with_headless_disabled_checks_device() {
 
     let dir = ScopedTempDir::new("fb-headless-disabled");
     let missing = dir.path().join("fb0");
-    run_ui_display_on_path(&missing, ScreenTarget::Splash, Some(0), None, None);
-    run_ui_display_on_path(&missing, ScreenTarget::Shell, Some(0), None, None);
-    run_ui_display_on_path(&missing, ScreenTarget::Appliance, Some(0), None, None);
+    run_ui_display_on_path(&missing, ScreenTarget::Splash, Some(0), None, None, 60);
+    run_ui_display_on_path(&missing, ScreenTarget::Shell, Some(0), None, None, 60);
+    run_ui_display_on_path(&missing, ScreenTarget::Appliance, Some(0), None, None, 60);
 
     // SAFETY: serialized test guard
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
@@ -529,9 +568,9 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
     let _guard = lock_env();
     // SAFETY: serialized test guard
     unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "0") };
-    run_ui_display(ScreenTarget::Splash, Some(0), None, None);
-    run_ui_display(ScreenTarget::Shell, Some(0), None, None);
-    run_ui_display(ScreenTarget::Appliance, Some(0), None, None);
+    run_ui_display(ScreenTarget::Splash, Some(0), None, None, 60);
+    run_ui_display(ScreenTarget::Shell, Some(0), None, None, 60);
+    run_ui_display(ScreenTarget::Appliance, Some(0), None, None, 60);
     // SAFETY: serialized test guard
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
 
@@ -544,6 +583,7 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
         false,
         Some(speaker_core::ui::ThemePreset::Peppy),
         Some(1),
+        60,
     );
     assert!(!shell.is_playing());
     assert_eq!(shell.current_theme(), speaker_core::ui::ThemePreset::Peppy);
@@ -556,6 +596,7 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
         true,
         Some(speaker_core::ui::ThemePreset::CyberpunkNeon),
         Some(2),
+        30,
     );
     assert!(bt_mock.is_some());
     assert!(shell_mock.is_playing());

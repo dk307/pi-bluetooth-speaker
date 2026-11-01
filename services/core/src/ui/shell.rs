@@ -76,6 +76,12 @@ impl AppShell {
     ///
     /// If disabled while the shell is currently on the CD Player tab (tab 3), the active tab
     /// is automatically reset to the Now Playing player tab (tab 0) to prevent state desync.
+    /// Sets the marquee scroll rate in fps (30 or 60) on the UI window.
+    pub fn set_marquee_fps(&self, fps: u32) {
+        self.window
+            .set_marquee_fps(i32::try_from(fps).unwrap_or(i32::MAX));
+    }
+
     pub fn set_cd_enabled(&self, enabled: bool) {
         self.window.set_cd_enabled(enabled);
         if !enabled && self.current_tab() == 3 {
