@@ -87,6 +87,12 @@ pub struct MarqueeStrip {
     /// Raw premultiplied RGBA pixels backing `image`, shared cheaply with the
     /// framebuffer-side marquee composer.
     pixels: Arc<[RgbaPremulPixel]>,
+    /// Stable strip identity assigned by the [`MarqueeStripCache`] on creation.
+    ///
+    /// Unlike `Arc` buffer addresses (which are not stable across clones and can be
+    /// recycled after a re-render replaces the buffer), this monotonically increasing
+    /// counter gives the framebuffer-side composer a reliable "strip changed" signal.
+    id: u64,
 }
 
 impl MarqueeStrip {
@@ -98,7 +104,17 @@ impl MarqueeStrip {
             width: 0,
             height: 0,
             pixels: Arc::from([]),
+            id: 0,
         }
+    }
+
+    /// Stable identity of this strip assigned by the [`MarqueeStripCache`].
+    ///
+    /// `0` marks strips created outside the cache (empty placeholders); cache-managed
+    /// strips always carry a strictly positive, never-reused identity.
+    #[must_use]
+    pub const fn strip_id(&self) -> u64 {
+        self.id
     }
 
     /// The raw premultiplied RGBA pixel buffer backing the strip image.
@@ -183,6 +199,9 @@ impl StripRequest {
 pub struct MarqueeStripCache {
     rasterizer: Option<MarqueeStripRasterizer>,
     title: Option<(StripKey, MarqueeStrip)>,
+    /// Next monotonically increasing strip identity to hand out (`0` is reserved for
+    /// uncached/empty strips, so cache-managed strips always carry a positive id).
+    next_id: u64,
 }
 
 impl MarqueeStripCache {
@@ -196,7 +215,13 @@ impl MarqueeStripCache {
     /// already matches (no re-render, no property invalidation).
     #[must_use]
     pub fn rasterize_title(&mut self, request: &StripRequest) -> Option<MarqueeStrip> {
-        Self::rasterize_slot(&mut self.rasterizer, &mut self.title, request, "title")
+        Self::rasterize_slot(
+            &mut self.rasterizer,
+            &mut self.title,
+            &mut self.next_id,
+            request,
+            "title",
+        )
     }
 
     /// How many actual rasterization passes were performed (cache misses).
@@ -210,6 +235,7 @@ impl MarqueeStripCache {
     fn rasterize_slot(
         rasterizer: &mut Option<MarqueeStripRasterizer>,
         slot: &mut Option<(StripKey, MarqueeStrip)>,
+        next_id: &mut u64,
         request: &StripRequest,
         label: &str,
     ) -> Option<MarqueeStrip> {
@@ -227,10 +253,14 @@ impl MarqueeStripCache {
                 }
             }
         }
-        let strip = rasterizer
+        let mut strip = rasterizer
             .as_mut()
             .expect("rasterizer created above")
             .rasterize(request);
+        // Assign a stable identity independent of heap addresses so the framebuffer
+        // composer can detect strip changes without pointer-identity comparisons.
+        strip.id = next_id.wrapping_add(1);
+        *next_id = strip.id;
         *slot = Some((request.key(), strip.clone()));
         Some(strip)
     }
@@ -349,6 +379,9 @@ impl MarqueeStripRasterizer {
             width,
             height,
             pixels: Arc::from(buffer.into_boxed_slice()),
+            // Strips are handed a stable identity only once they enter a
+            // [`MarqueeStripCache`] slot (see `rasterize_slot`).
+            id: 0,
         };
         self.key = Some(request.key());
         self.renders += 1;

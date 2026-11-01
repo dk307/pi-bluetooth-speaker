@@ -159,6 +159,7 @@ impl AppShell {
                 cycle_px,
                 strip: strip.pixels_arc(),
                 strip_w: strip.width(),
+                strip_id: strip.strip_id(),
             })
         };
         vec![row(
@@ -279,6 +280,17 @@ impl AppShell {
             .set_position_text(crate::hardware::format_duration_ms(position_ms).into());
         self.window
             .set_duration_text(crate::hardware::format_duration_ms(duration_ms).into());
+    }
+
+    /// Applies a full [`BtPlaybackState`] snapshot to the window properties.
+    ///
+    /// Called by the bt-monitor worker (and available to integration tests to
+    /// simulate the worker tick) after fresh state is fetched on a background
+    /// thread; the transport control callbacks intentionally do not fetch or
+    /// apply state themselves to avoid blocking D-Bus/OBEX round-trips on the
+    /// render thread.
+    pub fn refresh_playback_display(&self, playback: &crate::hardware::BtPlaybackState) {
+        Self::apply_playback_to_window(&self.window, &self.last_cover_path, playback);
     }
 
     /// Updates the audio stream inspector pill details.
@@ -448,7 +460,7 @@ impl AppShell {
     /// caching the result next to the source file.
     fn upscale_cover_art(path: &str) -> Option<Box<str>> {
         const TARGET_COVER_SIZE: u32 = 480;
-        tracing::error!("UPSACLE_IN {:?}", path);
+        tracing::debug!("UPSCALE_IN {:?}", path);
         let src = std::path::Path::new(path);
         let file_name = src.file_name()?;
         let mut upscaled_name = file_name.to_os_string();
@@ -526,43 +538,27 @@ impl AppShell {
         let win = self.window.as_weak();
         self.window.on_toggle_play_pause(move || {
             if let Some(w) = win.upgrade() {
+                // `player_toggle` already returns the optimistic next state; do NOT
+                // call `playback_state()` here — it resolves cover art over blocking
+                // OBEX and would freeze the render thread for seconds. The bt-monitor
+                // worker re-applies authoritative state (incl. cover) every tick.
                 if let Ok(next_state) = bt_toggle.player_toggle() {
-                    let actual = bt_toggle
-                        .playback_state()
-                        .ok()
-                        .flatten()
-                        .map_or(next_state, |p| p.is_playing());
-                    w.set_is_playing(actual);
+                    w.set_is_playing(next_state);
                 }
             }
         });
 
         let bt_next = bt.clone();
-        let bt_sync_next = bt.clone();
-        let win_next = self.window.as_weak();
-        let cover_next = Arc::clone(&self.last_cover_path);
         self.window.on_next_track(move || {
-            if bt_next.player_next().is_ok() {
-                if let Some(w) = win_next.upgrade() {
-                    if let Ok(Some(ref p)) = bt_sync_next.playback_state() {
-                        Self::apply_playback_to_window(&w, &cover_next, p);
-                    }
-                }
-            }
+            // Fire-and-forget: skip the blocking `playback_state()` round-trip
+            // (it resolves cover art over OBEX and freezes the render thread);
+            // the bt-monitor worker refreshes state and cover within one tick.
+            let _ = bt_next.player_next();
         });
 
         let bt_prev = bt.clone();
-        let bt_sync_prev = bt.clone();
-        let win_prev = self.window.as_weak();
-        let cover_prev = Arc::clone(&self.last_cover_path);
         self.window.on_previous_track(move || {
-            if bt_prev.player_previous().is_ok() {
-                if let Some(w) = win_prev.upgrade() {
-                    if let Ok(Some(ref p)) = bt_sync_prev.playback_state() {
-                        Self::apply_playback_to_window(&w, &cover_prev, p);
-                    }
-                }
-            }
+            let _ = bt_prev.player_previous();
         });
 
         let bt_seek = bt;

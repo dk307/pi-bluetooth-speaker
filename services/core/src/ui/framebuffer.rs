@@ -331,6 +331,10 @@ pub struct MarqueeRowSpec {
     pub strip: Arc<[crate::ui::marquee::RgbaPremulPixel]>,
     /// Strip width in pixels (`strip.len() / strip_h`).
     pub strip_w: u32,
+    /// Stable monotonic strip identity assigned by the strip cache. Unlike heap
+    /// addresses this survives reallocation and never collides after re-rasterization,
+    /// so it is the sole identity signal used by the composer.
+    pub strip_id: u64,
 }
 
 /// Identifies when a row's composed content must be refreshed: scroll moved or the
@@ -338,7 +342,7 @@ pub struct MarqueeRowSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RowFingerprint {
     scroll_px: u32,
-    strip_id: usize,
+    strip_id: u64,
 }
 
 /// Per-row overlay state: clean background snapshot plus the last composed fingerprint.
@@ -391,10 +395,7 @@ impl MarqueeOverlay {
                             let unchanged = existing.scroll_px == spec.scroll_px
                                 && existing.cycle_px == spec.cycle_px
                                 && existing.strip_w == spec.strip_w
-                                && std::ptr::addr_eq(
-                                    std::sync::Arc::as_ptr(&existing.strip),
-                                    std::sync::Arc::as_ptr(&spec.strip),
-                                );
+                                && existing.strip_id == spec.strip_id;
                             MarqueeRowState {
                                 rect: state.rect,
                                 background: state.background.clone(),
@@ -454,7 +455,7 @@ impl MarqueeOverlay {
         for (spec, state) in &mut self.rows {
             let fingerprint = RowFingerprint {
                 scroll_px: spec.scroll_px,
-                strip_id: Arc::as_ptr(&spec.strip).addr(),
+                strip_id: spec.strip_id,
             };
             if state.last == Some(fingerprint) || state.background.is_empty() {
                 continue;
@@ -1079,7 +1080,7 @@ impl Framebuffer {
     }
 
     /// Renders one frame through the `mmap`-backed scanout path (`VSync` pacing + dirty blit).
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "all parameters are destructured backend fields of a single render call"
     )]
@@ -1182,7 +1183,7 @@ impl Framebuffer {
     }
 
     /// Renders one frame through the regular-file mapping path (full flush after draw).
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "all parameters are destructured backend fields of a single render call"
     )]

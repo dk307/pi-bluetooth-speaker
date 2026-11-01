@@ -499,6 +499,7 @@ fn marquee_compose_overlays_strip_over_captured_background() {
         cycle_px: 8,
         strip: std::sync::Arc::clone(&strip),
         strip_w,
+        strip_id: 1,
     }]);
     fb.install_marquee_backgrounds(vec![bg]);
     assert!(fb.marquee_overlay_ready());
@@ -546,6 +547,7 @@ fn marquee_compose_tiles_wrap_and_scroll() {
         cycle_px: 4,
         strip,
         strip_w,
+        strip_id: 2,
     }]);
     let bg = fb.capture_region(0, 0, 8, 1).unwrap();
     fb.install_marquee_backgrounds(vec![bg]);
@@ -600,6 +602,7 @@ fn marquee_compose_preserves_background_outside_strip_tiles() {
         cycle_px: 2,
         strip,
         strip_w: 1,
+        strip_id: 3,
     }]);
     let bg = fb.capture_region(0, 0, 2, 1).unwrap();
     fb.install_marquee_backgrounds(vec![bg]);

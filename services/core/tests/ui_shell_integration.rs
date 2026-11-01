@@ -506,8 +506,16 @@ fn ui_shell_now_playing_callbacks() {
     assert!(shell.is_playing());
 
     shell.window().invoke_next_track();
+    // The transport callbacks are fire-and-forget; simulate the bt-monitor
+    // worker applying the fresh state on its next tick.
+    if let Some(playback) = bt.status().unwrap().playback.as_ref() {
+        shell.refresh_playback_display(playback);
+    }
     assert_eq!(shell.window().get_track_title(), "Money for Nothing");
     shell.window().invoke_previous_track();
+    if let Some(playback) = bt.status().unwrap().playback.as_ref() {
+        shell.refresh_playback_display(playback);
+    }
     assert_eq!(shell.window().get_track_title(), "Money for Nothing");
     shell.window().invoke_seek(0.5);
     assert_eq!(bt.status().unwrap().playback.unwrap().position_ms, 115_000);

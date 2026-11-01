@@ -407,6 +407,59 @@ pub fn init_shell(
     (shell, maybe_bt)
 }
 
+/// Polls the Bluetooth device and publishes playback/PCM changes into `shared`.
+///
+/// Runs on the dedicated `bt-monitor` thread until `running` is cleared.
+/// Panics here are re-raised by the render loop's `join()` so a dead monitor
+/// fails the daemon instead of leaving the playback UI silently stale.
+#[cfg(feature = "ui")]
+fn bt_monitor_loop(
+    bt: &crate::hardware::BluetoothDevice,
+    shared: &Mutex<(
+        Option<crate::hardware::BtPlaybackState>,
+        Option<crate::hardware::BlueAlsaPcm>,
+    )>,
+    running: &AtomicBool,
+) {
+    let mut last_pb: Option<crate::hardware::BtPlaybackState> = None;
+    let mut last_pcms: Option<Box<[crate::hardware::BlueAlsaPcm]>> = None;
+
+    while running.load(Ordering::Relaxed) {
+        let is_playing = last_pb
+            .as_ref()
+            .is_some_and(crate::hardware::BtPlaybackState::is_playing);
+        let poll_interval = if is_playing {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_millis(750)
+        };
+
+        if let Ok(Some(ref pb)) = bt.playback_state() {
+            if last_pb.as_ref() != Some(pb) {
+                if let Ok(mut lock) = shared.lock() {
+                    lock.0 = Some(pb.clone());
+                }
+                last_pb = Some(pb.clone());
+            }
+        }
+        if let Ok(ref pcms) = bt.audio_pcms() {
+            if last_pcms.as_ref() != Some(pcms) {
+                if let Some(active) = pcms.iter().find(|p| p.running).or_else(|| pcms.first()) {
+                    if let Ok(mut lock) = shared.lock() {
+                        lock.1 = Some(active.clone());
+                    }
+                }
+                last_pcms = Some(pcms.clone());
+            }
+        }
+
+        let deadline = Instant::now() + poll_interval;
+        while running.load(Ordering::Relaxed) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+
 #[cfg(feature = "ui")]
 pub fn run_render_loop(
     fb: &mut Framebuffer,
@@ -435,45 +488,7 @@ pub fn run_render_loop(
         std::thread::Builder::new()
             .name("bt-monitor".into())
             .spawn(move || {
-                let mut last_pb: Option<crate::hardware::BtPlaybackState> = None;
-                let mut last_pcms: Option<Box<[crate::hardware::BlueAlsaPcm]>> = None;
-
-                while bg_running_worker.load(Ordering::Relaxed) {
-                    let is_playing = last_pb
-                        .as_ref()
-                        .is_some_and(crate::hardware::BtPlaybackState::is_playing);
-                    let poll_interval = if is_playing {
-                        Duration::from_millis(250)
-                    } else {
-                        Duration::from_millis(750)
-                    };
-
-                    if let Ok(Some(ref pb)) = bt.playback_state() {
-                        if last_pb.as_ref() != Some(pb) {
-                            if let Ok(mut lock) = shared_state_worker.lock() {
-                                lock.0 = Some(pb.clone());
-                            }
-                            last_pb = Some(pb.clone());
-                        }
-                    }
-                    if let Ok(ref pcms) = bt.audio_pcms() {
-                        if last_pcms.as_ref() != Some(pcms) {
-                            if let Some(active) =
-                                pcms.iter().find(|p| p.running).or_else(|| pcms.first())
-                            {
-                                if let Ok(mut lock) = shared_state_worker.lock() {
-                                    lock.1 = Some(active.clone());
-                                }
-                            }
-                            last_pcms = Some(pcms.clone());
-                        }
-                    }
-
-                    let deadline = Instant::now() + poll_interval;
-                    while bg_running_worker.load(Ordering::Relaxed) && Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(25));
-                    }
-                }
+                bt_monitor_loop(&bt, &shared_state_worker, &bg_running_worker);
             })
     });
 
@@ -521,8 +536,23 @@ pub fn run_render_loop(
 
     loop_timing.report();
     bg_running.store(false, Ordering::Relaxed);
-    if let Some(Ok(worker)) = bt_worker {
-        let _ = worker.join();
+    if let Some(worker) = bt_worker {
+        // Propagate a worker panic to this thread: a crashed bt-monitor must fail
+        // the daemon (fail-fast) rather than leave playback state silently stale.
+        match worker {
+            Ok(handle) => {
+                if let Err(panic) = handle.join() {
+                    std::panic::resume_unwind(panic);
+                }
+            }
+            Err(e) => {
+                report_display(
+                    tracing::Level::WARN,
+                    "bt-monitor thread could not be started",
+                    &e,
+                );
+            }
+        }
     }
     tracing::info!("Render loop finished");
     println!("  Display: Render loop finished.");
