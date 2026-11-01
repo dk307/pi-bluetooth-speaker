@@ -214,47 +214,55 @@ export component NowPlayingView inherits Rectangle {
         padding: 16px;
         spacing: 24px;
 
-        // Left Column: square cover art / vinyl disc box filling the column height
+        // Left Column: square cover art / vinyl disc box centered in a fixed-width
+        // column, sized to the largest square that fits the column height so the
+        // top and bottom card margins stay symmetric.
         Rectangle {
-            width: parent.height;
-            height: parent.height;
-            border-radius: 16px;
-            clip: true;
-            background: @linear-gradient(145deg, Theme.active.card_surface 0%, Theme.active.chassis 100%);
-            border-width: 1px;
-            border-color: Theme.active.card_border;
+            width: 340px;
 
-            // Ambient glowing aura behind the turntable when music is playing
             Rectangle {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
-                width: Math.min(parent.width, parent.height) - 40px;
+                width: Math.min(parent.width, parent.height);
                 height: self.width;
-                border-radius: self.width / 2;
-                background: Theme.active.primary_accent;
-                opacity: root.is_playing ? 0.12 : 0.02;
-                animate opacity { duration: 600ms; easing: ease-in-out; }
-            }
+                border-radius: 16px;
+                clip: true;
+                background: @linear-gradient(145deg, Theme.active.card_surface 0%, Theme.active.chassis 100%);
+                border-width: 1px;
+                border-color: Theme.active.card_border;
 
-            // 1. Cover Art Image (if available from AVRCP)
-            if root.has_cover_art : Image {
-                width: 100%;
-                height: 100%;
-                source: root.cover_image;
-                image-fit: contain;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
+                // Ambient glowing aura behind the turntable when music is playing
+                Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: parent.width - 40px;
+                    height: self.width;
+                    border-radius: self.width / 2;
+                    background: Theme.active.primary_accent;
+                    opacity: root.is_playing ? 0.12 : 0.02;
+                    animate opacity { duration: 600ms; easing: ease-in-out; }
+                }
 
-            // 2. Vinyl Record Graphic (when no Bluetooth cover art)
-            if !root.has_cover_art : Image {
-                width: 78%;
-                height: 78%;
-                source: @image-url("../../../assets/icons/disk.svg");
-                colorize: Theme.active.primary_accent;
-                image-fit: contain;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+                // 1. Cover Art Image (if available from AVRCP)
+                if root.has_cover_art : Image {
+                    width: 100%;
+                    height: 100%;
+                    source: root.cover_image;
+                    image-fit: contain;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                // 2. Vinyl Record Graphic (when no Bluetooth cover art)
+                if !root.has_cover_art : Image {
+                    width: 78%;
+                    height: 78%;
+                    source: @image-url("../../../assets/icons/disk.svg");
+                    colorize: Theme.active.primary_accent;
+                    image-fit: contain;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
 
