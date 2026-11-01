@@ -139,10 +139,18 @@ impl AppShell {
                    cycle: i32,
                    overflow: bool,
                    strip: Option<&super::marquee::MarqueeStrip>| {
-            if !overflow || strip.is_none_or(super::marquee::MarqueeStrip::is_empty) {
-                return None;
-            }
-            let strip = strip.expect("strip checked non-None");
+            let strip = strip.filter(|s| !s.is_empty())?;
+            // Non-overflow rows are composed too (Slint strips are hidden in compose
+            // mode): a single unscrolled tile with a cycle wider than the viewport so
+            // the tiling loop never draws a second copy inside the row.
+            let (scroll_px, cycle_px) = if overflow {
+                (
+                    u32::try_from(scroll).unwrap_or(0),
+                    u32::try_from(cycle).unwrap_or(0),
+                )
+            } else {
+                (0, px(w, 800.0) + 1)
+            };
             Some(MarqueeRowSpec {
                 rect: (
                     px(origin.x, 800.0),
@@ -150,8 +158,8 @@ impl AppShell {
                     px(w, 800.0),
                     px(h, 480.0),
                 ),
-                scroll_px: u32::try_from(scroll).unwrap_or(0),
-                cycle_px: u32::try_from(cycle).unwrap_or(0),
+                scroll_px,
+                cycle_px,
                 strip: strip.pixels_arc(),
                 strip_w: strip.width(),
             })

@@ -34,7 +34,7 @@ use slint::platform::software_renderer::{
     LineBufferProvider, MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
     TargetPixel,
 };
-use slint::platform::{Platform, PlatformError};
+use slint::platform::{Platform, PlatformError, WindowAdapter};
 
 /// `FBIO_WAITFORVSYNC` ioctl request number (`_IOW('F', 0x20, u32)`), blocks until the
 /// display controller's next vertical blanking interval.
@@ -700,6 +700,7 @@ pub(crate) fn take_last_secondary_window() -> Option<Rc<MinimalSoftwareWindow>> 
 pub struct Framebuffer {
     backend: Backend,
     last_timing: core::cell::Cell<Option<FrameTiming>>,
+    force_full_redraw: core::cell::Cell<bool>,
     marquee_overlay: MarqueeOverlay,
 }
 
@@ -848,6 +849,7 @@ impl Framebuffer {
 
         Ok(Self {
             last_timing: core::cell::Cell::new(None),
+            force_full_redraw: core::cell::Cell::new(false),
             marquee_overlay: MarqueeOverlay::default(),
             backend: Backend::Hardware {
                 file,
@@ -983,6 +985,7 @@ impl Framebuffer {
         let ctrl = FramebufferMockCtrl::default();
         let fb = Self {
             last_timing: core::cell::Cell::new(None),
+            force_full_redraw: core::cell::Cell::new(false),
             marquee_overlay: MarqueeOverlay::default(),
             backend: Backend::Mock {
                 buffer: vec![
@@ -1090,14 +1093,24 @@ impl Framebuffer {
         back_buffer: &mut [Bgrx8888Pixel],
         sync: ScanoutSync,
         width: usize,
+        force_full: bool,
     ) -> Result<bool, FramebufferError> {
         let pixel_slice = Bgrx8888Pixel::try_from_bytes_mut(mmap_mut)?;
         let mut timing = FrameTiming::default();
         let mut dirty = (0_usize, 0_usize, 0_usize, 0_usize);
         let draw_start = Instant::now();
+        if force_full {
+            window.request_redraw();
+        }
 
         let did_draw = window.draw_if_needed(|renderer| {
+            if force_full {
+                renderer.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
+            }
             let region = renderer.render_by_line(FbLineBuffer::direct(back_buffer, width));
+            if force_full {
+                renderer.set_repaint_buffer_type(RepaintBufferType::ReusedBuffer);
+            }
             let origin = region.bounding_box_origin();
             let size = region.bounding_box_size();
             dirty = (
@@ -1169,6 +1182,10 @@ impl Framebuffer {
     }
 
     /// Renders one frame through the regular-file mapping path (full flush after draw).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "all parameters are destructured backend fields of a single render call"
+    )]
     fn render_file_frame(
         overlay: &mut MarqueeOverlay,
         last_timing: &core::cell::Cell<Option<FrameTiming>>,
@@ -1177,11 +1194,21 @@ impl Framebuffer {
         dev_path: &str,
         back_buffer: &mut [Bgrx8888Pixel],
         width: usize,
+        force_full: bool,
     ) -> Result<bool, FramebufferError> {
         let mut timing = FrameTiming::default();
         let draw_start = Instant::now();
+        if force_full {
+            window.request_redraw();
+        }
         let did_draw = window.draw_if_needed(|renderer| {
+            if force_full {
+                renderer.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
+            }
             renderer.render_by_line(FbLineBuffer::direct(back_buffer, width));
+            if force_full {
+                renderer.set_repaint_buffer_type(RepaintBufferType::ReusedBuffer);
+            }
         });
         timing.draw_us = Self::elapsed_us(draw_start);
         let compose_start = Instant::now();
@@ -1222,6 +1249,7 @@ impl Framebuffer {
         window: &MinimalSoftwareWindow,
     ) -> Result<bool, FramebufferError> {
         let width = Self::DEFAULT_WIDTH as usize;
+        let force_full = self.force_full_redraw.replace(false);
 
         match &mut self.backend {
             Backend::Hardware {
@@ -1242,6 +1270,7 @@ impl Framebuffer {
                     back_buffer,
                     *sync,
                     width,
+                    force_full,
                 ),
                 None => Self::render_file_frame(
                     &mut self.marquee_overlay,
@@ -1251,6 +1280,7 @@ impl Framebuffer {
                     dev_path,
                     back_buffer,
                     width,
+                    force_full,
                 ),
             },
             Backend::Mock { buffer, ctrl } => {
@@ -1263,8 +1293,17 @@ impl Framebuffer {
                 }
                 let mut timing = FrameTiming::default();
                 let draw_start = Instant::now();
+                if force_full {
+                    window.request_redraw();
+                }
                 let did_draw = window.draw_if_needed(|renderer| {
+                    if force_full {
+                        renderer.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
+                    }
                     renderer.render_by_line(FbLineBuffer::direct(buffer, width));
+                    if force_full {
+                        renderer.set_repaint_buffer_type(RepaintBufferType::ReusedBuffer);
+                    }
                 });
                 timing.draw_us = Self::elapsed_us(draw_start);
                 let compose_start = Instant::now();
@@ -1278,6 +1317,22 @@ impl Framebuffer {
                 Ok(effective)
             }
         }
+    }
+
+    /// Renders one frame in which Slint repaints the WHOLE window regardless of its
+    /// dirty state. Used for marquee background capture: with partial rendering the
+    /// hidden strips leave no dirty region, so the shadow buffer would keep stale
+    /// strip pixels that would be baked into the captured background (ghost text).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FramebufferError`] when the underlying scanout write fails.
+    pub fn render_frame_full_redraw(
+        &mut self,
+        window: &MinimalSoftwareWindow,
+    ) -> Result<bool, FramebufferError> {
+        self.force_full_redraw.set(true);
+        self.render_frame(window)
     }
 
     /// Returns the phase timing of the most recent [`render_frame`](Self::render_frame) call.

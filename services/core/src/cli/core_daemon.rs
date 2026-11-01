@@ -566,7 +566,15 @@ fn sync_marquee_overlay(
     let theme = shell.current_theme();
     if !fb.marquee_overlay_ready() || overlay_theme.as_ref() != Some(&theme) {
         shell.set_marquee_strips_visible(false);
-        fb.render_frame(window)?;
+        // The capture frame MUST repaint the whole window: with partial rendering the
+        // hidden strips leave no dirty region, so the shadow buffer would still hold
+        // previously composed strip pixels and they would be baked into the captured
+        // "background" (visible as ghost/double text under the strip).
+        // The composer must also be inert during the capture render: render_frame
+        // composes the still-installed (old) specs AFTER the full redraw, which would
+        // write the old strip straight back into the snapshot region.
+        fb.set_marquee_rows(Vec::new());
+        fb.render_frame_full_redraw(window)?;
         let rects = shell.marquee_geometry();
         let mut backgrounds = Vec::with_capacity(rects.len());
         for (x, y, w, h) in &rects {

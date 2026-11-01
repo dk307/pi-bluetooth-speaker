@@ -131,9 +131,12 @@ fn shell_marquee_compose_mode_scrolls_without_slint_dirty() {
     shell.set_playing(true);
     shell.set_tab(0);
 
-    // Capture cycle (mirrors `core_daemon::sync_marquee_overlay`).
+    // Capture cycle (mirrors `core_daemon::sync_marquee_overlay`): the capture
+    // frame must repaint the whole window or stale strip pixels would be baked
+    // into the captured background (ghost text).
     shell.set_marquee_strips_visible(false);
-    fb.render_frame(&window).expect("capture render");
+    fb.render_frame_full_redraw(&window)
+        .expect("capture render");
     let rects = shell.marquee_geometry();
     assert_eq!(rects.len(), 2);
     assert!(
@@ -197,4 +200,127 @@ fn shell_marquee_compose_mode_scrolls_without_slint_dirty() {
         distinct_rows >= 2,
         "composed marquee row never changed; scroll composition is not advancing"
     );
+}
+
+/// Non-overflowing titles must still be visible in compose mode: the Slint strips
+/// are hidden there, so the composer must install a static single-tile row
+/// (scroll 0, cycle wider than the viewport) for every populated row.
+#[test]
+fn shell_marquee_compose_mode_shows_non_overflow_rows() {
+    let (mut fb, _ctrl) = Framebuffer::new_mocked();
+    let window = fb.init_platform().expect("platform init");
+    let main_window = MainWindow::new().expect("MainWindow");
+    let shell = AppShell::new(main_window);
+    shell.apply_theme(ThemePreset::Peppy);
+    shell.set_track_metadata(
+        "A Really Long Album Title That Will Certainly Overflow The Marquee Viewport",
+        "Short",
+        "Audiophile DSP Sink",
+    );
+    shell.set_playing(true);
+    shell.set_tab(0);
+
+    // Capture cycle (mirrors `core_daemon::sync_marquee_overlay`).
+    shell.set_marquee_strips_visible(false);
+    fb.render_frame_full_redraw(&window)
+        .expect("capture render");
+    let rects = shell.marquee_geometry();
+    let mut backgrounds = Vec::with_capacity(rects.len());
+    for &(x, y, w, h) in &rects {
+        backgrounds.push(fb.capture_region(x, y, w, h).expect("capture region"));
+    }
+    let artist_background = backgrounds[1].clone();
+    shell.set_marquee_compose_in_rust(true);
+    fb.set_marquee_rows(shell.marquee_row_specs());
+    fb.install_marquee_backgrounds(backgrounds);
+    shell.set_marquee_strips_visible(true);
+
+    let specs = shell.marquee_row_specs();
+    assert_eq!(specs.len(), 2, "both populated rows must compose");
+    let title = &specs[0];
+    let artist = &specs[1];
+    assert!(
+        title.cycle_px > title.rect.2,
+        "overflow row keeps the slint cycle: {title:?}"
+    );
+    assert_eq!(
+        artist.scroll_px, 0,
+        "non-overflow row must not scroll: {artist:?}"
+    );
+    assert!(
+        artist.cycle_px > artist.rect.2,
+        "non-overflow cycle must exceed the viewport width: {artist:?}"
+    );
+
+    fb.render_frame(&window).expect("compose render");
+    // The non-overflow strip content must actually appear on screen: capture the
+    // artist row and verify it is not the empty background.
+    let row = fb
+        .capture_region(artist.rect.0, artist.rect.1, artist.rect.2, artist.rect.3)
+        .expect("read composed row");
+    assert_ne!(
+        &*row, &*artist_background,
+        "non-overflow strip was never composed onto the background"
+    );
+}
+
+/// Re-capturing the marquee background after rows were already composed (e.g. a
+/// song change that alters the row geometry) must produce a CLEAN snapshot: the
+/// composer must be inert during the capture render, otherwise `render_frame`'s
+/// post-draw compose step writes the still-installed strip back into the region
+/// that is being captured (visible as a static ghost copy of the old text).
+#[test]
+fn shell_marquee_background_recapture_is_ghost_free() {
+    let (mut fb, _ctrl) = Framebuffer::new_mocked();
+    let window = fb.init_platform().expect("platform init");
+    let main_window = MainWindow::new().expect("MainWindow");
+    let shell = AppShell::new(main_window);
+    shell.apply_theme(ThemePreset::Peppy);
+    shell.set_track_metadata(
+        "A Deliberately Long Track Title That Overflows The Marquee Viewport Width",
+        "Some Artist Name With A Very Long Suffix That Definitely Overflows The Viewport",
+        "Audiophile DSP Sink",
+    );
+    shell.set_playing(true);
+    shell.set_tab(0);
+
+    // Reference: capture the pristine background before any composition ran.
+    shell.set_marquee_strips_visible(false);
+    fb.render_frame_full_redraw(&window)
+        .expect("pristine render");
+    let rects = shell.marquee_geometry();
+    let pristine: Vec<Box<[speaker_core::ui::Bgrx8888Pixel]>> = rects
+        .iter()
+        .map(|&(x, y, w, h)| fb.capture_region(x, y, w, h).expect("pristine capture"))
+        .collect();
+
+    // Bring the overlay up and let the composer run (this is the state a song
+    // change starts from: composed pixels in the shadow buffer).
+    shell.set_marquee_compose_in_rust(true);
+    fb.set_marquee_rows(shell.marquee_row_specs());
+    fb.install_marquee_backgrounds(pristine.clone());
+    shell.set_marquee_strips_visible(true);
+    for _ in 0..5 {
+        slint::platform::update_timers_and_animations();
+        fb.set_marquee_rows(shell.marquee_row_specs());
+        fb.render_frame(&window).expect("compose render");
+    }
+
+    // Simulate a song change: geometry churns, the render loop re-captures. The
+    // capture cycle must clear the rows so the composer cannot repaint the old
+    // strip into the snapshot region during the capture render.
+    shell.set_marquee_strips_visible(false);
+    fb.set_marquee_rows(Vec::new());
+    fb.render_frame_full_redraw(&window)
+        .expect("recapture render");
+    let recaptured: Vec<Box<[speaker_core::ui::Bgrx8888Pixel]>> = rects
+        .iter()
+        .map(|&(x, y, w, h)| fb.capture_region(x, y, w, h).expect("recapture"))
+        .collect();
+    for (i, (fresh, old)) in recaptured.iter().zip(pristine.iter()).enumerate() {
+        assert_eq!(
+            &**fresh, &**old,
+            "row {i}: recaptured background contains composed strip pixels (ghost)"
+        );
+    }
 }
