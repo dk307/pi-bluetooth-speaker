@@ -327,6 +327,20 @@ impl BlueAlsaPcm {
     }
 }
 
+/// Computes the playback progress ratio clamped to `0.0..=1.0`.
+///
+/// A zero or unknown duration maps to `0.0`. Shared between
+/// [`BtPlaybackState::progress_ratio`] and the UI shell so the ratio logic has
+/// a single source of truth.
+#[must_use]
+pub fn playback_progress_ratio(position_ms: u32, duration_ms: u32) -> f32 {
+    if duration_ms == 0 {
+        0.0
+    } else {
+        (position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
+    }
+}
+
 /// Formats a duration in milliseconds into a user-friendly string (`MM:SS` or `HH:MM:SS`).
 #[must_use]
 pub fn format_duration_ms(ms: u32) -> String {
@@ -399,11 +413,7 @@ impl BtPlaybackState {
     /// Returns the progress ratio between 0.0 and 1.0.
     #[must_use]
     pub fn progress_ratio(&self) -> f32 {
-        if self.duration_ms == 0 {
-            0.0
-        } else {
-            (self.position_ms as f32 / self.duration_ms as f32).clamp(0.0, 1.0)
-        }
+        playback_progress_ratio(self.position_ms, self.duration_ms)
     }
 
     /// Formats the elapsed position as `MM:SS`.
@@ -706,13 +716,17 @@ pub(crate) enum BtErrorKind {
     NoActivePlayer { details: Box<str> },
     Cancelled { message: Box<str> },
     MockFault { message: Box<str> },
-    Unsupported { action: Box<str>, reason: Box<str> },
 }
 
 /// Subsystem error type for Bluetooth driver and diagnostic operations.
+///
+/// The optional `source` field preserves the typed underlying error (e.g. the
+/// original `zbus::Error`) so the cause chain survives `?` conversions, per
+/// the M-ERRORS-STD-SOURCE guideline.
 #[derive(Debug)]
 pub struct BtError {
     kind: BtErrorKind,
+    source: Option<Box<dyn std::error::Error + Send + Sync>>,
     backtrace: Backtrace,
 }
 
@@ -720,8 +734,27 @@ impl BtError {
     fn new(kind: BtErrorKind) -> Self {
         Self {
             kind,
+            source: None,
             backtrace: Backtrace::capture(),
         }
+    }
+
+    /// Attaches an underlying error as this error's [`std::error::Error::source`].
+    fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        self.source = Some(Box::new(source));
+        self
+    }
+
+    /// Builds a D-Bus error with a human-readable `details` context *and* the
+    /// typed underlying error preserved as the source.
+    pub(crate) fn dbus_with_source(
+        details: impl Into<Box<str>>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::new(BtErrorKind::Dbus {
+            details: details.into(),
+        })
+        .with_source(source)
     }
 
     pub(crate) fn dbus(details: impl Into<Box<str>>) -> Self {
@@ -761,13 +794,6 @@ impl BtError {
         })
     }
 
-    pub(crate) fn unsupported(action: impl Into<Box<str>>, reason: impl Into<Box<str>>) -> Self {
-        Self::new(BtErrorKind::Unsupported {
-            action: action.into(),
-            reason: reason.into(),
-        })
-    }
-
     /// Returns `true` if this error represents a D-Bus communication error.
     #[must_use]
     pub const fn is_dbus(&self) -> bool {
@@ -798,12 +824,6 @@ impl BtError {
         matches!(self.kind, BtErrorKind::Cancelled { .. })
     }
 
-    /// Returns `true` if the operation is not supported by the underlying subsystem.
-    #[must_use]
-    pub const fn is_unsupported(&self) -> bool {
-        matches!(self.kind, BtErrorKind::Unsupported { .. })
-    }
-
     /// Returns `true` if this error was injected by a mock controller.
     #[must_use]
     pub const fn is_mock_fault(&self) -> bool {
@@ -832,26 +852,30 @@ impl BtError {
             }
             BtErrorKind::Cancelled { message } => write!(f, "task cancelled: {message}"),
             BtErrorKind::MockFault { message } => write!(f, "injected mock fault: {message}"),
-            BtErrorKind::Unsupported { action, reason } => {
-                write!(f, "'{action}' is not supported: {reason}")
-            }
         }
     }
 }
 
 super::impl_canonical_error_display!(BtError);
 
-impl std::error::Error for BtError {}
+impl std::error::Error for BtError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_ref().map(|boxed| {
+            let erased: &(dyn std::error::Error + 'static) = &**boxed;
+            erased
+        })
+    }
+}
 
 impl From<zbus::Error> for BtError {
     fn from(err: zbus::Error) -> Self {
-        Self::dbus(err.to_string())
+        Self::dbus_with_source(err.to_string(), err)
     }
 }
 
 impl From<zbus::fdo::Error> for BtError {
     fn from(err: zbus::fdo::Error) -> Self {
-        Self::dbus(err.to_string())
+        Self::dbus_with_source(err.to_string(), err)
     }
 }
 
@@ -1031,7 +1055,51 @@ fn get_str_array(props: &HashMap<String, OwnedValue>, key: &str) -> Box<[Box<str
     Box::default()
 }
 
-fn get_track_prop_str(val: &OwnedValue, key: &str) -> Option<Box<str>> {
+/// Extraction rules shared by all track-property readers so that the
+/// dictionary key-matching and nested-`Value` unwrapping scaffolding has a
+/// single implementation (see `get_track_prop`).
+trait TrackPropExtract: Sized {
+    /// Extracts the value from a plain dict entry.
+    fn extract(value: &Value<'_>) -> Option<Self>;
+
+    /// Extracts the value from an entry that wraps an inner `Value` variant
+    /// (produced when `BlueZ` nests `v`-typed values inside `a{sv}` maps).
+    fn extract_nested(value: &Value<'_>) -> Option<Self> {
+        if let Value::Value(inner) = value {
+            Self::extract(inner)
+        } else {
+            None
+        }
+    }
+}
+
+impl TrackPropExtract for Box<str> {
+    fn extract(value: &Value<'_>) -> Option<Self> {
+        if let Ok(s) = value.downcast_ref::<&str>() {
+            return Some(s.into());
+        }
+        if let Value::Str(s) = value {
+            return Some(s.as_str().into());
+        }
+        None
+    }
+}
+
+impl TrackPropExtract for u32 {
+    fn extract(value: &Value<'_>) -> Option<Self> {
+        if let Ok(u) = value.downcast_ref::<u32>() {
+            return Some(u);
+        }
+        if let Value::U32(u) = value {
+            return Some(*u);
+        }
+        None
+    }
+}
+
+/// Looks up `key` inside a `a{sv}` dict and extracts its typed value,
+/// transparently unwrapping nested `Value` variants.
+fn get_track_prop<T: TrackPropExtract>(val: &OwnedValue, key: &str) -> Option<T> {
     if let Value::Dict(dict) = &**val {
         for (k, v) in dict.iter() {
             let matches_key = if let Ok(s) = k.downcast_ref::<&str>() {
@@ -1041,50 +1109,26 @@ fn get_track_prop_str(val: &OwnedValue, key: &str) -> Option<Box<str>> {
             } else {
                 false
             };
-            if matches_key {
-                if let Ok(s) = v.downcast_ref::<&str>() {
-                    return Some(s.into());
-                } else if let Value::Str(s) = v {
-                    return Some(s.as_str().into());
-                } else if let Value::Value(inner) = v {
-                    if let Ok(s) = inner.downcast_ref::<&str>() {
-                        return Some(s.into());
-                    } else if let Value::Str(s) = &**inner {
-                        return Some(s.as_str().into());
-                    }
-                }
+            if !matches_key {
+                continue;
+            }
+            if let Some(out) = T::extract(v) {
+                return Some(out);
+            }
+            if let Some(out) = T::extract_nested(v) {
+                return Some(out);
             }
         }
     }
     None
 }
 
+fn get_track_prop_str(val: &OwnedValue, key: &str) -> Option<Box<str>> {
+    get_track_prop::<Box<str>>(val, key)
+}
+
 fn get_track_prop_u32(val: &OwnedValue, key: &str) -> Option<u32> {
-    if let Value::Dict(dict) = &**val {
-        for (k, v) in dict.iter() {
-            let matches_key = if let Ok(s) = k.downcast_ref::<&str>() {
-                s == key
-            } else if let Value::Str(s) = k {
-                s.as_str() == key
-            } else {
-                false
-            };
-            if matches_key {
-                if let Ok(u) = v.downcast_ref::<u32>() {
-                    return Some(u);
-                } else if let Value::U32(u) = v {
-                    return Some(*u);
-                } else if let Value::Value(inner) = v {
-                    if let Ok(u) = inner.downcast_ref::<u32>() {
-                        return Some(u);
-                    } else if let Value::U32(u) = &**inner {
-                        return Some(*u);
-                    }
-                }
-            }
-        }
-    }
-    None
+    get_track_prop::<u32>(val, key)
 }
 
 /// Extracts a D-Bus `ay` byte array property (e.g. `BlueALSA` `Volume`).
@@ -2310,8 +2354,12 @@ impl DbusClient {
 
         let selected_adapter_id = adapter.as_ref().map(|a| a.id.as_ref());
 
-        // 3. Search for MediaPlayer1 interfaces belonging to the selected adapter
-        let mut playback = None;
+        // 3. Search for MediaPlayer1 interfaces belonging to the selected adapter.
+        // All candidates are collected and then selected deterministically:
+        // prefer a player that is actively playing; among equal-status candidates,
+        // break ties by lexicographic object path so the `HashMap` iteration order
+        // of `ManagedObjects` cannot influence the selection.
+        let mut candidates: Vec<BtPlaybackState> = Vec::new();
         for (path, ifaces) in objects {
             if let Some(props) = find_iface(ifaces, "org.bluez.MediaPlayer1") {
                 if let Some(adapter_id) = selected_adapter_id {
@@ -2325,12 +2373,20 @@ impl DbusClient {
                     }
                 }
 
-                let state = Self::parse_media_player_props(path.as_str(), props, &devices);
-                if state.is_playing() || playback.is_none() {
-                    playback = Some(state);
-                }
+                candidates.push(Self::parse_media_player_props(
+                    path.as_str(),
+                    props,
+                    &devices,
+                ));
             }
         }
+
+        candidates.sort_by(|a, b| {
+            b.is_playing()
+                .cmp(&a.is_playing())
+                .then_with(|| a.player_path.cmp(&b.player_path))
+        });
+        let playback = candidates.into_iter().next();
 
         Ok((adapter, devices, playback))
     }
@@ -2358,6 +2414,46 @@ impl DbusClient {
         let proxy =
             zbus::blocking::Proxy::new(&self.conn, "org.bluez", path, "org.bluez.MediaPlayer1")?;
         proxy.call_method(method, &())?;
+        Ok(())
+    }
+
+    /// Seeks to an absolute position by translating the target into the relative
+    /// `Seek(i64 offset)` call exposed by `BlueZ`'s `MediaPlayer1` (offset in
+    /// microseconds; a positive offset moves forward, a negative offset moves
+    /// backward).
+    ///
+    /// The current position is read from a fresh managed-objects snapshot (not
+    /// via [`DbusClient::playback_state`]) so that seeking never triggers an
+    /// OBEX cover-art fetch.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails or no active player exists.
+    pub(crate) fn player_seek(&self, position_ms: u32) -> Result<(), BtError> {
+        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+            .destination("org.bluez")
+            .and_then(|b| b.path("/"))
+            .and_then(zbus::blocking::proxy::Builder::build)?;
+        let objects = proxy.get_managed_objects()?;
+        let (_, _, playback) = Self::parse_bluez_all(&objects, None)?;
+        let playback = playback
+            .ok_or_else(|| BtError::no_active_player("no active MediaPlayer1 found on D-Bus"))?;
+        let path = playback
+            .player_path
+            .as_deref()
+            .ok_or_else(|| BtError::no_active_player("active MediaPlayer1 has no object path"))?;
+
+        // `Seek` takes a *relative* offset in microseconds; convert the absolute
+        // millisecond target using the freshly observed position.
+        let offset_us = (i64::from(position_ms) - i64::from(playback.position_ms)) * 1_000;
+        let player =
+            zbus::blocking::Proxy::new(&self.conn, "org.bluez", path, "org.bluez.MediaPlayer1")?;
+        player.call_method("Seek", &(offset_us,))?;
+        tracing::debug!(
+            position_ms,
+            current_ms = playback.position_ms,
+            offset_us,
+            "seek issued via BlueZ MediaPlayer1.Seek"
+        );
         Ok(())
     }
 
@@ -2429,17 +2525,22 @@ impl DbusClient {
     /// loss, permission errors, malformed replies) propagate as [`BtError`].
     fn query_pcm_codecs(conn: &Connection, pcm_path: &str) -> Result<Box<[Box<str>]>, BtError> {
         let proxy = zbus::blocking::Proxy::new(conn, "org.bluealsa", pcm_path, "org.bluealsa.PCM1")
-            .map_err(|e| BtError::dbus(format!("codec proxy for {pcm_path}: {e}")))?;
+            .map_err(|e| BtError::dbus_with_source(format!("codec proxy for {pcm_path}"), e))?;
 
         let reply = match proxy.call_method("GetCodecs", &()) {
             Ok(reply) => reply,
             Err(e) if is_unknown_method_error(&e) => return Ok(Box::default()),
-            Err(e) => return Err(BtError::dbus(format!("GetCodecs call for {pcm_path}: {e}"))),
+            Err(e) => {
+                return Err(BtError::dbus_with_source(
+                    format!("GetCodecs call for {pcm_path}"),
+                    e,
+                ));
+            }
         };
         let codecs = reply
             .body()
             .deserialize::<HashMap<String, HashMap<String, OwnedValue>>>()
-            .map_err(|e| BtError::dbus(format!("GetCodecs reply for {pcm_path}: {e}")))?;
+            .map_err(|e| BtError::dbus_with_source(format!("GetCodecs reply for {pcm_path}"), e))?;
 
         let mut names: Vec<Box<str>> = codecs.into_keys().map(Into::into).collect();
         names.sort();
@@ -3290,21 +3391,19 @@ impl BluetoothDevice {
     /// Requests seeking to a specific playback position in milliseconds.
     ///
     /// # Note
-    /// The Bluetooth AVRCP profile does not support arbitrary absolute position seeking
-    /// across Bluetooth controllers; `Position` on `org.bluez.MediaPlayer1` is strictly
-    /// read-only in the Linux `BlueZ` stack. In mock / preview mode, this simulates timeline
-    /// scrubbing.
+    /// `BlueZ`'s `MediaPlayer1` only exposes a *relative* `Seek(i64 offset)` method
+    /// (offset in microseconds; positive moves forward, negative moves backward),
+    /// so the absolute target is translated using the currently reported position
+    /// read from a fresh managed-objects snapshot. In mock / preview mode, this
+    /// simulates timeline scrubbing.
     ///
     /// # Errors
-    /// Returns [`BtError`] if mock seeking fails or has an injected fault.
+    /// Returns [`BtError`] if the D-Bus seek fails, no active player exists, or
+    /// (in mock mode) an injected fault fires.
     pub fn player_seek(&self, position_ms: u32) -> Result<(), BtError> {
         match &*self.backend {
             Backend::Mock(mock) => mock.player_seek(position_ms),
-            Backend::Dbus(_) => Err(BtError::unsupported(
-                "seek",
-                "BlueZ MediaPlayer1 exposes no absolute seek method; AVRCP only offers coarse \
-                 FastForward/Rewind presses",
-            )),
+            Backend::Dbus(dbus) => dbus.player_seek(position_ms),
         }
     }
 

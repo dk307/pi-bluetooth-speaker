@@ -273,11 +273,7 @@ impl AppShell {
         )]
         self.window.set_duration_ms(duration_ms as i32);
         self.window.set_is_playing(is_playing);
-        let ratio = if duration_ms == 0 {
-            0.0
-        } else {
-            (position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
-        };
+        let ratio = crate::hardware::playback_progress_ratio(position_ms, duration_ms);
         self.window.set_progress_ratio(ratio);
         self.window
             .set_position_text(crate::hardware::format_duration_ms(position_ms).into());
@@ -412,11 +408,8 @@ impl AppShell {
         if w.get_is_playing() != playing {
             w.set_is_playing(playing);
         }
-        let ratio = if playback.duration_ms == 0 {
-            0.0
-        } else {
-            (playback.position_ms as f32 / playback.duration_ms as f32).clamp(0.0, 1.0)
-        };
+        let ratio =
+            crate::hardware::playback_progress_ratio(playback.position_ms, playback.duration_ms);
         w.set_progress_ratio(ratio);
         w.set_position_text(crate::hardware::format_duration_ms(playback.position_ms).into());
         let duration_text = crate::hardware::format_duration_ms(playback.duration_ms);

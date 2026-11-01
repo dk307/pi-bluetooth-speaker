@@ -42,6 +42,12 @@ struct Behavior {
     native_get_calls: AtomicUsize,
     last_get_pixel: String,
     device_connected: bool,
+    /// Position (milliseconds) reported by the fake `MediaPlayer1`.
+    position_ms: u32,
+    /// Number of `Seek` calls observed on the fake `MediaPlayer1`.
+    seek_calls: AtomicUsize,
+    /// Last `Seek` offset (microseconds) seen on the fake `MediaPlayer1`.
+    last_seek_offset_us: i64,
 }
 
 type Shared = Arc<Mutex<Behavior>>;
@@ -111,6 +117,10 @@ impl ObjectManager {
                 .unwrap(),
         );
         props.insert("Track".into(), Value::from(track).try_into().unwrap());
+        props.insert(
+            "Position".into(),
+            Value::from(b.position_ms).try_into().unwrap(),
+        );
         props.insert("ObexPort".into(), Value::from(4097u16).try_into().unwrap());
         let mut ifaces = HashMap::new();
         ifaces.insert("org.bluez.MediaPlayer1".to_string(), props);
@@ -120,6 +130,17 @@ impl ObjectManager {
             ifaces,
         );
         out
+    }
+}
+
+struct MediaPlayer(Shared);
+
+#[zbus::interface(name = "org.bluez.MediaPlayer1")]
+impl MediaPlayer {
+    fn seek(&self, offset: i64) {
+        let mut b = self.0.lock().unwrap();
+        b.seek_calls.fetch_add(1, Ordering::SeqCst);
+        b.last_seek_offset_us = offset;
     }
 }
 
@@ -291,6 +312,9 @@ impl Harness {
             native_get_calls: AtomicUsize::new(0),
             last_get_pixel: String::new(),
             device_connected: true,
+            position_ms: 45_000,
+            seek_calls: AtomicUsize::new(0),
+            last_seek_offset_us: 0,
         };
         behavior(&mut b);
         let mac_path = b.mac_path.clone();
@@ -315,6 +339,11 @@ impl Harness {
             )
             .unwrap()
             .serve_at(mac_path, Device(Arc::clone(&state)))
+            .unwrap()
+            .serve_at(
+                "/org/bluez/hci0/dev_x/player0",
+                MediaPlayer(Arc::clone(&state)),
+            )
             .unwrap()
             .name("org.bluez")
             .unwrap()
@@ -382,6 +411,14 @@ impl Harness {
             .unwrap()
             .native_get_calls
             .load(Ordering::SeqCst)
+    }
+
+    fn seek_calls(&self) -> usize {
+        self.state.lock().unwrap().seek_calls.load(Ordering::SeqCst)
+    }
+
+    fn last_seek_offset_us(&self) -> i64 {
+        self.state.lock().unwrap().last_seek_offset_us
     }
 
     fn caps_dir_path(&self) -> std::path::PathBuf {
@@ -524,4 +561,12 @@ fn native_cap_persisted_after_native_pull_refusal() {
     assert!(h.cover().is_some());
     let caps = speaker_core::hardware::load_native_caps_in(&h.caps_dir_path());
     assert_eq!(caps.get("11_00_00_00_00_12"), Some(&499_999));
+}
+
+#[test]
+fn player_seek_translates_absolute_ms_to_relative_us() {
+    let h = Harness::new("11:00:00:00:00:99", |_| {});
+    h.device.player_seek(60_000).expect("seek accepted");
+    assert_eq!(h.seek_calls(), 1);
+    assert_eq!(h.last_seek_offset_us(), 15_000_000);
 }

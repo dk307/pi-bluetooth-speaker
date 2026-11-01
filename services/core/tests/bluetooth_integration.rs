@@ -1760,3 +1760,77 @@ fn native_caps_persistence_roundtrip() {
     assert_eq!(caps.get("AA_BB_CC_DD_EE_FF"), Some(&740_000));
     assert_eq!(caps.get("11_22_33_44_55_66"), Some(&980_000));
 }
+
+#[test]
+fn parse_bluez_all_deterministic_player_selection() {
+    fn with_adapter() -> ManagedObjects {
+        let mut objects: ManagedObjects = HashMap::new();
+        let mut adapter_ifaces = HashMap::new();
+        let mut adapter_props = HashMap::new();
+        adapter_props.insert("Address".to_string(), to_val("DC:A6:32:11:22:33"));
+        adapter_props.insert("Name".to_string(), to_val("RaspberryPi"));
+        adapter_props.insert("Alias".to_string(), to_val("Speaker-Pi"));
+        adapter_props.insert("Powered".to_string(), to_val(true));
+        adapter_ifaces.insert(iface("org.bluez.Adapter1"), adapter_props);
+        objects.insert(
+            OwnedObjectPath::try_from("/org/bluez/hci0").unwrap(),
+            adapter_ifaces,
+        );
+        objects
+    }
+
+    // Two paused players: the lexicographically smallest object path must win
+    // regardless of `HashMap` iteration order (insertion is reversed on
+    // purpose so the tie-break cannot depend on it).
+    let mut objects = with_adapter();
+    for path in [
+        "/org/bluez/hci0/dev_22/player1",
+        "/org/bluez/hci0/dev_11/player9",
+    ] {
+        let mut ifaces = HashMap::new();
+        let mut props = HashMap::new();
+        props.insert("Status".to_string(), to_val("paused"));
+        ifaces.insert(iface("org.bluez.MediaPlayer1"), props);
+        objects.insert(OwnedObjectPath::try_from(path).unwrap(), ifaces);
+    }
+    let (_, _, playback) = DbusClient::parse_bluez_all(&objects, Some("hci0")).unwrap();
+    assert_eq!(
+        playback.unwrap().player_path.as_deref(),
+        Some("/org/bluez/hci0/dev_11/player9")
+    );
+
+    // A playing player beats a paused one even when its path sorts later.
+    let mut objects = with_adapter();
+    for (path, status) in [
+        ("/org/bluez/hci0/dev_11/player1", "paused"),
+        ("/org/bluez/hci0/dev_22/player9", "playing"),
+    ] {
+        let mut ifaces = HashMap::new();
+        let mut props = HashMap::new();
+        props.insert("Status".to_string(), to_val(status));
+        ifaces.insert(iface("org.bluez.MediaPlayer1"), props);
+        objects.insert(OwnedObjectPath::try_from(path).unwrap(), ifaces);
+    }
+    let (_, _, playback) = DbusClient::parse_bluez_all(&objects, Some("hci0")).unwrap();
+    assert_eq!(
+        playback.unwrap().player_path.as_deref(),
+        Some("/org/bluez/hci0/dev_22/player9")
+    );
+}
+
+#[test]
+fn bt_error_preserves_dbus_source() {
+    use std::error::Error as _;
+
+    let err = BtError::from(zbus::Error::Address("dbus unavailable".to_string()));
+    assert!(err.is_dbus());
+    let source = err.source().expect("typed source must be preserved");
+    let dbus_source = source
+        .downcast_ref::<zbus::Error>()
+        .expect("source must remain a typed zbus::Error");
+    assert!(matches!(dbus_source, zbus::Error::Address(_)));
+
+    let fdo_err = BtError::from(zbus::fdo::Error::Failed("unknown object".into()));
+    assert!(fdo_err.is_dbus());
+    assert!(fdo_err.source().is_some());
+}
