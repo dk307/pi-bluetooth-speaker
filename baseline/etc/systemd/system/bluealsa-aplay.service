@@ -2,7 +2,7 @@
 Description=BlueALSA A2DP Playback Forwarder
 After=bluealsa.service sound.target camilladsp.service
 Requires=bluealsa.service
-Wants=camilladsp.service
+Wants=bluealsa.service camilladsp.service
 
 [Service]
 Type=simple

@@ -531,7 +531,7 @@ impl BluetoothControllerInfo {
 }
 
 /// Runs `hciconfig <adapter> version` with a hard deadline, capturing stdout.
-fn run_probe_command(program: &str, args: &[&str]) -> Option<String> {
+fn run_probe_command(program: &str, args: &[&str]) -> Result<String, std::io::Error> {
     const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -539,32 +539,53 @@ fn run_probe_command(program: &str, args: &[&str]) -> Option<String> {
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .spawn()?;
     let deadline = Instant::now() + PROBE_TIMEOUT;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
+            Ok(Some(status)) => break Ok(status),
             Ok(None) if Instant::now() < deadline => {
                 thread::sleep(POLL_INTERVAL);
             }
-            Ok(None) | Err(_) => {
+            Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "external process timed out",
+                ));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(e);
             }
         }
-    }?;
+    };
+    let status = status?;
     if !status.success() {
-        return None;
+        return Err(std::io::Error::other(format!(
+            "{program} exited with a non-success status"
+        )));
     }
     let mut stdout = Vec::new();
-    child.stdout.take()?.read_to_end(&mut stdout).ok()?;
-    String::from_utf8(stdout).ok()
+    child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("stdout was taken"))?
+        .read_to_end(&mut stdout)?;
+    String::from_utf8(stdout)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.utf8_error()))
 }
 
 fn run_hciconfig_version(adapter: &str) -> Option<String> {
-    run_probe_command("hciconfig", &[adapter, "version"])
+    match run_probe_command("hciconfig", &[adapter, "version"]) {
+        Ok(output) => Some(output),
+        Err(e) => {
+            tracing::debug!(error = %e, "hciconfig {adapter} version probe failed");
+            None
+        }
+    }
 }
 
 /// Parses `hciconfig <adapter> version` output into controller identity fields.
@@ -1539,8 +1560,17 @@ impl DbusClient {
         }
         let rmem_max_arg = format!("net.core.rmem_max={BT_SOCKET_RMEM_MAX}");
         let rmem_default_arg = format!("net.core.rmem_default={BT_SOCKET_RMEM_DEFAULT}");
-        let ok = run_probe_command("sysctl", &["-w", rmem_max_arg.as_str()]).is_some()
-            && run_probe_command("sysctl", &["-w", rmem_default_arg.as_str()]).is_some();
+        let (max_res, default_res) = (
+            run_probe_command("sysctl", &["-w", rmem_max_arg.as_str()]),
+            run_probe_command("sysctl", &["-w", rmem_default_arg.as_str()]),
+        );
+        let ok = max_res.is_ok() && default_res.is_ok();
+        if let Err(e) = max_res {
+            tracing::warn!(error = %e, "sysctl rmem_max update failed");
+        }
+        if let Err(e) = default_res {
+            tracing::warn!(error = %e, "sysctl rmem_default update failed");
+        }
         if ok {
             tracing::info!(
                 rmem_max = BT_SOCKET_RMEM_MAX,
@@ -1564,10 +1594,17 @@ impl DbusClient {
             return;
         }
         let slot_arg = HCI_SUPERVISION_TIMEOUT_SLOTS.to_string();
-        let sr_ok = run_probe_command("hcitool", &["sr", mac.as_str(), "master"]).is_some();
-        let lst_ok =
-            run_probe_command("hcitool", &["lst", mac.as_str(), slot_arg.as_str()]).is_some();
-        if sr_ok && lst_ok {
+        let (sr_res, lst_res) = (
+            run_probe_command("hcitool", &["sr", mac.as_str(), "master"]),
+            run_probe_command("hcitool", &["lst", mac.as_str(), slot_arg.as_str()]),
+        );
+        if let Err(e) = &sr_res {
+            tracing::warn!(error = %e, mac, "hcitool role switch failed");
+        }
+        if let Err(e) = &lst_res {
+            tracing::warn!(error = %e, mac, "hcitool supervision timeout failed");
+        }
+        if sr_res.is_ok() && lst_res.is_ok() {
             tracing::info!(
                 mac,
                 slots = HCI_SUPERVISION_TIMEOUT_SLOTS,
@@ -1577,8 +1614,8 @@ impl DbusClient {
         } else {
             tracing::warn!(
                 mac,
-                sr_ok,
-                lst_ok,
+                sr_ok = sr_res.is_ok(),
+                lst_ok = lst_res.is_ok(),
                 "hcitool ACL link tuning failed; will retry on next transfer"
             );
         }
@@ -2086,7 +2123,9 @@ pub fn select_bip_candidates(
         }
         if is_bip_pixel_range(&pixel) {
             for (w, h) in BIP_SYNTHETIC_TARGETS {
-                let area = w * h;
+                let Some(area) = w.checked_mul(h) else {
+                    continue;
+                };
                 if area <= max_cap_px && area > BIP_MIN_HIGHRES_PX {
                     out.push(BipImageCandidate {
                         pixel: format!("{w}*{h}"),
@@ -2100,7 +2139,12 @@ pub fn select_bip_candidates(
         let Some((w, h)) = parse_bip_pixel(&pixel) else {
             continue;
         };
-        let area = w * h;
+        // Descriptor dimensions come from the remote phone's `Image1.Properties`
+        // (peer-controlled OBEX data); reject any pair whose product overflows `u32`
+        // instead of wrapping around and letting a huge candidate pass the cap filter.
+        let Some(area) = w.checked_mul(h) else {
+            continue;
+        };
         if area > max_cap_px || area <= BIP_MIN_HIGHRES_PX {
             continue;
         }

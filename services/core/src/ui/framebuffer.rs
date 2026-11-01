@@ -26,15 +26,16 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use slint::PhysicalSize;
 use slint::platform::software_renderer::{
     LineBufferProvider, MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
     TargetPixel,
 };
 use slint::platform::{Platform, PlatformError, WindowAdapter};
+use slint::PhysicalSize;
 
 /// `FBIO_WAITFORVSYNC` ioctl request number (`_IOW('F', 0x20, u32)`), blocks until the
 /// display controller's next vertical blanking interval.
@@ -1449,11 +1450,19 @@ impl Framebuffer {
     /// descriptor does not support the ioctl (regular files, mocks, other fb drivers).
     #[must_use]
     pub fn wait_for_vsync(file: &File) -> bool {
+        static VSYNC_CONSECUTIVE_FAILURES: AtomicUsize = AtomicUsize::new(0);
         // `FBIO_WAITFORVSYNC` copies a `u32` CRTC index from userspace; `0` selects the
         // primary display output on `bcm2708_fb`.
         let crtc: libc::c_uint = 0;
         // SAFETY: `file` is an open file descriptor and `crtc` outlives the syscall.
-        unsafe { libc::ioctl(file.as_raw_fd(), FBIO_WAITFORVSYNC, &crtc) == 0 }
+        let result = unsafe { libc::ioctl(file.as_raw_fd(), FBIO_WAITFORVSYNC, &crtc) };
+        if result == -1 {
+            let count = VSYNC_CONSECUTIVE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::warn!(error = %std::io::Error::last_os_error(), consecutive_failures = count, "VSync ioctl failed");
+            return false;
+        }
+        VSYNC_CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
+        result == 0
     }
 
     /// Microseconds elapsed since `start`.

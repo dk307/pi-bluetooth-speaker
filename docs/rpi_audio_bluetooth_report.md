@@ -281,6 +281,20 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
   ```bash
   /usr/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"
   ```
+- **Boot Race Mitigation (Critical):** `bluealsa-aplay` MUST NOT attempt to enumerate the PCM list before `bluealsad` has fully registered `org.bluealsa` on the system D-Bus bus. A boot race here (previously observed when starting the service without proper ordering) manifests as `Couldn't get BlueALSA PCM list: The name org.bluealsa was not provided by any .service files`, after which the AVRCP → Merus hardware volume sync is permanently dead for the session (the mixer handle is never opened, so volume changes on the phone are silently ignored while playback continues at whatever hardware volume was last set).
+- **Dependency & Resilience Configuration:** To prevent the boot race, the `[Unit]` section MUST pin `bluealsa-aplay.service` to `bluealsa.service` with both ordering and lifecycle dependencies, and the `[Service]` section MUST enable aggressive automatic restarts:
+  ```ini
+  [Unit]
+  After=bluealsa.service sound.target camilladsp.service
+  Requires=bluealsa.service
+  Wants=bluealsa.service camilladsp.service
+
+  [Service]
+  Restart=always
+  RestartSec=2
+  ```
+  - `Requires=bluealsa.service` + `After=bluealsa.service` ensures the daemon is fully stopped/started before the forwarder binds to its D-Bus name.
+  - `Restart=always` and `RestartSec=2` act as a self-healing backstop: if the D-Bus registration handshake still slips through during fast boot cycles, systemd immediately re-spawns the forwarder until the D-Bus name is present.
 
 ### 7.3. ALSA Routing Configuration (`/etc/asound.conf`)
 - **Module:** `snd-aloop` loaded via `/etc/modules-load.d/snd-aloop.conf`
