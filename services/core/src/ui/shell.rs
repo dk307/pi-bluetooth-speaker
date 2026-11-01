@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use slint::ComponentHandle;
 
-use super::generated::{MainWindow, Theme};
+use super::framebuffer::MarqueeRowSpec;
+use super::generated::{MainWindow, MarqueeCompose, Theme};
 use super::marquee::{MarqueeStripCache, MarqueeTypography, StripRequest};
 use super::theme::ThemePreset;
 
@@ -76,10 +77,108 @@ impl AppShell {
     ///
     /// If disabled while the shell is currently on the CD Player tab (tab 3), the active tab
     /// is automatically reset to the Now Playing player tab (tab 0) to prevent state desync.
-    /// Sets the marquee scroll rate in fps (30 or 60) on the UI window.
+    /// Sets the marquee scroll rate in fps (30 or 60) on the shared composer global.
     pub fn set_marquee_fps(&self, fps: u32) {
         self.window
+            .global::<MarqueeCompose>()
             .set_marquee_fps(i32::try_from(fps).unwrap_or(i32::MAX));
+    }
+
+    /// Toggles Rust-side marquee composition (strip images render statically in Slint).
+    pub fn set_marquee_compose_in_rust(&self, compose: bool) {
+        self.window
+            .global::<MarqueeCompose>()
+            .set_compose_in_rust(compose);
+    }
+
+    /// Suspends or resumes marquee strip rendering for the one-frame background capture
+    /// (`visible = false` keeps the strip layout geometry but renders nothing).
+    pub fn set_marquee_strips_visible(&self, visible: bool) {
+        self.window
+            .global::<MarqueeCompose>()
+            .set_capture_pending(!visible);
+    }
+
+    /// Marquee viewport rectangles `(x, y, width, height)` in framebuffer pixels, read
+    /// from the shared composer global (clamped to the fixed 800x480 panel).
+    #[must_use]
+    pub fn marquee_geometry(&self) -> Vec<(u32, u32, u32, u32)> {
+        let g = self.window.global::<MarqueeCompose>();
+        let px = |v: f32, max: f32| u32::try_from(v.round().clamp(0.0, max) as i64).unwrap_or(0);
+        let rect = |origin: slint::LogicalPosition, w: f32, h: f32| {
+            (
+                px(origin.x, 800.0),
+                px(origin.y, 480.0),
+                px(w, 800.0),
+                px(h, 480.0),
+            )
+        };
+        vec![
+            rect(g.get_title_origin(), g.get_title_w(), g.get_title_h()),
+            rect(g.get_artist_origin(), g.get_artist_w(), g.get_artist_h()),
+        ]
+    }
+
+    /// Builds [`MarqueeRowSpec`]s for the Rust-side composer from the shared global and
+    /// the cached strip pixels; rows are omitted when the text does not overflow.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the strip-cache mutex was poisoned by a prior panic in this thread.
+    #[must_use]
+    pub fn marquee_row_specs(&self) -> Vec<MarqueeRowSpec> {
+        let g = self.window.global::<MarqueeCompose>();
+        if !g.get_compose_in_rust() {
+            return Vec::new();
+        }
+        let px = |v: f32, max: f32| u32::try_from(v.round().clamp(0.0, max) as i64).unwrap_or(0);
+        let row = |origin: slint::LogicalPosition,
+                   w: f32,
+                   h: f32,
+                   scroll: i32,
+                   cycle: i32,
+                   overflow: bool,
+                   strip: Option<&super::marquee::MarqueeStrip>| {
+            if !overflow || strip.is_none_or(super::marquee::MarqueeStrip::is_empty) {
+                return None;
+            }
+            let strip = strip.expect("strip checked non-None");
+            Some(MarqueeRowSpec {
+                rect: (
+                    px(origin.x, 800.0),
+                    px(origin.y, 480.0),
+                    px(w, 800.0),
+                    px(h, 480.0),
+                ),
+                scroll_px: u32::try_from(scroll).unwrap_or(0),
+                cycle_px: u32::try_from(cycle).unwrap_or(0),
+                strip: strip.pixels_arc(),
+                strip_w: strip.width(),
+            })
+        };
+        vec![
+            row(
+                g.get_title_origin(),
+                g.get_title_w(),
+                g.get_title_h(),
+                g.get_title_scroll_px(),
+                g.get_title_cycle_px(),
+                g.get_title_overflow(),
+                self.strips.borrow().title(),
+            ),
+            row(
+                g.get_artist_origin(),
+                g.get_artist_w(),
+                g.get_artist_h(),
+                g.get_artist_scroll_px(),
+                g.get_artist_cycle_px(),
+                g.get_artist_overflow(),
+                self.strips.borrow().artist(),
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     pub fn set_cd_enabled(&self, enabled: bool) {

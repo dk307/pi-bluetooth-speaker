@@ -17,8 +17,9 @@ use std::time::{Duration, Instant};
 
 use crate::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts};
 use crate::hardware::TempSensor;
+use crate::ui::theme::ThemePreset;
 #[cfg(feature = "ui")]
-use crate::ui::{AppShell, FrameTiming, Framebuffer, MainWindow, SplashScreen};
+use crate::ui::{AppShell, FrameTiming, Framebuffer, FramebufferError, MainWindow, SplashScreen};
 #[cfg(feature = "ui")]
 use slint::ComponentHandle;
 #[cfg(feature = "ui")]
@@ -477,17 +478,16 @@ pub fn run_render_loop(
     });
 
     let mut loop_timing = FrameLoopTiming::default();
+    let mut overlay_theme: Option<ThemePreset> = None;
     while duration.is_none_or(|d| start.elapsed() < d) {
         let frame_start = Instant::now();
 
-        if let Ok(mut lock) = shared_state.try_lock() {
-            if let Some(pb) = lock.0.take() {
-                shell.apply_bluetooth_playback(&pb);
-            }
-            if let Some(pcm) = lock.1.take() {
-                shell.apply_pcm_stream(&pcm);
-            }
+        if let Err(e) = sync_marquee_overlay(fb, shell, window, &mut overlay_theme) {
+            report_display(tracing::Level::ERROR, "Marquee overlay sync failed", &e);
+            break;
         }
+
+        apply_shared_bt_state(shell, &shared_state);
 
         // No unconditional `request_redraw()` here: the marquee timers and real Slint
         // animations mark the window dirty themselves, so the loop idles when the UI is
@@ -528,6 +528,62 @@ pub fn run_render_loop(
     println!("  Display: Render loop finished.");
 }
 
+/// Applies queued Bluetooth playback/PCM updates from the worker to the shell.
+fn apply_shared_bt_state(
+    shell: &AppShell,
+    shared_state: &Arc<
+        Mutex<(
+            Option<crate::hardware::BtPlaybackState>,
+            Option<crate::hardware::BlueAlsaPcm>,
+        )>,
+    >,
+) {
+    if let Ok(mut lock) = shared_state.try_lock() {
+        if let Some(pb) = lock.0.take() {
+            shell.apply_bluetooth_playback(&pb);
+        }
+        if let Some(pcm) = lock.1.take() {
+            shell.apply_pcm_stream(&pcm);
+        }
+    }
+}
+
+/// Keeps the Rust-side marquee composer synchronized with the UI shell.
+///
+/// Captures a one-frame clean row background snapshot on first use and after every theme
+/// change (strips render nothing for that frame), then refreshes the per-iteration scroll
+/// specifications read from the shared `MarqueeCompose` global.
+///
+/// # Errors
+///
+/// Propagates [`FramebufferError`] from the capture render or region snapshots.
+fn sync_marquee_overlay(
+    fb: &mut Framebuffer,
+    shell: &AppShell,
+    window: &MinimalSoftwareWindow,
+    overlay_theme: &mut Option<ThemePreset>,
+) -> Result<(), FramebufferError> {
+    let theme = shell.current_theme();
+    if !fb.marquee_overlay_ready() || overlay_theme.as_ref() != Some(&theme) {
+        shell.set_marquee_strips_visible(false);
+        fb.render_frame(window)?;
+        let rects = shell.marquee_geometry();
+        let mut backgrounds = Vec::with_capacity(rects.len());
+        for (x, y, w, h) in &rects {
+            backgrounds.push(fb.capture_region(*x, *y, *w, *h)?);
+        }
+        // Composition must be enabled before the specs are built: the specs are gated on
+        // the compose flag, and rows must exist before their backgrounds are installed.
+        shell.set_marquee_compose_in_rust(true);
+        fb.set_marquee_rows(shell.marquee_row_specs());
+        fb.install_marquee_backgrounds(backgrounds);
+        shell.set_marquee_strips_visible(true);
+        *overlay_theme = Some(theme);
+    }
+    fb.set_marquee_rows(shell.marquee_row_specs());
+    Ok(())
+}
+
 /// Adaptive power-saving sleep when the UI is completely static (0% CPU at idle).
 fn idle_sleep() {
     let timer_duration = slint::platform::duration_until_next_timer_update();
@@ -546,6 +602,7 @@ struct FrameLoopTiming {
     draw_us: u64,
     vsync_us: u64,
     blit_us: u64,
+    compose_us: u64,
     max_draw_us: u64,
     dirty_px: u64,
     max_dirty_px: u64,
@@ -563,6 +620,7 @@ impl FrameLoopTiming {
         self.draw_us += timing.draw_us;
         self.vsync_us += timing.vsync_us;
         self.blit_us += timing.blit_us;
+        self.compose_us += timing.compose_us;
         self.max_draw_us = self.max_draw_us.max(timing.draw_us);
         self.dirty_px += timing.dirty_px;
         if timing.dirty_px > self.max_dirty_px {
@@ -578,10 +636,11 @@ impl FrameLoopTiming {
         let rendered = self.rendered.max(1);
         let max_dirty_box = format!("{:?}", self.max_dirty_box);
         println!(
-            "Frame timing: {frames} loop iterations, {rendered} rendered | avg draw {draw} us, avg vsync {vsync} us (blocking), avg blit {blit} us, max draw {max_draw} us | avg dirty {dirty} px, max dirty {max_dirty} px at {max_dirty_box}",
+            "Frame timing: {frames} loop iterations, {rendered} rendered | avg draw {draw} us, avg compose {compose} us, avg vsync {vsync} us (blocking), avg blit {blit} us, max draw {max_draw} us | avg dirty {dirty} px, max dirty {max_dirty} px at {max_dirty_box}",
             frames = self.frames,
             rendered = self.rendered,
             draw = self.draw_us / rendered,
+            compose = self.compose_us / rendered,
             vsync = self.vsync_us / rendered,
             blit = self.blit_us / rendered,
             max_draw = self.max_draw_us,

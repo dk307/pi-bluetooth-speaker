@@ -9,6 +9,7 @@
 
 use std::fmt::{self, Formatter};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use slint::Color;
 use slint::ComponentHandle;
@@ -83,6 +84,9 @@ pub struct MarqueeStrip {
     image: slint::Image,
     width: u32,
     height: u32,
+    /// Raw premultiplied RGBA pixels backing `image`, shared cheaply with the
+    /// framebuffer-side marquee composer.
+    pixels: Arc<[RgbaPremulPixel]>,
 }
 
 impl MarqueeStrip {
@@ -93,7 +97,20 @@ impl MarqueeStrip {
             image: slint::Image::default(),
             width: 0,
             height: 0,
+            pixels: Arc::from([]),
         }
+    }
+
+    /// The raw premultiplied RGBA pixel buffer backing the strip image.
+    #[must_use]
+    pub fn pixels(&self) -> &[RgbaPremulPixel] {
+        &self.pixels
+    }
+
+    /// A cheap shared handle to the strip pixel buffer.
+    #[must_use]
+    pub fn pixels_arc(&self) -> Arc<[RgbaPremulPixel]> {
+        Arc::clone(&self.pixels)
     }
 
     /// The strip image to scroll.
@@ -170,6 +187,18 @@ pub struct MarqueeStripCache {
 }
 
 impl MarqueeStripCache {
+    /// The currently cached title strip, if any.
+    #[must_use]
+    pub fn title(&self) -> Option<&MarqueeStrip> {
+        self.title.as_ref().map(|(_, strip)| strip)
+    }
+
+    /// The currently cached artist/album strip, if any.
+    #[must_use]
+    pub fn artist(&self) -> Option<&MarqueeStrip> {
+        self.artist.as_ref().map(|(_, strip)| strip)
+    }
+
     /// Rasterizes the title strip for `request`, or returns `None` when the cached strip
     /// already matches (no re-render, no property invalidation).
     #[must_use]
@@ -325,6 +354,7 @@ impl MarqueeStripRasterizer {
             image: premul_to_image(&buffer, width, height),
             width,
             height,
+            pixels: Arc::from(buffer.into_boxed_slice()),
         };
         self.key = Some(request.key());
         self.renders += 1;

@@ -303,13 +303,260 @@ pub struct FrameTiming {
     pub dirty_px: u64,
     /// Dirty bounding box `(x, y, width, height)` in pixels.
     pub dirty_box: (u32, u32, u32, u32),
+    /// Rust-side marquee row composition duration (zero when no overlay is active).
+    pub compose_us: u64,
 }
 
 impl FrameTiming {
     /// Total non-blocking CPU time attributable to this frame.
     #[must_use]
     pub const fn cpu_us(&self) -> u64 {
-        self.draw_us + self.blit_us
+        self.draw_us + self.compose_us + self.blit_us
+    }
+}
+
+/// A single marquee row to be composed by Rust directly into the shadow buffer.
+///
+/// Produced per render-loop iteration from the shared [`MarqueeCompose`] Slint global
+/// (see `crate::ui::shell`); consumed by [`Framebuffer::set_marquee_rows`].
+#[derive(Debug, Clone)]
+pub struct MarqueeRowSpec {
+    /// Viewport rectangle `(x, y, width, height)` in framebuffer pixels.
+    pub rect: (u32, u32, u32, u32),
+    /// Current leftward scroll distance in whole pixels (`0..cycle_px`).
+    pub scroll_px: u32,
+    /// Tile advance distance in pixels (strip width plus the inter-copy gap).
+    pub cycle_px: u32,
+    /// Premultiplied RGBA strip pixels in row-major order.
+    pub strip: Arc<[crate::ui::marquee::RgbaPremulPixel]>,
+    /// Strip width in pixels (`strip.len() / strip_h`).
+    pub strip_w: u32,
+}
+
+/// Identifies when a row's composed content must be refreshed: scroll moved or the
+/// strip pixel buffer was replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RowFingerprint {
+    scroll_px: u32,
+    strip_id: usize,
+}
+
+/// Per-row overlay state: clean background snapshot plus the last composed fingerprint.
+#[derive(Debug)]
+struct MarqueeRowState {
+    rect: (u32, u32, u32, u32),
+    /// Clean background snapshot in BGRX pixels, `width * height`, row-major.
+    background: Box<[Bgrx8888Pixel]>,
+    last: Option<RowFingerprint>,
+}
+
+/// Rust-side marquee composer state owned by the framebuffer.
+///
+/// While active, the Slint scene keeps the marquee strip images static; every animation
+/// tick this overlay restores the captured clean row background into the shadow buffer,
+/// alpha-composites the scrolled strip tiles over it (opaque pixels copy directly; only
+/// antialiased glyph edges blend), and extends the scanout blit to cover the rows.
+#[derive(Debug, Default)]
+pub struct MarqueeOverlay {
+    rows: Vec<(MarqueeRowSpec, MarqueeRowState)>,
+}
+
+impl MarqueeOverlay {
+    fn row_pixels(rect: &(u32, u32, u32, u32)) -> usize {
+        let (_, _, w, h) = *rect;
+        usize::saturating_mul(w as usize, h as usize)
+    }
+
+    /// Replaces the pending row specifications, retaining captured backgrounds for rows
+    /// whose rectangle is unchanged.
+    pub fn set_rows(&mut self, rows: Vec<MarqueeRowSpec>) {
+        self.rows = rows
+            .into_iter()
+            .map(|spec| {
+                let prev = self
+                    .rows
+                    .iter()
+                    .find(|(existing, _)| existing.rect == spec.rect)
+                    .map_or_else(
+                        || MarqueeRowState {
+                            rect: spec.rect,
+                            background: Box::from([]),
+                            last: None,
+                        },
+                        |(existing, state)| {
+                            // An identical spec (same rect, scroll, cycle, and strip
+                            // buffer) keeps the previous compose fingerprint so the
+                            // composer skips unchanged rows instead of recomposing at
+                            // the raw render-loop rate.
+                            let unchanged = existing.scroll_px == spec.scroll_px
+                                && existing.cycle_px == spec.cycle_px
+                                && existing.strip_w == spec.strip_w
+                                && std::ptr::addr_eq(
+                                    std::sync::Arc::as_ptr(&existing.strip),
+                                    std::sync::Arc::as_ptr(&spec.strip),
+                                );
+                            MarqueeRowState {
+                                rect: state.rect,
+                                background: state.background.clone(),
+                                last: if unchanged { state.last } else { None },
+                            }
+                        },
+                    );
+                (spec, prev)
+            })
+            .collect();
+    }
+
+    /// Installs captured background snapshots (one per row, in row order).
+    pub fn install_backgrounds(&mut self, backgrounds: Vec<Box<[Bgrx8888Pixel]>>) {
+        for ((_, state), bg) in self.rows.iter_mut().zip(backgrounds) {
+            state.background = bg;
+            state.last = None;
+        }
+    }
+
+    /// Forces recomposition of rows whose rect intersects a Slint-drawn dirty
+    /// region. A Slint redraw rewrites the row area with the plain background
+    /// (strips are invisible in compose mode), so cached fingerprints for those
+    /// rows are stale until the strip is composed again.
+    pub fn invalidate_rows_intersecting(&mut self, dirty: (u32, u32, u32, u32)) {
+        let (dx, dy, dw, dh) = dirty;
+        let (dx2, dy2) = (dx.saturating_add(dw), dy.saturating_add(dh));
+        for (_, state) in &mut self.rows {
+            let (rx, ry, rw, rh) = state.rect;
+            let (rx2, ry2) = (rx.saturating_add(rw), ry.saturating_add(rh));
+            let intersects = dx < rx2 && rx < dx2 && dy < ry2 && ry < dy2;
+            if intersects {
+                state.last = None;
+            }
+        }
+    }
+
+    /// Whether every row has a captured background snapshot.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        !self.rows.is_empty()
+            && self
+                .rows
+                .iter()
+                .all(|(_, state)| state.background.len() == Self::row_pixels(&state.rect))
+    }
+
+    /// Composites rows whose fingerprint changed since the last frame into `back_buffer`
+    /// and returns the union bounding box of the composed rows (if any).
+    fn compose_changed(
+        &mut self,
+        back_buffer: &mut [Bgrx8888Pixel],
+        width: usize,
+    ) -> Option<(usize, usize, usize, usize)> {
+        let mut dirty: Option<(usize, usize, usize, usize)> = None;
+        let height = back_buffer.len().checked_div(width).unwrap_or(0);
+        for (spec, state) in &mut self.rows {
+            let fingerprint = RowFingerprint {
+                scroll_px: spec.scroll_px,
+                strip_id: Arc::as_ptr(&spec.strip).addr(),
+            };
+            if state.last == Some(fingerprint) || state.background.is_empty() {
+                continue;
+            }
+            state.last = Some(fingerprint);
+            let (rx, ry, rw, rh) = state.rect;
+            let (rx, ry, rw, rh) = (rx as usize, ry as usize, rw as usize, rh as usize);
+            if rw == 0 || rh == 0 || rx.saturating_add(rw) > width || ry.saturating_add(rh) > height
+            {
+                continue;
+            }
+            let strip_w = usize::try_from(spec.strip_w).unwrap_or(0);
+            let strip_h = spec.strip.len().checked_div(strip_w).unwrap_or(0);
+            for line in 0..rh {
+                let dst = &mut back_buffer[(ry + line) * width + rx..(ry + line) * width + rx + rw];
+                let bg_start = line * rw;
+                let bg_end = bg_start + rw;
+                match state.background.get(bg_start..bg_end) {
+                    Some(bg) if bg.len() == rw => dst.copy_from_slice(bg),
+                    _ => continue,
+                }
+                if line < strip_h {
+                    compose_scanned_line(dst, spec, line);
+                }
+            }
+            dirty = Some(match dirty {
+                None => (rx, ry, rw, rh),
+                Some((x, y, w, h)) => (
+                    rx.min(x),
+                    ry.min(y),
+                    rx.saturating_add(rw).max(x.saturating_add(w)) - rx.min(x),
+                    ry.saturating_add(rh).max(y.saturating_add(h)) - ry.min(y),
+                ),
+            });
+        }
+        dirty
+    }
+}
+
+/// Composites one scanline of scrolled, tiled strip pixels over a freshly restored
+/// background scanline.
+fn compose_scanned_line(dst: &mut [Bgrx8888Pixel], spec: &MarqueeRowSpec, line: usize) {
+    let strip_w = u64::from(spec.strip_w);
+    let scroll = u64::from(spec.scroll_px);
+    let cycle = u64::from(spec.cycle_px);
+    if strip_w == 0 || cycle == 0 {
+        return;
+    }
+    let dst_len = dst.len() as u64;
+    // Strip tiles repeat every `cycle` px; tile k's left edge sits at `k * cycle - scroll`
+    // in viewport coordinates. Every tile whose left edge is left of the viewport's right
+    // edge contributes (clipped) content or inter-tile background gap.
+    let mut k: u64 = 0;
+    while k * cycle <= scroll + dst_len {
+        let tile_left = k * cycle;
+        k += 1;
+        let (start, src_off) = if tile_left >= scroll {
+            (usize::try_from(tile_left - scroll).unwrap_or(0), 0_usize)
+        } else {
+            (
+                0_usize,
+                usize::try_from(scroll - tile_left).unwrap_or(usize::MAX),
+            )
+        };
+        if src_off >= strip_w as usize {
+            continue; // tile body ended left of the viewport; only its gap remains
+        }
+        if start >= dst.len() {
+            continue;
+        }
+        let strip_row_len = strip_w as usize;
+        let row_base = line.saturating_mul(strip_row_len);
+        for (i, dst_px) in dst[start..].iter_mut().enumerate() {
+            let src_x = src_off + i;
+            if src_x >= strip_row_len {
+                break; // inter-tile gap: the remainder keeps the background
+            }
+            let Some(src) = spec.strip.get(row_base.wrapping_add(src_x)) else {
+                break;
+            };
+            match src.alpha {
+                0 => {}
+                255 => {
+                    dst_px.red = src.red;
+                    dst_px.green = src.green;
+                    dst_px.blue = src.blue;
+                    dst_px.alpha = 255;
+                }
+                a => {
+                    // Premultiplied-over blend against the opaque background.
+                    let inv = u16::from(u8::MAX - a);
+                    let blend = |dst_c: u8, src_c: u8| -> u8 {
+                        let mixed = u16::from(dst_c) * inv / 255 + u16::from(src_c);
+                        u8::try_from(mixed).unwrap_or(u8::MAX)
+                    };
+                    dst_px.red = blend(dst_px.red, src.red);
+                    dst_px.green = blend(dst_px.green, src.green);
+                    dst_px.blue = blend(dst_px.blue, src.blue);
+                    dst_px.alpha = 255;
+                }
+            }
+        }
     }
 }
 
@@ -453,6 +700,7 @@ pub(crate) fn take_last_secondary_window() -> Option<Rc<MinimalSoftwareWindow>> 
 pub struct Framebuffer {
     backend: Backend,
     last_timing: core::cell::Cell<Option<FrameTiming>>,
+    marquee_overlay: MarqueeOverlay,
 }
 
 // Compile-time proofs for the fixed appliance panel geometry. The const
@@ -600,6 +848,7 @@ impl Framebuffer {
 
         Ok(Self {
             last_timing: core::cell::Cell::new(None),
+            marquee_overlay: MarqueeOverlay::default(),
             backend: Backend::Hardware {
                 file,
                 mmap,
@@ -734,6 +983,7 @@ impl Framebuffer {
         let ctrl = FramebufferMockCtrl::default();
         let fb = Self {
             last_timing: core::cell::Cell::new(None),
+            marquee_overlay: MarqueeOverlay::default(),
             backend: Backend::Mock {
                 buffer: vec![
                     Bgrx8888Pixel::default();
@@ -825,6 +1075,131 @@ impl Framebuffer {
         Ok(())
     }
 
+    /// Renders one frame through the `mmap`-backed scanout path (`VSync` pacing + dirty blit).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "all parameters are destructured backend fields of a single render call"
+    )]
+    fn render_mmap_frame(
+        overlay: &mut MarqueeOverlay,
+        last_timing: &core::cell::Cell<Option<FrameTiming>>,
+        window: &MinimalSoftwareWindow,
+        file: &mut File,
+        mmap_mut: &mut memmap2::MmapMut,
+        dev_path: &str,
+        back_buffer: &mut [Bgrx8888Pixel],
+        sync: ScanoutSync,
+        width: usize,
+    ) -> Result<bool, FramebufferError> {
+        let pixel_slice = Bgrx8888Pixel::try_from_bytes_mut(mmap_mut)?;
+        let mut timing = FrameTiming::default();
+        let mut dirty = (0_usize, 0_usize, 0_usize, 0_usize);
+        let draw_start = Instant::now();
+
+        let did_draw = window.draw_if_needed(|renderer| {
+            let region = renderer.render_by_line(FbLineBuffer::direct(back_buffer, width));
+            let origin = region.bounding_box_origin();
+            let size = region.bounding_box_size();
+            dirty = (
+                usize::try_from(origin.x).unwrap_or(0),
+                usize::try_from(origin.y).unwrap_or(0),
+                usize::try_from(size.width).unwrap_or(0),
+                usize::try_from(size.height).unwrap_or(0),
+            );
+        });
+        timing.draw_us = Self::elapsed_us(draw_start);
+        let dirty_px = u64::try_from(dirty.2 * dirty.3).unwrap_or(u64::MAX);
+        timing.dirty_px = dirty_px;
+        timing.dirty_box = (
+            u32::try_from(dirty.0).unwrap_or(0),
+            u32::try_from(dirty.1).unwrap_or(0),
+            u32::try_from(dirty.2).unwrap_or(0),
+            u32::try_from(dirty.3).unwrap_or(0),
+        );
+        let compose_start = Instant::now();
+        let slint_dirty = (
+            u32::try_from(dirty.0).unwrap_or(0),
+            u32::try_from(dirty.1).unwrap_or(0),
+            u32::try_from(dirty.2).unwrap_or(0),
+            u32::try_from(dirty.3).unwrap_or(0),
+        );
+        overlay.invalidate_rows_intersecting(slint_dirty);
+        let marquee_dirty = overlay.compose_changed(back_buffer, width);
+        timing.compose_us = Self::elapsed_us(compose_start);
+        let effective = did_draw || marquee_dirty.is_some();
+        let blit_box = Self::union_dirty_boxes(dirty, marquee_dirty);
+        if effective {
+            let (blit_x, blit_y, blit_w, blit_h) = blit_box;
+            if matches!(sync, ScanoutSync::CharDevice { vsync: true }) {
+                // The vsync wait itself paces this frame to the hardware refresh; the
+                // boolean result is informational only.
+                let vsync_start = Instant::now();
+                let _ = Self::wait_for_vsync(file);
+                timing.vsync_us = Self::elapsed_us(vsync_start);
+            }
+            let blit_start = Instant::now();
+            Self::blit_dirty_rect(
+                back_buffer,
+                pixel_slice,
+                width,
+                blit_x,
+                blit_y,
+                blit_w,
+                blit_h,
+            );
+            if sync == ScanoutSync::FileMapped {
+                mmap_mut
+                    .flush()
+                    .map_err(|e| FramebufferError::io(dev_path.to_owned(), e))?;
+            }
+            timing.blit_us = Self::elapsed_us(blit_start);
+            let marquee_px =
+                u64::try_from(marquee_dirty.map_or(0, |(_, _, w, h)| w.saturating_mul(h)))
+                    .unwrap_or(u64::MAX);
+            timing.dirty_px = dirty_px.saturating_add(marquee_px);
+            timing.dirty_box = (
+                u32::try_from(blit_x).unwrap_or(0),
+                u32::try_from(blit_y).unwrap_or(0),
+                u32::try_from(blit_w).unwrap_or(0),
+                u32::try_from(blit_h).unwrap_or(0),
+            );
+        }
+        last_timing.set(Some(timing));
+        Ok(effective)
+    }
+
+    /// Renders one frame through the regular-file mapping path (full flush after draw).
+    fn render_file_frame(
+        overlay: &mut MarqueeOverlay,
+        last_timing: &core::cell::Cell<Option<FrameTiming>>,
+        window: &MinimalSoftwareWindow,
+        file: &mut File,
+        dev_path: &str,
+        back_buffer: &mut [Bgrx8888Pixel],
+        width: usize,
+    ) -> Result<bool, FramebufferError> {
+        let mut timing = FrameTiming::default();
+        let draw_start = Instant::now();
+        let did_draw = window.draw_if_needed(|renderer| {
+            renderer.render_by_line(FbLineBuffer::direct(back_buffer, width));
+        });
+        timing.draw_us = Self::elapsed_us(draw_start);
+        let compose_start = Instant::now();
+        // The file-mapped path has no dirty tracking (it always flushes fully);
+        // any Slint draw may have overwritten the row area, so invalidate all.
+        if did_draw {
+            overlay.invalidate_rows_intersecting((0, 0, u32::MAX, u32::MAX));
+        }
+        let marquee_dirty = overlay.compose_changed(back_buffer, width);
+        timing.compose_us = Self::elapsed_us(compose_start);
+        let effective = did_draw || marquee_dirty.is_some();
+        if effective {
+            Self::flush_file_buffer(file, Bgrx8888Pixel::as_bytes(back_buffer), dev_path)?;
+        }
+        last_timing.set(Some(timing));
+        Ok(effective)
+    }
+
     /// Renders a pending frame into the framebuffer if redraw was requested.
     ///
     /// On hardware (`/dev/fb0` character device), Slint renders into the cached RAM
@@ -856,79 +1231,28 @@ impl Framebuffer {
                 back_buffer,
                 sync,
                 ..
-            } => {
-                if let Some(mmap_mut) = mmap {
-                    let pixel_slice = Bgrx8888Pixel::try_from_bytes_mut(mmap_mut)?;
-                    let mut timing = FrameTiming::default();
-                    let mut dirty = (0_usize, 0_usize, 0_usize, 0_usize);
-                    let draw_start = Instant::now();
-
-                    let did_draw = window.draw_if_needed(|renderer| {
-                        let region =
-                            renderer.render_by_line(FbLineBuffer::direct(back_buffer, width));
-                        let origin = region.bounding_box_origin();
-                        let size = region.bounding_box_size();
-                        dirty = (
-                            usize::try_from(origin.x).unwrap_or(0),
-                            usize::try_from(origin.y).unwrap_or(0),
-                            usize::try_from(size.width).unwrap_or(0),
-                            usize::try_from(size.height).unwrap_or(0),
-                        );
-                    });
-                    timing.draw_us = Self::elapsed_us(draw_start);
-                    let dirty_px = u64::try_from(dirty.2 * dirty.3).unwrap_or(u64::MAX);
-                    timing.dirty_px = dirty_px;
-                    timing.dirty_box = (
-                        u32::try_from(dirty.0).unwrap_or(0),
-                        u32::try_from(dirty.1).unwrap_or(0),
-                        u32::try_from(dirty.2).unwrap_or(0),
-                        u32::try_from(dirty.3).unwrap_or(0),
-                    );
-                    if did_draw {
-                        if matches!(*sync, ScanoutSync::CharDevice { vsync: true }) {
-                            // The vsync wait itself paces this frame to the hardware
-                            // refresh; the boolean result is informational only.
-                            let vsync_start = Instant::now();
-                            let _ = Self::wait_for_vsync(file);
-                            timing.vsync_us = Self::elapsed_us(vsync_start);
-                        }
-                        let blit_start = Instant::now();
-                        Self::blit_dirty_rect(
-                            back_buffer,
-                            pixel_slice,
-                            width,
-                            dirty.0,
-                            dirty.1,
-                            dirty.2,
-                            dirty.3,
-                        );
-                        if *sync == ScanoutSync::FileMapped {
-                            mmap_mut
-                                .flush()
-                                .map_err(|e| FramebufferError::io(dev_path.clone(), e))?;
-                        }
-                        timing.blit_us = Self::elapsed_us(blit_start);
-                    }
-                    self.last_timing.set(Some(timing));
-                    Ok(did_draw)
-                } else {
-                    let mut timing = FrameTiming::default();
-                    let draw_start = Instant::now();
-                    let did_draw = window.draw_if_needed(|renderer| {
-                        renderer.render_by_line(FbLineBuffer::direct(back_buffer, width));
-                    });
-                    timing.draw_us = Self::elapsed_us(draw_start);
-                    if did_draw {
-                        Self::flush_file_buffer(
-                            file,
-                            Bgrx8888Pixel::as_bytes(back_buffer),
-                            dev_path,
-                        )?;
-                    }
-                    self.last_timing.set(Some(timing));
-                    Ok(did_draw)
-                }
-            }
+            } => match mmap {
+                Some(mmap_mut) => Self::render_mmap_frame(
+                    &mut self.marquee_overlay,
+                    &self.last_timing,
+                    window,
+                    file,
+                    mmap_mut,
+                    dev_path,
+                    back_buffer,
+                    *sync,
+                    width,
+                ),
+                None => Self::render_file_frame(
+                    &mut self.marquee_overlay,
+                    &self.last_timing,
+                    window,
+                    file,
+                    dev_path,
+                    back_buffer,
+                    width,
+                ),
+            },
             Backend::Mock { buffer, ctrl } => {
                 let mut state = ctrl.state.lock().expect("mock state lock poisoned");
                 if let Some(message) = &state.render_error {
@@ -943,11 +1267,15 @@ impl Framebuffer {
                     renderer.render_by_line(FbLineBuffer::direct(buffer, width));
                 });
                 timing.draw_us = Self::elapsed_us(draw_start);
-                if did_draw {
+                let compose_start = Instant::now();
+                let marquee_dirty = self.marquee_overlay.compose_changed(buffer, width);
+                timing.compose_us = Self::elapsed_us(compose_start);
+                let effective = did_draw || marquee_dirty.is_some();
+                if effective {
                     state.render_calls += 1;
                 }
                 self.last_timing.set(Some(timing));
-                Ok(did_draw)
+                Ok(effective)
             }
         }
     }
@@ -956,6 +1284,103 @@ impl Framebuffer {
     #[must_use]
     pub fn last_frame_timing(&self) -> Option<FrameTiming> {
         self.last_timing.get()
+    }
+
+    /// Replaces the pending Rust-side marquee row specifications.
+    pub fn set_marquee_rows(&mut self, rows: Vec<MarqueeRowSpec>) {
+        self.marquee_overlay.set_rows(rows);
+    }
+
+    /// Whether the marquee overlay has a captured background for every row.
+    #[must_use]
+    pub fn marquee_overlay_ready(&self) -> bool {
+        self.marquee_overlay.is_ready()
+    }
+
+    /// Installs captured background snapshots (one per row, in [`Self::set_marquee_rows`]
+    /// row order) produced by [`Self::capture_region`].
+    pub fn install_marquee_backgrounds(&mut self, backgrounds: Vec<Box<[Bgrx8888Pixel]>>) {
+        self.marquee_overlay.install_backgrounds(backgrounds);
+    }
+
+    /// Copies a rectangular region of the current shadow-buffer content as a clean
+    /// background snapshot for the marquee composer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FramebufferError`] if the region exceeds the fixed panel bounds or the
+    /// mock state mutex is poisoned.
+    pub fn capture_region(
+        &self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+    ) -> Result<Box<[Bgrx8888Pixel]>, FramebufferError> {
+        let width = Self::DEFAULT_WIDTH as usize;
+        let height = Self::DEFAULT_HEIGHT as usize;
+        let (x, y, w, h) = (
+            usize::try_from(x).unwrap_or(0),
+            usize::try_from(y).unwrap_or(0),
+            usize::try_from(w).unwrap_or(0),
+            usize::try_from(h).unwrap_or(0),
+        );
+        if w == 0 || h == 0 || x.saturating_add(w) > width || y.saturating_add(h) > height {
+            return Err(FramebufferError::invalid_geometry(
+                u32::try_from(x).unwrap_or(u32::MAX),
+                u32::try_from(y).unwrap_or(u32::MAX),
+                format!(
+                    "marquee background region ({x}, {y}, {w}, {h}) exceeds the {width}x{height} panel"
+                ),
+            ));
+        }
+        let mut snapshot = Vec::with_capacity(w * h);
+        match &self.backend {
+            Backend::Hardware { back_buffer, .. } => {
+                for line in 0..h {
+                    let start = (y + line) * width + x;
+                    snapshot.extend_from_slice(&back_buffer[start..start + w]);
+                }
+            }
+            Backend::Mock { buffer, ctrl } => {
+                // Hold the state mutex for the snapshot's lifetime; the buffer is read
+                // through , the guard only serializes concurrent mock mutation.
+                let _state = ctrl.state.lock().map_err(|poisoned| {
+                    FramebufferError::io(
+                        "mock-fb",
+                        io::Error::other(format!("mock state lock poisoned: {poisoned}")),
+                    )
+                })?;
+                for line in 0..h {
+                    let start = (y + line) * width + x;
+                    snapshot.extend_from_slice(&buffer[start..start + w]);
+                }
+            }
+        }
+        Ok(snapshot.into_boxed_slice())
+    }
+
+    /// Unions two dirty boxes expressed as `(x, y, width, height)`; zero-area boxes are
+    /// treated as absent.
+    fn union_dirty_boxes(
+        a: (usize, usize, usize, usize),
+        b: Option<(usize, usize, usize, usize)>,
+    ) -> (usize, usize, usize, usize) {
+        let Some((bx, by, bw, bh)) = b else {
+            return a;
+        };
+        if bw == 0 || bh == 0 {
+            return a;
+        }
+        if a.2 == 0 || a.3 == 0 {
+            return (bx, by, bw, bh);
+        }
+        (
+            a.0.min(bx),
+            a.1.min(by),
+            a.0.saturating_add(a.2).max(bx.saturating_add(bw)) - a.0.min(bx),
+            a.1.saturating_add(a.3).max(by.saturating_add(bh)) - a.1.min(by),
+        )
     }
 
     /// Blocks until the display controller's next vertical blanking interval.

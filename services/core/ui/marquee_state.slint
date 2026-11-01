@@ -1,0 +1,32 @@
+// Shared state bridge between the Slint marquee animation and the Rust-side
+// framebuffer composer (see `crate::ui::framebuffer::MarqueeOverlay`).
+//
+// `now_playing` is instantiated inside a conditional element, so its internal
+// properties are not addressable from the window root; a global is the sanctioned
+// way to publish per-tick animation state (geometry, scroll offset, clock) to Rust.
+export global MarqueeCompose {
+    // Marquee scroll rate in ticks per second (30 or 60); set from the CLI.
+    in-out property <int> marquee_fps: 60;
+    // True once the Rust composer has captured clean row backgrounds; makes the
+    // strip images render statically inside Slint (no per-frame dirty regions).
+    in-out property <bool> compose_in_rust: false;
+    // True during the one-frame background capture: strip images stay laid out but
+    // render nothing, so the shadow buffer shows only the clean row background.
+    in-out property <bool> capture_pending: false;
+    // Shared marquee clock advanced by the single 16.65 ms timer in NowPlayingView.
+    in-out property <int> clock: 0;
+    // Title marquee viewport geometry in window coordinates and scroll state.
+    in-out property <Point> title_origin;
+    in-out property <length> title_w;
+    in-out property <length> title_h;
+    in-out property <int> title_scroll_px;
+    in-out property <int> title_cycle_px;
+    in-out property <bool> title_overflow;
+    // Artist marquee viewport geometry in window coordinates and scroll state.
+    in-out property <Point> artist_origin;
+    in-out property <length> artist_w;
+    in-out property <length> artist_h;
+    in-out property <int> artist_scroll_px;
+    in-out property <int> artist_cycle_px;
+    in-out property <bool> artist_overflow;
+}

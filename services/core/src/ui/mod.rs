@@ -25,7 +25,7 @@ pub(crate) mod theme;
 
 #[doc(inline)]
 pub use framebuffer::{
-    Bgrx8888Pixel, FrameTiming, Framebuffer, FramebufferError, FramebufferMockCtrl,
+    Bgrx8888Pixel, FrameTiming, Framebuffer, FramebufferError, FramebufferMockCtrl, MarqueeRowSpec,
 };
 #[doc(inline)]
 pub use generated::{MainWindow, SplashScreen, Theme, ThemePalette};
