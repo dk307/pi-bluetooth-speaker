@@ -304,7 +304,11 @@ fn cover_art_none_when_thumbnail_and_get_fail_and_session_cleared() {
     });
     assert!(h.cover().is_none());
     assert!(h.cover().is_none());
-    assert_eq!(h.create_calls(), 2, "failed fetch must drop cached session");
+    assert_eq!(
+        h.create_calls(),
+        4,
+        "each failed fetch drops the cached session and recreates it for the thumbnail fallback"
+    );
 }
 
 #[test]

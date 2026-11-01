@@ -1477,14 +1477,10 @@ impl DbusClient {
             .build()
             .ok()?;
 
-        // Prefer the FULL-RESOLUTION image: BIP `GetThumbnail` returns a small
-        // (e.g. 200x200) preview that loses detail when upscaled to the appliance
-        // panel; `Get` without transformation filters returns the native image and
-        // only falls back to the thumbnail when the device does not support it.
         let empty_props = HashMap::new();
         let transfer_res = image_proxy
-            .get(&cache_path, handle, &empty_props)
-            .or_else(|_| image_proxy.get_thumbnail(&cache_path, handle));
+            .get_thumbnail(&cache_path, handle)
+            .or_else(|_| image_proxy.get(&cache_path, handle, &empty_props));
 
         let (transfer_path, _) = match transfer_res {
             Ok(res) => res,
