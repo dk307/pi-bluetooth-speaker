@@ -351,3 +351,55 @@ with one bounds-checked `get()` per pixel is faster and was kept.
    (section 8, AGENTS item 18). A digit-strip image display would avoid the
    whole-card text cascade.
 3. **Wave indicator tick rate.** Already cheap; only revisit if measurements change.
+
+## 11. Compose-Mode Defects Found in Live Playback (2026-10-31)
+
+Three defects surfaced once the FB composer ran against real playback sessions, all
+root-caused with a temporary Pi-side probe comparing row pixels before/after a
+candidate render (`unchanged_after_full_redraw`) rather than by eyeballing:
+
+1. **Flicker — static strip flashing through.** In compose mode the Slint strip
+   images stayed *visible* at `x = 0` (only the wrap copy was gated). The composer
+   paints the scrolled strip over that area, but every non-scroll Slint redraw
+   (wave-indicator ticks during the 2 s pause phase) repainted the static strip
+   first. Fix: hide the strips whenever `compose_in_rust` is active
+   (`visible: !strips_hidden && !compose_in_rust`).
+2. **Invisible non-overflowing titles.** `marquee_row_specs` skipped non-overflow
+   rows while the Slint strips are hidden in compose mode — nothing rendered them
+   at all. Fix: every populated row gets a composer spec; non-overflow rows compose
+   a single static tile (`scroll_px = 0`, `cycle_px = viewport_width + 1` so the
+   tiling loop provably never draws a second copy inside the viewport).
+3. **Ghost text after song changes (the subtle one).** A song change that alters a
+   row's viewport geometry (artist overflow toggling 408↔484 px) drops that row's
+   captured background → `marquee_overlay_ready()` goes false → the render loop
+   re-captures. But the capture render itself ran `compose_changed` *after* the
+   full redraw with the still-installed OLD specs, writing the old strip straight
+   back into the region being snapshotted. Probe evidence: on the polluted
+   recapture, row 0 reported `unchanged_after_full_redraw=true` — pre-capture
+   (bg + old strip) == post-capture (bg repainted clean, then old strip recomposed).
+   The first capture was clean only because the row list was still empty then.
+   Fix: the capture cycle clears the rows first (`set_marquee_rows(Vec::new())`)
+   so the composer is provably inert during the capture render.
+
+The fingerprint skip also turned out to benefit the pause phase: while
+`scroll_px` is unchanged the composer neither recomposes nor blits, so `-m 60`
+dropped from ~31% to **27.4% total (15.6% render thread)** and `-m 30` stands at
+**24.4% (12.7%)**. A run-length batching experiment for the composer inner loop
+was *slower* than the simple per-pixel loop on the in-order Cortex-A53
+(0.86 → 1.33 ms; glyph edges produce many short runs) and was reverted — simple
+loops with one bounds-checked `get()` per pixel win on this silicon.
+
+### Cumulative CPU trajectory (playback, one core)
+
+56% → 35% (storm/wave fixes) → 27% (30 fps flag) → 24.4% / 27.4% (FB composition,
+fingerprint skip, pause-phase skipping). Remaining budget: ~9% tokio workers +
+bt-monitor polling (event-driven `PropertiesChanged` = roadmap item), ~2.5%
+1 Hz position-text redraw (documented limitation), rest is marquee compose/blit.
+
+### Debugging lesson
+
+Visual symptoms ("sometimes", "double text", "text stays in place") on a
+single-buffered framebuffer map cleanly to *buffer-state* bugs: something wrote
+pixels that the later pipeline stages assume absent. A pixel-diff probe between
+the buffer state before and after the suspect render is decisive — far more
+reliable than reasoning from screenshots.
