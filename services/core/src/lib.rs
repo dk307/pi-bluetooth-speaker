@@ -12,4 +12,7 @@ pub mod runtime;
 pub mod ui;
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]
-core::arch::global_asm!(".symver acosf, acosf@GLIBC_2.17");
+core::arch::global_asm!(
+    ".symver acosf, acosf@GLIBC_2.17",
+    ".symver atan2f, atan2f@GLIBC_2.17"
+);

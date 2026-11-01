@@ -1,0 +1,517 @@
+import { Theme } from "theme.slint";
+import { MarqueeCompose } from "marquee_state.slint";
+
+// Scrolling marquee over a pre-rasterized text strip image.
+//
+// The strip image is rendered offscreen (see `marquee_rasterizer.slint`) only when its
+// text, color, or typography changes; per-frame work here is a cheap pixel blit instead
+// of glyph shaping and rasterization. `strip` is empty until the first raster completes.
+component MarqueeText inherits Rectangle {
+    in property <image> strip;
+    // Shared marquee clock (ticks of the parent's single 16.65 ms timer) and the
+    // configured marquee frame rate in ticks per second (60 = 1 px per tick, 30 =
+    // 2 px every other tick). One shared timer guarantees title and artist scroll
+    // in lockstep; independent per-instance timers drift apart and double the
+    // number of dirty events fed to the render loop.
+    in property <int> clock_frame: 0;
+    in property <int> marquee_fps: 60;
+    // When true, the strip images stay static (x = 0) and Rust composes the scrolled
+    // pixels directly into the framebuffer shadow buffer every animation tick, so the
+    // software renderer never dirties the marquee rows per frame.
+    in property <bool> compose_in_rust: false;
+    // During background capture the images keep their layout geometry but render
+    // nothing, so `capture_region` snapshots the clean row background.
+    in property <bool> strips_hidden: false;
+    clip: true;
+    height: strip_item.preferred-height;
+    horizontal-stretch: 1;
+    preferred-width: 0px;
+
+    strip_item := Image {
+        x: root.compose_in_rust ? 0px : root.scroll_offset;
+        source: root.strip;
+        visible: !root.strips_hidden && !root.compose_in_rust;
+    }
+
+    property <length> text_width: strip_item.width;
+    out property <bool> is_overflow: text_width > root.width;
+    out property <Point> viewport_origin: root.absolute-position;
+    out property <length> viewport_w: root.width;
+    out property <length> viewport_h: root.height;
+    // Current leftward scroll distance in whole physical px (0..cycle_px); 0 while the
+    // strip renders statically inside Slint (compose_in_rust == false).
+    out property <int> scroll_px: root.compose_in_rust && root.is_overflow ?
+        Math.max(0, Math.round(-root.scroll_offset / 1px)) : 0;
+    out property <int> cycle_px: Math.round(root.cycle_distance / 1px);
+    property <length> gap: 80px;
+    property <length> cycle_distance: text_width + gap;
+
+    // Unidirectional marquee: 2.0s stationary pause at start, then constant-speed leftward
+    // scroll. The offset derives from the shared integer frame clock: each clock tick
+    // advances the scroll by `step_frames` physical px, so 60 fps = 1 px per 16.65 ms and
+    // 30 fps = 2 px per 33.3 ms at identical on-screen speed. Halving the effective frame
+    // rate halves the per-second software-renderer cost of scrolling the large
+    // pre-rasterized strips (~34k dirty px/frame). Reading `animation-tick()` was
+    // deliberately avoided:
+    // it permanently marks Slint's animation driver active, pinning the render loop at
+    // 60 fps (and ~60% CPU) even while the marquee is paused or the text does not overflow.
+    property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
+    property <length> step: root.step_frames * 1px;
+    property <int> cycle_frames: Math.max(1, Math.round(cycle_distance / root.step));
+    property <int> pause_frames: Math.round(pause_secs * root.marquee_fps);
+    property <int> total_frames: Math.max(pause_frames + cycle_frames, 1);
+    property <int> scroll_frame: Math.mod(root.clock_frame, root.total_frames);
+    property <float> pause_secs: 2.0;
+    property <float> progress: scroll_frame < pause_frames ?
+        0.0 : ((scroll_frame - pause_frames) * 1.0 / cycle_frames);
+    property <length> scroll_offset: is_overflow ? (-cycle_distance * progress) : 0px;
+
+    // The wrap-around copy is only ever visible once the trailing gap of the first
+    // copy has entered the viewport's right edge; skipping it otherwise halves the
+    // per-frame image blit area.
+    // Whether the wrap-around copy must be composited. Expressed in INTEGER frame
+    // arithmetic on purpose: the previous float comparison
+    // `scroll_offset + cycle_distance < width` flapped when f32 rounding made
+    // `scroll_offset` non-monotonic at the crossing, destroying and recreating the
+    // conditional item tree every frame — and each item-tree destruction forces a
+    // full-window redraw (~30 ms) in Slint's partial renderer
+    // (`free_graphics_resources` -> `force_screen_refresh`), causing a ~70% CPU storm.
+    property <bool> wrap_visible: root.is_overflow
+        && (root.scroll_frame - root.pause_frames) > root.cycle_frames - Math.round(root.width / root.step);
+
+    // The wrap-around copy is only ever visible once the trailing gap of the first
+    // copy has entered the viewport's right edge; skipping it otherwise halves the
+    // per-frame image blit area. The element stays in the item tree permanently and
+    // only its `visible` flag toggles, so no item-tree destruction can occur.
+    Image {
+        x: root.compose_in_rust ? 0px : root.scroll_offset + root.cycle_distance;
+        source: root.strip;
+        visible: !root.strips_hidden && !root.compose_in_rust && root.wrap_visible;
+    }
+}
+
+component AmbientWaveIndicator inherits Rectangle {
+    in property <bool> is_playing: true;
+    width: 64px;
+    height: 24px;
+    background: transparent;
+
+    property <int> tick: 0;
+
+    Timer {
+        interval: 180ms;
+        running: root.is_playing;
+        triggered() => {
+            root.tick = Math.mod(root.tick + 1, 6);
+        }
+    }
+
+    HorizontalLayout {
+        alignment: center;
+        spacing: 4px;
+
+        Rectangle {
+            width: 4px;
+            height: root.is_playing ? Math.max(6px, (Math.mod(root.tick, 4) == 0 ? 20px : (Math.mod(root.tick, 4) == 2 ? 8px : 14px))) : 4px;
+            border-radius: 2px;
+            background: Theme.active.primary_accent;
+        }
+        Rectangle {
+            width: 4px;
+            height: root.is_playing ? Math.max(6px, (Math.mod(root.tick + 1, 4) == 0 ? 24px : (Math.mod(root.tick + 1, 4) == 2 ? 10px : 18px))) : 4px;
+            border-radius: 2px;
+            background: Theme.active.secondary_accent;
+        }
+        Rectangle {
+            width: 4px;
+            height: root.is_playing ? Math.max(6px, (Math.mod(root.tick + 2, 4) == 0 ? 18px : (Math.mod(root.tick + 2, 4) == 2 ? 7px : 12px))) : 4px;
+            border-radius: 2px;
+            background: Theme.active.primary_accent;
+        }
+        Rectangle {
+            width: 4px;
+            height: root.is_playing ? Math.max(6px, (Math.mod(root.tick + 3, 4) == 0 ? 22px : (Math.mod(root.tick + 3, 4) == 2 ? 9px : 16px))) : 4px;
+            border-radius: 2px;
+            background: Theme.active.secondary_accent;
+        }
+        Rectangle {
+            width: 4px;
+            height: root.is_playing ? Math.max(6px, (Math.mod(root.tick, 3) == 0 ? 16px : 8px)) : 4px;
+            border-radius: 2px;
+            background: Theme.active.primary_accent;
+        }
+    }
+}
+
+export component NowPlayingView inherits Rectangle {
+    in property <string> track_title: "Waiting for Bluetooth Connection...";
+    in property <string> track_artist: "DietPi Audiophile Speaker";
+    in property <string> track_album: "";
+    in property <string> artist_marquee_text;
+    in property <image> title_marquee_strip;
+    in property <image> artist_marquee_strip;
+    in property <string> position_text: "00:00";
+    in property <string> duration_text: "00:00";
+    in property <float> progress_ratio: 0.0;
+    in property <bool> is_playing: false;
+    in property <bool> has_cover_art: false;
+    in property <image> cover_image;
+    // Marquee scroll rate in ticks per second (30 or 60; default 60). One shared
+    // 16.65 ms timer advances `marquee_clock` by one scroll step every
+    // `step_frames` triggers, so both marquees scroll in lockstep and the render
+    // loop receives exactly one dirty event per effective animation frame.
+    in property <int> marquee_fps: MarqueeCompose.marquee_fps;
+    // See `MarqueeText.compose_in_rust`: set by Rust after the background snapshot exists.
+    in property <bool> marquee_compose_in_rust: MarqueeCompose.compose_in_rust;
+    in-out property <int> marquee_clock <=> MarqueeCompose.clock;
+    property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
+    property <int> raw_tick: 0;
+    out property <bool> is_animating: title_marquee.is_overflow || root.is_playing;
+
+    // Publish composer state to the shared global consumed by the Rust render loop.
+    // Callback assignments (not declarative bindings) are the sanctioned way to write
+    // global properties from a component instance.
+    function publish_composer_state() {
+        MarqueeCompose.title_origin = title_marquee.viewport_origin;
+        MarqueeCompose.title_w = title_marquee.viewport_w;
+        MarqueeCompose.title_h = title_marquee.viewport_h;
+        MarqueeCompose.title_scroll_px = title_marquee.scroll_px;
+        MarqueeCompose.title_cycle_px = title_marquee.cycle_px;
+        MarqueeCompose.title_overflow = title_marquee.is_overflow;
+    }
+
+    Timer {
+        interval: 16.65ms;
+        running: title_marquee.is_overflow;
+        triggered() => {
+            root.raw_tick += 1;
+            if (Math.mod(root.raw_tick, root.step_frames) == 0) {
+                root.marquee_clock += 1;
+            }
+            root.publish_composer_state();
+        }
+    }
+
+    init => {
+        root.publish_composer_state();
+    }
+
+    changed title_marquee_strip => {
+        root.marquee_clock = 0;
+        root.publish_composer_state();
+    }
+    changed artist_marquee_strip => {
+        root.marquee_clock = 0;
+        root.publish_composer_state();
+    }
+
+    callback toggle_play_pause();
+    callback next_track();
+    callback previous_track();
+    callback seek(float);
+
+    HorizontalLayout {
+        padding: 16px;
+        spacing: 24px;
+
+        // Left Column: square cover art / vinyl disc box centered in a fixed-width
+        // column, sized to the largest square that fits the column height so the
+        // top and bottom card margins stay symmetric.
+        Rectangle {
+            width: 340px;
+
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: Math.min(parent.width, parent.height);
+                height: self.width;
+                border-radius: 16px;
+                clip: true;
+                background: @linear-gradient(145deg, Theme.active.card_surface 0%, Theme.active.chassis 100%);
+                border-width: 1px;
+                border-color: Theme.active.card_border;
+
+                // Ambient glowing aura behind the turntable when music is playing
+                Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: parent.width - 40px;
+                    height: self.width;
+                    border-radius: self.width / 2;
+                    background: Theme.active.primary_accent;
+                    opacity: root.is_playing ? 0.12 : 0.02;
+                    animate opacity { duration: 600ms; easing: ease-in-out; }
+                }
+
+                // 1. Cover Art Image (if available from AVRCP)
+                if root.has_cover_art : Image {
+                    width: 100%;
+                    height: 100%;
+                    source: root.cover_image;
+                    image-fit: contain;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                // 2. Vinyl Record Graphic (when no Bluetooth cover art)
+                if !root.has_cover_art : Image {
+                    width: 78%;
+                    height: 78%;
+                    source: @image-url("../../../assets/icons/disk.svg");
+                    colorize: Theme.active.primary_accent;
+                    image-fit: contain;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Right Column: Track Info, Scrubber & Transport
+        VerticalLayout {
+            alignment: space-around;
+            padding-top: 4px;
+            padding-bottom: 4px;
+            spacing: 14px;
+
+            // Track metadata & live playback wave
+            VerticalLayout {
+                spacing: 6px;
+
+                title_marquee := MarqueeText {
+                    strip: root.title_marquee_strip;
+                    clock_frame: root.marquee_clock;
+                    marquee_fps: root.marquee_fps;
+                    compose_in_rust: root.marquee_compose_in_rust;
+                    strips_hidden: MarqueeCompose.capture_pending;
+                }
+
+                HorizontalLayout {
+                    spacing: 12px;
+
+                    // The artist/album line is intentionally static (no marquee): long
+                    // text is truncated with an ellipsis instead of scrolling.
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.artist_marquee_text;
+                        color: Theme.active.secondary_accent;
+                        font-size: 22px;
+                        font-weight: 700;
+                        overflow: elide;
+                        wrap: no-wrap;
+                        vertical-alignment: center;
+                    }
+
+                    if root.is_playing : AmbientWaveIndicator {
+                        is_playing: root.is_playing;
+                    }
+                }
+            }
+
+            // Playback progress scrubber (Thick bar + large draggable knob)
+            HorizontalLayout {
+                spacing: 16px;
+
+                Text {
+                    text: root.position_text;
+                    font-size: 18px;
+                    font-weight: 800;
+                    color: Theme.active.text_primary;
+                    vertical-alignment: center;
+                    width: 58px;
+                    horizontal-alignment: right;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 28px;
+                    background: transparent;
+
+                    // Background track (Vertically centered)
+                    Rectangle {
+                        x: 0px;
+                        y: (parent.height - self.height) / 2;
+                        width: parent.width;
+                        height: 14px;
+                        background: #1c2430;
+                        border-radius: 7px;
+
+                        // Filled played position bar
+                        Rectangle {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio));
+                            height: parent.height;
+                            background: Theme.active.primary_accent;
+                            border-radius: 7px;
+                        }
+                    }
+
+                    // Scrubber handle knob (Vertically centered in parent container)
+                    Rectangle {
+                        x: Math.max(0px, Math.min(parent.width - self.width, parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio)) - self.width / 2));
+                        y: (parent.height - self.height) / 2;
+                        width: 24px;
+                        height: 24px;
+                        border-radius: 12px;
+                        background: Theme.active.text_primary;
+                        border-width: 3px;
+                        border-color: Theme.active.primary_accent;
+                    }
+
+                    TouchArea {
+                        clicked => {
+                            root.seek(Math.max(0.0, Math.min(1.0, self.mouse-x / self.width)));
+                        }
+                        moved => {
+                            root.seek(Math.max(0.0, Math.min(1.0, self.mouse-x / self.width)));
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.duration_text;
+                    font-size: 18px;
+                    font-weight: 800;
+                    color: Theme.active.text_muted;
+                    vertical-alignment: center;
+                    width: 58px;
+                    horizontal-alignment: left;
+                }
+            }
+
+            // Transport controls row (Larger touch targets & Peppy graphics)
+            HorizontalLayout {
+                alignment: center;
+                spacing: 36px;
+
+                // Previous Button (72px, vertically centered with 86px hero button)
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 72px;
+                        height: 72px;
+                        border-radius: 36px;
+                        background: Theme.active.card_surface;
+                        border-width: 1px;
+                        border-color: Theme.active.card_border;
+
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 4px;
+
+                                Rectangle {
+                                    width: 4px;
+                                    height: 22px;
+                                    border-radius: 2px;
+                                    background: Theme.active.text_primary;
+                                }
+
+                                Image {
+                                    source: @image-url("../../../assets/icons/left.svg");
+                                    colorize: Theme.active.text_primary;
+                                    width: 16px;
+                                    height: 22px;
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.previous_track();
+                            }
+                        }
+                    }
+                }
+
+                // Play / Pause (Hero Button 86px, vertically centered)
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 86px;
+                        height: 86px;
+                        border-radius: 43px;
+                        background: Theme.active.primary_accent;
+
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
+                                alignment: center;
+
+                                if root.is_playing : Image {
+                                    source: @image-url("../../../assets/icons/pause.svg");
+                                    colorize: Theme.active.dock_active_text;
+                                    width: 24px;
+                                    height: 30px;
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                }
+
+                                if !root.is_playing : Image {
+                                    source: @image-url("../../../assets/icons/play.svg");
+                                    colorize: Theme.active.dock_active_text;
+                                    width: 26px;
+                                    height: 30px;
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.toggle_play_pause();
+                            }
+                        }
+                    }
+                }
+
+                // Next Button (72px, vertically centered with 86px hero button)
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 72px;
+                        height: 72px;
+                        border-radius: 36px;
+                        background: Theme.active.card_surface;
+                        border-width: 1px;
+                        border-color: Theme.active.card_border;
+
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 4px;
+
+                                Image {
+                                    source: @image-url("../../../assets/icons/right.svg");
+                                    colorize: Theme.active.text_primary;
+                                    width: 16px;
+                                    height: 22px;
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    width: 4px;
+                                    height: 22px;
+                                    border-radius: 2px;
+                                    background: Theme.active.text_primary;
+                                }
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.next_track();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

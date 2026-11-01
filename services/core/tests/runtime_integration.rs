@@ -108,3 +108,15 @@ fn test_driver_error_cancellation_construction() {
     let err = TestDriverError::from_cancelled("sensor bus abort");
     assert_eq!(err, TestDriverError::Cancelled("sensor bus abort".into()));
 }
+
+#[tokio::test]
+async fn run_blocking_success_and_error() {
+    use speaker_core::runtime::run_blocking;
+
+    let res: Result<i32, DummyError> = run_blocking("compute", || Ok(123)).await;
+    assert_eq!(res.unwrap(), 123);
+
+    let err: Result<i32, DummyError> =
+        run_blocking("compute", || Err(DummyError("inner failure".into()))).await;
+    assert_eq!(err.unwrap_err(), DummyError("inner failure".into()));
+}

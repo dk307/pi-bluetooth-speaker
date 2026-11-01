@@ -375,6 +375,40 @@ fn illuminance_bounds_and_millilux_edge_cases() {
 fn light_error_backtrace_and_predicates() {
     let err = light_test_helpers::make_i2c_error("test");
     let _ = err.backtrace();
+    assert!(err.is_i2c());
+    assert!(!err.is_powered_down());
+    assert!(!err.is_cancelled());
+    assert!(!err.is_invalid_address());
+    assert!(!err.is_invalid_illuminance());
+    assert!(!err.is_mock_fault());
+
+    let mock_err = light_test_helpers::make_mock_fault_error("bus fault");
+    assert!(mock_err.is_mock_fault());
+    assert_eq!(mock_err.summary(), "injected mock fault: bus fault");
+
+    let addr_err = light_test_helpers::make_invalid_address_error(0x77);
+    assert!(addr_err.is_invalid_address());
+    assert!(addr_err.summary().contains("0x77"));
+
+    let illum_err = light_test_helpers::make_invalid_illuminance_error("overflow");
+    assert!(illum_err.is_invalid_illuminance());
+    assert!(illum_err.summary().contains("overflow"));
+
+    let pwr_err = light_test_helpers::make_powered_down_error();
+    assert!(pwr_err.is_powered_down());
+    assert!(pwr_err.summary().contains("powered down"));
+
+    let cancel_err = light_test_helpers::make_cancelled_error("aborted");
+    assert!(cancel_err.is_cancelled());
+    assert!(cancel_err.summary().contains("aborted"));
+}
+
+#[tokio::test]
+async fn light_sensor_async_diagnostics() {
+    let (sensor, _) = LightSensor::new_mocked();
+    let diag = sensor.read_diagnostics_async().await.unwrap();
+    assert_eq!(diag.bus, BH1750_DEFAULT_I2C_BUS);
+    assert_eq!(diag.address, I2cAddress::default_address());
 }
 
 #[test]

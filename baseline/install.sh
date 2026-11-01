@@ -26,7 +26,7 @@ apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
     cmake git build-essential autoconf automake libtool pkg-config \
     device-tree-compiler \
-    libasound2-dev libasound2-plugins \
+    alsa-utils libasound2-dev libasound2-plugins \
     libbluetooth-dev bluez bluez-tools bluez-alsa-utils \
     libglib2.0-dev libsbc-dev libdbus-1-dev \
     libfreeaptx-dev libfdk-aac-dev libopus-dev libmp3lame-dev libmpg123-dev \

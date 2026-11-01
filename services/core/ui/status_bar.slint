@@ -1,54 +1,72 @@
 import { Theme } from "theme.slint";
 
 export component TopStatusBar inherits Rectangle {
-    height: 40px;
+    height: 60px;
     background: Theme.active.chassis;
 
     in property <string> active_source: "Bluetooth";
     in property <string> track_or_device: "Waiting for Connection...";
-    in property <string> stream_codec: "aptX-HD 48kHz";
+    in property <string> stream_codec: "aptX-HD";
+    in property <string> stream_sample_rate: "48 kHz";
+    in property <string> stream_bit_depth: "16-bit";
+    in property <float> volume_value: 75.0;
+    in property <bool> is_muted: false;
+
+    // Codecs with fixed bitrate/specifications per Bluetooth SIG & Qualcomm specs:
+    // Qualcomm aptX HD (fixed 24-bit 48kHz 576kbps), aptX (fixed 16-bit 44.1kHz 352kbps), aptX LL.
+    // For variable/scalable codecs (LDAC, aptX Adaptive, LHDC, SSC, SBC, AAC, LC3), specs vary and are shown.
+    property <bool> is_fixed_spec_codec: (
+        root.stream_codec == "aptX-HD" ||
+        root.stream_codec == "aptX HD" ||
+        root.stream_codec == "aptXHD" ||
+        root.stream_codec == "aptx-hd" ||
+        root.stream_codec == "aptX" ||
+        root.stream_codec == "aptx" ||
+        root.stream_codec == "aptX-LL" ||
+        root.stream_codec == "aptX LL" ||
+        root.stream_codec == "aptx-ll"
+    );
+
+    // Display stream specs (sample rate & bit depth) only for codecs where specifications can vary
+    in property <bool> show_stream_specs: !root.is_fixed_spec_codec;
 
     callback source_clicked();
     callback night_mode_clicked();
+    callback volume_clicked();
 
     HorizontalLayout {
-        padding-left: 16px;
-        padding-right: 16px;
+        padding-left: 18px;
+        padding-right: 18px;
         alignment: space-between;
 
-        // Left: Source Pill
-        HorizontalLayout {
-            alignment: start;
+        // Left: Source Pill (Vertically centered in 60px status bar)
+        VerticalLayout {
+            alignment: center;
             Rectangle {
-                height: 28px;
+                height: 42px;
                 background: Theme.active.card_surface;
-                border-radius: 14px;
+                border-radius: self.height / 2;
                 border-width: 1px;
                 border-color: Theme.active.card_border;
-                y: 6px;
 
                 HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    spacing: 6px;
-                    alignment: center;
+                    padding-left: 14px;
+                    padding-right: 16px;
+                    spacing: 8px;
 
-                    Text {
-                        text: "📶";
-                        font-size: 11px;
-                        vertical-alignment: center;
+                    // Bluetooth Source Icon
+                    Image {
+                        source: @image-url("../../../assets/icons/bluetooth-rune.svg");
+                        colorize: Theme.active.primary_accent;
+                        width: 15px;
+                        image-fit: contain;
                     }
+
                     Text {
                         text: root.active_source;
                         color: Theme.active.primary_accent;
-                        font-size: 12px;
+                        font-size: 17px;
                         font-weight: 700;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: "▼";
-                        color: Theme.active.text_muted;
-                        font-size: 9px;
                         vertical-alignment: center;
                     }
                 }
@@ -61,67 +79,167 @@ export component TopStatusBar inherits Rectangle {
             }
         }
 
-        // Center: Track / Client Quick Info
-        HorizontalLayout {
+        // Center: Track / Client Quick Info (Vertically centered in 60px status bar)
+        VerticalLayout {
             alignment: center;
             Text {
                 text: root.track_or_device;
                 color: Theme.active.text_primary;
-                font-size: 14px;
-                font-weight: 600;
+                font-size: 20px;
+                font-weight: 700;
                 vertical-alignment: center;
                 overflow: elide;
-                max-width: 380px;
+                max-width: 360px;
             }
         }
 
-        // Right: Audio Codec Badge + Night Mode Toggle
-        HorizontalLayout {
-            alignment: end;
-            spacing: 10px;
+        // Right: Audio Codec, Sample Rate, Bit Depth Badges + Volume + DIM Toggle (Vertically centered)
+        VerticalLayout {
+            alignment: center;
+            HorizontalLayout {
+                spacing: 10px;
 
-            Rectangle {
-                height: 28px;
-                background: Theme.active.card_surface;
-                border-radius: 8px;
-                border-width: 1px;
-                border-color: Theme.active.card_border;
-                y: 6px;
-
-                HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
+                // 1. Codec Badge (aptX-HD / AAC / SBC / LDAC)
+                VerticalLayout {
                     alignment: center;
+                    Rectangle {
+                        height: 40px;
+                        background: Theme.active.card_surface;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: Theme.active.card_border;
 
-                    Text {
-                        text: root.stream_codec;
-                        color: Theme.active.secondary_accent;
-                        font-size: 11px;
-                        font-weight: 700;
-                        vertical-alignment: center;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+
+                            Text {
+                                text: root.stream_codec;
+                                color: Theme.active.primary_accent;
+                                font-size: 16px;
+                                font-weight: 800;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
                 }
-            }
 
-            Rectangle {
-                width: 28px;
-                height: 28px;
-                background: Theme.active.card_surface;
-                border-radius: 14px;
-                border-width: 1px;
-                border-color: Theme.active.card_border;
-                y: 6px;
+                // 2. Sample Rate Badge (Displayed only for codecs where specifications can vary)
+                if root.show_stream_specs && root.stream_sample_rate != "" : VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        height: 40px;
+                        background: Theme.active.card_surface;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: Theme.active.card_border;
 
-                Text {
-                    text: "🌙";
-                    font-size: 12px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+
+                            Text {
+                                text: root.stream_sample_rate;
+                                color: Theme.active.secondary_accent;
+                                font-size: 15px;
+                                font-weight: 800;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
                 }
 
-                TouchArea {
-                    clicked => {
-                        root.night_mode_clicked();
+                // 3. Bit Depth Badge (Displayed only for codecs where specifications can vary)
+                if root.show_stream_specs && root.stream_bit_depth != "" : VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        height: 40px;
+                        background: Theme.active.card_surface;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: Theme.active.card_border;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+
+                            Text {
+                                text: root.stream_bit_depth;
+                                color: Theme.active.secondary_accent;
+                                font-size: 15px;
+                                font-weight: 800;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // 4. Volume / Mute Control (Takes whole vertical space of top row)
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        height: 52px;
+                        background: transparent;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+
+                            if !root.is_muted : Image {
+                                source: @image-url("../../../assets/icons/volume-up.svg");
+                                colorize: Theme.active.secondary_accent;
+                                width: 44px;
+                                image-fit: contain;
+                            }
+
+                            if !root.is_muted : Text {
+                                text: Math.round(root.volume_value);
+                                color: Theme.active.secondary_accent;
+                                font-size: 20px;
+                                font-weight: 800;
+                                vertical-alignment: center;
+                            }
+
+                            if root.is_muted : Image {
+                                source: @image-url("../../../assets/icons/volume-mute.svg");
+                                colorize: #EF4444;
+                                width: 44px;
+                                image-fit: contain;
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.volume_clicked();
+                            }
+                        }
+                    }
+                }
+
+                // 5. DIM Toggle Button
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 52px;
+                        height: 40px;
+                        background: Theme.active.card_surface;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: Theme.active.card_border;
+
+                        Text {
+                            text: "DIM";
+                            font-size: 15px;
+                            font-weight: 800;
+                            color: Theme.active.text_muted;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.night_mode_clicked();
+                            }
+                        }
                     }
                 }
             }

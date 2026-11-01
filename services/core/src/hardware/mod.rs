@@ -70,8 +70,12 @@ pub use dsp::test_helpers as dsp_test_helpers;
 pub use bluetooth::{
     BCM43438_FIRMWARE_PATH, BCM43438_UART_BAUD_RATE, BT_ADDRESS_OCTETS, BlueAlsaPcm,
     BluetoothControllerInfo, BluetoothDevice, BluetoothDeviceMock, BluetoothHardwareInfo,
-    BluetoothServices, BluetoothStatus, BtAdapter, BtAddress, BtDevice, BtError,
-    DEFAULT_BT_ADAPTER, ServiceState, decode_pcm_format,
+    BluetoothServices, BluetoothStatus, BluezSnapshot, BtAdapter, BtAddress, BtDevice, BtError,
+    BtPlaybackState, COVER_ART_CACHE_DIR, DEFAULT_BT_ADAPTER, ServiceState, clean_cover_art_in_dir,
+    clean_old_cover_art, clean_old_cover_art_in, cover_art_cached_path, cover_art_cached_path_in,
+    cover_art_path_for, cover_art_path_for_in, decode_pcm_format, format_duration_ms,
+    is_complete_jpeg, load_native_caps_in, native_image_size, playback_progress_ratio,
+    store_native_cap_in,
 };
 
 #[cfg(feature = "test-util")]

@@ -31,7 +31,7 @@ baseline/
 │   └── systemd/system/
 │       ├── camilladsp.service     # CamillaDSP WebSocket & filtering engine daemon
 │       ├── bluealsa.service       # BlueALSA high-res A2DP audio sink daemon
-│       ├── bluealsa-aplay.service # Forwarder feeding BlueALSA decoded audio into ALSA dmix
+│       ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA dmix + MA12070P HW volume sync
 │       └── bt-agent.service       # Headless auto-trust & auto-pairing D-Bus agent
 ├── alsa/
 │   └── asound.state               # Persisted MA12070P hardware mixer gains & limiter states
@@ -125,11 +125,11 @@ This performs an automated 25-point check across:
   [TP-Link UB500 USB BT Adapter]
          │
          ▼
-  [bluealsa.service (v4.3.1)]
+  [bluealsa.service (v5.0.0)]
          │
          ▼
-  [bluealsa-aplay.service -D default]
-         │
+  [bluealsa-aplay.service -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"]
+         │  (SoftVolume: false — 100% bit-perfect PCM to Loopback; AVRCP volume -> MA12070P HW mixer)
          ▼
   [ALSA Loopback Card 0: pcm.dsp_dmix @ 48kHz S32_LE]
          │

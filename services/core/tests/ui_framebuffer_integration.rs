@@ -2,6 +2,7 @@
 //! Integration tests for the Linux Framebuffer driver and Slint platform backend.
 
 use std::fs;
+use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::rc::Rc;
@@ -70,6 +71,7 @@ fn mock_framebuffer_lifecycle() {
     assert_eq!(fb.pixel_count(), 384_000);
     assert_eq!(fb.byte_len(), 1_536_000);
     assert!(fb.is_mocked());
+    assert!(!fb.is_hardware_panel());
     assert_eq!(fb.unblank_count(), 0);
     assert_eq!(fb.render_count(), 0);
 
@@ -166,6 +168,38 @@ fn framebuffer_hardware_tempfile_mmap() {
     let drawn = fb.render_frame(&window).unwrap();
     assert!(drawn);
     assert_eq!(fb.pixels().len(), 384_000);
+
+    // `RepaintBufferType::ReusedBuffer`: an unchanged scene must not redraw or blit.
+    let unchanged = fb.render_frame(&window).unwrap();
+    assert!(!unchanged);
+
+    window.request_redraw();
+    assert!(fb.render_frame(&window).unwrap());
+}
+
+#[test]
+fn framebuffer_mmap_blits_dirty_rect_only_into_scanout() {
+    let temp = ScopedTempDir::try_new("fb_blit_test").unwrap();
+    let dev_file = temp.path().join("fake_fb");
+    fs::write(&dev_file, vec![0u8; 800 * 480 * 4]).unwrap();
+
+    let mut fb = Framebuffer::open(&dev_file, None::<&Path>).unwrap();
+    let window = fb.init_platform().unwrap();
+    window.request_redraw();
+    assert!(fb.render_frame(&window).unwrap());
+
+    // The blitted scanout must match the cached shadow buffer exactly after a render.
+    assert_eq!(fb.pixels(), fb.shadow_buffer());
+}
+
+#[test]
+fn framebuffer_vsync_probe_fails_gracefully_on_regular_file() {
+    let temp = ScopedTempDir::try_new("fb_vsync_test").unwrap();
+    let dev_file = temp.path().join("fake_fb");
+    fs::write(&dev_file, vec![0u8; 16]).unwrap();
+
+    let file = File::open(&dev_file).unwrap();
+    assert!(!Framebuffer::wait_for_vsync(&file));
 }
 
 #[test]
@@ -371,4 +405,210 @@ fn framebuffer_unblank_with_missing_blank_file() {
     let non_existent_blank = temp.path().join("does_not_exist");
     let mut fb = Framebuffer::open(&dev, Some(&non_existent_blank)).unwrap();
     fb.unblank().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Rust-side marquee composer (MarqueeOverlay)
+// ---------------------------------------------------------------------------
+
+use speaker_core::ui::{MarqueeRowSpec, RgbaPremulPixel};
+
+/// A strip row of 4x2 premultiplied pixels exercising all alpha paths.
+fn sample_strip() -> (std::sync::Arc<[RgbaPremulPixel]>, u32) {
+    let row0 = [
+        RgbaPremulPixel {
+            red: 255,
+            green: 0,
+            blue: 0,
+            alpha: 255,
+        }, // opaque red
+        RgbaPremulPixel {
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 0,
+        }, // transparent gap
+        RgbaPremulPixel {
+            red: 0,
+            green: 128,
+            blue: 0,
+            alpha: 128,
+        }, // 50% green premul
+        RgbaPremulPixel {
+            red: 0,
+            green: 0,
+            blue: 255,
+            alpha: 255,
+        }, // opaque blue
+    ];
+    let row1 = [
+        RgbaPremulPixel {
+            red: 10,
+            green: 20,
+            blue: 30,
+            alpha: 255,
+        },
+        RgbaPremulPixel {
+            red: 40,
+            green: 50,
+            blue: 60,
+            alpha: 255,
+        },
+        RgbaPremulPixel {
+            red: 70,
+            green: 80,
+            blue: 90,
+            alpha: 255,
+        },
+        RgbaPremulPixel {
+            red: 100,
+            green: 110,
+            blue: 120,
+            alpha: 255,
+        },
+    ];
+    (
+        std::sync::Arc::from(
+            [row0.as_slice(), row1.as_slice()]
+                .concat()
+                .into_boxed_slice(),
+        ),
+        4,
+    )
+}
+
+fn gray(value: u8) -> Bgrx8888Pixel {
+    Bgrx8888Pixel::new(value, value, value)
+}
+
+#[test]
+fn marquee_compose_overlays_strip_over_captured_background() {
+    let (mut fb, _ctrl) = Framebuffer::new_mocked();
+    let window = fb.init_platform().unwrap();
+    window.request_redraw();
+    fb.render_frame(&window).unwrap();
+
+    // Capture a clean background for a 4x2 row starting at (10, 20).
+    let bg = fb.capture_region(10, 20, 4, 2).unwrap();
+    assert_eq!(bg.len(), 8);
+
+    let (strip, strip_w) = sample_strip();
+    fb.set_marquee_rows(vec![MarqueeRowSpec {
+        rect: (10, 20, 4, 2),
+        scroll_px: 0,
+        cycle_px: 8,
+        strip: std::sync::Arc::clone(&strip),
+        strip_w,
+        strip_id: 1,
+    }]);
+    fb.install_marquee_backgrounds(vec![bg]);
+    assert!(fb.marquee_overlay_ready());
+
+    // Compose (no Slint dirty): render_frame must report effective work.
+    assert!(fb.render_frame(&window).unwrap());
+    let composed = fb.capture_region(10, 20, 4, 2).unwrap();
+    // Opaque red copies, transparent keeps the background (zero), semi green blends
+    // premultiplied-over (background zero => source wins scaled), opaque blue copies.
+    assert_eq!(composed[0], Bgrx8888Pixel::new(255, 0, 0));
+    // Transparent strip pixel: the background passes through unchanged (zero-alpha in
+    // the mock's default buffer).
+    assert_eq!(composed[1], Bgrx8888Pixel::default());
+    assert_eq!(composed[2], Bgrx8888Pixel::new(0, 128, 0));
+    assert_eq!(composed[3], Bgrx8888Pixel::new(0, 0, 255));
+    // Second row: opaque values copy verbatim.
+    assert_eq!(composed[4], Bgrx8888Pixel::new(10, 20, 30));
+    assert_eq!(composed[7], Bgrx8888Pixel::new(100, 110, 120));
+
+    // Unchanged fingerprint: no composition work, no render.
+    assert!(!fb.render_frame(&window).unwrap());
+    assert_eq!(fb.render_count(), 2);
+}
+
+#[test]
+fn marquee_compose_tiles_wrap_and_scroll() {
+    let (mut fb, _ctrl) = Framebuffer::new_mocked();
+    let window = fb.init_platform().unwrap();
+    window.request_redraw();
+    fb.render_frame(&window).unwrap();
+
+    // Background: gray gradient to distinguish tile copies from background.
+    let mut gradient = Vec::with_capacity(8);
+    for i in 0..8u8 {
+        gradient.push(gray(10 + i));
+    }
+    // Write the gradient into the buffer via capture/install roundtrip: install a
+    // background equal to a synthesized snapshot by capturing after painting it.
+    // Simpler: build the spec so the strip covers everything; verify wrap via tiles.
+    let (strip, strip_w) = sample_strip();
+    // Viewport 8 px wide; cycle 4 (strip_w 4 + gap 0) -> tiles at -3, +1, +5.
+    fb.set_marquee_rows(vec![MarqueeRowSpec {
+        rect: (0, 0, 8, 1),
+        scroll_px: 3,
+        cycle_px: 4,
+        strip,
+        strip_w,
+        strip_id: 2,
+    }]);
+    let bg = fb.capture_region(0, 0, 8, 1).unwrap();
+    fb.install_marquee_backgrounds(vec![bg]);
+
+    assert!(fb.render_frame(&window).unwrap());
+    let composed = fb.capture_region(0, 0, 8, 1).unwrap();
+    // Tile at x=-3: src columns 3..4 -> opaque blue at x=0.
+    assert_eq!(composed[0], Bgrx8888Pixel::new(0, 0, 255));
+    // x=1..3: tile k=1, src 0..3: opaque red, transparent, semi green.
+    assert_eq!(composed[1], Bgrx8888Pixel::new(255, 0, 0));
+    assert_eq!(composed[2], Bgrx8888Pixel::default());
+    assert_eq!(composed[3], Bgrx8888Pixel::new(0, 128, 0));
+    // x=4: tile k=1 src 3 (blue); x=5..7: tile k=2 src 0..2 pattern repeats.
+    assert_eq!(composed[4], Bgrx8888Pixel::new(0, 0, 255));
+    assert_eq!(composed[5], Bgrx8888Pixel::new(255, 0, 0));
+    assert_eq!(composed[6], Bgrx8888Pixel::default());
+    assert_eq!(composed[7], Bgrx8888Pixel::new(0, 128, 0));
+}
+
+#[test]
+fn marquee_capture_region_rejects_out_of_bounds() {
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let err = fb.capture_region(797, 0, 4, 1).unwrap_err();
+    assert!(err.is_invalid_geometry());
+    let err = fb.capture_region(0, 0, 0, 1).unwrap_err();
+    assert!(err.is_invalid_geometry());
+    let err = fb.capture_region(0, 480, 4, 1).unwrap_err();
+    assert!(err.is_invalid_geometry());
+    fb.capture_region(0, 0, 4, 1).unwrap();
+}
+
+#[test]
+fn marquee_compose_preserves_background_outside_strip_tiles() {
+    let (mut fb, _ctrl) = Framebuffer::new_mocked();
+    let window = fb.init_platform().unwrap();
+    window.request_redraw();
+    fb.render_frame(&window).unwrap();
+
+    // Paint a known background: single-opaque strip of 1 px at scroll 0 over a
+    // synthetic bg is not possible via capture (mock buffer is zeros); instead verify
+    // that a fully transparent strip leaves the background untouched.
+    let strip: std::sync::Arc<[RgbaPremulPixel]> = std::sync::Arc::from(vec![RgbaPremulPixel {
+        red: 9,
+        green: 9,
+        blue: 9,
+        alpha: 0,
+    }]);
+
+    fb.set_marquee_rows(vec![MarqueeRowSpec {
+        rect: (0, 0, 2, 1),
+        scroll_px: 0,
+        cycle_px: 2,
+        strip,
+        strip_w: 1,
+        strip_id: 3,
+    }]);
+    let bg = fb.capture_region(0, 0, 2, 1).unwrap();
+    fb.install_marquee_backgrounds(vec![bg]);
+
+    assert!(fb.render_frame(&window).unwrap());
+    let composed = fb.capture_region(0, 0, 2, 1).unwrap();
+    assert_eq!(composed[0], Bgrx8888Pixel::default());
+    assert_eq!(composed[1], Bgrx8888Pixel::default());
 }

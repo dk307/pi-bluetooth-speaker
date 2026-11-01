@@ -19,6 +19,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Install System Dependencies
+        # `yeslogic-fontconfig-sys` (via Slint's fontdb) needs pkg-config and the
+        # fontconfig headers; the ubuntu-24.04-arm image ships neither by default.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev
+
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

@@ -15,7 +15,7 @@ This document defines the behavioral, architectural, and engineering rules for A
   ```
 * **Live Hardware Testing via SSH (`root@192.168.2.110`):**
   * You can test compiled `aarch64` binaries directly on the live Raspberry Pi 3 over SSH at `root@192.168.2.110`.
-  * **Strict Non-Destructive Rule:** **Do NOT modify any persistent files, configurations, or running services on the SSH server.** Copy test/utility binaries only to `/tmp/<binary>`, execute them, and remove `/tmp/<binary>` immediately afterward.
+  * **Strict Non-Destructive Rule:** **Do NOT modify any persistent files, configurations, or running services on the SSH server.** Copy test/utility binaries only to `/tmp/<binary>`, execute them, and remove `/tmp/<binary>` immediately afterward. **Exception:** when the user explicitly asks to deploy/install release binaries, copy them to `/usr/local/bin` (never touch configs or services, and do not restart services unless asked).
 
 ---
 
@@ -34,7 +34,7 @@ Before designing types, writing modules, implementing error handling, or writing
 All code developed in this repository must maintain high, verifiable test coverage:
 * **Tooling:** Use `cargo llvm-cov` to measure line, function, and region coverage across crates, modules, and CLI utilities:
   ```bash
-  cargo llvm-cov --manifest-path services/core/Cargo.toml
+  cargo llvm-cov --manifest-path services/core/Cargo.toml --target x86_64-unknown-linux-gnu
   ```
 * **Coverage Standards:**
   * Always check code coverage when writing, modifying, or refactoring code, and improve coverage to a reasonable extent (target **>85%–90%+** line and function coverage).
@@ -51,7 +51,7 @@ To prevent multi-iteration PR review churn and excessive token/CI consumption, A
 * **Mandatory Local Verification Before Every Push:** Never push a commit without first passing all local gates in order:
   1. `cargo fmt --manifest-path services/core/Cargo.toml -- --check`
   2. `cargo clippy --manifest-path services/core/Cargo.toml --all-targets -- -D warnings`
-  3. `cargo llvm-cov --manifest-path services/core/Cargo.toml --fail-under-lines 90 --fail-under-functions 90`
+  3. `cargo llvm-cov --manifest-path services/core/Cargo.toml --target x86_64-unknown-linux-gnu --fail-under-lines 90 --fail-under-functions 90`
   4. `cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins`
   5. If any CI workflow or configuration (`.github/workflows/*.yml`, `.pr_agent.toml`) is touched, verify workflow syntax and configuration locally before committing.
 * **Strict PR Scope Boundaries (Blast Radius Containment):** A feature or bugfix PR must touch **only** the files within its declared scope. **Never refactor already-merged, working sibling drivers or CLI utilities** (e.g., modifying `read_temp` during a `read_light` PR). The rule *"sweep by bug class"* applies strictly to the new files and tests introduced in the PR.
@@ -144,6 +144,7 @@ To prevent multi-iteration PR review churn and excessive token/CI consumption, A
   * **NaN-Resilient Slint Property Bindings:** Slint float properties consumed in layout calculations (such as progress bars or percentage widths) must guard against `NaN` using explicit non-negative boundary conditions (`val >= 0.0 ? ... : 0`), preventing IEEE-754 `NaN` from poisoning layout math and collapsing rendered widgets.
   * **Single Source of Truth for Slint State (`M-SINGLE-SOURCE-OF-TRUTH-SLINT`):** Avoid creating shadow atomic variables (e.g. `Arc<AtomicI32>`) in Rust controller structs (`AppShell`) to track Slint component or global properties (`active_tab`, `active_preset`). Query the Slint component (`window.get_active_tab()`) and globals (`window.global::<Theme>().get_active_preset()`) directly, ensuring zero-allocation state tracking and preventing state divergence when weak window upgrades or asynchronous updates occur.
   * **Modulo Arithmetic over Declared Enum Counts:** When implementing modular wrapping for domain enum indexing (e.g., `ThemePreset::from_index`), use `Self::COUNT as i32` rather than hardcoding literal integers, preventing silent desynchronization when new variants are added.
+  * **Dynamic Math Expressions over Hardcoded Pixel Offsets (`M-SLINT-MATH-LAYOUT`):** In Slint UI markup, component layouts, and geometry calculations, always use dynamic mathematical expressions (`(parent.height - self.height) / 2`, `(parent.width - self.width) / 2`, layout centering containers `VerticalLayout { alignment: center; ... }`, or relative percentage/stretch properties) to compute positions, alignments, and sizes. Never manually pre-calculate pixel offsets and hardcode literal numbers into `.slint` files (e.g. `y: 6px`, `y: -5px`, `y: 24px`, or manual top-alignment offsets). Hardcoded literal numbers break whenever parent bounds, padding, themes, or font scales change, introducing subtle visual regressions. Let Slint compute the geometry dynamically.
 
 
 ---
@@ -167,3 +168,9 @@ Before writing any new hardware driver, protocol parser, or peripheral module, a
 * **Single Option Available:** Even if there is only one viable crate or solution, agents **MUST explicitly inform and prompt the user** that a new external crate is being added (stating crate name, version, purpose, and license) before adding it to `Cargo.toml`.
 * **Application Wrapping & Mocking:** Using an external crate does not bypass project architectural standards. The external driver must be wrapped inside the project's domain model (`new_mocked()`, canonical errors, strong newtypes) inside `Backend::Hardware`, preserving host-testability and CI coverage.
 
+
+### 4.4 Learned Rules: Coverage Target, D-Bus Testing & Honest Reporting
+* **Host Coverage Target Is Mandatory:** `services/core/.cargo/config.toml` forces `build.target = aarch64-unknown-linux-gnu`, so a bare `cargo llvm-cov` tries to execute aarch64 test binaries on the x86-64 host and fails with `Exec format error`. Always pass `--target x86_64-unknown-linux-gnu` to `cargo llvm-cov`, `cargo clippy` and `cargo test` on the dev host; use the aarch64 target only for release builds.
+* **Gate on the Right Metric and Exit Code:** The gates are *line* and *function* coverage, not region coverage (the `TOTAL` row's first percentage). Never pipe a gate command into `tail`/`grep` and then read `$?`; capture the real exit code (`> log 2>&1; echo $?` or `${PIPESTATUS[0]}`).
+* **Test Real D-Bus Code Paths with a Private Bus:** For `zbus` code that cannot be mocked (OBEX session/transfer handling), spawn a private `dbus-daemon --session --nofork --print-address=1`, serve a fake `org.bluez`/`org.bluez.obex` with `#[zbus::interface]`, and inject the client via `BluetoothDevice::with_connection`. Use a distinct MAC per test (cover-art cache files are keyed by MAC and cleaned per MAC), kill the daemon in `Drop`, and fail loudly if `dbus-daemon` is missing. See `services/core/tests/bluetooth_obex_integration.rs`.
+* **Never Claim Unverified Results:** Do not report tests as written, or coverage/gate numbers, unless the files exist and the commands were actually run and observed in that session.

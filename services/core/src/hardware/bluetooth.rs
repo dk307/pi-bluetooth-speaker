@@ -14,11 +14,11 @@
 //! - Non-blocking async queries via [`crate::runtime::run_blocking`] (`M-SERVICES-CLONE`)
 
 use std::backtrace::Backtrace;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -307,6 +307,8 @@ pub struct BlueAlsaPcm {
     pub format: Box<str>,
     /// Hardware volume levels per channel (e.g. `L: 127 R: 127`), if reported.
     pub volume: Option<Box<str>>,
+    /// Average volume level as a percentage (0..=100), if reported.
+    pub volume_percent: Option<u8>,
     /// Whether audio output is muted (any channel volume high bit set).
     pub muted: bool,
     /// Audio transmission latency in milliseconds, if reported.
@@ -322,6 +324,108 @@ impl BlueAlsaPcm {
         } else {
             "STANDBY / PAUSED (Connected)"
         }
+    }
+}
+
+/// Computes the playback progress ratio clamped to `0.0..=1.0`.
+///
+/// A zero or unknown duration maps to `0.0`. Shared between
+/// [`BtPlaybackState::progress_ratio`] and the UI shell so the ratio logic has
+/// a single source of truth.
+#[must_use]
+pub fn playback_progress_ratio(position_ms: u32, duration_ms: u32) -> f32 {
+    if duration_ms == 0 {
+        0.0
+    } else {
+        (position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
+    }
+}
+
+/// Formats a duration in milliseconds into a user-friendly string (`MM:SS` or `HH:MM:SS`).
+#[must_use]
+pub fn format_duration_ms(ms: u32) -> String {
+    let total_secs = ms / 1000;
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+/// Active Bluetooth AVRCP media player playback state and track metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BtPlaybackState {
+    /// Associated remote device MAC address, if known.
+    pub device_address: Option<BtAddress>,
+    /// Remote device name or alias.
+    pub device_name: Box<str>,
+    /// Playback status (e.g. `playing`, `paused`, `stopped`).
+    pub status: Box<str>,
+    /// Current track title.
+    pub title: Box<str>,
+    /// Track artist.
+    pub artist: Box<str>,
+    /// Track album.
+    pub album: Box<str>,
+    /// Elapsed playback position in milliseconds.
+    pub position_ms: u32,
+    /// Total track duration in milliseconds.
+    pub duration_ms: u32,
+    /// Path to player D-Bus object (e.g. `/org/bluez/hci0/dev_.../player0`).
+    pub player_path: Option<Box<str>>,
+    /// OBEX BIP L2CAP PSM port (AVRCP 1.6 Cover Art), if advertised by remote player.
+    pub obex_port: Option<u16>,
+    /// Track image handle (e.g. "1000001") for AVRCP Cover Art over OBEX BIP.
+    pub image_handle: Option<Box<str>>,
+    /// Local cache path to downloaded cover art image (e.g. `/var/cache/speaker-covers/...jpg`).
+    pub cover_art_path: Option<Box<str>>,
+}
+
+impl Default for BtPlaybackState {
+    fn default() -> Self {
+        Self {
+            device_address: None,
+            device_name: "Bluetooth Audio Device".into(),
+            status: "stopped".into(),
+            title: "Waiting for Bluetooth Connection...".into(),
+            artist: "DietPi Audiophile Speaker".into(),
+            album: "High-Resolution DSP Sink".into(),
+            position_ms: 0,
+            duration_ms: 0,
+            player_path: None,
+            obex_port: None,
+            image_handle: None,
+            cover_art_path: None,
+        }
+    }
+}
+
+impl BtPlaybackState {
+    /// Returns `true` if playback status is "playing" (case-insensitive).
+    #[must_use]
+    pub fn is_playing(&self) -> bool {
+        self.status.eq_ignore_ascii_case("playing")
+    }
+
+    /// Returns the progress ratio between 0.0 and 1.0.
+    #[must_use]
+    pub fn progress_ratio(&self) -> f32 {
+        playback_progress_ratio(self.position_ms, self.duration_ms)
+    }
+
+    /// Formats the elapsed position as `MM:SS`.
+    #[must_use]
+    pub fn format_position(&self) -> String {
+        format_duration_ms(self.position_ms)
+    }
+
+    /// Formats the track duration as `MM:SS`.
+    #[must_use]
+    pub fn format_duration(&self) -> String {
+        format_duration_ms(self.duration_ms)
     }
 }
 
@@ -427,36 +531,61 @@ impl BluetoothControllerInfo {
 }
 
 /// Runs `hciconfig <adapter> version` with a hard deadline, capturing stdout.
-fn run_hciconfig_version(adapter: &str) -> Option<String> {
+fn run_probe_command(program: &str, args: &[&str]) -> Result<String, std::io::Error> {
     const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-    let mut child = Command::new("hciconfig")
-        .args([adapter, "version"])
+    let mut child = Command::new(program)
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .spawn()?;
     let deadline = Instant::now() + PROBE_TIMEOUT;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
+            Ok(Some(status)) => break Ok(status),
             Ok(None) if Instant::now() < deadline => {
                 thread::sleep(POLL_INTERVAL);
             }
-            Ok(None) | Err(_) => {
+            Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "external process timed out",
+                ));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(e);
             }
         }
-    }?;
+    };
+    let status = status?;
     if !status.success() {
-        return None;
+        return Err(std::io::Error::other(format!(
+            "{program} exited with a non-success status"
+        )));
     }
     let mut stdout = Vec::new();
-    child.stdout.take()?.read_to_end(&mut stdout).ok()?;
-    String::from_utf8(stdout).ok()
+    child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("stdout was taken"))?
+        .read_to_end(&mut stdout)?;
+    String::from_utf8(stdout)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.utf8_error()))
+}
+
+fn run_hciconfig_version(adapter: &str) -> Option<String> {
+    match run_probe_command("hciconfig", &[adapter, "version"]) {
+        Ok(output) => Some(output),
+        Err(e) => {
+            tracing::debug!(error = %e, "hciconfig {adapter} version probe failed");
+            None
+        }
+    }
 }
 
 /// Parses `hciconfig <adapter> version` output into controller identity fields.
@@ -544,6 +673,8 @@ pub struct BluetoothStatus {
     pub pcms: Box<[BlueAlsaPcm]>,
     /// Raspberry Pi hardware controller metadata.
     pub hardware: BluetoothHardwareInfo,
+    /// Active AVRCP media player playback state, if available.
+    pub playback: Option<BtPlaybackState>,
 }
 
 impl BluetoothStatus {
@@ -582,6 +713,20 @@ impl BluetoothStatus {
     pub fn paired_devices(&self) -> Vec<&BtDevice> {
         self.devices.iter().filter(|d| d.paired).collect()
     }
+
+    /// Returns `true` if media playback is actively playing.
+    #[must_use]
+    pub fn is_playing(&self) -> bool {
+        self.playback
+            .as_ref()
+            .is_some_and(BtPlaybackState::is_playing)
+    }
+
+    /// Returns a reference to the active media player playback state, if any.
+    #[must_use]
+    pub const fn playback_state(&self) -> Option<&BtPlaybackState> {
+        self.playback.as_ref()
+    }
 }
 
 #[derive(Debug)]
@@ -589,14 +734,20 @@ pub(crate) enum BtErrorKind {
     Dbus { details: Box<str> },
     AdapterNotFound { adapter: Box<str> },
     InvalidAddress { raw: Box<str>, reason: Box<str> },
+    NoActivePlayer { details: Box<str> },
     Cancelled { message: Box<str> },
     MockFault { message: Box<str> },
 }
 
 /// Subsystem error type for Bluetooth driver and diagnostic operations.
+///
+/// The optional `source` field preserves the typed underlying error (e.g. the
+/// original `zbus::Error`) so the cause chain survives `?` conversions, per
+/// the M-ERRORS-STD-SOURCE guideline.
 #[derive(Debug)]
 pub struct BtError {
     kind: BtErrorKind,
+    source: Option<Box<dyn std::error::Error + Send + Sync>>,
     backtrace: Backtrace,
 }
 
@@ -604,8 +755,27 @@ impl BtError {
     fn new(kind: BtErrorKind) -> Self {
         Self {
             kind,
+            source: None,
             backtrace: Backtrace::capture(),
         }
+    }
+
+    /// Attaches an underlying error as this error's [`std::error::Error::source`].
+    fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        self.source = Some(Box::new(source));
+        self
+    }
+
+    /// Builds a D-Bus error with a human-readable `details` context *and* the
+    /// typed underlying error preserved as the source.
+    pub(crate) fn dbus_with_source(
+        details: impl Into<Box<str>>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::new(BtErrorKind::Dbus {
+            details: details.into(),
+        })
+        .with_source(source)
     }
 
     pub(crate) fn dbus(details: impl Into<Box<str>>) -> Self {
@@ -624,6 +794,12 @@ impl BtError {
         Self::new(BtErrorKind::InvalidAddress {
             raw: raw.into(),
             reason: reason.into(),
+        })
+    }
+
+    pub(crate) fn no_active_player(details: impl Into<Box<str>>) -> Self {
+        Self::new(BtErrorKind::NoActivePlayer {
+            details: details.into(),
         })
     }
 
@@ -657,6 +833,12 @@ impl BtError {
         matches!(self.kind, BtErrorKind::InvalidAddress { .. })
     }
 
+    /// Returns `true` if an operation failed because no active media player was found.
+    #[must_use]
+    pub const fn is_no_active_player(&self) -> bool {
+        matches!(self.kind, BtErrorKind::NoActivePlayer { .. })
+    }
+
     /// Returns `true` if this error represents an asynchronous task cancellation.
     #[must_use]
     pub const fn is_cancelled(&self) -> bool {
@@ -686,6 +868,9 @@ impl BtError {
             BtErrorKind::InvalidAddress { raw, reason } => {
                 write!(f, "invalid Bluetooth address '{raw}': {reason}")
             }
+            BtErrorKind::NoActivePlayer { details } => {
+                write!(f, "no active Bluetooth media player: {details}")
+            }
             BtErrorKind::Cancelled { message } => write!(f, "task cancelled: {message}"),
             BtErrorKind::MockFault { message } => write!(f, "injected mock fault: {message}"),
         }
@@ -694,17 +879,24 @@ impl BtError {
 
 super::impl_canonical_error_display!(BtError);
 
-impl std::error::Error for BtError {}
+impl std::error::Error for BtError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_ref().map(|boxed| {
+            let erased: &(dyn std::error::Error + 'static) = &**boxed;
+            erased
+        })
+    }
+}
 
 impl From<zbus::Error> for BtError {
     fn from(err: zbus::Error) -> Self {
-        Self::dbus(err.to_string())
+        Self::dbus_with_source(err.to_string(), err)
     }
 }
 
 impl From<zbus::fdo::Error> for BtError {
     fn from(err: zbus::fdo::Error) -> Self {
-        Self::dbus(err.to_string())
+        Self::dbus_with_source(err.to_string(), err)
     }
 }
 
@@ -763,6 +955,74 @@ pub(crate) trait BlueZAdapter1 {
     fn set_pairable(&self, value: bool) -> zbus::Result<()>;
 }
 
+#[zbus::proxy(
+    default_service = "org.bluez.obex",
+    default_path = "/org/bluez/obex",
+    interface = "org.bluez.obex.Client1",
+    gen_async = false,
+    blocking_name = "ObexClientProxyBlocking"
+)]
+pub(crate) trait ObexClient {
+    fn create_session(
+        &self,
+        destination: &str,
+        args: &HashMap<&str, Value<'_>>,
+    ) -> zbus::Result<OwnedObjectPath>;
+}
+
+#[zbus::proxy(
+    default_service = "org.bluez.obex",
+    interface = "org.bluez.obex.Image1",
+    gen_async = false,
+    blocking_name = "ObexImageProxyBlocking"
+)]
+pub(crate) trait ObexImage {
+    fn get(
+        &self,
+        file: &str,
+        handle: &str,
+        properties: &HashMap<&str, Value<'_>>,
+    ) -> zbus::Result<(OwnedObjectPath, HashMap<String, OwnedValue>)>;
+
+    fn get_thumbnail(
+        &self,
+        file: &str,
+        handle: &str,
+    ) -> zbus::Result<(OwnedObjectPath, HashMap<String, OwnedValue>)>;
+
+    fn properties(&self, handle: &str) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
+}
+
+#[zbus::proxy(
+    default_service = "org.bluez.obex",
+    interface = "org.bluez.obex.Transfer1",
+    gen_async = false,
+    blocking_name = "ObexTransferProxyBlocking"
+)]
+pub(crate) trait ObexTransfer {
+    #[zbus(property)]
+    fn status(&self) -> zbus::Result<String>;
+
+    #[zbus(property)]
+    fn transferred(&self) -> zbus::Result<u64>;
+
+    fn cancel(&self) -> zbus::Result<()>;
+}
+
+/// Minimal `org.bluez.Device1` proxy for ACL-link recovery after OBEX failures.
+#[zbus::proxy(
+    default_service = "org.bluez",
+    interface = "org.bluez.Device1",
+    gen_async = false,
+    blocking_name = "ObexDeviceProxyBlocking"
+)]
+pub(crate) trait ObexDevice {
+    #[zbus(property)]
+    fn connected(&self) -> zbus::Result<bool>;
+
+    fn connect(&self) -> zbus::Result<()>;
+}
+
 /// Type alias for D-Bus `ObjectManager` `GetManagedObjects` map.
 pub type ManagedObjects =
     HashMap<OwnedObjectPath, HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>>;
@@ -816,6 +1076,82 @@ fn get_str_array(props: &HashMap<String, OwnedValue>, key: &str) -> Box<[Box<str
     Box::default()
 }
 
+/// Extraction rules shared by all track-property readers so that the
+/// dictionary key-matching and nested-`Value` unwrapping scaffolding has a
+/// single implementation (see `get_track_prop`).
+trait TrackPropExtract: Sized {
+    /// Extracts the value from a plain dict entry.
+    fn extract(value: &Value<'_>) -> Option<Self>;
+
+    /// Extracts the value from an entry that wraps an inner `Value` variant
+    /// (produced when `BlueZ` nests `v`-typed values inside `a{sv}` maps).
+    fn extract_nested(value: &Value<'_>) -> Option<Self> {
+        if let Value::Value(inner) = value {
+            Self::extract(inner)
+        } else {
+            None
+        }
+    }
+}
+
+impl TrackPropExtract for Box<str> {
+    fn extract(value: &Value<'_>) -> Option<Self> {
+        if let Ok(s) = value.downcast_ref::<&str>() {
+            return Some(s.into());
+        }
+        if let Value::Str(s) = value {
+            return Some(s.as_str().into());
+        }
+        None
+    }
+}
+
+impl TrackPropExtract for u32 {
+    fn extract(value: &Value<'_>) -> Option<Self> {
+        if let Ok(u) = value.downcast_ref::<u32>() {
+            return Some(u);
+        }
+        if let Value::U32(u) = value {
+            return Some(*u);
+        }
+        None
+    }
+}
+
+/// Looks up `key` inside a `a{sv}` dict and extracts its typed value,
+/// transparently unwrapping nested `Value` variants.
+fn get_track_prop<T: TrackPropExtract>(val: &OwnedValue, key: &str) -> Option<T> {
+    if let Value::Dict(dict) = &**val {
+        for (k, v) in dict.iter() {
+            let matches_key = if let Ok(s) = k.downcast_ref::<&str>() {
+                s == key
+            } else if let Value::Str(s) = k {
+                s.as_str() == key
+            } else {
+                false
+            };
+            if !matches_key {
+                continue;
+            }
+            if let Some(out) = T::extract(v) {
+                return Some(out);
+            }
+            if let Some(out) = T::extract_nested(v) {
+                return Some(out);
+            }
+        }
+    }
+    None
+}
+
+fn get_track_prop_str(val: &OwnedValue, key: &str) -> Option<Box<str>> {
+    get_track_prop::<Box<str>>(val, key)
+}
+
+fn get_track_prop_u32(val: &OwnedValue, key: &str) -> Option<u32> {
+    get_track_prop::<u32>(val, key)
+}
+
 /// Extracts a D-Bus `ay` byte array property (e.g. `BlueALSA` `Volume`).
 fn get_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Box<[u8]>> {
     match props.get(key).map(|v| &**v) {
@@ -857,30 +1193,43 @@ pub fn decode_pcm_format(id: u16) -> Box<str> {
     }
 }
 
-/// Renders `BlueALSA` per-channel volume bytes (`(muted << 7) | level`).
+/// Renders `BlueALSA` per-channel volume bytes (`(muted << 7) | level`) and calculates average volume percent.
 ///
 /// Uses channel names when provided (`ChannelMap`), falling back to generic indices.
+/// Returns `(formatted_channel_string, is_muted, volume_percent)`.
 #[must_use]
 pub fn format_volume_bytes(
     bytes: &[u8],
     channel_names: Option<&[Box<str>]>,
-) -> (Option<Box<str>>, bool) {
+) -> (Option<Box<str>>, bool, Option<u8>) {
     if bytes.is_empty() {
-        return (None, false);
+        return (None, false, None);
     }
     let muted = bytes.iter().any(|b| b & 0x80 != 0);
+    let mut total_level: u32 = 0;
     let volume = bytes
         .iter()
         .enumerate()
         .map(|(i, b)| {
+            let level = b & 0x7F;
+            total_level += u32::from(level);
             let name = channel_names
                 .and_then(|names| names.get(i))
                 .map_or_else(|| format!("CH{i}"), std::string::ToString::to_string);
-            format!("{name}: {}", b & 0x7F)
+            format!("{name}: {level}")
         })
         .collect::<Vec<_>>()
         .join(" ");
-    (Some(volume.into()), muted)
+
+    let avg_level = f64::from(total_level) / (bytes.len() as f64);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "percentage clamped 0.0..=100.0 fits in u8"
+    )]
+    let percent = ((avg_level / 127.0) * 100.0).round().clamp(0.0, 100.0) as u8;
+
+    (Some(volume.into()), muted, Some(percent))
 }
 
 #[must_use]
@@ -955,12 +1304,27 @@ pub fn is_service_absent_fdo_error(err: &zbus::fdo::Error) -> bool {
 #[derive(Clone, Debug)]
 pub struct DbusClient {
     conn: Connection,
+    obex_session: Arc<Mutex<Option<(BtAddress, OwnedObjectPath)>>>,
+    device_caps_dir: std::path::PathBuf,
+    cache_dir: std::path::PathBuf,
+    acl_tuned: Arc<Mutex<HashSet<BtAddress>>>,
+    socket_tuned: Arc<Mutex<bool>>,
 }
+
+/// Snapshot of `BlueZ` adapter, connected/paired devices, and media player state.
+pub type BluezSnapshot = (Option<BtAdapter>, Box<[BtDevice]>, Option<BtPlaybackState>);
 
 impl DbusClient {
     #[must_use]
     pub fn new(conn: Connection) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            obex_session: Arc::new(Mutex::new(None)),
+            device_caps_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
+            cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
+            acl_tuned: Arc::new(Mutex::new(HashSet::new())),
+            socket_tuned: Arc::new(Mutex::new(false)),
+        }
     }
 
     pub(crate) fn check_services(&self) -> Result<BluetoothServices, BtError> {
@@ -1051,10 +1415,78 @@ impl DbusClient {
         })
     }
 
+    fn parse_media_player_props(
+        path: &str,
+        props: &HashMap<String, OwnedValue>,
+        devices: &[BtDevice],
+    ) -> BtPlaybackState {
+        let status: Box<str> = get_str(props, "Status").unwrap_or("stopped").into();
+        let position_ms = get_u32(props, "Position").unwrap_or(0);
+        let player_path = Some(path.into());
+
+        let device_address = props
+            .get("Device")
+            .and_then(|v| match &**v {
+                Value::ObjectPath(p) => Self::extract_mac_from_pcm_path(p.as_str()),
+                Value::Str(s) => Self::extract_mac_from_pcm_path(s.as_str()),
+                _ => v
+                    .downcast_ref::<&str>()
+                    .ok()
+                    .and_then(Self::extract_mac_from_pcm_path),
+            })
+            .and_then(|s| BtAddress::parse_str(&s).ok());
+
+        let device_name = device_address
+            .and_then(|addr| devices.iter().find(|d| d.address == addr))
+            .map_or_else(
+                || "Bluetooth Audio Device".into(),
+                |d| d.display_name().into(),
+            );
+
+        let (title, artist, album, duration_ms) = if let Some(track_val) = props.get("Track") {
+            let title = get_track_prop_str(track_val, "Title")
+                .unwrap_or_else(|| "Waiting for Bluetooth Track...".into());
+            let artist = get_track_prop_str(track_val, "Artist")
+                .unwrap_or_else(|| "DietPi Audiophile Speaker".into());
+            let album = get_track_prop_str(track_val, "Album")
+                .unwrap_or_else(|| "High-Resolution DSP Sink".into());
+            let duration_ms = get_track_prop_u32(track_val, "Duration").unwrap_or(0);
+            (title, artist, album, duration_ms)
+        } else {
+            (
+                "Waiting for Bluetooth Connection...".into(),
+                "DietPi Audiophile Speaker".into(),
+                "High-Resolution DSP Sink".into(),
+                0,
+            )
+        };
+
+        let obex_port = get_u16(props, "ObexPort").filter(|&p| p > 0);
+        let image_handle = props
+            .get("Track")
+            .and_then(|track_val| get_track_prop_str(track_val, "ImgHandle"))
+            .filter(|h| !h.is_empty());
+
+        BtPlaybackState {
+            device_address,
+            device_name,
+            status,
+            title,
+            artist,
+            album,
+            position_ms,
+            duration_ms,
+            player_path,
+            obex_port,
+            image_handle,
+            cover_art_path: None,
+        }
+    }
+
     pub(crate) fn query_bluez(
         &self,
         target_adapter: Option<&str>,
-    ) -> Result<(Option<BtAdapter>, Box<[BtDevice]>), BtError> {
+    ) -> Result<BluezSnapshot, BtError> {
         let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
             .destination("org.bluez")
             .and_then(|b| b.path("/"))
@@ -1062,9 +1494,858 @@ impl DbusClient {
 
         let objects = proxy.get_managed_objects()?;
 
-        Self::parse_bluez_objects(&objects, target_adapter)
+        let (adapter, devices, mut playback) = Self::parse_bluez_all(&objects, target_adapter)?;
+        self.resolve_cover_art(&mut playback);
+        Ok((adapter, devices, playback))
     }
 
+    fn resolve_cover_art(&self, playback: &mut Option<BtPlaybackState>) {
+        if let Some(pb) = playback {
+            if let Some(addr) = pb.device_address {
+                if let Some(port) = pb.obex_port {
+                    let _ = self.ensure_obex_session(addr, port);
+                    if let Some(ref handle) = pb.image_handle {
+                        pb.cover_art_path = self.fetch_cover_art(addr, handle);
+                    }
+                }
+            }
+        }
+    }
+
+    fn is_obex_session_alive(&self, path: &str) -> bool {
+        zbus::blocking::Proxy::new(
+            &self.conn,
+            "org.bluez.obex",
+            path,
+            "org.bluez.obex.Session1",
+        )
+        .and_then(|p| p.get_property::<String>("Destination"))
+        .is_ok()
+    }
+
+    fn ensure_obex_session(&self, addr: BtAddress, port: u16) -> Option<OwnedObjectPath> {
+        let mut session_lock = self.obex_session.lock().ok()?;
+        if let Some((cached_addr, ref path)) = *session_lock {
+            if cached_addr == addr && self.is_obex_session_alive(path.as_str()) {
+                return Some(path.clone());
+            }
+            *session_lock = None;
+        }
+
+        let client = ObexClientProxyBlocking::new(&self.conn).ok()?;
+        let mut args = HashMap::new();
+        args.insert("Target", Value::from("bip-avrcp"));
+        args.insert("PSM", Value::from(port));
+
+        match client.create_session(&addr.to_string(), &args) {
+            Ok(new_path) => {
+                tracing::info!("Created OBEX BIP session at {new_path} for device {addr}");
+                *session_lock = Some((addr, new_path.clone()));
+                Some(new_path)
+            }
+            Err(e) => {
+                tracing::debug!("Failed to create OBEX BIP session for {addr}: {e}");
+                None
+            }
+        }
+    }
+
+    /// Raises kernel Bluetooth socket read-buffer limits once per process (`sysctl`).
+    fn tune_bt_socket_buffers(&self) {
+        let Ok(mut tuned) = self.socket_tuned.lock() else {
+            return;
+        };
+        if *tuned {
+            return;
+        }
+        let rmem_max_arg = format!("net.core.rmem_max={BT_SOCKET_RMEM_MAX}");
+        let rmem_default_arg = format!("net.core.rmem_default={BT_SOCKET_RMEM_DEFAULT}");
+        let (max_res, default_res) = (
+            run_probe_command("sysctl", &["-w", rmem_max_arg.as_str()]),
+            run_probe_command("sysctl", &["-w", rmem_default_arg.as_str()]),
+        );
+        let ok = max_res.is_ok() && default_res.is_ok();
+        if let Err(e) = max_res {
+            tracing::warn!(error = %e, "sysctl rmem_max update failed");
+        }
+        if let Err(e) = default_res {
+            tracing::warn!(error = %e, "sysctl rmem_default update failed");
+        }
+        if ok {
+            tracing::info!(
+                rmem_max = BT_SOCKET_RMEM_MAX,
+                rmem_default = BT_SOCKET_RMEM_DEFAULT,
+                "Raised kernel Bluetooth socket read buffers"
+            );
+            *tuned = true;
+        } else {
+            tracing::warn!("sysctl socket buffer tuning failed; will retry on next transfer");
+        }
+    }
+
+    /// Switches the phone to Slave role and raises the supervision timeout once per MAC
+    /// (`hcitool sr` + `hcitool lst`) to avoid L2CAP flow-control starvation (0x08).
+    fn tune_acl_link(&self, addr: BtAddress) {
+        let mac = addr.to_string();
+        let Ok(mut tuned) = self.acl_tuned.lock() else {
+            return;
+        };
+        if tuned.contains(&addr) {
+            return;
+        }
+        let slot_arg = HCI_SUPERVISION_TIMEOUT_SLOTS.to_string();
+        let (sr_res, lst_res) = (
+            run_probe_command("hcitool", &["sr", mac.as_str(), "master"]),
+            run_probe_command("hcitool", &["lst", mac.as_str(), slot_arg.as_str()]),
+        );
+        if let Err(e) = &sr_res {
+            tracing::warn!(error = %e, mac, "hcitool role switch failed");
+        }
+        if let Err(e) = &lst_res {
+            tracing::warn!(error = %e, mac, "hcitool supervision timeout failed");
+        }
+        if sr_res.is_ok() && lst_res.is_ok() {
+            tracing::info!(
+                mac,
+                slots = HCI_SUPERVISION_TIMEOUT_SLOTS,
+                "Tuned ACL link (role switch + supervision timeout)"
+            );
+            tuned.insert(addr);
+        } else {
+            tracing::warn!(
+                mac,
+                sr_ok = sr_res.is_ok(),
+                lst_ok = lst_res.is_ok(),
+                "hcitool ACL link tuning failed; will retry on next transfer"
+            );
+        }
+    }
+
+    fn fetch_cover_art(&self, addr: BtAddress, handle: &str) -> Option<Box<str>> {
+        if let Some(cached) = cover_art_cached_path_in(&self.cache_dir, addr, handle) {
+            return Some(cached);
+        }
+
+        if let Err(reason) = ensure_cover_art_cache_dir_in(&self.cache_dir) {
+            tracing::warn!("Cover art cache unavailable: {reason}");
+            return None;
+        }
+
+        let session_path = self.prepare_bip_transfer(addr)?;
+        let image_proxy = self.build_image_proxy(session_path.as_str())?;
+
+        let (cache_path, sanitized_mac, sanitized_handle) =
+            cover_art_path_for_in(&self.cache_dir, addr, handle)?;
+        let cache_path_buf = std::path::PathBuf::from(&cache_path);
+        let _ = std::fs::remove_file(&cache_path_buf);
+
+        // Tier 1: adaptive resolution step-down over the advertised BIP variants.
+        let mut cap = load_device_caps_in(&self.device_caps_dir)
+            .get(&sanitized_mac)
+            .copied()
+            .unwrap_or(BIP_DEFAULT_CAP_PX);
+        if let Ok(descriptors) = image_proxy.properties(handle) {
+            // Strategy A: Zero-descriptor native pull (raw pre-compressed native bytes).
+            if let Some(path) = self.try_native_pull(
+                &image_proxy,
+                &descriptors,
+                handle,
+                &sanitized_mac,
+                &sanitized_handle,
+                &cache_path,
+            ) {
+                return Some(path);
+            }
+
+            for candidate in select_bip_candidates(&descriptors, cap) {
+                let tmp_path = format!("{cache_path}.tmp.jpg");
+                let tmp_path_buf = std::path::PathBuf::from(&tmp_path);
+                let mut props: HashMap<&str, Value<'_>> = HashMap::new();
+                props.insert("Pixel", Value::from(candidate.pixel.as_str()));
+                props.insert("Encoding", Value::from(candidate.encoding.as_str()));
+                let transfer_res = image_proxy.get(&tmp_path, handle, &props);
+                let Ok((transfer_path, _)) = transfer_res else {
+                    tracing::debug!(
+                        "OBEX Image1 Get({}) failed for handle {handle}",
+                        candidate.pixel
+                    );
+                    if let Ok(mut lock) = self.obex_session.lock() {
+                        *lock = None;
+                    }
+                    cap = candidate.area - 1;
+                    let _ = store_device_cap_in(&self.device_caps_dir, &sanitized_mac, cap);
+                    if !self.ensure_device_acl_connected(addr) {
+                        return None;
+                    }
+                    break;
+                };
+                let settled =
+                    self.wait_for_transfer(transfer_path.as_str(), BIP_VARIANT_TIMEOUT_MS);
+                let completed = settled == Some(true) && is_complete_jpeg(&tmp_path_buf);
+                if completed && std::fs::rename(&tmp_path_buf, &cache_path_buf).is_ok() {
+                    clean_old_cover_art_in(&self.cache_dir, &sanitized_mac, &sanitized_handle);
+                    return Some(Box::<str>::from(cache_path));
+                }
+                let _ = std::fs::remove_file(&tmp_path_buf);
+                tracing::debug!(
+                    "OBEX Image1 Get({}) did not complete for handle {handle}",
+                    candidate.pixel
+                );
+                cap = candidate.area - 1;
+                let _ = store_device_cap_in(&self.device_caps_dir, &sanitized_mac, cap);
+                if !self.ensure_device_acl_connected(addr) {
+                    return None;
+                }
+            }
+        }
+
+        // Tier 2: baseline 200x200 BIP thumbnail fallback, with a plain-Get last resort
+        // for phones that refuse the thumbnail PDU.
+        self.try_thumbnail_fallback(
+            &image_proxy,
+            handle,
+            &sanitized_mac,
+            &sanitized_handle,
+            &cache_path,
+        )
+    }
+
+    /// Runs one-time socket/HCI link tuning, waits for the phone's AVRCP `TrackChanged`
+    /// state machine to settle, and returns the cached-or-new BIP OBEX session path.
+    fn prepare_bip_transfer(&self, addr: BtAddress) -> Option<OwnedObjectPath> {
+        self.tune_bt_socket_buffers();
+        self.tune_acl_link(addr);
+
+        // Settle wait: let the phone finish its AVRCP TrackChanged state machine
+        // before we hammer it with OBEX session/transfer requests.
+        thread::sleep(Duration::from_millis(BIP_TRACK_SETTLE_MS));
+
+        let session_lock = self.obex_session.lock().ok()?;
+        session_lock.as_ref().map(|(_, p)| p.clone())
+    }
+
+    /// Builds a blocking `Image1` proxy on top of an existing BIP OBEX session path.
+    fn build_image_proxy<'a>(
+        &'a self,
+        session_path: &'a str,
+    ) -> Option<ObexImageProxyBlocking<'a>> {
+        ObexImageProxyBlocking::builder(&self.conn)
+            .path(session_path)
+            .ok()?
+            .build()
+            .ok()
+    }
+
+    /// Strategy A: zero-descriptor native BIP pull (raw pre-compressed native bytes).
+    ///
+    /// Passes an empty dictionary so obexd omits the `x-bt/img-Description` header and the
+    /// phone streams the raw pre-compressed native bytes without re-encoding. Only attempts
+    /// when the advertised native `Size` is unknown (0) or within the per-device byte cap.
+    /// On success the payload is promoted to `cache_path` and returned; on Get failure the
+    /// per-device byte cap is lowered and persisted. Returns `None` when the caller should
+    /// fall through to the explicit variant loop.
+    fn try_native_pull(
+        &self,
+        image_proxy: &ObexImageProxyBlocking<'_>,
+        descriptors: &[HashMap<String, OwnedValue>],
+        handle: &str,
+        sanitized_mac: &str,
+        sanitized_handle: &str,
+        cache_path: &str,
+    ) -> Option<Box<str>> {
+        let cache_path_buf = std::path::Path::new(cache_path);
+        let native_size = native_image_size(descriptors);
+        let native_cap = load_native_caps_in(&self.device_caps_dir)
+            .get(sanitized_mac)
+            .copied()
+            .unwrap_or(BIP_DEFAULT_NATIVE_BYTES_CAP);
+        if native_size > native_cap {
+            tracing::debug!(
+                handle,
+                native_size,
+                cap = native_cap,
+                "Skipping native BIP pull: advertised size exceeds byte cap"
+            );
+            return None;
+        }
+
+        let tmp_path = format!("{cache_path}.native.tmp.jpg");
+        let tmp_path_buf = std::path::PathBuf::from(&tmp_path);
+        let empty_props: HashMap<&str, Value<'_>> = HashMap::new();
+        tracing::info!(
+            handle,
+            native_size,
+            "Attempting zero-descriptor native BIP pull"
+        );
+        match image_proxy.get(&tmp_path, handle, &empty_props) {
+            Ok((transfer_path, _)) => {
+                let settled = self.wait_for_transfer(transfer_path.as_str(), BIP_NATIVE_TIMEOUT_MS);
+                let completed = settled == Some(true) && is_complete_jpeg(&tmp_path_buf);
+                if completed && std::fs::rename(&tmp_path_buf, cache_path_buf).is_ok() {
+                    clean_old_cover_art_in(&self.cache_dir, sanitized_mac, sanitized_handle);
+                    tracing::info!(handle, "Native BIP pull succeeded for handle {handle}");
+                    return Some(Box::<str>::from(cache_path));
+                }
+                let _ = std::fs::remove_file(&tmp_path_buf);
+                tracing::debug!(
+                    handle,
+                    "Native BIP pull did not complete for handle {handle}"
+                );
+                None
+            }
+            Err(err) => {
+                tracing::debug!(
+                    handle,
+                    error = %err,
+                    "Native BIP pull Get failed for handle {handle}"
+                );
+                if native_size > 0 {
+                    let new_cap = native_size - 1;
+                    if let Err(store_err) =
+                        store_native_cap_in(&self.device_caps_dir, sanitized_mac, new_cap)
+                    {
+                        tracing::warn!(
+                            handle,
+                            error = %store_err,
+                            "Failed to persist native byte cap"
+                        );
+                    } else {
+                        tracing::info!(
+                            handle,
+                            new_cap,
+                            "Persisted native byte cap after native pull failure"
+                        );
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Tier 2: baseline 200x200 BIP thumbnail fallback, with a plain-Get last resort for
+    /// phones that refuse the thumbnail PDU. Clears the OBEX session on failure so the
+    /// next track starts with a fresh session.
+    fn try_thumbnail_fallback(
+        &self,
+        image_proxy: &ObexImageProxyBlocking<'_>,
+        handle: &str,
+        sanitized_mac: &str,
+        sanitized_handle: &str,
+        cache_path: &str,
+    ) -> Option<Box<str>> {
+        let cache_path_buf = std::path::Path::new(cache_path);
+        let empty_props: HashMap<&str, Value<'_>> = HashMap::new();
+        let transfer_res = image_proxy
+            .get_thumbnail(cache_path, handle)
+            .or_else(|_| image_proxy.get(cache_path, handle, &empty_props));
+        let Ok((transfer_path, _)) = transfer_res else {
+            tracing::debug!("OBEX Image1 GetThumbnail/Get failed for handle {handle}");
+            if let Ok(mut lock) = self.obex_session.lock() {
+                *lock = None;
+            }
+            return None;
+        };
+        match self.wait_for_transfer(transfer_path.as_str(), BIP_THUMBNAIL_TIMEOUT_MS) {
+            Some(true) if is_complete_jpeg(cache_path_buf) => {
+                clean_old_cover_art_in(&self.cache_dir, sanitized_mac, sanitized_handle);
+                Some(Box::<str>::from(cache_path))
+            }
+            _ => {
+                let _ = std::fs::remove_file(cache_path_buf);
+                if let Ok(mut lock) = self.obex_session.lock() {
+                    *lock = None;
+                }
+                None
+            }
+        }
+    }
+
+    /// Waits for an async OBEX transfer to settle, enforcing a progress-aware watchdog.
+    ///
+    /// Polls `org.bluez.obex.Transfer1` every [`BIP_POLL_INTERVAL_MS`] reading `Status`
+    /// and the `Transferred` byte counter. A transfer is kept alive while its byte
+    /// counter advances; `Cancel` is issued only after [`BIP_STALL_TIMEOUT_MS`] of
+    /// zero byte progress or once the total [`timeout_ms`] budget is exceeded.
+    ///
+    /// Returns `Some(true)` when the transfer reports `complete`, `Some(false)` on error
+    /// or D-Bus failure, and `None` when the watchdog expired (after issuing `Cancel`).
+    fn wait_for_transfer(&self, transfer_path: &str, timeout_ms: u64) -> Option<bool> {
+        let proxy = ObexTransferProxyBlocking::builder(&self.conn)
+            .path(transfer_path)
+            .ok()
+            .and_then(|b| b.build().ok())?;
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let mut last_bytes: Option<u64> = None;
+        let mut last_progress: Option<Instant> = Some(Instant::now());
+        while Instant::now() < deadline {
+            match proxy.status() {
+                Ok(status) if status == "complete" => {
+                    tracing::info!(
+                        transfer = transfer_path,
+                        bytes = last_bytes.unwrap_or(0),
+                        "obex transfer complete"
+                    );
+                    return Some(true);
+                }
+                Ok(status) if status == "error" => {
+                    tracing::warn!(transfer = transfer_path, "obex transfer reported error");
+                    return Some(false);
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(transfer = transfer_path, error = %err, "obex transfer status read failed");
+                    return Some(false);
+                }
+            }
+            match proxy.transferred() {
+                Ok(bytes) => {
+                    if last_bytes.is_none_or(|prev| bytes > prev) {
+                        last_progress = Some(Instant::now());
+                        tracing::trace!(transfer = transfer_path, bytes, "obex transfer progress");
+                    }
+                    last_bytes = Some(bytes);
+                }
+                Err(err) => {
+                    tracing::debug!(transfer = transfer_path, error = %err, "obex transferred read failed");
+                }
+            }
+            if last_progress.is_none_or(|started_at| {
+                started_at.elapsed() >= Duration::from_millis(BIP_STALL_TIMEOUT_MS)
+            }) {
+                tracing::warn!(
+                    transfer = transfer_path,
+                    stall_ms = BIP_STALL_TIMEOUT_MS,
+                    bytes = last_bytes.unwrap_or(0),
+                    "obex transfer stalled; cancelling"
+                );
+                let _ = proxy.cancel();
+                return None;
+            }
+            thread::sleep(Duration::from_millis(BIP_POLL_INTERVAL_MS));
+        }
+        tracing::warn!(
+            transfer = transfer_path,
+            timeout_ms,
+            bytes = last_bytes.unwrap_or(0),
+            "obex transfer watchdog expired; cancelling"
+        );
+        let _ = proxy.cancel();
+        None
+    }
+
+    /// Ensures the phone ACL link is alive; reconnects and waits for A2DP recovery.
+    ///
+    /// Returns `true` when the link is (or was already) connected, `false` when the
+    /// device had to be reconnected (the caller must break out of the high-res loop).
+    fn ensure_device_acl_connected(&self, addr: BtAddress) -> bool {
+        let dev_path = format!("/org/bluez/hci0/dev_{}", addr.to_string().replace(':', "_"));
+        let proxy = ObexDeviceProxyBlocking::builder(&self.conn)
+            .path(dev_path.as_str())
+            .ok()
+            .and_then(|b| b.build().ok());
+        let Some(proxy) = proxy else {
+            return false;
+        };
+        match proxy.connected() {
+            Ok(true) => true,
+            Ok(false) => {
+                if proxy.connect().is_err() {
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(1500));
+                false
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// Validates whether a file on disk is a fully flushed, complete JPEG image.
+///
+/// Ensures both the SOI marker (`0xFF, 0xD8`) and the EOI marker (`0xFF, 0xD9`)
+/// are present so Slint never attempts to decode a partially written transfer buffer.
+#[must_use]
+pub fn is_complete_jpeg(path: &std::path::Path) -> bool {
+    use std::io::{Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(len) = f.metadata().map(|m| m.len()) else {
+        return false;
+    };
+    if len < 100 {
+        return false;
+    }
+    let mut header = [0u8; 2];
+    if f.read_exact(&mut header).is_err() || header != [0xFF, 0xD8] {
+        return false;
+    }
+    if f.seek(SeekFrom::End(-2)).is_err() {
+        return false;
+    }
+    let mut footer = [0u8; 2];
+    if f.read_exact(&mut footer).is_err() {
+        return false;
+    }
+    footer == [0xFF, 0xD9]
+}
+
+/// Maximum accepted OBEX native image size in bytes.
+///
+/// Larger descriptors risk Android `TransactionTooLargeException` crashes on the
+/// phone side when the bitmaps are scaled during the Binder IPC reply.
+pub const BIP_MAX_NATIVE_BYTES: u64 = 280_000;
+
+/// Default per-device resolution ceiling in pixels (800x800).
+pub const BIP_DEFAULT_CAP_PX: u32 = 640_000;
+
+/// Minimum pixel area for a Tier-1 candidate; 200x200 is reserved for the thumbnail tier.
+pub const BIP_MIN_HIGHRES_PX: u32 = 40_000;
+
+/// Poll interval for OBEX `Transfer1` progress watchdogs, in milliseconds.
+pub const BIP_POLL_INTERVAL_MS: u64 = 80;
+
+/// Stall watchdog: abort a transfer only after this many milliseconds with zero byte progress.
+pub const BIP_STALL_TIMEOUT_MS: u64 = 2_500;
+
+/// Total watchdog for the zero-descriptor native pull, in milliseconds.
+pub const BIP_NATIVE_TIMEOUT_MS: u64 = 8_000;
+
+/// Total watchdog for an explicit high-res variant transfer, in milliseconds.
+pub const BIP_VARIANT_TIMEOUT_MS: u64 = 4_000;
+
+/// Total watchdog for the baseline `Image1.GetThumbnail` transfer, in milliseconds.
+pub const BIP_THUMBNAIL_TIMEOUT_MS: u64 = 2_500;
+
+/// Settle wait after `TrackChanged` before any OBEX traffic, in milliseconds.
+pub const BIP_TRACK_SETTLE_MS: u64 = 650;
+
+/// Default per-device maximum safe native image size in bytes for the zero-descriptor pull.
+pub const BIP_DEFAULT_NATIVE_BYTES_CAP: u64 = 1_500_000;
+
+/// ACL link supervision timeout in Bluetooth clock slots (32000 slots = 20 s).
+pub const HCI_SUPERVISION_TIMEOUT_SLOTS: u32 = 32_000;
+
+/// Raised kernel socket receive buffer ceiling (`net.core.rmem_max`), in bytes.
+pub const BT_SOCKET_RMEM_MAX: u32 = 2_097_152;
+
+/// Raised kernel socket receive buffer default (`net.core.rmem_default`), in bytes.
+pub const BT_SOCKET_RMEM_DEFAULT: u32 = 1_048_576;
+
+/// Synthetic explicit targets used when a BIP descriptor advertises an open range.
+pub const BIP_SYNTHETIC_TARGETS: [(u32, u32); 3] = [(800, 800), (600, 600), (400, 400)];
+
+/// A concrete BIP image variant selected for an `Image1.Get` transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BipImageCandidate {
+    /// BIP `Pixel` descriptor string, e.g. `600*600`.
+    pub pixel: String,
+    /// BIP `Encoding` string, e.g. `JPEG`.
+    pub encoding: String,
+    /// Pixel area `width * height` used for step-down ordering.
+    pub area: u32,
+}
+
+/// Parses a BIP `Pixel` descriptor like `600*600` or a range `0*0-65535*65535`.
+#[must_use]
+pub fn parse_bip_pixel(s: &str) -> Option<(u32, u32)> {
+    let first = s.split('-').next()?;
+    let (w, h) = first.split_once('*')?;
+    let w = w.trim().parse::<u32>().ok()?;
+    let h = h.trim().parse::<u32>().ok()?;
+    Some((w, h))
+}
+
+/// Whether a BIP `Pixel` descriptor is an open-ended range (min `0*0`).
+#[must_use]
+pub fn is_bip_pixel_range(s: &str) -> bool {
+    s.split('-').next() == Some("0*0")
+}
+
+/// Returns the maximum advertised native image `Size` in bytes across all descriptors.
+///
+/// Compares the `Size` key case-insensitively (BIP descriptors are case-insensitive in
+/// practice) and returns 0 when no descriptor advertises a parseable byte count, meaning
+/// the native size is unknown and a zero-descriptor pull is safe to attempt.
+#[must_use]
+pub fn native_image_size<S: ::std::hash::BuildHasher>(
+    descriptors: &[HashMap<String, OwnedValue, S>],
+) -> u64 {
+    descriptors
+        .iter()
+        .filter_map(|descriptor| {
+            descriptor
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("Size"))
+                .and_then(|(_, v)| v.downcast_ref::<u64>().ok())
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// Selects BIP `Get` candidates from `Image1.Properties` descriptors, descending by pixel area.
+///
+/// Descriptors advertising `Size` above [`BIP_MAX_NATIVE_BYTES`] are discarded, as are
+/// candidates above the per-device pixel ceiling or at/below [`BIP_MIN_HIGHRES_PX`]
+/// (the 200x200 baseline is reserved for the thumbnail fallback tier). Open range
+/// descriptors are expanded into the explicit [`BIP_SYNTHETIC_TARGETS`] that fit the ceiling.
+#[must_use]
+pub fn select_bip_candidates(
+    descriptors: &[HashMap<String, OwnedValue>],
+    max_cap_px: u32,
+) -> Vec<BipImageCandidate> {
+    let mut out: Vec<BipImageCandidate> = Vec::new();
+    for descriptor in descriptors {
+        // BIP descriptors are case-insensitive in practice (obexd emits lowercase keys).
+        let get_value = |key: &str| -> Option<&OwnedValue> {
+            descriptor
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                .map(|(_, v)| v)
+        };
+        let get_str = |key: &str| -> Option<String> {
+            get_value(key)
+                .and_then(|v| v.downcast_ref::<&str>().ok())
+                .map(str::to_owned)
+        };
+        let (Some(pixel), Some(encoding)) = (get_str("Pixel"), get_str("Encoding")) else {
+            continue;
+        };
+        // `Size` is in bytes; BIP `MaxSize` is in kilobytes.
+        let size_bytes = get_value("Size")
+            .and_then(|v| v.downcast_ref::<u64>().ok())
+            .unwrap_or(0);
+        let max_size_kb = get_value("MaxSize")
+            .and_then(|v| v.downcast_ref::<u64>().ok())
+            .unwrap_or(0);
+        if size_bytes > BIP_MAX_NATIVE_BYTES || max_size_kb > BIP_MAX_NATIVE_BYTES / 1024 {
+            continue;
+        }
+        if is_bip_pixel_range(&pixel) {
+            for (w, h) in BIP_SYNTHETIC_TARGETS {
+                let Some(area) = w.checked_mul(h) else {
+                    continue;
+                };
+                if area <= max_cap_px && area > BIP_MIN_HIGHRES_PX {
+                    out.push(BipImageCandidate {
+                        pixel: format!("{w}*{h}"),
+                        encoding: encoding.clone(),
+                        area,
+                    });
+                }
+            }
+            continue;
+        }
+        let Some((w, h)) = parse_bip_pixel(&pixel) else {
+            continue;
+        };
+        // Descriptor dimensions come from the remote phone's `Image1.Properties`
+        // (peer-controlled OBEX data); reject any pair whose product overflows `u32`
+        // instead of wrapping around and letting a huge candidate pass the cap filter.
+        let Some(area) = w.checked_mul(h) else {
+            continue;
+        };
+        if area > max_cap_px || area <= BIP_MIN_HIGHRES_PX {
+            continue;
+        }
+        out.push(BipImageCandidate {
+            pixel,
+            encoding,
+            area,
+        });
+    }
+    out.sort_by_key(|a| std::cmp::Reverse(a.area));
+    out.dedup_by(|a, b| a.pixel == b.pixel && a.encoding == b.encoding);
+    out
+}
+
+/// Per-device resolution ceilings keyed by sanitized MAC address.
+pub type DeviceCaps = HashMap<String, u32>;
+
+/// Name of the persistent per-device BIP resolution ceiling file.
+pub const DEVICE_CAPS_FILENAME: &str = "device_caps.json";
+
+/// Loads per-device BIP pixel ceilings from a directory (hermetic variant).
+#[must_use]
+pub fn load_device_caps_in(dir: &std::path::Path) -> DeviceCaps {
+    std::fs::read_to_string(dir.join(DEVICE_CAPS_FILENAME))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<DeviceCaps>(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Persists a single device ceiling into a caps file (read-modify-write).
+///
+/// # Errors
+/// Returns an error string when the file cannot be written.
+pub fn store_device_cap_in(
+    dir: &std::path::Path,
+    sanitized_mac: &str,
+    max_px: u32,
+) -> Result<(), Box<str>> {
+    let mut caps = load_device_caps_in(dir);
+    caps.insert(sanitized_mac.to_owned(), max_px);
+    let raw =
+        serde_json::to_string(&caps).map_err(|e| Box::<str>::from(format!("caps encode: {e}")))?;
+    std::fs::write(dir.join(DEVICE_CAPS_FILENAME), raw)
+        .map_err(|e| Box::<str>::from(format!("cannot write {DEVICE_CAPS_FILENAME}: {e}")))
+}
+
+/// Per-device native-pull byte ceilings keyed by sanitized MAC address.
+pub type NativeCaps = HashMap<String, u64>;
+
+/// Name of the persistent per-device native byte ceiling file.
+pub const NATIVE_CAPS_FILENAME: &str = "native_caps.json";
+
+/// Loads per-device native byte ceilings from a directory (hermetic variant).
+#[must_use]
+pub fn load_native_caps_in(dir: &std::path::Path) -> NativeCaps {
+    std::fs::read_to_string(dir.join(NATIVE_CAPS_FILENAME))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<NativeCaps>(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Persists a single native byte ceiling into a caps file (read-modify-write).
+///
+/// # Errors
+/// Returns an error string when the file cannot be written.
+pub fn store_native_cap_in(
+    dir: &std::path::Path,
+    sanitized_mac: &str,
+    max_bytes: u64,
+) -> Result<(), Box<str>> {
+    let mut caps = load_native_caps_in(dir);
+    caps.insert(sanitized_mac.to_owned(), max_bytes);
+    let raw = serde_json::to_string(&caps)
+        .map_err(|e| Box::<str>::from(format!("native caps encode: {e}")))?;
+    std::fs::write(dir.join(NATIVE_CAPS_FILENAME), raw)
+        .map_err(|e| Box::<str>::from(format!("cannot write {NATIVE_CAPS_FILENAME}: {e}")))
+}
+
+/// Root-only spool directory for OBEX cover art cache files.
+///
+/// A predictable path under the world-writable `/tmp` would let a local process
+/// win a TOCTOU symlink race against the privileged `obexd` transfer write; a
+/// root-owned `0700` directory closes that window.
+pub const COVER_ART_CACHE_DIR: &str = "/var/cache/speaker-covers";
+
+/// Creates the cover art cache directory (defaulting to [`COVER_ART_CACHE_DIR`]) with
+/// `0700` permissions if needed.
+///
+/// # Errors
+/// Returns an error string when the directory cannot be created or locked down.
+fn ensure_cover_art_cache_dir_in(dir: &std::path::Path) -> Result<(), Box<str>> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| Box::<str>::from(format!("cannot create {}: {e}", dir.display())))?;
+    let mut perms = std::fs::metadata(dir)
+        .map_err(|e| Box::<str>::from(format!("cannot stat {}: {e}", dir.display())))?
+        .permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(dir, perms)
+        .map_err(|e| Box::<str>::from(format!("cannot chmod {}: {e}", dir.display())))?;
+    Ok(())
+}
+
+/// Returns the deterministic cache path and sanitized MAC/handle for an OBEX cover art handle.
+#[must_use]
+pub fn cover_art_path_for(addr: BtAddress, handle: &str) -> Option<(String, String, String)> {
+    cover_art_path_for_in(std::path::Path::new(COVER_ART_CACHE_DIR), addr, handle)
+}
+
+/// Directory-parametrized variant of [`cover_art_path_for`] (testable without the
+/// production cache directory).
+#[must_use]
+pub fn cover_art_path_for_in(
+    dir: &std::path::Path,
+    addr: BtAddress,
+    handle: &str,
+) -> Option<(String, String, String)> {
+    let sanitized_mac = addr.to_string().replace([':', '-'], "_");
+    let sanitized_handle: String = handle
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if sanitized_handle.is_empty() {
+        return None;
+    }
+    let cache_path = format!(
+        "{}/speaker-cover-{sanitized_mac}-{sanitized_handle}.jpg",
+        dir.display()
+    );
+    Some((cache_path, sanitized_mac, sanitized_handle))
+}
+
+/// Checks if cover art is already cached on disk and cleans obsolete images.
+#[must_use]
+pub fn cover_art_cached_path(addr: BtAddress, handle: &str) -> Option<Box<str>> {
+    cover_art_cached_path_in(std::path::Path::new(COVER_ART_CACHE_DIR), addr, handle)
+}
+
+/// Directory-parametrized variant of [`cover_art_cached_path`] (testable without the
+/// production cache directory).
+#[must_use]
+pub fn cover_art_cached_path_in(
+    dir: &std::path::Path,
+    addr: BtAddress,
+    handle: &str,
+) -> Option<Box<str>> {
+    let (cache_path, sanitized_mac, sanitized_handle) = cover_art_path_for_in(dir, addr, handle)?;
+    cover_art_cached_path_in_dir(dir, &cache_path, &sanitized_mac, &sanitized_handle)
+}
+
+/// Path-parametrized cache validity check (internal helper of [`cover_art_cached_path_in`]).
+fn cover_art_cached_path_in_dir(
+    dir: &std::path::Path,
+    cache_path: &str,
+    sanitized_mac: &str,
+    sanitized_handle: &str,
+) -> Option<Box<str>> {
+    let cache_path_buf = std::path::PathBuf::from(cache_path);
+    if is_complete_jpeg(&cache_path_buf) {
+        clean_cover_art_in_dir(dir, sanitized_mac, sanitized_handle);
+        return Some(Box::<str>::from(cache_path));
+    }
+    None
+}
+
+/// Cleans old cover art files in the target directory for a device address except the active handle.
+pub fn clean_cover_art_in_dir(dir: &std::path::Path, sanitized_mac: &str, current_handle: &str) {
+    let prefix = format!("speaker-cover-{sanitized_mac}-");
+    let current_filename = format!("speaker-cover-{sanitized_mac}-{current_handle}.jpg");
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Ok(file_name) = entry.file_name().into_string() {
+                if file_name.starts_with(&prefix)
+                    && std::path::Path::new(&file_name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg"))
+                    && file_name != current_filename
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
+/// Cleans old cover art files in the cache directory for a device address except the active handle.
+pub fn clean_old_cover_art(sanitized_mac: &str, current_handle: &str) {
+    clean_cover_art_in_dir(
+        std::path::Path::new(COVER_ART_CACHE_DIR),
+        sanitized_mac,
+        current_handle,
+    );
+}
+
+/// Directory-parametrized variant of [`clean_old_cover_art`] (testable without the
+/// production cache directory).
+pub fn clean_old_cover_art_in(dir: &std::path::Path, sanitized_mac: &str, current_handle: &str) {
+    clean_cover_art_in_dir(dir, sanitized_mac, current_handle);
+}
+
+impl DbusClient {
     /// Parses `BlueZ` managed objects into adapter and device models.
     ///
     /// # Errors
@@ -1131,6 +2412,151 @@ impl DbusClient {
         Ok((adapter, devices.into_boxed_slice()))
     }
 
+    /// Parses `BlueZ` managed objects into adapter, device, and active media player models.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if adapter filtering or object parsing fails.
+    pub fn parse_bluez_all(
+        objects: &ManagedObjects,
+        target_adapter: Option<&str>,
+    ) -> Result<BluezSnapshot, BtError> {
+        let (adapter, devices) = Self::parse_bluez_objects(objects, target_adapter)?;
+
+        let selected_adapter_id = adapter.as_ref().map(|a| a.id.as_ref());
+
+        // 3. Search for MediaPlayer1 interfaces belonging to the selected adapter.
+        // All candidates are collected and then selected deterministically:
+        // prefer a player that is actively playing; among equal-status candidates,
+        // break ties by lexicographic object path so the `HashMap` iteration order
+        // of `ManagedObjects` cannot influence the selection.
+        let mut candidates: Vec<BtPlaybackState> = Vec::new();
+        for (path, ifaces) in objects {
+            if let Some(props) = find_iface(ifaces, "org.bluez.MediaPlayer1") {
+                if let Some(adapter_id) = selected_adapter_id {
+                    let matches_adapter = path
+                        .as_str()
+                        .strip_prefix("/org/bluez/")
+                        .and_then(|p| p.split('/').next())
+                        .is_some_and(|id| id == adapter_id);
+                    if !matches_adapter {
+                        continue;
+                    }
+                }
+
+                candidates.push(Self::parse_media_player_props(
+                    path.as_str(),
+                    props,
+                    &devices,
+                ));
+            }
+        }
+
+        candidates.sort_by(|a, b| {
+            b.is_playing()
+                .cmp(&a.is_playing())
+                .then_with(|| a.player_path.cmp(&b.player_path))
+        });
+        let playback = candidates.into_iter().next();
+
+        Ok((adapter, devices, playback))
+    }
+
+    pub(crate) fn call_player_method(
+        &self,
+        player_path: Option<&str>,
+        method: &str,
+    ) -> Result<(), BtError> {
+        let path = if let Some(p) = player_path {
+            p.to_string()
+        } else {
+            let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+                .destination("org.bluez")
+                .and_then(|b| b.path("/"))
+                .and_then(zbus::blocking::proxy::Builder::build)?;
+            let objects = proxy.get_managed_objects()?;
+            let (_, _, playback) = Self::parse_bluez_all(&objects, None)?;
+            playback
+                .and_then(|p| p.player_path)
+                .map(|p| p.to_string())
+                .ok_or_else(|| BtError::no_active_player("no active MediaPlayer1 found on D-Bus"))?
+        };
+
+        let proxy =
+            zbus::blocking::Proxy::new(&self.conn, "org.bluez", path, "org.bluez.MediaPlayer1")?;
+        proxy.call_method(method, &())?;
+        Ok(())
+    }
+
+    /// Seeks to an absolute position by translating the target into the relative
+    /// `Seek(i64 offset)` call exposed by `BlueZ`'s `MediaPlayer1` (offset in
+    /// microseconds; a positive offset moves forward, a negative offset moves
+    /// backward).
+    ///
+    /// The current position is read from a fresh managed-objects snapshot (not
+    /// via [`DbusClient::playback_state`]) so that seeking never triggers an
+    /// OBEX cover-art fetch.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails or no active player exists.
+    pub(crate) fn player_seek(&self, position_ms: u32) -> Result<(), BtError> {
+        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+            .destination("org.bluez")
+            .and_then(|b| b.path("/"))
+            .and_then(zbus::blocking::proxy::Builder::build)?;
+        let objects = proxy.get_managed_objects()?;
+        let (_, _, playback) = Self::parse_bluez_all(&objects, None)?;
+        let playback = playback
+            .ok_or_else(|| BtError::no_active_player("no active MediaPlayer1 found on D-Bus"))?;
+        let path = playback
+            .player_path
+            .as_deref()
+            .ok_or_else(|| BtError::no_active_player("active MediaPlayer1 has no object path"))?;
+
+        // `Seek` takes a *relative* offset in microseconds; convert the absolute
+        // millisecond target using the freshly observed position.
+        let offset_us = (i64::from(position_ms) - i64::from(playback.position_ms)) * 1_000;
+        let player =
+            zbus::blocking::Proxy::new(&self.conn, "org.bluez", path, "org.bluez.MediaPlayer1")?;
+        player.call_method("Seek", &(offset_us,))?;
+        tracing::debug!(
+            position_ms,
+            current_ms = playback.position_ms,
+            offset_us,
+            "seek issued via BlueZ MediaPlayer1.Seek"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn playback_state(&self) -> Result<Option<BtPlaybackState>, BtError> {
+        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+            .destination("org.bluez")
+            .and_then(|b| b.path("/"))
+            .and_then(zbus::blocking::proxy::Builder::build)?;
+        let objects = proxy.get_managed_objects()?;
+        let (_, _, mut playback) = Self::parse_bluez_all(&objects, None)?;
+        self.resolve_cover_art(&mut playback);
+        Ok(playback)
+    }
+
+    pub(crate) fn player_toggle(&self) -> Result<bool, BtError> {
+        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+            .destination("org.bluez")
+            .and_then(|b| b.path("/"))
+            .and_then(zbus::blocking::proxy::Builder::build)?;
+        let objects = proxy.get_managed_objects()?;
+        let (_, _, playback) = Self::parse_bluez_all(&objects, None)?;
+        let playback = playback
+            .ok_or_else(|| BtError::no_active_player("no active MediaPlayer1 found on D-Bus"))?;
+        let next_playing = !playback.is_playing();
+        let method = if playback.is_playing() {
+            "Pause"
+        } else {
+            "Play"
+        };
+        self.call_player_method(playback.player_path.as_deref(), method)?;
+        Ok(next_playing)
+    }
+
     pub(crate) fn query_bluealsa(
         &self,
         devices: &[BtDevice],
@@ -1169,17 +2595,22 @@ impl DbusClient {
     /// loss, permission errors, malformed replies) propagate as [`BtError`].
     fn query_pcm_codecs(conn: &Connection, pcm_path: &str) -> Result<Box<[Box<str>]>, BtError> {
         let proxy = zbus::blocking::Proxy::new(conn, "org.bluealsa", pcm_path, "org.bluealsa.PCM1")
-            .map_err(|e| BtError::dbus(format!("codec proxy for {pcm_path}: {e}")))?;
+            .map_err(|e| BtError::dbus_with_source(format!("codec proxy for {pcm_path}"), e))?;
 
         let reply = match proxy.call_method("GetCodecs", &()) {
             Ok(reply) => reply,
             Err(e) if is_unknown_method_error(&e) => return Ok(Box::default()),
-            Err(e) => return Err(BtError::dbus(format!("GetCodecs call for {pcm_path}: {e}"))),
+            Err(e) => {
+                return Err(BtError::dbus_with_source(
+                    format!("GetCodecs call for {pcm_path}"),
+                    e,
+                ));
+            }
         };
         let codecs = reply
             .body()
             .deserialize::<HashMap<String, HashMap<String, OwnedValue>>>()
-            .map_err(|e| BtError::dbus(format!("GetCodecs reply for {pcm_path}: {e}")))?;
+            .map_err(|e| BtError::dbus_with_source(format!("GetCodecs reply for {pcm_path}"), e))?;
 
         let mut names: Vec<Box<str>> = codecs.into_keys().map(Into::into).collect();
         names.sort();
@@ -1240,8 +2671,8 @@ impl DbusClient {
                 } else {
                     Some(channel_map)
                 };
-                let (volume, muted) = get_byte_array(props, "Volume")
-                    .map_or((None, false), |bytes| {
+                let (volume, muted, volume_percent) = get_byte_array(props, "Volume")
+                    .map_or((None, false, None), |bytes| {
                         format_volume_bytes(&bytes, channel_names.as_deref())
                     });
 
@@ -1261,6 +2692,7 @@ impl DbusClient {
                     channels,
                     format,
                     volume,
+                    volume_percent,
                     muted,
                     delay,
                 });
@@ -1331,7 +2763,9 @@ struct MockState {
     adapter: Option<BtAdapter>,
     devices: Vec<BtDevice>,
     pcms: Vec<BlueAlsaPcm>,
+    playback: Option<BtPlaybackState>,
     fault: Option<Box<str>>,
+    cache_dir: std::path::PathBuf,
 }
 
 impl BluetoothDeviceMock {
@@ -1384,10 +2818,26 @@ impl BluetoothDeviceMock {
                 channels: 2,
                 format: "S16_LE".into(),
                 volume: Some("L: 100 R: 100".into()),
+                volume_percent: Some(79),
                 muted: false,
                 delay: Some("2000".into()),
             }],
+            playback: Some(BtPlaybackState {
+                device_address: Some(phone_addr),
+                device_name: "iPhone 15 Pro".into(),
+                status: "playing".into(),
+                title: "Money for Nothing".into(),
+                artist: "Dire Straits".into(),
+                album: "Brothers in Arms".into(),
+                position_ms: 105_000,
+                duration_ms: 230_000,
+                player_path: Some("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0".into()),
+                obex_port: Some(4097),
+                image_handle: Some("1000001".into()),
+                cover_art_path: None,
+            }),
             fault: None,
+            cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
         };
 
         Self {
@@ -1499,6 +2949,188 @@ impl BluetoothDeviceMock {
         }
     }
 
+    /// Sets the simulated media player playback state.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_playback(&self, playback: Option<BtPlaybackState>) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        state.playback = playback;
+    }
+
+    /// Updates the simulated playback status (e.g. `playing`, `paused`, `stopped`).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_player_status(&self, status: impl Into<Box<str>>) {
+        let status = status.into();
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref mut p) = state.playback {
+            p.status = status;
+        }
+    }
+
+    /// Updates the simulated track metadata and total duration.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_player_track(&self, title: &str, artist: &str, album: &str, duration_ms: u32) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref mut p) = state.playback {
+            p.title = title.into();
+            p.artist = artist.into();
+            p.album = album.into();
+            p.duration_ms = duration_ms;
+            p.position_ms = 0;
+        }
+    }
+
+    /// Sets the simulated playback position in milliseconds.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_player_position(&self, position_ms: u32) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref mut p) = state.playback {
+            p.position_ms = position_ms.min(p.duration_ms);
+        }
+    }
+
+    /// Sets the simulated album cover art path directly.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_player_cover_art(&self, cover_art_path: Option<Box<str>>) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref mut p) = state.playback {
+            p.cover_art_path = cover_art_path;
+        }
+    }
+
+    /// Sets the simulated image handle and OBEX BIP PSM port.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_player_image_handle(&self, handle: Option<Box<str>>, port: Option<u16>) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref mut p) = state.playback {
+            p.image_handle = handle;
+            p.obex_port = port;
+        }
+    }
+
+    /// Overrides the cover art cache directory used for simulated cache lookups.
+    ///
+    /// Mirrors [`BluetoothDevice::with_cache_dir`] so hermetic tests can point the
+    /// mock at a temporary directory instead of the production cache directory
+    /// (which requires root privileges to create).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_cover_art_cache_dir(&self, dir: &std::path::Path) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        dir.clone_into(&mut state.cache_dir);
+    }
+
+    fn player_play(&self) -> Result<(), BtError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        if let Some(ref mut p) = state.playback {
+            p.status = "playing".into();
+            Ok(())
+        } else {
+            Err(BtError::no_active_player("no active mock player"))
+        }
+    }
+
+    fn player_pause(&self) -> Result<(), BtError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        if let Some(ref mut p) = state.playback {
+            p.status = "paused".into();
+            Ok(())
+        } else {
+            Err(BtError::no_active_player("no active mock player"))
+        }
+    }
+
+    fn playback_state(&self) -> Result<Option<BtPlaybackState>, BtError> {
+        let state = self.state.read().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        let mut pb = state.playback.clone();
+        if let Some(ref mut p) = pb {
+            if p.cover_art_path.is_none() {
+                if let (Some(addr), Some(handle)) = (p.device_address, &p.image_handle) {
+                    p.cover_art_path = cover_art_cached_path_in(&state.cache_dir, addr, handle);
+                }
+            }
+        }
+        Ok(pb)
+    }
+
+    fn player_toggle(&self) -> Result<bool, BtError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        if let Some(ref mut p) = state.playback {
+            let next_playing = !p.is_playing();
+            if next_playing {
+                p.status = "playing".into();
+            } else {
+                p.status = "paused".into();
+            }
+            Ok(next_playing)
+        } else {
+            Err(BtError::no_active_player("no active mock player"))
+        }
+    }
+
+    fn player_next(&self) -> Result<(), BtError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        if let Some(ref mut p) = state.playback {
+            p.position_ms = 0;
+            Ok(())
+        } else {
+            Err(BtError::no_active_player("no active mock player"))
+        }
+    }
+
+    fn player_previous(&self) -> Result<(), BtError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        if let Some(ref mut p) = state.playback {
+            p.position_ms = 0;
+            Ok(())
+        } else {
+            Err(BtError::no_active_player("no active mock player"))
+        }
+    }
+
+    fn player_seek(&self, position_ms: u32) -> Result<(), BtError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        if let Some(ref mut p) = state.playback {
+            p.position_ms = position_ms.min(p.duration_ms);
+            Ok(())
+        } else {
+            Err(BtError::no_active_player("no active mock player"))
+        }
+    }
+
     fn get_adapter_mut<'a>(
         state: &'a mut MockState,
         target_adapter: Option<&str>,
@@ -1561,12 +3193,21 @@ impl BluetoothDeviceMock {
                 _ => return Err(BtError::adapter_not_found(target)),
             }
         }
+        let mut playback = state.playback.clone();
+        if let Some(ref mut p) = playback {
+            if p.cover_art_path.is_none() {
+                if let (Some(addr), Some(handle)) = (p.device_address, &p.image_handle) {
+                    p.cover_art_path = cover_art_cached_path_in(&state.cache_dir, addr, handle);
+                }
+            }
+        }
         Ok(BluetoothStatus {
             services: state.services.clone(),
             adapter: state.adapter.clone(),
             devices: state.devices.clone().into_boxed_slice(),
             pcms: state.pcms.clone().into_boxed_slice(),
             hardware: BluetoothHardwareInfo::rpi3(),
+            playback,
         })
     }
 
@@ -1632,6 +3273,29 @@ impl BluetoothDevice {
         }
     }
 
+    /// Overrides the directory holding persistent per-device BIP resolution caps.
+    ///
+    /// Used by hermetic tests to avoid polluting the production cache directory.
+    #[must_use]
+    pub fn with_device_caps_dir(mut self, dir: &std::path::Path) -> Self {
+        if let Some(Backend::Dbus(dbus)) = Arc::get_mut(&mut self.backend) {
+            dir.clone_into(&mut dbus.device_caps_dir);
+        }
+        self
+    }
+
+    /// Overrides the directory holding downloaded cover art images.
+    ///
+    /// Used by hermetic tests to avoid touching the production cache directory
+    /// (which requires root privileges to create).
+    #[must_use]
+    pub fn with_cache_dir(mut self, dir: &std::path::Path) -> Self {
+        if let Some(Backend::Dbus(dbus)) = Arc::get_mut(&mut self.backend) {
+            dir.clone_into(&mut dbus.cache_dir);
+        }
+        self
+    }
+
     /// Inspects the status for a specific adapter (or default if `None`) synchronously.
     ///
     /// # Errors
@@ -1644,7 +3308,7 @@ impl BluetoothDevice {
             Backend::Mock(mock) => mock.read_status_for_adapter(target_adapter),
             Backend::Dbus(dbus) => {
                 let services = dbus.check_services()?;
-                let (adapter, devices) = dbus.query_bluez(target_adapter)?;
+                let (adapter, devices, playback) = dbus.query_bluez(target_adapter)?;
                 let pcms = dbus.query_bluealsa(&devices)?;
                 let mut hardware = BluetoothHardwareInfo::rpi3();
                 let probed = adapter
@@ -1657,6 +3321,7 @@ impl BluetoothDevice {
                     devices,
                     pcms,
                     hardware,
+                    playback,
                 })
             }
         }
@@ -1741,6 +3406,102 @@ impl BluetoothDevice {
     /// Returns [`BtError`] if querying fails.
     pub fn audio_pcms(&self) -> Result<Box<[BlueAlsaPcm]>, BtError> {
         Ok(self.status()?.pcms)
+    }
+
+    /// Returns the active media player playback state, if available.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if querying fails.
+    pub fn playback_state(&self) -> Result<Option<BtPlaybackState>, BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.playback_state(),
+            Backend::Dbus(dbus) => dbus.playback_state(),
+        }
+    }
+
+    /// Returns the active media player playback state asynchronously.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if reading fails or task is cancelled.
+    pub async fn playback_state_async(&self) -> Result<Option<BtPlaybackState>, BtError> {
+        let dev = self.clone();
+        crate::runtime::run_blocking("bluetooth playback read", move || dev.playback_state()).await
+    }
+
+    /// Sends a Play command to the active Bluetooth media player.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails or no player is available.
+    pub fn player_play(&self) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.player_play(),
+            Backend::Dbus(dbus) => dbus.call_player_method(None, "Play"),
+        }
+    }
+
+    /// Sends a Pause command to the active Bluetooth media player.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails or no player is available.
+    pub fn player_pause(&self) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.player_pause(),
+            Backend::Dbus(dbus) => dbus.call_player_method(None, "Pause"),
+        }
+    }
+
+    /// Toggles between Play and Pause on the active Bluetooth media player.
+    ///
+    /// Returns `true` if the player transitioned to playing, or `false` if paused.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails or no player is available.
+    pub fn player_toggle(&self) -> Result<bool, BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.player_toggle(),
+            Backend::Dbus(dbus) => dbus.player_toggle(),
+        }
+    }
+
+    /// Sends a Next command to advance to the next track.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails or no player is available.
+    pub fn player_next(&self) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.player_next(),
+            Backend::Dbus(dbus) => dbus.call_player_method(None, "Next"),
+        }
+    }
+
+    /// Sends a Previous command to restart or return to the previous track.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails or no player is available.
+    pub fn player_previous(&self) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.player_previous(),
+            Backend::Dbus(dbus) => dbus.call_player_method(None, "Previous"),
+        }
+    }
+
+    /// Requests seeking to a specific playback position in milliseconds.
+    ///
+    /// # Note
+    /// `BlueZ`'s `MediaPlayer1` only exposes a *relative* `Seek(i64 offset)` method
+    /// (offset in microseconds; positive moves forward, negative moves backward),
+    /// so the absolute target is translated using the currently reported position
+    /// read from a fresh managed-objects snapshot. In mock / preview mode, this
+    /// simulates timeline scrubbing.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if the D-Bus seek fails, no active player exists, or
+    /// (in mock mode) an injected fault fires.
+    pub fn player_seek(&self, position_ms: u32) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.player_seek(position_ms),
+            Backend::Dbus(dbus) => dbus.player_seek(position_ms),
+        }
     }
 
     /// Powers on or off the local Bluetooth radio for a specific adapter.
@@ -1853,6 +3614,12 @@ pub mod test_helpers {
     #[must_use]
     pub fn make_invalid_address_error(raw: &str, reason: &str) -> BtError {
         BtError::invalid_address(raw, reason)
+    }
+
+    /// Creates a `BtError::no_active_player` error for testing.
+    #[must_use]
+    pub fn make_no_active_player_error(details: &str) -> BtError {
+        BtError::no_active_player(details)
     }
 
     /// Creates a `BtError::cancelled` error for testing.

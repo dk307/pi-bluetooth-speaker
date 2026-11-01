@@ -1560,6 +1560,13 @@ fn bt_info_cli_mock_execution_and_controls() {
     let code = run_app(&device, &opts);
     assert_eq!(code, ExitCode::SUCCESS);
 
+    // With cover art path populated
+    if let Ok(Some(mut pb)) = device.playback_state() {
+        pb.cover_art_path = Some("/tmp/speaker-cover-AA_BB_CC-123.jpg".into());
+        mock.set_playback(Some(pb));
+    }
+    assert_eq!(run_app(&device, &opts), ExitCode::SUCCESS);
+
     opts.common.format = OutputFormat::Json;
     let code_json = run_app(&device, &opts);
     assert_eq!(code_json, ExitCode::SUCCESS);
@@ -1715,6 +1722,7 @@ fn bt_info_cli_mock_execution_and_controls() {
         available_codecs: Box::new(["SBC".into(), "aptX".into()]),
         delay: Some("150 ms".into()),
         volume: Some("80%".into()),
+        volume_percent: Some(80),
         muted: false,
         sampling_rate: 44100,
         channels: 2,

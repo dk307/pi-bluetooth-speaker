@@ -1,18 +1,29 @@
-// One POST checklist row: green checkmark, fixed-width label, live status text.
+import { Theme } from "theme.slint";
+
+// One POST checklist row: vector status dot, fixed-width label, live status text.
 component PostCheckRow inherits HorizontalLayout {
     in property <string> label;
     in property <string> status;
     spacing: 10px;
-    Text { text: "✓"; color: #7ee787; font-size: 13px; font-weight: 700; }
-    Text { text: root.label; color: #8b949e; font-size: 13px; width: 140px; }
-    Text { text: root.status; color: #f0f6fc; font-size: 13px; font-weight: 500; }
+
+    Rectangle {
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: Theme.active.primary_accent;
+        y: 4px;
+    }
+    Text { text: root.label; color: Theme.active.text_muted; font-size: 13px; width: 140px; }
+    Text { text: root.status; color: Theme.active.text_primary; font-size: 13px; font-weight: 500; }
 }
+
+export { Theme }
 
 export component SplashScreen inherits Window {
     title: "DietPi Audiophile Console";
     width: 800px;
     height: 480px;
-    background: #090d12;
+    background: Theme.active.chassis;
     default-font-family: "sans-serif";
 
     in-out property <float> progress: 100.0;
@@ -34,8 +45,8 @@ export component SplashScreen inherits Window {
             spacing: 4px;
 
             Text {
-                text: "◆ DIETPI AUDIOPHILE CONSOLE ◆";
-                color: #00c8ff;
+                text: "DIETPI AUDIOPHILE CONSOLE";
+                color: Theme.active.primary_accent;
                 font-size: 24px;
                 font-weight: 800;
                 horizontal-alignment: center;
@@ -43,7 +54,7 @@ export component SplashScreen inherits Window {
 
             Text {
                 text: "High-Resolution Digital Audio Sink & DSP Engine";
-                color: #8b949e;
+                color: Theme.active.text_muted;
                 font-size: 13px;
                 font-weight: 500;
                 horizontal-alignment: center;
@@ -51,7 +62,7 @@ export component SplashScreen inherits Window {
 
             Text {
                 text: "Appliance Release v2.0 (ARM Cortex-A53 / NEON)";
-                color: #58a6ff;
+                color: Theme.active.secondary_accent;
                 font-size: 11px;
                 font-weight: 600;
                 horizontal-alignment: center;
@@ -61,9 +72,9 @@ export component SplashScreen inherits Window {
         // Center POST Verification Card
         Rectangle {
             width: 620px;
-            background: #111923;
+            background: Theme.active.card_surface;
             border-radius: 12px;
-            border-color: #30363d;
+            border-color: Theme.active.card_border;
             border-width: 1px;
             clip: true;
 
@@ -76,13 +87,13 @@ export component SplashScreen inherits Window {
                     alignment: space-between;
                     Text {
                         text: "HARDWARE INITIALIZATION (POST)";
-                        color: #70e1ff;
+                        color: Theme.active.secondary_accent;
                         font-size: 12px;
                         font-weight: 700;
                     }
                     Text {
                         text: "\{root.progress >= 0.0 ? (root.progress > 100.0 ? 100 : Math.round(root.progress)) : 0}%";
-                        color: #7ee787;
+                        color: Theme.active.primary_accent;
                         font-size: 12px;
                         font-weight: 700;
                     }
@@ -91,7 +102,7 @@ export component SplashScreen inherits Window {
                 // Progress Bar Track
                 Rectangle {
                     height: 6px;
-                    background: #1c2430;
+                    background: Theme.active.card_border;
                     border-radius: 3px;
 
                     Rectangle {
@@ -99,7 +110,7 @@ export component SplashScreen inherits Window {
                         y: 0px;
                         width: parent.width * ((root.progress >= 0.0 && root.progress <= 100.0 ? root.progress : (root.progress > 100.0 ? 100.0 : 0.0)) / 100.0);
                         height: parent.height;
-                        background: #00c8ff;
+                        background: Theme.active.primary_accent;
                         border-radius: 3px;
                     }
                 }
@@ -146,13 +157,13 @@ export component SplashScreen inherits Window {
                 width: 8px;
                 height: 8px;
                 border-radius: 4px;
-                background: #7ee787;
+                background: Theme.active.primary_accent;
                 y: 4px;
             }
 
             Text {
                 text: root.status_text;
-                color: #c9d1d9;
+                color: Theme.active.text_primary;
                 font-size: 13px;
                 font-weight: 600;
                 horizontal-alignment: center;

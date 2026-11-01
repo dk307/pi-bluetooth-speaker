@@ -98,38 +98,40 @@ The display is divided into three functional zones:
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ [Top Status Bar (40px)]: [Source Pill ▼]      Device / Track Info      [Codec] [🌙] │
+│ [Top Status Bar (60px)]: [📶 Bluetooth]  Pixel 10 Pro XL  [Codec] [Rate] [Bit] [DIM]│
 ├──────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │                                                                              │
-│                         MAIN SCREEN VIEWPORT (380px)                         │
-│                    (Displays active screen: 0 to 5)                          │
+│                         MAIN SCREEN VIEWPORT (360px)                         │
+│                    (Displays active screen: 0 to 4)                          │
 │                                                                              │
 │                                                                              │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│ [Bottom Dock (60px)]:  [🎵 Player] [🎚️ VU] [📶 BT] [🎛️ DSP] [⚙️ Config]       │
-│                        (Optional when enabled: [💿 CD])                      │
+│ [Bottom Dock (60px)]:  [Player]  [VU Meter]  [Bluetooth]  [DSP & Tone]  [Settings]   │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-1. **Top Status Bar (Height: 40px):**
-   - **Streamlined Audio-Centric Design:** To preserve a focused, distraction-free audiophile aesthetic, ambient enclosure temperature and system clock are excluded from the top bar (thermals remain viewable in Screen 6: System Health & Thermals).
-   - **Active Source Pill:** Tap to switch active source. Displays currently enabled sources (e.g. `📶 Bluetooth`; auxiliary sources like `💿 CD Player`, `📻 AirPlay`, and `🌐 UPnP` appear only when enabled).
-   - **Connected Client / Quick Info:** Shows connected device name (e.g., `Pixel 10 Pro XL`) or current track with auto-clipping.
-   - **Codec Badge:** Real-time badge (`aptX-HD`, `AAC`, `SBC-XQ`, `48kHz`).
-   - **Night Mode Toggle:** One-tap button (`🌙`) to blank the DSI backlight.
+1. **Top Status Bar (Height: 60px):**
+   - **Symmetrical 60px Baseline:** Matches the 60px height of the bottom navigation dock for perfect vertical balance on the 800×480 screen.
+   - **Streamlined Audio-Centric Design:** Clean, distraction-free audiophile aesthetic.
+   - **Active Source Pill (Top-Left):** Vertically centered 42px pill with high-contrast centered Bluetooth rune icon (`bluetooth-rune.svg`) and active source label (`Bluetooth`).
+   - **Connected Client / Quick Info:** Shows connected device name (e.g., `Pixel 10 Pro XL`) with automated elision.
+   - **Streamlined Status Badges (Top-Right):** Clean, distraction-free typographic pills without nested icons:
+     - **Codec Badge:** Active Bluetooth codec (`aptX-HD`, `SBC`, `AAC`, `LDAC`) in primary accent gold (height 40px, font-size 16px).
+     - **Dynamic Stream Spec Badges:** Sample rate (`48 kHz`, `96 kHz`) and bit depth (`16-bit`, `24-bit`) badges in warm amber gold (`secondary_accent`) displayed only for variable/scalable codecs (`LDAC`, `aptX Adaptive`, `LHDC`, `SSC`, `SBC`, `AAC`, `LC3`), and automatically hidden for fixed-spec codecs (`aptX-HD`, `aptX`, `aptX-LL`) to eliminate spec redundancy.
+     - **Volume Control:** Real-time volume level and mute indicator linked directly to live BlueALSA / ALSA amplifier mixer controls.
+     - **Hardware DIM Mode:** Dedicated one-tap hardware backlight dimming button (`DIM`).
 
-2. **Main Viewport (Height: 380px):**
+2. **Main Viewport (Height: 360px):**
    - Displays the active screen. Supports smooth transitions and reactive view switching.
 
 3. **Bottom Navigation Dock (Height: 60px):**
-   - Touch-friendly icon bar showing currently enabled services (minimum touch target > 48px):
-     - `🎵 Player` (Now Playing & Transport)
-     - `🎚️ VU Meter` (PeppyMeter Dual Visualizer)
-     - `📶 Bluetooth` (Device Manager & Pairing)
-     - `💿 CD Player` (*Conditionally visible:* Only displayed when CD player subsystem is enabled; currently disabled by default)
-     - `🎛️ DSP & Tone` (CamillaDSP Levels & Presets)
-     - `⚙️ Settings` (Preferences, Hardware Health & Thermals)
+   - Touch-friendly icon bar showing enabled services (minimum touch target > 48px):
+     - `Player` (Now Playing & Transport)
+     - `VU Meter` (PeppyMeter Dual Visualizer)
+     - `Bluetooth` (Device Manager & Pairing)
+     - `DSP & Tone` (CamillaDSP Levels & Presets)
+     - `Settings` (Preferences, Hardware Health & Thermals)
 
 ---
 
@@ -213,36 +215,51 @@ Whenever the physical **EC12 rotary knob is turned** (or a volume change is rece
 4. **Touchscreen Interactivity:**
    - Users can drag their finger along the horizontal track to adjust volume via touch, tap `[ 🔇 MUTE ]` for soft-fade muting, or tap outside the bar to dismiss immediately.
 
+### 3.3. Dynamic Mathematical Layout & Sizing Principles (`M-SLINT-MATH-LAYOUT`)
+
+> [!IMPORTANT]
+> **Use Maths to Calculate Location and Size Where Possible — Never Pre-Calculate and Hardcode Literal Answer Sizes:**
+> In Slint UI markup, component layouts, and geometry calculations:
+> 1. **Compute Positions Dynamically:** Use mathematical expressions (such as `(parent.height - self.height) / 2`, `(parent.width - self.width) / 2`, `border-radius: self.height / 2`, or declarative alignment containers `VerticalLayout { alignment: center; ... }`).
+> 2. **Never Hardcode Offline Answers:** Do not manually calculate numbers on scratchpads and put literal pixel offsets (e.g. `y: 6px`, `y: -5px`, `y: 24px`, or manual top-alignment offsets) into `.slint` files.
+> 3. **Resilience to Scale & Bounds:** Mathematical expressions dynamically adapt whenever container dimensions, bar heights, theme metrics, or font scales change. Hardcoded literal offsets inevitably break and create visual misalignment regressions across themes or screen density changes. Let Slint compute the geometry dynamically.
+
 ---
 
 ## 4. Screen-by-Screen Breakdown & Wireframes
 
-### Screen 1: Now Playing (Playback & Artwork)
+### Screen 1: Now Playing (Playback & Transport)
 * **Visual Layout:**
-  - **Left Column (260x260):** Artwork container with rounded corners and subtle drop shadow.
+  - **Left Column (260x260):** Album art container displaying an authentic turntable vinyl record graphic (`disk.svg`) inside a rounded border, styled dynamically in the active theme accent color.
   - **Right Column (500x260):** 
-    - Track Title (large bold typography with auto-scroll marquee for long names).
-    - Artist Name & Album Name.
-    - **Audio Stream Inspector Pill:** Tap to view exact stream telemetry (`44.1 kHz / 16-bit | aptX-HD 576 kbps | CamillaDSP 48k/32bit | Clock Drift: 0.999974`).
-    - Track playback scrubber / progress bar with elapsed and remaining time.
-    - Transport buttons: `⏮️ Prev`, `⏯️ Play/Pause`, `⏭️ Next`, `🔇 Soft-Mute`.
-    - Arc / Slider Volume Indicator (bidirectionally synchronized with phone volume and physical EC12 rotary knob).
-  - **Bottom Span:** Mini real-time stereo LED peak meters linked to CamillaDSP output.
-  - **Night Mode Button (`🌙`):** Located on top bar; tapping immediately blacks out display backlight (`brightness=0`) for dark-room listening while music plays. Tap anywhere on screen to wake.
+    - **Track Title:** Large bold typography (30px) with clean elision for long names.
+    - **Artist Name:** High-contrast subtitle (22px) rendered in the secondary theme accent.
+    - **Thick Progress Scrubber:**
+      - Stretched **16px** thick played position bar with a large **26px** draggable handle knob.
+      - Bold **18px** elapsed and duration timestamps (`02:15` / `02:51`).
+      - Full touch interactivity with linear seek calculation and boundary clamping.
+    - **Large Vector Transport Controls:**
+      - `|◀` **Previous Track:** **72px** circular button with Peppy vector graphic (`left.svg`).
+      - `||` / `▶` **Hero Play/Pause:** Large **86px** circular hero button with Peppy vector graphic (`play.svg` / `pause.svg`).
+      - `▶|` **Next Track:** **72px** circular button with Peppy vector graphic (`right.svg`).
+  - **Distraction-Free Audiophile Clean-up:**
+    - Volume control is delegated to the universal rotary encoder HUD and DSP view.
+    - Mini L/R speaker VU bars are omitted from this tab (dedicated full stereo analog needle visualizers reside in Tab 1: VU Meter).
+    - Redundant stream inspector pill and album subtitle ("High Resolution DSP Sink") are removed for high readability.
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ [📶 Bluetooth ▼]  Pixel 10 Pro XL   [aptX-HD 576k]   [🌙]   [26.4°C]   [12:05]│
+│ [📶 Bluetooth]    Pixel 10 Pro XL            [aptX-HD] [48 kHz] [24-bit] [DIM]│
 ├──────────────────────────────────┬───────────────────────────────────────────┤
-│                                  │  Track Title (Marquee Scroll...)          │
-│   ┌──────────────────────────┐   │  Artist Name • Album Title                │
-│   │                          │   │  [ℹ️ 44.1kHz/16b ➔ DSP 48kHz/32b | S:0.99] │
-│   │     260x260 COVER ART    │   │                                           │
-│   │    (AVRCP 1.6 BIP /      │   │  [01:45] ━━━━━━━●──────────── [03:50]     │
-│   │     MusicBrainz / Vinyl) │   │                                           │
-│   │                          │   │     [⏮️]     [ ⏯️ ]     [⏭️]     [🔊 78%] │
-│   └──────────────────────────┘   ├───────────────────────────────────────────┤
-│                                  │  Mini VU: L [████████░░] R [████████░░]   │
+│                                  │  Track Title (Bold 30px)                  │
+│   ┌──────────────────────────┐   │  Artist Name (Accent 22px)                │
+│   │                          │   │                                           │
+│   │                          │   │                                           │
+│   │    TURNTABLE VINYL DISC  │   │  02:15  [━━━━━━━━━━━━●──────]  02:51      │
+│   │         (disk.svg)       │   │                                           │
+│   │                          │   │                                           │
+│   │                          │   │         [ |◀ ]    (  ||  )    [ ▶| ]      │
+│   └──────────────────────────┘   │         (72px)     (86px)     (72px)      │
 └──────────────────────────────────┴───────────────────────────────────────────┘
 ```
 
