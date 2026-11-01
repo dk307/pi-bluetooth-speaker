@@ -14,7 +14,7 @@
 //! - Non-blocking async queries via [`crate::runtime::run_blocking`] (`M-SERVICES-CLONE`)
 
 use std::backtrace::Backtrace;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -1300,15 +1300,27 @@ pub fn is_service_absent_fdo_error(err: &zbus::fdo::Error) -> bool {
     }
 }
 
+/// Consolidated mutable D-Bus client state protected by a single mutex.
+///
+/// This groups the OBEX session cache, Bluetooth ACL tuning history, and socket
+/// tuning flags together to reduce lock contention and code complexity.
+#[derive(Debug, Default)]
+struct DbusClientState {
+    /// Active OBEX file transfer session (target device address and path).
+    obex_session: Option<(BtAddress, OwnedObjectPath)>,
+    /// MAC addresses whose ACL links have been tuned.
+    acl_tuned: HashSet<BtAddress>,
+    /// Whether Bluetooth socket buffers have been tuned.
+    socket_tuned: bool,
+}
+
 /// D-Bus client executing direct queries against systemd, `BlueZ`, and `BlueALSA`.
 #[derive(Clone, Debug)]
 pub struct DbusClient {
     conn: Connection,
-    obex_session: Arc<Mutex<Option<(BtAddress, OwnedObjectPath)>>>,
     device_caps_dir: std::path::PathBuf,
     cache_dir: std::path::PathBuf,
-    acl_tuned: Arc<Mutex<HashSet<BtAddress>>>,
-    socket_tuned: Arc<Mutex<bool>>,
+    state: Arc<Mutex<DbusClientState>>,
 }
 
 /// Snapshot of `BlueZ` adapter, connected/paired devices, and media player state.
@@ -1319,11 +1331,9 @@ impl DbusClient {
     pub fn new(conn: Connection) -> Self {
         Self {
             conn,
-            obex_session: Arc::new(Mutex::new(None)),
             device_caps_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
-            acl_tuned: Arc::new(Mutex::new(HashSet::new())),
-            socket_tuned: Arc::new(Mutex::new(false)),
+            state: Arc::new(Mutex::new(DbusClientState::default())),
         }
     }
 
@@ -1524,12 +1534,12 @@ impl DbusClient {
     }
 
     fn ensure_obex_session(&self, addr: BtAddress, port: u16) -> Option<OwnedObjectPath> {
-        let mut session_lock = self.obex_session.lock().ok()?;
-        if let Some((cached_addr, ref path)) = *session_lock {
+        let mut session_lock = self.state.lock().ok()?;
+        if let Some((cached_addr, ref path)) = session_lock.obex_session {
             if cached_addr == addr && self.is_obex_session_alive(path.as_str()) {
                 return Some(path.clone());
             }
-            *session_lock = None;
+            session_lock.obex_session = None;
         }
 
         let client = ObexClientProxyBlocking::new(&self.conn).ok()?;
@@ -1540,7 +1550,7 @@ impl DbusClient {
         match client.create_session(&addr.to_string(), &args) {
             Ok(new_path) => {
                 tracing::info!("Created OBEX BIP session at {new_path} for device {addr}");
-                *session_lock = Some((addr, new_path.clone()));
+                session_lock.obex_session = Some((addr, new_path.clone()));
                 Some(new_path)
             }
             Err(e) => {
@@ -1552,12 +1562,13 @@ impl DbusClient {
 
     /// Raises kernel Bluetooth socket read-buffer limits once per process (`sysctl`).
     fn tune_bt_socket_buffers(&self) {
-        let Ok(mut tuned) = self.socket_tuned.lock() else {
+        let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if *tuned {
+        if state.socket_tuned {
             return;
         }
+        state.socket_tuned = true;
         let rmem_max_arg = format!("net.core.rmem_max={BT_SOCKET_RMEM_MAX}");
         let rmem_default_arg = format!("net.core.rmem_default={BT_SOCKET_RMEM_DEFAULT}");
         let (max_res, default_res) = (
@@ -1577,7 +1588,7 @@ impl DbusClient {
                 rmem_default = BT_SOCKET_RMEM_DEFAULT,
                 "Raised kernel Bluetooth socket read buffers"
             );
-            *tuned = true;
+            state.socket_tuned = true;
         } else {
             tracing::warn!("sysctl socket buffer tuning failed; will retry on next transfer");
         }
@@ -1587,10 +1598,10 @@ impl DbusClient {
     /// (`hcitool sr` + `hcitool lst`) to avoid L2CAP flow-control starvation (0x08).
     fn tune_acl_link(&self, addr: BtAddress) {
         let mac = addr.to_string();
-        let Ok(mut tuned) = self.acl_tuned.lock() else {
+        let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if tuned.contains(&addr) {
+        if state.acl_tuned.contains(&addr) {
             return;
         }
         let slot_arg = HCI_SUPERVISION_TIMEOUT_SLOTS.to_string();
@@ -1610,7 +1621,7 @@ impl DbusClient {
                 slots = HCI_SUPERVISION_TIMEOUT_SLOTS,
                 "Tuned ACL link (role switch + supervision timeout)"
             );
-            tuned.insert(addr);
+            state.acl_tuned.insert(addr);
         } else {
             tracing::warn!(
                 mac,
@@ -1669,8 +1680,8 @@ impl DbusClient {
                         "OBEX Image1 Get({}) failed for handle {handle}",
                         candidate.pixel
                     );
-                    if let Ok(mut lock) = self.obex_session.lock() {
-                        *lock = None;
+                    if let Ok(mut lock) = self.state.lock() {
+                        lock.obex_session = None;
                     }
                     cap = candidate.area - 1;
                     let _ = store_device_cap_in(&self.device_caps_dir, &sanitized_mac, cap);
@@ -1720,8 +1731,8 @@ impl DbusClient {
         // before we hammer it with OBEX session/transfer requests.
         thread::sleep(Duration::from_millis(BIP_TRACK_SETTLE_MS));
 
-        let session_lock = self.obex_session.lock().ok()?;
-        session_lock.as_ref().map(|(_, p)| p.clone())
+        let session_lock = self.state.lock().ok()?;
+        session_lock.obex_session.as_ref().map(|(_, p)| p.clone())
     }
 
     /// Builds a blocking `Image1` proxy on top of an existing BIP OBEX session path.
@@ -1840,8 +1851,8 @@ impl DbusClient {
             .or_else(|_| image_proxy.get(cache_path, handle, &empty_props));
         let Ok((transfer_path, _)) = transfer_res else {
             tracing::debug!("OBEX Image1 GetThumbnail/Get failed for handle {handle}");
-            if let Ok(mut lock) = self.obex_session.lock() {
-                *lock = None;
+            if let Ok(mut lock) = self.state.lock() {
+                lock.obex_session = None;
             }
             return None;
         };
@@ -1852,8 +1863,8 @@ impl DbusClient {
             }
             _ => {
                 let _ = std::fs::remove_file(cache_path_buf);
-                if let Ok(mut lock) = self.obex_session.lock() {
-                    *lock = None;
+                if let Ok(mut lock) = self.state.lock() {
+                    lock.obex_session = None;
                 }
                 None
             }
@@ -3223,6 +3234,68 @@ impl BluetoothDeviceMock {
 enum Backend {
     Dbus(DbusClient),
     Mock(BluetoothDeviceMock),
+}
+
+/// User-initiated transport command dispatched from the render thread to the `bt-monitor` worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportCommand {
+    /// Toggle between Play and Pause on the active media player.
+    TogglePlayPause,
+    /// Advance to the next track.
+    NextTrack,
+    /// Return to the previous track.
+    PreviousTrack,
+    /// Seek to an absolute playback position in milliseconds.
+    Seek(u32),
+}
+
+/// Thread-safe command queue bridging Slint render-thread callbacks and the
+/// `bt-monitor` worker thread so transport D-Bus calls never block the render thread.
+///
+/// The render thread only `push`es (lock-free cheap mutex); the worker drains the
+/// queue once per monitor tick and executes the blocking D-Bus calls off-thread.
+#[derive(Debug, Clone, Default)]
+pub struct TransportCommandQueue {
+    queue: Arc<Mutex<VecDeque<TransportCommand>>>,
+}
+
+impl TransportCommandQueue {
+    /// Creates an empty transport command queue.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            queue: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    /// Enqueues a transport command for execution on the `bt-monitor` worker.
+    pub fn push(&self, command: TransportCommand) {
+        if let Ok(mut lock) = self.queue.lock() {
+            // Bounded to 32 commands: rapid-fire clicks can never accumulate an
+            // unbounded backlog, and each dropped overflow command is harmless
+            // (the next authoritative state publish reconciles the UI).
+            if lock.len() < 32 {
+                lock.push_back(command);
+            } else {
+                tracing::debug!("transport command queue full; dropping {command:?}");
+            }
+        }
+    }
+
+    /// Returns `true` while at least one command is pending execution.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.queue.lock().is_ok_and(|lock| lock.is_empty())
+    }
+
+    /// Drains all pending commands in FIFO order.
+    #[must_use]
+    pub fn drain(&self) -> Vec<TransportCommand> {
+        self.queue
+            .lock()
+            .map(|mut lock| lock.drain(..).collect())
+            .unwrap_or_default()
+    }
 }
 
 /// Raspberry Pi Bluetooth controller and `BlueALSA` audio subsystem client.

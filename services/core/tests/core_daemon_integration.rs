@@ -281,16 +281,19 @@ fn run_render_loop_mocked_and_bluetooth_paths() {
 
     // 1. None bluetooth path breaking on render failure
     ctrl.set_render_error("simulated loop failure");
-    run_render_loop(&mut fb, &window, &shell, None, Some(10));
+    let commands = speaker_core::hardware::TransportCommandQueue::new();
+    run_render_loop(&mut fb, &window, &shell, None, &commands, Some(10));
 
     // 2. Bluetooth sync branch with mocked BluetoothDevice breaking on render failure
     let (bt, _) = speaker_core::hardware::BluetoothDevice::new_mocked();
     ctrl.set_render_error("simulated bt loop failure");
-    run_render_loop(&mut fb, &window, &shell, Some(&bt), Some(10));
+    let commands = speaker_core::hardware::TransportCommandQueue::new();
+    run_render_loop(&mut fb, &window, &shell, Some(&bt), &commands, Some(10));
 
     // 3. Bluetooth sync branch running short preview loop to completion (clear fault first)
     ctrl.clear_render_error();
-    run_render_loop(&mut fb, &window, &shell, Some(&bt), Some(1));
+    let commands = speaker_core::hardware::TransportCommandQueue::new();
+    run_render_loop(&mut fb, &window, &shell, Some(&bt), &commands, Some(1));
 
     // 4. run_shell_on with render error
     ctrl.set_render_error("simulated shell render error");
@@ -578,7 +581,7 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
     let (fb, _) = Framebuffer::new_mocked();
     let _window = fb.init_platform().unwrap();
     let main_window = MainWindow::new().unwrap();
-    let (shell, _) = init_shell(
+    let (shell, _, _) = init_shell(
         main_window,
         false,
         Some(speaker_core::ui::ThemePreset::Peppy),
@@ -591,7 +594,7 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
 
     // 3. init_shell with mocked_device = true exercises mocked Bluetooth path and playback sync
     let main_window_mock = MainWindow::new().unwrap();
-    let (shell_mock, bt_mock) = init_shell(
+    let (shell_mock, bt_mock, _) = init_shell(
         main_window_mock,
         true,
         Some(speaker_core::ui::ThemePreset::CyberpunkNeon),

@@ -369,18 +369,23 @@ pub fn init_shell(
     theme: Option<crate::ui::ThemePreset>,
     tab: Option<i32>,
     marquee_fps: u32,
-) -> (AppShell, Option<crate::hardware::BluetoothDevice>) {
+) -> (
+    AppShell,
+    Option<crate::hardware::BluetoothDevice>,
+    crate::hardware::TransportCommandQueue,
+) {
     let shell = AppShell::new(main_window);
     shell.set_marquee_fps(marquee_fps);
     if let Some(t) = theme {
         shell.apply_theme(t);
     }
+    let commands = crate::hardware::TransportCommandQueue::new();
     let maybe_bt = if mocked_device {
         let (mock_bt, _) = crate::hardware::BluetoothDevice::new_mocked();
         if let Ok(Some(ref pb)) = mock_bt.playback_state() {
             shell.apply_bluetooth_playback(pb);
         }
-        shell.wire_bluetooth_transport(mock_bt.clone());
+        shell.wire_bluetooth_transport(&commands);
         Some(mock_bt)
     } else {
         match crate::hardware::BluetoothDevice::new() {
@@ -388,7 +393,7 @@ pub fn init_shell(
                 if let Ok(Some(ref pb)) = bt.playback_state() {
                     shell.apply_bluetooth_playback(pb);
                 }
-                shell.wire_bluetooth_transport(bt.clone());
+                shell.wire_bluetooth_transport(&commands);
                 Some(bt)
             }
             Err(e) => {
@@ -404,7 +409,72 @@ pub fn init_shell(
     if let Some(tb) = tab {
         shell.set_tab(tb);
     }
-    (shell, maybe_bt)
+    (shell, maybe_bt, commands)
+}
+
+/// Worker-side snapshot of Bluetooth state published to the render thread.
+///
+/// Each field is an `Option` delta: `None` means "no change this tick", while the
+/// inner value carries the authoritative latest state. Cover art is decoded and
+/// upscaled here (off the render thread) and published as a pre-rendered image.
+#[cfg(feature = "ui")]
+#[derive(Debug, Default)]
+struct BtSharedUpdate {
+    /// Latest playback snapshot, if it changed since the last publish.
+    playback: Option<crate::hardware::BtPlaybackState>,
+    /// Active PCM stream, if it changed since the last publish.
+    pcm: Option<crate::hardware::BlueAlsaPcm>,
+    /// Cover art delta: outer `Some` = cover state changed; inner `Some` = path of the
+    /// (already upscaled) image to display, inner `None` = clear the displayed cover art.
+    /// Carried as a path, not a `slint::Image`, because `slint::Image` is not `Send`.
+    // The three cover states (unchanged / clear / show path) are intentional.
+    #[expect(
+        clippy::option_option,
+        reason = "delta field distinguishes no-change, clear, and show-path cover states"
+    )]
+    cover: Option<Option<Box<str>>>,
+}
+
+/// Upscales small AVRCP cover art to panel resolution with Lanczos3,
+/// caching the result next to the source file.
+#[cfg(feature = "ui")]
+fn upscale_cover_art(path: &str) -> Option<Box<str>> {
+    const TARGET_COVER_SIZE: u32 = 480;
+    tracing::debug!("UPSCALE_IN {:?}", path);
+    let src = Path::new(path);
+    let file_name = src.file_name()?;
+    let mut upscaled_name = file_name.to_os_string();
+    upscaled_name.push(".480.jpg");
+    let out_path = src.with_file_name(upscaled_name);
+    let out_str = out_path.to_str()?.to_owned().into_boxed_str();
+
+    if out_path.is_file() {
+        return Some(out_str);
+    }
+
+    let img = image::open(src).ok()?;
+    if img.width() >= TARGET_COVER_SIZE || img.height() >= TARGET_COVER_SIZE {
+        return Some(Box::<str>::from(path));
+    }
+
+    let upscaled = img.resize_exact(
+        TARGET_COVER_SIZE,
+        TARGET_COVER_SIZE,
+        image::imageops::FilterType::Lanczos3,
+    );
+    upscaled
+        .save_with_format(&out_path, image::ImageFormat::Jpeg)
+        .ok()?;
+    Some(out_str)
+}
+
+/// Loads cover art from disk (upscaling first) into a Slint image.
+#[cfg(feature = "ui")]
+fn load_cover_image(path: &str) -> Option<slint::Image> {
+    let load_path = upscale_cover_art(path).unwrap_or_else(|| path.into());
+    slint::Image::load_from_path(Path::new(load_path.as_ref()))
+        .ok()
+        .or_else(|| slint::Image::load_from_path(Path::new(path)).ok())
 }
 
 /// Polls the Bluetooth device and publishes playback/PCM changes into `shared`.
@@ -415,16 +485,32 @@ pub fn init_shell(
 #[cfg(feature = "ui")]
 fn bt_monitor_loop(
     bt: &crate::hardware::BluetoothDevice,
-    shared: &Mutex<(
-        Option<crate::hardware::BtPlaybackState>,
-        Option<crate::hardware::BlueAlsaPcm>,
-    )>,
+    shared: &Mutex<BtSharedUpdate>,
+    commands: &crate::hardware::TransportCommandQueue,
     running: &AtomicBool,
 ) {
     let mut last_pb: Option<crate::hardware::BtPlaybackState> = None;
     let mut last_pcms: Option<Box<[crate::hardware::BlueAlsaPcm]>> = None;
+    let mut last_cover_path: Option<Box<str>> = None;
 
     while running.load(Ordering::Relaxed) {
+        for command in commands.drain() {
+            match command {
+                crate::hardware::TransportCommand::TogglePlayPause => {
+                    let _ = bt.player_toggle();
+                }
+                crate::hardware::TransportCommand::NextTrack => {
+                    let _ = bt.player_next();
+                }
+                crate::hardware::TransportCommand::PreviousTrack => {
+                    let _ = bt.player_previous();
+                }
+                crate::hardware::TransportCommand::Seek(pos) => {
+                    let _ = bt.player_seek(pos);
+                }
+            }
+        }
+
         let is_playing = last_pb
             .as_ref()
             .is_some_and(crate::hardware::BtPlaybackState::is_playing);
@@ -434,22 +520,42 @@ fn bt_monitor_loop(
             Duration::from_millis(750)
         };
 
+        let mut update = BtSharedUpdate::default();
+
         if let Ok(Some(ref pb)) = bt.playback_state() {
             if last_pb.as_ref() != Some(pb) {
-                if let Ok(mut lock) = shared.lock() {
-                    lock.0 = Some(pb.clone());
+                let cover_path = pb.cover_art_path.clone();
+                if last_cover_path != cover_path {
+                    match cover_path.as_ref() {
+                        Some(path) => update.cover = Some(upscale_cover_art(path)),
+                        None => update.cover = Some(None),
+                    }
+                    last_cover_path = cover_path;
                 }
+                update.playback = Some(pb.clone());
                 last_pb = Some(pb.clone());
             }
         }
         if let Ok(ref pcms) = bt.audio_pcms() {
             if last_pcms.as_ref() != Some(pcms) {
                 if let Some(active) = pcms.iter().find(|p| p.running).or_else(|| pcms.first()) {
-                    if let Ok(mut lock) = shared.lock() {
-                        lock.1 = Some(active.clone());
-                    }
+                    update.pcm = Some(active.clone());
                 }
                 last_pcms = Some(pcms.clone());
+            }
+        }
+
+        if update.playback.is_some() || update.pcm.is_some() || update.cover.is_some() {
+            if let Ok(mut lock) = shared.lock() {
+                if update.playback.is_some() {
+                    lock.playback = update.playback;
+                }
+                if update.pcm.is_some() {
+                    lock.pcm = update.pcm;
+                }
+                if update.cover.is_some() {
+                    lock.cover = update.cover;
+                }
             }
         }
 
@@ -466,6 +572,7 @@ pub fn run_render_loop(
     window: &Rc<MinimalSoftwareWindow>,
     shell: &AppShell,
     maybe_bt: Option<&crate::hardware::BluetoothDevice>,
+    commands: &crate::hardware::TransportCommandQueue,
     preview_secs: Option<u64>,
 ) {
     let start = Instant::now();
@@ -475,20 +582,21 @@ pub fn run_render_loop(
 
     let bg_running = Arc::new(AtomicBool::new(true));
     let bg_running_worker = Arc::clone(&bg_running);
-    let shared_state: Arc<
-        Mutex<(
-            Option<crate::hardware::BtPlaybackState>,
-            Option<crate::hardware::BlueAlsaPcm>,
-        )>,
-    > = Arc::new(Mutex::new((None, None)));
+    let shared_state: Arc<Mutex<BtSharedUpdate>> = Arc::new(Mutex::new(BtSharedUpdate::default()));
     let shared_state_worker = Arc::clone(&shared_state);
+    let commands_worker = commands.clone();
 
     let bt_worker = maybe_bt.map(|bt| {
         let bt = bt.clone();
         std::thread::Builder::new()
             .name("bt-monitor".into())
             .spawn(move || {
-                bt_monitor_loop(&bt, &shared_state_worker, &bg_running_worker);
+                bt_monitor_loop(
+                    &bt,
+                    &shared_state_worker,
+                    &commands_worker,
+                    &bg_running_worker,
+                );
             })
     });
 
@@ -558,22 +666,20 @@ pub fn run_render_loop(
     println!("  Display: Render loop finished.");
 }
 
-/// Applies queued Bluetooth playback/PCM updates from the worker to the shell.
-fn apply_shared_bt_state(
-    shell: &AppShell,
-    shared_state: &Arc<
-        Mutex<(
-            Option<crate::hardware::BtPlaybackState>,
-            Option<crate::hardware::BlueAlsaPcm>,
-        )>,
-    >,
-) {
+/// Applies queued Bluetooth playback/PCM/cover updates from the worker to the shell.
+fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpdate>>) {
     if let Ok(mut lock) = shared_state.try_lock() {
-        if let Some(pb) = lock.0.take() {
+        if let Some(pb) = lock.playback.take() {
             shell.apply_bluetooth_playback(&pb);
         }
-        if let Some(pcm) = lock.1.take() {
+        if let Some(pcm) = lock.pcm.take() {
             shell.apply_pcm_stream(&pcm);
+        }
+        if let Some(cover) = lock.cover.take() {
+            match cover.and_then(|path| load_cover_image(&path)) {
+                Some(img) => shell.set_cover_image(img),
+                None => shell.set_has_cover_art(false),
+            }
         }
     }
 }
@@ -722,7 +828,7 @@ pub fn run_shell_on(
         }
     };
 
-    let (shell, maybe_bt) = init_shell(
+    let (shell, maybe_bt, commands) = init_shell(
         main_window,
         !fb.is_hardware_panel(),
         theme,
@@ -745,7 +851,14 @@ pub fn run_shell_on(
     tracing::info!("UI Shell rendered to /dev/fb0 successfully");
     println!("  Display: UI Shell rendered to /dev/fb0 successfully!");
 
-    run_render_loop(fb, &window, &shell, maybe_bt.as_ref(), preview_secs);
+    run_render_loop(
+        fb,
+        &window,
+        &shell,
+        maybe_bt.as_ref(),
+        &commands,
+        preview_secs,
+    );
 }
 
 /// Executes the core appliance daemon with parsed options.
