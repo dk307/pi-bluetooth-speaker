@@ -297,3 +297,57 @@ render rate nets an ~8-point CPU saving. Thread attribution at 30 fps: main rend
    extra strip plumbing.
 4. **Wave indicator tick rate.** The 180 ms stepped timer is already cheap after removing
    the height animations; only worth revisiting if measurements change.
+
+## 10. Framebuffer-Level Marquee Composition (2026-10-31)
+
+Implemented roadmap item 1. The marquee rows are now rendered *statically* in Slint
+(strip images pinned at `x = 0`, hidden while composition is active) and scrolled by Rust:
+
+- A clean per-row background snapshot is captured once per theme (one rendered frame
+  with the strips hidden), then each tick the composer restores the background
+  scanlines and composites the premultiplied strip tiles at the current integer
+  scroll offset (opaque pixels copied, transparent skipped, antialiased edges
+  premultiplied-over blended). The composer's dirty box is unioned with the Slint
+  dirty box before the VSync dirty-rect blit.
+- Because `NowPlayingView` lives inside a conditional element, the viewport cannot
+  reference its internals; the Slint `MarqueeCompose` **global** is the sanctioned
+  bridge for geometry/scroll/fps state (two-way bindings to globals are only legal
+  as `foo <=> bar;` with a single-identifier left side).
+- `MarqueeOverlay::set_rows` preserves per-row compose fingerprints for byte-identical
+  specs; rows only recompose when the scroll actually advanced. This is what makes
+  `--marquee-fps 30` genuinely halve the compose+blit rate — without it the raw
+  60 Hz render-loop rate recomposed every iteration regardless of the CLI flag.
+- Rows intersecting a Slint dirty region are force-recomposed, since a Slint redraw
+  rewrites the row area with the plain background (strips are invisible in compose
+  mode) — without this the strip would blank for up to one scroll tick after every
+  wave tick / 1 Hz position-text redraw.
+
+### Measured results (live Pi 3, playback, /proc utime+stime thread deltas over 10 s)
+
+| Configuration | Render thread | Total |
+|---|---|---|
+| Slint-rendered marquee, 60 fps (pre-composer) | 20.5% | ~32% |
+| FB-composed, 60 fps | 18.8% | ~31% |
+| FB-composed, 30 fps (before fingerprint fix — no change!) | 20.5% | ~32% |
+| **FB-composed, 30 fps (with fingerprint fix)** | **12.7%** | **24.4%** |
+
+Average phase costs at 60 fps: draw ~1.0 ms (dominated by ~5.5/s wave-tick frames),
+compose ~0.86 ms, blit ~0.3 ms. A run-length batching experiment for the composer
+inner loop was *slower* (0.86 → 1.33 ms) on the in-order Cortex-A53 because glyph
+edges produce many short runs with branch-heavy scanning; the simple per-pixel loop
+with one bounds-checked `get()` per pixel is faster and was kept.
+
+### Cumulative CPU trajectory (playback, one core)
+
+56% (baseline) → 35% (storm/wave fixes, 60 fps) → 27% (30 fps flag) → **24.4%**
+(FB composition + fingerprint-skipped recompose).
+
+### Remaining optimization opportunities
+
+1. **Event-driven Bluetooth monitoring (~3-5% CPU).** Replace the bt-monitor
+   thread's D-Bus polling with `PropertiesChanged` signal subscriptions so tokio
+   workers and bt-monitor only wake on real state changes.
+2. **Per-second position-text redraw (~2.5% CPU).** Known Slint 1.9.2 limitation
+   (section 8, AGENTS item 18). A digit-strip image display would avoid the
+   whole-card text cascade.
+3. **Wave indicator tick rate.** Already cheap; only revisit if measurements change.
