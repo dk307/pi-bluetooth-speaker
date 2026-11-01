@@ -30,12 +30,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use slint::PhysicalSize;
 use slint::platform::software_renderer::{
     LineBufferProvider, MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
     TargetPixel,
 };
 use slint::platform::{Platform, PlatformError, WindowAdapter};
-use slint::PhysicalSize;
 
 /// `FBIO_WAITFORVSYNC` ioctl request number (`_IOW('F', 0x20, u32)`), blocks until the
 /// display controller's next vertical blanking interval.

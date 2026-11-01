@@ -34,7 +34,7 @@ export component MainViewport inherits Rectangle {
     callback select_theme(int);
 
     // Tab 0: Now Playing
-    if root.active_tab == 0 : Rectangle {
+    if root.active_tab == 0 : VerticalLayout {
         padding: 16px;
 
         Rectangle {
@@ -66,7 +66,7 @@ export component MainViewport inherits Rectangle {
     }
 
     // Tab 1: VU Meter (Authentic PeppyMeter Skin Picture)
-    if root.active_tab == 1 : Rectangle {
+    if root.active_tab == 1 : VerticalLayout {
         padding: 8px;
 
         Rectangle {
@@ -90,7 +90,7 @@ export component MainViewport inherits Rectangle {
     }
 
     // Tab 2: Bluetooth Status & Controller
-    if root.active_tab == 2 : Rectangle {
+    if root.active_tab == 2 : VerticalLayout {
         padding: 14px;
 
         VerticalLayout {
@@ -106,9 +106,9 @@ export component MainViewport inherits Rectangle {
                     border-radius: 14px;
                     border-width: 1px;
                     border-color: Theme.active.card_border;
-                    padding: 16px;
 
                     VerticalLayout {
+                        padding: 16px;
                         spacing: 10px;
 
                         HorizontalLayout {
@@ -152,10 +152,10 @@ export component MainViewport inherits Rectangle {
                             border-radius: 8px;
                             border-width: 1px;
                             border-color: Theme.active.card_border;
-                            padding-left: 10px;
-                            padding-right: 10px;
 
                             HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
                                 alignment: start;
                                 spacing: 8px;
 
@@ -199,9 +199,9 @@ export component MainViewport inherits Rectangle {
                     border-radius: 14px;
                     border-width: 1px;
                     border-color: Theme.active.card_border;
-                    padding: 16px;
 
                     VerticalLayout {
+                        padding: 16px;
                         spacing: 10px;
 
                         HorizontalLayout {
@@ -276,10 +276,10 @@ export component MainViewport inherits Rectangle {
                 border-radius: 8px;
                 border-width: 1px;
                 border-color: Theme.active.card_border;
-                padding-left: 12px;
-                padding-right: 12px;
 
                 HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
                     alignment: space-between;
 
                     Text {
@@ -311,7 +311,7 @@ export component MainViewport inherits Rectangle {
     }
 
     // Tab 3: CD Player
-    if root.active_tab == 3 : Rectangle {
+    if root.active_tab == 3 : VerticalLayout {
         padding: 20px;
 
         Rectangle {
@@ -344,7 +344,7 @@ export component MainViewport inherits Rectangle {
     }
 
     // Tab 4: DSP & Tone Control
-    if root.active_tab == 4 : Rectangle {
+    if root.active_tab == 4 : VerticalLayout {
         padding: 20px;
 
         Rectangle {
@@ -377,7 +377,7 @@ export component MainViewport inherits Rectangle {
     }
 
     // Tab 5: Settings & Theme Switcher
-    if root.active_tab == 5 : Rectangle {
+    if root.active_tab == 5 : VerticalLayout {
         padding: 16px;
 
         Rectangle {
