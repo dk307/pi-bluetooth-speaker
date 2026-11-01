@@ -246,3 +246,54 @@ simulated second (storm-free contract).
 
 **Expected playback CPU after the wave fix:** ~12-15% of one core (marquee image blit
 ~1.4 ms + wave ticks + 1 Hz text redraw), down from ~56%.
+
+## 9. Frame-Rate Scaling & Shared Marquee Clock (2026-10-31)
+
+### What was done
+
+1. **Shared marquee clock (`9fd8da6`).** The first 30 fps attempt gave each `MarqueeText`
+   instance its own 33.3 ms timer. Live Pi data showed the render loop still rendering at
+   60 fps: independent same-interval timers drift apart against the 16.65 ms vsync cadence,
+   producing alternating dirty events whose combined rate equals the full frame rate, each
+   still repainting the union bounding box of both strip rows. Fix: a single 16.65 ms
+   `Timer` in `NowPlayingView` advances a shared integer `marquee_clock` by one scroll step
+   every `step_frames` triggers (`step_frames = round(60 / marquee_fps)`); both marquees
+   derive `scroll_frame = Math.mod(clock_frame, total_frames)` from it, so they scroll in
+   lockstep and the dirty-event rate equals the configured fps exactly.
+2. **`-m / --marquee-fps 30|60` CLI option (default 60).** At 30 fps each scroll step is
+   2 px per 33.3 ms — identical on-screen speed to 60 fps, half the renderer invocations.
+   Plumbed `CoreCliOptions.marquee_fps` through `run_ui_display` / `run_shell_on` /
+   `init_shell` into the window's `marquee_fps` property.
+3. **Double-speed bug fix (`706110e`).** The first shared-clock revision advanced the clock
+   by `step_frames` px on *every* 16.65 ms tick (2x speed); corrected to one step per
+   `step_frames` ticks via a `raw_tick` counter gated on `Math.mod(raw_tick, step_frames) == 0`.
+4. Distilled as AGENTS item 19 (shared clock for same-rate Slint timers).
+
+### Measured results (live Pi, playback active, /proc utime sampling over 10 s)
+
+| Config   | avg draw | avg dirty | CPU            |
+|----------|----------|-----------|----------------|
+| 60 fps   | 3.35 ms  | ~47k px   | ~35% of 1 core |
+| 30 fps   | 3.70 ms  | ~49k px   | ~27% of 1 core |
+
+Per-frame dirty rose versus the earlier drifting-timer build (~36k px) because the lockstep
+clock moves both strips on every animation frame (union of both rows), but the halved
+render rate nets an ~8-point CPU saving. Thread attribution at 30 fps: main render thread
+~16-18%, tokio workers ~2-3% each, bt-monitor ~3%.
+
+### Remaining optimization opportunities (not yet implemented)
+
+1. **Framebuffer-level marquee composition (~10% CPU).** Render the marquee rows
+   *statically* in Slint (dirty only when a strip changes) and scroll them in Rust by
+   composing the pre-rasterized strip pixels directly into the shadow buffer at the current
+   offset (per-frame cost ~0.3 ms memcpy vs ~3.7 ms Slint render). Requires exposing each
+   marquee row's on-screen geometry from Slint to Rust. Biggest remaining render-thread win.
+2. **Event-driven Bluetooth monitoring (~3-5% CPU).** Replace the bt-monitor thread's D-Bus
+   polling with `org.freedesktop.DBus.Properties.PropertiesChanged` signal subscriptions so
+   worker wakeups only occur on real state changes.
+3. **Per-second position-text redraw (~2.5% CPU).** Known Slint 1.9.2 limitation (section 8,
+   AGENTS item 18). A digit-strip image display (each glyph pre-rasterized once, individual
+   `Image` elements per digit) would avoid the whole-card text cascade, at the cost of
+   extra strip plumbing.
+4. **Wave indicator tick rate.** The 180 ms stepped timer is already cheap after removing
+   the height animations; only worth revisiting if measurements change.
