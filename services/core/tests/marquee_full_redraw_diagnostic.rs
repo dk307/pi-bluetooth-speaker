@@ -138,7 +138,7 @@ fn shell_marquee_compose_mode_scrolls_without_slint_dirty() {
     fb.render_frame_full_redraw(&window)
         .expect("capture render");
     let rects = shell.marquee_geometry();
-    assert_eq!(rects.len(), 2);
+    assert_eq!(rects.len(), 1);
     assert!(
         rects.iter().all(|&(_, _, w, h)| w > 0 && h > 0),
         "marquee viewports must keep their layout geometry while hidden: {rects:?}"
@@ -153,11 +153,7 @@ fn shell_marquee_compose_mode_scrolls_without_slint_dirty() {
     shell.set_marquee_strips_visible(true);
 
     let specs = shell.marquee_row_specs();
-    assert_eq!(
-        specs.len(),
-        2,
-        "both marquee rows must overflow and compose"
-    );
+    assert_eq!(specs.len(), 1, "the overflowing title row must compose");
 
     let title_rect = rects[0];
     let mut last_row: Option<Vec<u8>> = None;
@@ -202,9 +198,9 @@ fn shell_marquee_compose_mode_scrolls_without_slint_dirty() {
     );
 }
 
-/// Non-overflowing titles must still be visible in compose mode: the Slint strips
-/// are hidden there, so the composer must install a static single-tile row
-/// (scroll 0, cycle wider than the viewport) for every populated row.
+/// Non-overflowing titles must still be visible in compose mode: the Slint strip
+/// is hidden there, so the composer must install a static single-tile row
+/// (scroll 0, cycle wider than the viewport) for the populated row.
 #[test]
 fn shell_marquee_compose_mode_shows_non_overflow_rows() {
     let (mut fb, _ctrl) = Framebuffer::new_mocked();
@@ -212,11 +208,7 @@ fn shell_marquee_compose_mode_shows_non_overflow_rows() {
     let main_window = MainWindow::new().expect("MainWindow");
     let shell = AppShell::new(main_window);
     shell.apply_theme(ThemePreset::Peppy);
-    shell.set_track_metadata(
-        "A Really Long Album Title That Will Certainly Overflow The Marquee Viewport",
-        "Short",
-        "Audiophile DSP Sink",
-    );
+    shell.set_track_metadata("Short", "Short", "Audiophile DSP Sink");
     shell.set_playing(true);
     shell.set_tab(0);
 
@@ -229,37 +221,32 @@ fn shell_marquee_compose_mode_shows_non_overflow_rows() {
     for &(x, y, w, h) in &rects {
         backgrounds.push(fb.capture_region(x, y, w, h).expect("capture region"));
     }
-    let artist_background = backgrounds[1].clone();
+    let title_background = backgrounds[0].clone();
     shell.set_marquee_compose_in_rust(true);
     fb.set_marquee_rows(shell.marquee_row_specs());
     fb.install_marquee_backgrounds(backgrounds);
     shell.set_marquee_strips_visible(true);
 
     let specs = shell.marquee_row_specs();
-    assert_eq!(specs.len(), 2, "both populated rows must compose");
+    assert_eq!(specs.len(), 1, "the populated row must compose");
     let title = &specs[0];
-    let artist = &specs[1];
+    assert_eq!(
+        title.scroll_px, 0,
+        "non-overflow row must not scroll: {title:?}"
+    );
     assert!(
         title.cycle_px > title.rect.2,
-        "overflow row keeps the slint cycle: {title:?}"
-    );
-    assert_eq!(
-        artist.scroll_px, 0,
-        "non-overflow row must not scroll: {artist:?}"
-    );
-    assert!(
-        artist.cycle_px > artist.rect.2,
-        "non-overflow cycle must exceed the viewport width: {artist:?}"
+        "non-overflow cycle must exceed the viewport width: {title:?}"
     );
 
     fb.render_frame(&window).expect("compose render");
     // The non-overflow strip content must actually appear on screen: capture the
-    // artist row and verify it is not the empty background.
+    // title row and verify it is not the empty background.
     let row = fb
-        .capture_region(artist.rect.0, artist.rect.1, artist.rect.2, artist.rect.3)
+        .capture_region(title.rect.0, title.rect.1, title.rect.2, title.rect.3)
         .expect("read composed row");
     assert_ne!(
-        &*row, &*artist_background,
+        &*row, &*title_background,
         "non-overflow strip was never composed onto the background"
     );
 }

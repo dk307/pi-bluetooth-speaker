@@ -18,7 +18,6 @@ export component MainViewport inherits Rectangle {
     in-out property <bool> has_cover_art: false;
     in-out property <image> cover_image;
     in-out property <image> title_marquee_strip;
-    in-out property <image> artist_marquee_strip;
     in property <string> artist_marquee_text;
     in-out property <float> left_peak_ratio: 0.0;
     in-out property <float> right_peak_ratio: 0.0;
@@ -56,7 +55,6 @@ export component MainViewport inherits Rectangle {
                 has_cover_art: root.has_cover_art;
                 cover_image: root.cover_image;
                 title_marquee_strip: root.title_marquee_strip;
-                artist_marquee_strip: root.artist_marquee_strip;
                 artist_marquee_text: root.artist_marquee_text;
 
                 toggle_play_pause => { root.toggle_play_pause(); }

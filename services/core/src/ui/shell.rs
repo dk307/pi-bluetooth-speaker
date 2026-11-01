@@ -113,10 +113,7 @@ impl AppShell {
                 px(h, 480.0),
             )
         };
-        vec![
-            rect(g.get_title_origin(), g.get_title_w(), g.get_title_h()),
-            rect(g.get_artist_origin(), g.get_artist_w(), g.get_artist_h()),
-        ]
+        vec![rect(g.get_title_origin(), g.get_title_w(), g.get_title_h())]
     }
 
     /// Builds [`MarqueeRowSpec`]s for the Rust-side composer from the shared global and
@@ -164,26 +161,15 @@ impl AppShell {
                 strip_w: strip.width(),
             })
         };
-        vec![
-            row(
-                g.get_title_origin(),
-                g.get_title_w(),
-                g.get_title_h(),
-                g.get_title_scroll_px(),
-                g.get_title_cycle_px(),
-                g.get_title_overflow(),
-                self.strips.borrow().title(),
-            ),
-            row(
-                g.get_artist_origin(),
-                g.get_artist_w(),
-                g.get_artist_h(),
-                g.get_artist_scroll_px(),
-                g.get_artist_cycle_px(),
-                g.get_artist_overflow(),
-                self.strips.borrow().artist(),
-            ),
-        ]
+        vec![row(
+            g.get_title_origin(),
+            g.get_title_w(),
+            g.get_title_h(),
+            g.get_title_scroll_px(),
+            g.get_title_cycle_px(),
+            g.get_title_overflow(),
+            self.strips.borrow().title(),
+        )]
         .into_iter()
         .flatten()
         .collect()
@@ -486,29 +472,16 @@ impl AppShell {
             font_weight: MarqueeTypography::TITLE_FONT_WEIGHT,
             font_family: preset.font_family().into(),
         };
-        let artist_request = StripRequest {
-            text: w.get_artist_marquee_text().as_str().into(),
-            color: rgb(palette.secondary_accent),
-            font_size_px: MarqueeTypography::ARTIST_FONT_SIZE_PX,
-            font_weight: MarqueeTypography::ARTIST_FONT_WEIGHT,
-            font_family: preset.font_family().into(),
-        };
 
-        let (title_strip, artist_strip) = {
+        let title_strip = {
             let mut cache = self.strips.borrow_mut();
-            (
-                cache.rasterize_title(&title_request),
-                cache.rasterize_artist(&artist_request),
-            )
+            cache.rasterize_title(&title_request)
         };
         // Only touch the image properties when a strip actually re-rendered: setting an
         // identical property value still fires Slint change notifications and forces
         // (expensive) partial/full invalidations four times per second.
         if let Some(strip) = title_strip {
             w.set_title_marquee_strip(strip.image().clone());
-        }
-        if let Some(strip) = artist_strip {
-            w.set_artist_marquee_strip(strip.image().clone());
         }
     }
 

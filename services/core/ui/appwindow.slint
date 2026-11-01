@@ -52,7 +52,6 @@ export component MainWindow inherits Window {
     // Marquee text strips pre-rendered offscreen by `MarqueeStripRasterizer`; the images
     // are re-rasterized from Rust only when their text, color, or typography changes.
     in-out property <image> title_marquee_strip;
-    in-out property <image> artist_marquee_strip;
     // Single source of truth for the artist/album composite shown in the second marquee,
     // shared by the declarative binding and the Rust-side strip rasterizer.
     out property <string> artist_marquee_text:
@@ -109,7 +108,6 @@ export component MainWindow inherits Window {
             right_peak_ratio: root.right_peak_ratio;
             track_or_device: root.track_or_device;
             title_marquee_strip: root.title_marquee_strip;
-            artist_marquee_strip: root.artist_marquee_strip;
             artist_marquee_text: root.artist_marquee_text;
 
             toggle_play_pause => { root.toggle_play_pause(); }

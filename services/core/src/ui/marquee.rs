@@ -2,7 +2,7 @@
 //!
 //! Re-shaping and re-rasterizing long marquee strings on every animation frame costs
 //! ~8 ms of CPU per 16.7 ms frame on the Raspberry Pi 3's software renderer. This module
-//! rasterizes each marquee strip (title, artist/album composite) exactly once per text,
+//! rasterizes the title marquee strip exactly once per text,
 //! color, or typography change into a transparent-background [`slint::Image`], which
 //! [`AppShell`](super::shell::AppShell) then hands to the declarative `MarqueeText`
 //! scroller for cheap per-frame pixel blits.
@@ -175,7 +175,7 @@ impl StripRequest {
     }
 }
 
-/// Two-slot marquee strip cache (title and artist/album) sharing one offscreen rasterizer.
+/// Single-slot marquee strip cache (title) wrapping one offscreen rasterizer.
 ///
 /// Strips are re-rendered only when their [`StripRequest`] key changes, so repeated
 /// 250 ms playback-state ticks with unchanged metadata perform no rasterization work.
@@ -183,7 +183,6 @@ impl StripRequest {
 pub struct MarqueeStripCache {
     rasterizer: Option<MarqueeStripRasterizer>,
     title: Option<(StripKey, MarqueeStrip)>,
-    artist: Option<(StripKey, MarqueeStrip)>,
 }
 
 impl MarqueeStripCache {
@@ -193,23 +192,11 @@ impl MarqueeStripCache {
         self.title.as_ref().map(|(_, strip)| strip)
     }
 
-    /// The currently cached artist/album strip, if any.
-    #[must_use]
-    pub fn artist(&self) -> Option<&MarqueeStrip> {
-        self.artist.as_ref().map(|(_, strip)| strip)
-    }
-
     /// Rasterizes the title strip for `request`, or returns `None` when the cached strip
     /// already matches (no re-render, no property invalidation).
     #[must_use]
     pub fn rasterize_title(&mut self, request: &StripRequest) -> Option<MarqueeStrip> {
         Self::rasterize_slot(&mut self.rasterizer, &mut self.title, request, "title")
-    }
-
-    /// Rasterizes the artist/album strip for `request`, or returns `None` when cached.
-    #[must_use]
-    pub fn rasterize_artist(&mut self, request: &StripRequest) -> Option<MarqueeStrip> {
-        Self::rasterize_slot(&mut self.rasterizer, &mut self.artist, request, "artist")
     }
 
     /// How many actual rasterization passes were performed (cache misses).

@@ -72,20 +72,17 @@ fn marquee_strip_cache_dedupes_per_slot() {
 
     let mut cache = speaker_core::ui::MarqueeStripCache::default();
     let title = cache.rasterize_title(&request("Title One"));
-    let artist = cache.rasterize_artist(&request("Artist One"));
     assert!(!title.expect("title strip").is_empty());
-    assert!(!artist.expect("artist strip").is_empty());
-    assert_eq!(cache.renders(), 2, "two distinct slots rasterize once each");
+    assert_eq!(cache.renders(), 1, "one distinct request rasterizes once");
 
-    // Repeated identical requests in alternating slots must not re-render: `None`
-    // signals a cache hit so callers skip the property write (no invalidation).
-    assert!(cache.rasterize_artist(&request("Artist One")).is_none());
+    // A repeated identical request must not re-render: `None` signals a cache hit
+    // so callers skip the property write (no invalidation).
     assert!(cache.rasterize_title(&request("Title One")).is_none());
-    assert_eq!(cache.renders(), 2);
+    assert_eq!(cache.renders(), 1);
 
-    // Changed text re-renders only the changed slot.
+    // Changed text re-renders the single slot.
     assert!(cache.rasterize_title(&request("Title Two")).is_some());
-    assert_eq!(cache.renders(), 3);
+    assert_eq!(cache.renders(), 2);
 }
 
 #[test]

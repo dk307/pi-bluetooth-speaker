@@ -166,7 +166,7 @@ export component NowPlayingView inherits Rectangle {
     in-out property <int> marquee_clock <=> MarqueeCompose.clock;
     property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
     property <int> raw_tick: 0;
-    out property <bool> is_animating: title_marquee.is_overflow || artist_marquee.is_overflow || root.is_playing;
+    out property <bool> is_animating: title_marquee.is_overflow || root.is_playing;
 
     // Publish composer state to the shared global consumed by the Rust render loop.
     // Callback assignments (not declarative bindings) are the sanctioned way to write
@@ -178,17 +178,11 @@ export component NowPlayingView inherits Rectangle {
         MarqueeCompose.title_scroll_px = title_marquee.scroll_px;
         MarqueeCompose.title_cycle_px = title_marquee.cycle_px;
         MarqueeCompose.title_overflow = title_marquee.is_overflow;
-        MarqueeCompose.artist_origin = artist_marquee.viewport_origin;
-        MarqueeCompose.artist_w = artist_marquee.viewport_w;
-        MarqueeCompose.artist_h = artist_marquee.viewport_h;
-        MarqueeCompose.artist_scroll_px = artist_marquee.scroll_px;
-        MarqueeCompose.artist_cycle_px = artist_marquee.cycle_px;
-        MarqueeCompose.artist_overflow = artist_marquee.is_overflow;
     }
 
     Timer {
         interval: 16.65ms;
-        running: title_marquee.is_overflow || artist_marquee.is_overflow;
+        running: title_marquee.is_overflow;
         triggered() => {
             root.raw_tick += 1;
             if (Math.mod(root.raw_tick, root.step_frames) == 0) {
@@ -220,10 +214,10 @@ export component NowPlayingView inherits Rectangle {
         padding: 16px;
         spacing: 24px;
 
-        // Left Column: 260x260 Cover Art / Vinyl Disc Box
+        // Left Column: square cover art / vinyl disc box filling the column height
         Rectangle {
-            width: 260px;
-            height: 260px;
+            width: parent.height;
+            height: parent.height;
             border-radius: 16px;
             clip: true;
             background: @linear-gradient(145deg, Theme.active.card_surface 0%, Theme.active.chassis 100%);
@@ -232,11 +226,11 @@ export component NowPlayingView inherits Rectangle {
 
             // Ambient glowing aura behind the turntable when music is playing
             Rectangle {
-                x: 20px;
-                y: 20px;
-                width: 220px;
-                height: 220px;
-                border-radius: 110px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: Math.min(parent.width, parent.height) - 40px;
+                height: self.width;
+                border-radius: self.width / 2;
                 background: Theme.active.primary_accent;
                 opacity: root.is_playing ? 0.12 : 0.02;
                 animate opacity { duration: 600ms; easing: ease-in-out; }
@@ -286,13 +280,17 @@ export component NowPlayingView inherits Rectangle {
                 HorizontalLayout {
                     spacing: 12px;
 
-                    artist_marquee := MarqueeText {
+                    // The artist/album line is intentionally static (no marquee): long
+                    // text is truncated with an ellipsis instead of scrolling.
+                    Text {
                         horizontal-stretch: 1;
-                        strip: root.artist_marquee_strip;
-                        clock_frame: root.marquee_clock;
-                        marquee_fps: root.marquee_fps;
-                        compose_in_rust: root.marquee_compose_in_rust;
-                        strips_hidden: MarqueeCompose.capture_pending;
+                        text: root.artist_marquee_text;
+                        color: Theme.active.secondary_accent;
+                        font-size: 22px;
+                        font-weight: 700;
+                        overflow: elide;
+                        wrap: no-wrap;
+                        vertical-alignment: center;
                     }
 
                     if root.is_playing : AmbientWaveIndicator {
