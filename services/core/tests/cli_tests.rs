@@ -984,7 +984,7 @@ fn dsp_info_cli_argument_parsing_and_stats() {
         "-n".into(),
         "5".into(),
         "-H".into(),
-        "192.168.2.110".into(),
+        "192.168.2.120".into(),
         "-p".into(),
         "8080".into(),
         "-c".into(),
@@ -998,7 +998,7 @@ fn dsp_info_cli_argument_parsing_and_stats() {
         assert_eq!(opts.common.format, OutputFormat::Json);
         assert!(opts.common.verbose);
         assert!(opts.reset_clipped);
-        assert_eq!(opts.host.as_str(), "192.168.2.110");
+        assert_eq!(opts.host.as_str(), "192.168.2.120");
         assert_eq!(opts.port.as_u16(), 8080);
     }
 

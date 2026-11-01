@@ -155,7 +155,7 @@ Before any push, the following commands **MUST** pass in order (Zero-Retry Pre-P
 2.  **Lint:** `cargo clippy --manifest-path services/core/Cargo.toml --all-targets -- -D warnings`
 3.  **Coverage:** `cargo llvm-cov --manifest-path services/core/Cargo.toml --target x86_64-unknown-linux-gnu --fail-under-lines 90 --fail-under-functions 90`
 4.  **Cross-Compile Build:** `cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins`
-5.  **Live Hardware Test:** Deploy binaries to `root@192.168.2.110:/tmp/` (non-destructive). Verify:
+5.  **Live Hardware Test:** Deploy binaries to `root@192.168.2.120:/tmp/` (non-destructive). Verify:
     *   UI does not freeze on `on_toggle_play_pause`/`on_seek` while `bluetoothd` is under load.
     *   Cover art updates without stuttering the marquee/animation.
     *   Reconnection state handling (simulate disconnect -> verify "No Connection").

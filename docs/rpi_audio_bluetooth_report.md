@@ -1,7 +1,7 @@
 # Raspberry Pi Audio Bluetooth Server & DSP Sink — System & Services Report
 
 **Generated:** October 20, 2026  
-**Host IP:** `192.168.2.110`  
+**Host IP:** `192.168.2.120`  
 **Hostname:** `DietPi`  
 **Purpose:** Dedicated Headless Bluetooth Audio Sink with Active DSP Crossover Engine, Hardware I2S Amplifier, Freenove 4.3" DSI Touchscreen, and Custom GPIO Peripherals (Encoder, Fan, Light & Temperature Sensors)
 
@@ -28,7 +28,7 @@ The system features:
 | **Kernel** | `Linux 6.18.39+rpt-rpi-v8 #1 SMP PREEMPT Debian 1:6.18.39-1+rpt1 aarch64` |
 | **RAM** | 917 MB total (~90 MB used, ~826 MB available) |
 | **Storage** | 29 GB SD card (~2.8 GB used, 25 GB free, 10% utilization) |
-| **Primary Network** | `eth0` @ `192.168.2.110` (Fast Ethernet, MAC: `b8:27:eb:4c:60:d1`) |
+| **Primary Network** | `eth0` @ `192.168.2.120` (Fast Ethernet, MAC: `b8:27:eb:4c:60:d1`) |
 
 ---
 
@@ -376,36 +376,36 @@ udp   0      0      0.0.0.0:68          dhclient (PID 510)
 ### Amplifier & Audio Telemetry
 ```bash
 # Live MA12070P I2C register diagnostics & fault detection
-ssh root@192.168.2.110 "python3 /root/amp/ma12070p_status.py"
+ssh root@192.168.2.120 "python3 /root/amp/ma12070p_status.py"
 
 # CamillaDSP live pipeline load, buffer levels, dBFS peak/RMS meters
-ssh root@192.168.2.110 "python3 /root/amp/camilladsp-status.py"
+ssh root@192.168.2.120 "python3 /root/amp/camilladsp-status.py"
 
 # Overall Bluetooth stack & adapter status
-ssh root@192.168.2.110 "python3 /root/amp/bt_status.py"
+ssh root@192.168.2.120 "python3 /root/amp/bt_status.py"
 ```
 
 ### Test Scripts Execution
 ```bash
 # Display Diagnostic on Freenove 4.3" DSI Screen
-ssh root@192.168.2.110 "python3 /root/freenove/display_info.py"
+ssh root@192.168.2.120 "python3 /root/freenove/display_info.py"
 
 # Read temperature from DS18B20 1-Wire sensor
-ssh root@192.168.2.110 "python3 /root/read_temp.py"
+ssh root@192.168.2.120 "python3 /root/read_temp.py"
 
 # Read ambient light level from BH1750
-ssh root@192.168.2.110 "python3 /root/read_light_level.py"
+ssh root@192.168.2.120 "python3 /root/read_light_level.py"
 
 # Test PWM Fan speed control & tachometer RPM feedback
-ssh root@192.168.2.110 "python3 /root/test_fan.py"
+ssh root@192.168.2.120 "python3 /root/test_fan.py"
 
 # Test EC12 rotary encoder rotation, push button, and RGB LED sequence
-ssh root@192.168.2.110 "python3 /root/test_all_encoder.py"
+ssh root@192.168.2.120 "python3 /root/test_all_encoder.py"
 ```
 
 ### Recompile Custom Merus Overlay (If Kernel / Overlays are Updated)
 ```bash
-ssh root@192.168.2.110 "
+ssh root@192.168.2.120 "
   dtc -I dtb -O dts /boot/firmware/overlays/merus-amp.dtbo -o /tmp/merus-amp.dts && \
   grep -v 'pinctrl' /tmp/merus-amp.dts > /tmp/merus-amp-custom.dts && \
   dtc -I dts -O dtb -o /boot/firmware/overlays/merus-amp-custom.dtbo /tmp/merus-amp-custom.dts
@@ -415,33 +415,33 @@ ssh root@192.168.2.110 "
 ### Quick Non-Interactive Hardware Checks
 ```bash
 # Check Active Touchscreen Input Event Device
-ssh root@192.168.2.110 "cat /proc/bus/input/devices | grep -A 5 'raspberrypi-ts'"
+ssh root@192.168.2.120 "cat /proc/bus/input/devices | grep -A 5 'raspberrypi-ts'"
 
 # Check Framebuffer Resolution & Geometry
-ssh root@192.168.2.110 "fbset -fb /dev/fb0"
+ssh root@192.168.2.120 "fbset -fb /dev/fb0"
 
 # Check 1-Wire sensor reading directly
-ssh root@192.168.2.110 "cat /sys/bus/w1/devices/28-*/w1_slave"
+ssh root@192.168.2.120 "cat /sys/bus/w1/devices/28-*/w1_slave"
 
 # Scan I2C Bus 1 (shows 0x20 amplifier and 0x23 BH1750)
-ssh root@192.168.2.110 "i2cdetect -y 1"
+ssh root@192.168.2.120 "i2cdetect -y 1"
 ```
 
 ### Audio Services Status
 ```bash
-ssh root@192.168.2.110 "systemctl status bluetooth bt-agent bluealsa bluealsa-aplay camilladsp --no-pager"
+ssh root@192.168.2.120 "systemctl status bluetooth bt-agent bluealsa bluealsa-aplay camilladsp --no-pager"
 ```
 
 ### BlueALSA Active Streams & Connected Devices
 ```bash
-ssh root@192.168.2.110 "bluealsactl status"
-ssh root@192.168.2.110 "bluealsactl list-pcms"
-ssh root@192.168.2.110 "bluetoothctl devices"
+ssh root@192.168.2.120 "bluealsactl status"
+ssh root@192.168.2.120 "bluealsactl list-pcms"
+ssh root@192.168.2.120 "bluetoothctl devices"
 ```
 
 ### ALSA Amplifier Volumes & Controls
 ```bash
-ssh root@192.168.2.110 "amixer -c sndrpimerusamp scontents"
+ssh root@192.168.2.120 "amixer -c sndrpimerusamp scontents"
 ```
 
 ---

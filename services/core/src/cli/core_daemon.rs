@@ -361,6 +361,18 @@ pub fn run_splash_on(
     });
 }
 
+/// Fully-initialized shell plus its Bluetooth transport wiring.
+#[cfg(feature = "ui")]
+#[derive(Debug)]
+pub struct ShellInit {
+    /// Application shell bound to the Slint window.
+    pub shell: AppShell,
+    /// Connected Bluetooth device handle, if D-Bus was reachable.
+    pub bt: Option<crate::hardware::BluetoothDevice>,
+    /// Queue bridging render-thread transport callbacks to the `bt-monitor` worker.
+    pub commands: crate::hardware::TransportCommandQueue,
+}
+
 #[cfg(feature = "ui")]
 #[must_use]
 pub fn init_shell(
@@ -369,11 +381,7 @@ pub fn init_shell(
     theme: Option<crate::ui::ThemePreset>,
     tab: Option<i32>,
     marquee_fps: u32,
-) -> (
-    AppShell,
-    Option<crate::hardware::BluetoothDevice>,
-    crate::hardware::TransportCommandQueue,
-) {
+) -> ShellInit {
     let shell = AppShell::new(main_window);
     shell.set_marquee_fps(marquee_fps);
     if let Some(t) = theme {
@@ -409,7 +417,11 @@ pub fn init_shell(
     if let Some(tb) = tab {
         shell.set_tab(tb);
     }
-    (shell, maybe_bt, commands)
+    ShellInit {
+        shell,
+        bt: maybe_bt,
+        commands,
+    }
 }
 
 /// Worker-side snapshot of Bluetooth state published to the render thread.
@@ -424,57 +436,64 @@ struct BtSharedUpdate {
     playback: Option<crate::hardware::BtPlaybackState>,
     /// Active PCM stream, if it changed since the last publish.
     pcm: Option<crate::hardware::BlueAlsaPcm>,
-    /// Cover art delta: outer `Some` = cover state changed; inner `Some` = path of the
-    /// (already upscaled) image to display, inner `None` = clear the displayed cover art.
-    /// Carried as a path, not a `slint::Image`, because `slint::Image` is not `Send`.
-    // The three cover states (unchanged / clear / show path) are intentional.
+    /// Cover art delta: outer `Some` = cover state changed; inner `Some` = decoded
+    /// pixel buffer to display, inner `None` = clear the displayed cover art.
+    /// Carried as a `SharedPixelBuffer` (which is `Send + Sync`) rather than a
+    /// `slint::Image` (which is not `Send`): the expensive decode/upscale happens
+    /// on the worker, and the render thread only wraps the buffer in an image.
+    // The three cover states (unchanged / clear / show buffer) are intentional.
     #[expect(
         clippy::option_option,
-        reason = "delta field distinguishes no-change, clear, and show-path cover states"
+        reason = "delta field distinguishes no-change, clear, and show-buffer cover states"
     )]
-    cover: Option<Option<Box<str>>>,
+    cover: Option<Option<CoverPixelBuffer>>,
 }
 
-/// Upscales small AVRCP cover art to panel resolution with Lanczos3,
-/// caching the result next to the source file.
+/// Alias for the cross-thread pixel buffer backing cover art.
 #[cfg(feature = "ui")]
-fn upscale_cover_art(path: &str) -> Option<Box<str>> {
+type CoverPixelBuffer = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
+
+/// Decodes cover art (upscaling first) into a cross-thread pixel buffer.
+///
+/// Runs on the `bt-monitor` worker thread: small AVRCP cover art is upscaled to
+/// panel resolution with Lanczos3 (cached next to the source file), decoded to
+/// RGBA, and returned as a [`CoverPixelBuffer`] so the render thread never pays
+/// for the decode or the resample during a frame.
+#[cfg(feature = "ui")]
+fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
     const TARGET_COVER_SIZE: u32 = 480;
-    tracing::debug!("UPSCALE_IN {:?}", path);
+    tracing::debug!("COVER_DECODE {:?}", path);
     let src = Path::new(path);
     let file_name = src.file_name()?;
     let mut upscaled_name = file_name.to_os_string();
     upscaled_name.push(".480.jpg");
     let out_path = src.with_file_name(upscaled_name);
-    let out_str = out_path.to_str()?.to_owned().into_boxed_str();
 
-    if out_path.is_file() {
-        return Some(out_str);
-    }
+    let img = if out_path.is_file() {
+        image::open(&out_path).ok()?
+    } else {
+        let img = image::open(src).ok()?;
+        if img.width() >= TARGET_COVER_SIZE || img.height() >= TARGET_COVER_SIZE {
+            img
+        } else {
+            let upscaled = img.resize_exact(
+                TARGET_COVER_SIZE,
+                TARGET_COVER_SIZE,
+                image::imageops::FilterType::Lanczos3,
+            );
+            upscaled
+                .save_with_format(&out_path, image::ImageFormat::Jpeg)
+                .ok()?;
+            upscaled
+        }
+    };
 
-    let img = image::open(src).ok()?;
-    if img.width() >= TARGET_COVER_SIZE || img.height() >= TARGET_COVER_SIZE {
-        return Some(Box::<str>::from(path));
-    }
-
-    let upscaled = img.resize_exact(
-        TARGET_COVER_SIZE,
-        TARGET_COVER_SIZE,
-        image::imageops::FilterType::Lanczos3,
-    );
-    upscaled
-        .save_with_format(&out_path, image::ImageFormat::Jpeg)
-        .ok()?;
-    Some(out_str)
-}
-
-/// Loads cover art from disk (upscaling first) into a Slint image.
-#[cfg(feature = "ui")]
-fn load_cover_image(path: &str) -> Option<slint::Image> {
-    let load_path = upscale_cover_art(path).unwrap_or_else(|| path.into());
-    slint::Image::load_from_path(Path::new(load_path.as_ref()))
-        .ok()
-        .or_else(|| slint::Image::load_from_path(Path::new(path)).ok())
+    let rgba = img.to_rgba8();
+    Some(CoverPixelBuffer::clone_from_slice(
+        rgba.as_raw(),
+        rgba.width(),
+        rgba.height(),
+    ))
 }
 
 /// Polls the Bluetooth device and publishes playback/PCM changes into `shared`.
@@ -522,18 +541,32 @@ fn bt_monitor_loop(
 
         let mut update = BtSharedUpdate::default();
 
+        // Publish the authoritative state. When the player is gone (disconnect,
+        // D-Bus error, or a failed transport command), publish the placeholder
+        // default so the render thread clears stale optimistic UI state instead
+        // of freezing the last known track.
         if let Ok(Some(ref pb)) = bt.playback_state() {
             if last_pb.as_ref() != Some(pb) {
                 let cover_path = pb.cover_art_path.clone();
                 if last_cover_path != cover_path {
-                    match cover_path.as_ref() {
-                        Some(path) => update.cover = Some(upscale_cover_art(path)),
-                        None => update.cover = Some(None),
-                    }
+                    update.cover = Some(match cover_path.as_ref() {
+                        Some(path) => decode_cover_buffer(path),
+                        None => None,
+                    });
                     last_cover_path = cover_path;
                 }
                 update.playback = Some(pb.clone());
                 last_pb = Some(pb.clone());
+            }
+        } else {
+            let placeholder = crate::hardware::BtPlaybackState::default();
+            if last_pb.as_ref() != Some(&placeholder) {
+                if last_cover_path.is_some() {
+                    update.cover = Some(None);
+                    last_cover_path = None;
+                }
+                update.playback = Some(placeholder.clone());
+                last_pb = Some(placeholder);
             }
         }
         if let Ok(ref pcms) = bt.audio_pcms() {
@@ -676,8 +709,10 @@ fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpda
             shell.apply_pcm_stream(&pcm);
         }
         if let Some(cover) = lock.cover.take() {
-            match cover.and_then(|path| load_cover_image(&path)) {
-                Some(img) => shell.set_cover_image(img),
+            match cover {
+                // Cheap on the render thread: just wraps the pre-decoded buffer
+                // into an image handle; the expensive decode happened on the worker.
+                Some(buffer) => shell.set_cover_image(slint::Image::from_rgba8(buffer)),
                 None => shell.set_has_cover_art(false),
             }
         }
@@ -828,7 +863,11 @@ pub fn run_shell_on(
         }
     };
 
-    let (shell, maybe_bt, commands) = init_shell(
+    let ShellInit {
+        shell,
+        bt,
+        commands,
+    } = init_shell(
         main_window,
         !fb.is_hardware_panel(),
         theme,
@@ -851,14 +890,7 @@ pub fn run_shell_on(
     tracing::info!("UI Shell rendered to /dev/fb0 successfully");
     println!("  Display: UI Shell rendered to /dev/fb0 successfully!");
 
-    run_render_loop(
-        fb,
-        &window,
-        &shell,
-        maybe_bt.as_ref(),
-        &commands,
-        preview_secs,
-    );
+    run_render_loop(fb, &window, &shell, bt.as_ref(), &commands, preview_secs);
 }
 
 /// Executes the core appliance daemon with parsed options.

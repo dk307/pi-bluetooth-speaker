@@ -1363,7 +1363,6 @@ impl DbusClient {
         if state.socket_tuned {
             return;
         }
-        state.socket_tuned = true;
         let rmem_max_arg = format!("net.core.rmem_max={BT_SOCKET_RMEM_MAX}");
         let rmem_default_arg = format!("net.core.rmem_default={BT_SOCKET_RMEM_DEFAULT}");
         let (max_res, default_res) = (

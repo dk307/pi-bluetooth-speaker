@@ -11,7 +11,7 @@ use speaker_core::cli::core_daemon::{
 };
 #[cfg(feature = "ui")]
 use speaker_core::cli::core_daemon::{
-    init_shell, report_display, run_app, run_render_loop, run_shell_on, run_splash_on,
+    ShellInit, init_shell, report_display, run_app, run_render_loop, run_shell_on, run_splash_on,
     run_ui_display, run_ui_display_on_path, run_ui_lifecycle,
 };
 use speaker_core::diag::CliParse;
@@ -581,7 +581,7 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
     let (fb, _) = Framebuffer::new_mocked();
     let _window = fb.init_platform().unwrap();
     let main_window = MainWindow::new().unwrap();
-    let (shell, _, _) = init_shell(
+    let ShellInit { shell, .. } = init_shell(
         main_window,
         false,
         Some(speaker_core::ui::ThemePreset::Peppy),
@@ -594,7 +594,11 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
 
     // 3. init_shell with mocked_device = true exercises mocked Bluetooth path and playback sync
     let main_window_mock = MainWindow::new().unwrap();
-    let (shell_mock, bt_mock, _) = init_shell(
+    let ShellInit {
+        shell: shell_mock,
+        bt: bt_mock,
+        ..
+    } = init_shell(
         main_window_mock,
         true,
         Some(speaker_core::ui::ThemePreset::CyberpunkNeon),

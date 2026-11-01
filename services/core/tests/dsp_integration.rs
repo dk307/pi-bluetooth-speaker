@@ -15,7 +15,7 @@ fn host_validation_and_parsing() {
     assert!(DspHost::default().is_loopback());
     assert!(DspHost::parse_str("localhost").unwrap().is_loopback());
     assert!(DspHost::parse_str("::1").unwrap().is_loopback());
-    assert!(!DspHost::parse_str("192.168.2.110").unwrap().is_loopback());
+    assert!(!DspHost::parse_str("192.168.2.120").unwrap().is_loopback());
     DspHost::parse_str("").unwrap_err();
     DspHost::parse_str("   ").unwrap_err();
     DspHost::parse_str("bad host name").unwrap_err();

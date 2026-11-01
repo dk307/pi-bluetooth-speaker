@@ -464,7 +464,7 @@ A dedicated touch configuration screen that allows the user to customize hardwar
        - **BlueZ Storage:** Symlink `/var/lib/bluetooth` to a designated persistent path or trigger the atomic remount commit upon BlueZ `Device1.Paired == True`.
 
 6. **Web Remote Companion (Optional):**
-   - Toggle to enable a lightweight micro-server on port `8080` (`http://192.168.2.110:8080`) providing couch remote control (Now Playing metadata, Play/Pause/Skip, Volume slider) from any phone or laptop browser on the local network.
+   - Toggle to enable a lightweight micro-server on port `8080` (`http://192.168.2.120:8080`) providing couch remote control (Now Playing metadata, Play/Pause/Skip, Volume slider) from any phone or laptop browser on the local network.
 
 ---
 
@@ -506,7 +506,7 @@ A dedicated network configuration screen for managing the physical Ethernet (`et
 4. **Failsafe Reversion Timer (Lockout Protection):**
    - When applying a new Static IP configuration, the system writes to `/etc/network/interfaces` and reloads networking.
    - An on-screen confirmation modal appears:
-     > *"New IP applied: 192.168.2.110. Testing gateway response... Keep this configuration? Reverting in 30 seconds..."*
+     > *"New IP applied: 192.168.2.120. Testing gateway response... Keep this configuration? Reverting in 30 seconds..."*
    - If the user does not tap "Keep Configuration" within 30 seconds (or if the gateway is unreachable), the system automatically restores the previous working `/etc/network/interfaces` file to guarantee SSH access is never lost.
 5. **Backend Management:**
    - Interacts with `/etc/network/interfaces` and `/etc/network/interfaces.d/eth0.conf` cleanly without corrupting other interfaces.
