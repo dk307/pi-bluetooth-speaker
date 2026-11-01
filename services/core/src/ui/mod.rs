@@ -6,7 +6,6 @@
 
 #[expect(
     clippy::all,
-    clippy::pedantic,
     clippy::restriction,
     clippy::semicolon_outside_block,
     trivial_numeric_casts,

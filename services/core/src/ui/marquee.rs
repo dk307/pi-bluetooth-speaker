@@ -299,6 +299,13 @@ impl MarqueeStripRasterizer {
         if self.key.as_ref() == Some(&request.key()) {
             return self.strip.clone();
         }
+        // Parley-based text layout (Slint >= 1.14) reports non-zero font metrics for
+        // empty strings; treat empty text as no strip explicitly.
+        if request.text.trim().is_empty() {
+            self.key = Some(request.key());
+            self.strip = MarqueeStrip::empty();
+            return self.strip.clone();
+        }
         let (red, green, blue) = request.color;
         self.rasterizer
             .set_raster_text(SharedString::from(request.text.as_ref()));
