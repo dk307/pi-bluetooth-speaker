@@ -1285,6 +1285,7 @@ pub struct DbusClient {
     conn: Connection,
     obex_session: Arc<Mutex<Option<(BtAddress, OwnedObjectPath)>>>,
     device_caps_dir: std::path::PathBuf,
+    cache_dir: std::path::PathBuf,
     acl_tuned: Arc<Mutex<HashSet<BtAddress>>>,
     socket_tuned: Arc<Mutex<bool>>,
 }
@@ -1299,6 +1300,7 @@ impl DbusClient {
             conn,
             obex_session: Arc::new(Mutex::new(None)),
             device_caps_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
+            cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             acl_tuned: Arc::new(Mutex::new(HashSet::new())),
             socket_tuned: Arc::new(Mutex::new(false)),
         }
@@ -1583,11 +1585,11 @@ impl DbusClient {
     }
 
     fn fetch_cover_art(&self, addr: BtAddress, handle: &str) -> Option<Box<str>> {
-        if let Some(cached) = cover_art_cached_path(addr, handle) {
+        if let Some(cached) = cover_art_cached_path_in(&self.cache_dir, addr, handle) {
             return Some(cached);
         }
 
-        if let Err(reason) = ensure_cover_art_cache_dir() {
+        if let Err(reason) = ensure_cover_art_cache_dir_in(&self.cache_dir) {
             tracing::warn!("Cover art cache unavailable: {reason}");
             return None;
         }
@@ -1595,7 +1597,8 @@ impl DbusClient {
         let session_path = self.prepare_bip_transfer(addr)?;
         let image_proxy = self.build_image_proxy(session_path.as_str())?;
 
-        let (cache_path, sanitized_mac, sanitized_handle) = cover_art_path_for(addr, handle)?;
+        let (cache_path, sanitized_mac, sanitized_handle) =
+            cover_art_path_for_in(&self.cache_dir, addr, handle)?;
         let cache_path_buf = std::path::PathBuf::from(&cache_path);
         let _ = std::fs::remove_file(&cache_path_buf);
 
@@ -1643,7 +1646,7 @@ impl DbusClient {
                     self.wait_for_transfer(transfer_path.as_str(), BIP_VARIANT_TIMEOUT_MS);
                 let completed = settled == Some(true) && is_complete_jpeg(&tmp_path_buf);
                 if completed && std::fs::rename(&tmp_path_buf, &cache_path_buf).is_ok() {
-                    clean_old_cover_art(&sanitized_mac, &sanitized_handle);
+                    clean_old_cover_art_in(&self.cache_dir, &sanitized_mac, &sanitized_handle);
                     return Some(Box::<str>::from(cache_path));
                 }
                 let _ = std::fs::remove_file(&tmp_path_buf);
@@ -1742,7 +1745,7 @@ impl DbusClient {
                 let settled = self.wait_for_transfer(transfer_path.as_str(), BIP_NATIVE_TIMEOUT_MS);
                 let completed = settled == Some(true) && is_complete_jpeg(&tmp_path_buf);
                 if completed && std::fs::rename(&tmp_path_buf, cache_path_buf).is_ok() {
-                    clean_old_cover_art(sanitized_mac, sanitized_handle);
+                    clean_old_cover_art_in(&self.cache_dir, sanitized_mac, sanitized_handle);
                     tracing::info!(handle, "Native BIP pull succeeded for handle {handle}");
                     return Some(Box::<str>::from(cache_path));
                 }
@@ -1807,7 +1810,7 @@ impl DbusClient {
         };
         match self.wait_for_transfer(transfer_path.as_str(), BIP_THUMBNAIL_TIMEOUT_MS) {
             Some(true) if is_complete_jpeg(cache_path_buf) => {
-                clean_old_cover_art(sanitized_mac, sanitized_handle);
+                clean_old_cover_art_in(&self.cache_dir, sanitized_mac, sanitized_handle);
                 Some(Box::<str>::from(cache_path))
             }
             _ => {
@@ -2183,27 +2186,38 @@ pub fn store_native_cap_in(
 /// root-owned `0700` directory closes that window.
 pub const COVER_ART_CACHE_DIR: &str = "/var/cache/speaker-covers";
 
-/// Creates [`COVER_ART_CACHE_DIR`] with `0700` permissions if needed.
+/// Creates the cover art cache directory (defaulting to [`COVER_ART_CACHE_DIR`]) with
+/// `0700` permissions if needed.
 ///
 /// # Errors
 /// Returns an error string when the directory cannot be created or locked down.
-fn ensure_cover_art_cache_dir() -> Result<(), Box<str>> {
+fn ensure_cover_art_cache_dir_in(dir: &std::path::Path) -> Result<(), Box<str>> {
     use std::os::unix::fs::PermissionsExt;
-    let dir = std::path::Path::new(COVER_ART_CACHE_DIR);
     std::fs::create_dir_all(dir)
-        .map_err(|e| Box::<str>::from(format!("cannot create {COVER_ART_CACHE_DIR}: {e}")))?;
+        .map_err(|e| Box::<str>::from(format!("cannot create {}: {e}", dir.display())))?;
     let mut perms = std::fs::metadata(dir)
-        .map_err(|e| Box::<str>::from(format!("cannot stat {COVER_ART_CACHE_DIR}: {e}")))?
+        .map_err(|e| Box::<str>::from(format!("cannot stat {}: {e}", dir.display())))?
         .permissions();
     perms.set_mode(0o700);
     std::fs::set_permissions(dir, perms)
-        .map_err(|e| Box::<str>::from(format!("cannot chmod {COVER_ART_CACHE_DIR}: {e}")))?;
+        .map_err(|e| Box::<str>::from(format!("cannot chmod {}: {e}", dir.display())))?;
     Ok(())
 }
 
 /// Returns the deterministic cache path and sanitized MAC/handle for an OBEX cover art handle.
 #[must_use]
 pub fn cover_art_path_for(addr: BtAddress, handle: &str) -> Option<(String, String, String)> {
+    cover_art_path_for_in(std::path::Path::new(COVER_ART_CACHE_DIR), addr, handle)
+}
+
+/// Directory-parametrized variant of [`cover_art_path_for`] (testable without the
+/// production cache directory).
+#[must_use]
+pub fn cover_art_path_for_in(
+    dir: &std::path::Path,
+    addr: BtAddress,
+    handle: &str,
+) -> Option<(String, String, String)> {
     let sanitized_mac = addr.to_string().replace([':', '-'], "_");
     let sanitized_handle: String = handle
         .chars()
@@ -2212,27 +2226,33 @@ pub fn cover_art_path_for(addr: BtAddress, handle: &str) -> Option<(String, Stri
     if sanitized_handle.is_empty() {
         return None;
     }
-    let cache_path =
-        format!("{COVER_ART_CACHE_DIR}/speaker-cover-{sanitized_mac}-{sanitized_handle}.jpg");
+    let cache_path = format!(
+        "{}/speaker-cover-{sanitized_mac}-{sanitized_handle}.jpg",
+        dir.display()
+    );
     Some((cache_path, sanitized_mac, sanitized_handle))
 }
 
 /// Checks if cover art is already cached on disk and cleans obsolete images.
 #[must_use]
 pub fn cover_art_cached_path(addr: BtAddress, handle: &str) -> Option<Box<str>> {
-    let (cache_path, sanitized_mac, sanitized_handle) = cover_art_path_for(addr, handle)?;
-    cover_art_cached_path_in(
-        std::path::Path::new(COVER_ART_CACHE_DIR),
-        &cache_path,
-        &sanitized_mac,
-        &sanitized_handle,
-    )
+    cover_art_cached_path_in(std::path::Path::new(COVER_ART_CACHE_DIR), addr, handle)
 }
 
 /// Directory-parametrized variant of [`cover_art_cached_path`] (testable without the
 /// production cache directory).
 #[must_use]
 pub fn cover_art_cached_path_in(
+    dir: &std::path::Path,
+    addr: BtAddress,
+    handle: &str,
+) -> Option<Box<str>> {
+    let (cache_path, sanitized_mac, sanitized_handle) = cover_art_path_for_in(dir, addr, handle)?;
+    cover_art_cached_path_in_dir(dir, &cache_path, &sanitized_mac, &sanitized_handle)
+}
+
+/// Path-parametrized cache validity check (internal helper of [`cover_art_cached_path_in`]).
+fn cover_art_cached_path_in_dir(
     dir: &std::path::Path,
     cache_path: &str,
     sanitized_mac: &str,
@@ -2273,6 +2293,12 @@ pub fn clean_old_cover_art(sanitized_mac: &str, current_handle: &str) {
         sanitized_mac,
         current_handle,
     );
+}
+
+/// Directory-parametrized variant of [`clean_old_cover_art`] (testable without the
+/// production cache directory).
+pub fn clean_old_cover_art_in(dir: &std::path::Path, sanitized_mac: &str, current_handle: &str) {
+    clean_cover_art_in_dir(dir, sanitized_mac, current_handle);
 }
 
 impl DbusClient {
@@ -2695,6 +2721,7 @@ struct MockState {
     pcms: Vec<BlueAlsaPcm>,
     playback: Option<BtPlaybackState>,
     fault: Option<Box<str>>,
+    cache_dir: std::path::PathBuf,
 }
 
 impl BluetoothDeviceMock {
@@ -2766,6 +2793,7 @@ impl BluetoothDeviceMock {
                 cover_art_path: None,
             }),
             fault: None,
+            cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
         };
 
         Self {
@@ -2947,6 +2975,19 @@ impl BluetoothDeviceMock {
         }
     }
 
+    /// Overrides the cover art cache directory used for simulated cache lookups.
+    ///
+    /// Mirrors [`BluetoothDevice::with_cache_dir`] so hermetic tests can point the
+    /// mock at a temporary directory instead of the production cache directory
+    /// (which requires root privileges to create).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_cover_art_cache_dir(&self, dir: &std::path::Path) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        dir.clone_into(&mut state.cache_dir);
+    }
+
     fn player_play(&self) -> Result<(), BtError> {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
@@ -2982,7 +3023,7 @@ impl BluetoothDeviceMock {
         if let Some(ref mut p) = pb {
             if p.cover_art_path.is_none() {
                 if let (Some(addr), Some(handle)) = (p.device_address, &p.image_handle) {
-                    p.cover_art_path = cover_art_cached_path(addr, handle);
+                    p.cover_art_path = cover_art_cached_path_in(&state.cache_dir, addr, handle);
                 }
             }
         }
@@ -3112,7 +3153,7 @@ impl BluetoothDeviceMock {
         if let Some(ref mut p) = playback {
             if p.cover_art_path.is_none() {
                 if let (Some(addr), Some(handle)) = (p.device_address, &p.image_handle) {
-                    p.cover_art_path = cover_art_cached_path(addr, handle);
+                    p.cover_art_path = cover_art_cached_path_in(&state.cache_dir, addr, handle);
                 }
             }
         }
@@ -3195,6 +3236,18 @@ impl BluetoothDevice {
     pub fn with_device_caps_dir(mut self, dir: &std::path::Path) -> Self {
         if let Some(Backend::Dbus(dbus)) = Arc::get_mut(&mut self.backend) {
             dir.clone_into(&mut dbus.device_caps_dir);
+        }
+        self
+    }
+
+    /// Overrides the directory holding downloaded cover art images.
+    ///
+    /// Used by hermetic tests to avoid touching the production cache directory
+    /// (which requires root privileges to create).
+    #[must_use]
+    pub fn with_cache_dir(mut self, dir: &std::path::Path) -> Self {
+        if let Some(Backend::Dbus(dbus)) = Arc::get_mut(&mut self.backend) {
+            dir.clone_into(&mut dbus.cache_dir);
         }
         self
     }

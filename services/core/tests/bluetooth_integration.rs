@@ -1553,8 +1553,10 @@ fn clean_cover_art_pruning_logic() {
 
 #[test]
 fn cover_art_path_and_cache_validation() {
+    use speaker_core::diag::ScopedTempDir;
     use speaker_core::hardware::{
-        BtAddress, COVER_ART_CACHE_DIR, cover_art_cached_path, cover_art_path_for,
+        BtAddress, COVER_ART_CACHE_DIR, cover_art_cached_path, cover_art_cached_path_in,
+        cover_art_path_for, cover_art_path_for_in,
     };
 
     let addr = BtAddress::new([0x30, 0xE0, 0x44, 0x67, 0x38, 0xA2]);
@@ -1564,25 +1566,33 @@ fn cover_art_path_and_cache_validation() {
     assert!(cover_art_cached_path(addr, "").is_none());
     assert!(cover_art_path_for(addr, "!@#$%^&*()").is_none());
 
-    // Valid handle generates path
+    // Valid handle generates the production path (pure path computation, no I/O).
     let (cache_path, mac, handle) = cover_art_path_for(addr, "img-001_A").unwrap();
     assert_eq!(mac, "30_E0_44_67_38_A2");
     assert_eq!(handle, "img-001_A");
     assert_eq!(
         cache_path,
-        "/var/cache/speaker-covers/speaker-cover-30_E0_44_67_38_A2-img-001_A.jpg"
+        format!("{COVER_ART_CACHE_DIR}/speaker-cover-30_E0_44_67_38_A2-img-001_A.jpg")
     );
+
+    // Filesystem-backed cache validation runs in a hermetic temporary directory
+    // (the production cache directory requires root privileges to create).
+    let dir = ScopedTempDir::new("cover-cache-test");
+    let (tmp_path, tmp_mac, tmp_handle) =
+        cover_art_path_for_in(dir.path(), addr, "img-001_A").unwrap();
+    assert_eq!(tmp_mac, mac);
+    assert_eq!(tmp_handle, handle);
+    assert!(std::path::Path::new(&tmp_path).starts_with(dir.path()));
 
     let mut valid_jpeg = vec![0u8; 120];
     valid_jpeg[0] = 0xFF;
     valid_jpeg[1] = 0xD8;
     valid_jpeg[118] = 0xFF;
     valid_jpeg[119] = 0xD9;
-    let _ = std::fs::create_dir_all(COVER_ART_CACHE_DIR);
-    std::fs::write(&cache_path, &valid_jpeg).unwrap();
-    let res = cover_art_cached_path(addr, "img-001_A");
-    assert_eq!(res.as_deref(), Some(cache_path.as_str()));
-    let _ = std::fs::remove_file(&cache_path);
+    std::fs::write(&tmp_path, &valid_jpeg).unwrap();
+    let res = cover_art_cached_path_in(dir.path(), addr, "img-001_A");
+    assert_eq!(res.as_deref(), Some(tmp_path.as_str()));
+    let _ = std::fs::remove_file(&tmp_path);
 }
 
 #[test]
@@ -1642,11 +1652,14 @@ fn is_complete_jpeg_thorough_validation() {
 
 #[test]
 fn mock_cover_art_resolution_and_control() {
-    use speaker_core::hardware::{
-        BluetoothDevice, BtAddress, COVER_ART_CACHE_DIR, cover_art_path_for,
-    };
+    use speaker_core::diag::ScopedTempDir;
+    use speaker_core::hardware::{BluetoothDevice, BtAddress, cover_art_path_for_in};
 
+    let dir = ScopedTempDir::new("mock-cover-cache-test");
     let (device, mock) = BluetoothDevice::new_mocked();
+    // Point the mock at a harness-owned cache dir so the test never touches the
+    // root-only production cache (`/var/cache/speaker-covers`).
+    mock.set_cover_art_cache_dir(dir.path());
     let addr = BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
     // Initial mock state has no cover art path
@@ -1662,13 +1675,15 @@ fn mock_cover_art_resolution_and_control() {
     mock.set_player_cover_art(None);
     mock.set_player_image_handle(Some("test-h1".into()), Some(4097));
 
-    let (cache_path, _, _) = cover_art_path_for(addr, "test-h1").unwrap();
+    let (cache_path, tmp_mac, tmp_handle) =
+        cover_art_path_for_in(dir.path(), addr, "test-h1").unwrap();
+    assert_eq!(tmp_mac, "AA_BB_CC_DD_EE_FF");
+    assert_eq!(tmp_handle, "test-h1");
     let mut valid_bytes = vec![0u8; 128];
     valid_bytes[0] = 0xFF;
     valid_bytes[1] = 0xD8;
     valid_bytes[126] = 0xFF;
     valid_bytes[127] = 0xD9;
-    let _ = std::fs::create_dir_all(COVER_ART_CACHE_DIR);
     std::fs::write(&cache_path, &valid_bytes).unwrap();
 
     let pb = device.playback_state().unwrap().unwrap();

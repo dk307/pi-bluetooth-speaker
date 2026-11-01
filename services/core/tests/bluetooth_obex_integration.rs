@@ -279,6 +279,7 @@ struct Harness {
     state: Shared,
     mac_prefix: String,
     caps_dir: ScopedTempDir,
+    cache_dir: ScopedTempDir,
 }
 
 impl Harness {
@@ -357,20 +358,26 @@ impl Harness {
             .build()
             .unwrap();
         let caps_dir = ScopedTempDir::new("obex_caps");
+        let cache_dir = ScopedTempDir::new("obex_covers");
         let harness = Self {
             daemon,
             _server: server,
-            device: BluetoothDevice::with_connection(client).with_device_caps_dir(caps_dir.path()),
+            device: BluetoothDevice::with_connection(client)
+                .with_device_caps_dir(caps_dir.path())
+                .with_cache_dir(cache_dir.path()),
             state,
             mac_prefix: format!("speaker-cover-{mac_us}-"),
             caps_dir,
+            cache_dir,
         };
         harness.remove_cover_files();
         harness
     }
 
     fn remove_cover_files(&self) {
-        for dir in ["/tmp", speaker_core::hardware::COVER_ART_CACHE_DIR] {
+        // Legacy `/tmp` leftovers are also pruned; active runs write only to the
+        // harness-owned cache directory (see `with_cache_dir`).
+        for dir in [std::path::Path::new("/tmp"), self.cache_dir.path()] {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 continue;
             };
