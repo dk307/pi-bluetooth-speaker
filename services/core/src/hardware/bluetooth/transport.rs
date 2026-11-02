@@ -108,13 +108,18 @@ pub struct BtPlaybackState {
     pub cover_art_path: Option<Box<str>>,
 }
 
+/// Placeholder title shown whenever no Bluetooth media player is connected.
+/// Single source of truth shared by the transport default state and the D-Bus
+/// property fallbacks in the connection module.
+pub const BT_NO_CONNECTION_TITLE: &str = "Waiting for Bluetooth Connection...";
+
 impl Default for BtPlaybackState {
     fn default() -> Self {
         Self {
             device_address: None,
             device_name: "Bluetooth Audio Device".into(),
             status: "stopped".into(),
-            title: "Waiting for Bluetooth Connection...".into(),
+            title: BT_NO_CONNECTION_TITLE.into(),
             artist: "".into(),
             album: "".into(),
             position_ms: 0,
@@ -249,30 +254,54 @@ impl TransportCommandQueue {
 
     /// Enqueues a transport command for execution on the `bt-monitor` worker.
     pub fn push(&self, command: TransportCommand) {
-        if let Ok(mut lock) = self.queue.lock() {
-            // Bounded to 32 commands: rapid-fire clicks can never accumulate an
-            // unbounded backlog, and each dropped overflow command is harmless
-            // (the next authoritative state publish reconciles the UI).
-            if lock.len() < 32 {
-                lock.push_back(command);
-            } else {
-                tracing::debug!("transport command queue full; dropping {command:?}");
+        let mut lock = match self.queue.lock() {
+            Ok(lock) => lock,
+            Err(poisoned) => {
+                tracing::warn!("TransportCommandQueue mutex poisoned in push; recovering");
+                poisoned.into_inner()
+            }
+        };
+        // Bounded to 32 commands: rapid-fire clicks can never accumulate an
+        // unbounded backlog, and each dropped overflow command is harmless
+        // (the next authoritative state publish reconciles the UI).
+        if lock.len() < 32 {
+            lock.push_back(command);
+        } else {
+            tracing::debug!("transport command queue full; dropping {command:?}");
+        }
+    }
+
+    /// Returns `true` while no command is pending execution.
+    ///
+    /// # Errors
+    /// Never: a poisoned mutex is recovered with `into_inner` so the queue state
+    /// stays queryable (command queue poisoning cannot happen without a prior
+    /// panic while the lock was held).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        match self.queue.lock() {
+            Ok(lock) => lock.is_empty(),
+            Err(poisoned) => {
+                tracing::warn!("TransportCommandQueue mutex poisoned in is_empty; recovering");
+                poisoned.into_inner().is_empty()
             }
         }
     }
 
-    /// Returns `true` while at least one command is pending execution.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.queue.lock().is_ok_and(|lock| lock.is_empty())
-    }
-
     /// Drains all pending commands in FIFO order.
+    ///
+    /// # Errors
+    /// Never: a poisoned mutex is recovered with `into_inner` so pending commands
+    /// are never silently dropped.
     #[must_use]
     pub fn drain(&self) -> Vec<TransportCommand> {
-        self.queue
-            .lock()
-            .map(|mut lock| lock.drain(..).collect())
-            .unwrap_or_default()
+        match self.queue.lock() {
+            Ok(mut lock) => lock.drain(..).collect(),
+            Err(poisoned) => {
+                tracing::warn!("TransportCommandQueue mutex poisoned in drain; recovering");
+                let mut lock = poisoned.into_inner();
+                lock.drain(..).collect()
+            }
+        }
     }
 }

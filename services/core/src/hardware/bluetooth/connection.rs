@@ -1022,10 +1022,7 @@ fn get_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Box<
     }
 }
 
-/// Decodes a `BlueALSA` 16-bit PCM format identifier (e.g. `0x8410` → `S16_2LE`).
-///
-/// Encoding per `BlueALSA` `BA_TRANSPORT_PCM_FORMAT`: bit 15 = signed, bit 14 = big-endian,
-/// bits 8–13 = physical bytes per sample, bits 0–7 = bit width.
+/// Reports whether the D-Bus error means the queried systemd unit does not exist.
 #[must_use]
 pub fn is_no_such_unit_error(err: &zbus::Error) -> bool {
     match err {
@@ -1175,36 +1172,42 @@ impl ChangeFlag {
 /// change signals from `org.bluez` and `org.bluealsa` on the system bus and wakes
 /// the shared [`ChangeFlag`] whenever one arrives.
 ///
-/// If the system bus cannot be reached, the thread exits immediately and callers
-/// fall back to the keep-alive timeout polling path.
+/// If the system bus cannot be reached, the thread retries with backoff and
+/// callers fall back to the keep-alive timeout polling path meanwhile.
 fn spawn_properties_changed_listener() -> Arc<ChangeFlag> {
+    const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
     let flag = Arc::new(ChangeFlag::default());
     let listener_flag = Arc::clone(&flag);
     let Ok(join) = std::thread::Builder::new()
         .name("bt-dbus-signals".into())
         .spawn(move || {
-            let Ok(conn) = Connection::system() else {
-                return;
-            };
             // A single unfiltered PropertiesChanged rule avoids the deadlock of
             // per-sender blocking iterators (each `next()` would block forever on
             // its own sender). Extra wakeups from unrelated services are cheap:
             // they just trigger one extra state re-poll on the monitor thread.
-            let Ok(rule) = zbus::MatchRule::builder()
-                .msg_type(zbus::message::Type::Signal)
-                .interface("org.freedesktop.DBus.Properties")
-                .map(zbus::match_rule::Builder::build)
-            else {
-                return;
-            };
-            let Ok(mut iter) = zbus::blocking::MessageIterator::for_match_rule(rule, &conn, None)
-            else {
-                return;
-            };
             loop {
-                if iter.next().is_some() {
+                let Ok(conn) = Connection::system() else {
+                    std::thread::sleep(RECONNECT_BACKOFF);
+                    continue;
+                };
+                let Ok(rule) = zbus::MatchRule::builder()
+                    .msg_type(zbus::message::Type::Signal)
+                    .interface("org.freedesktop.DBus.Properties")
+                    .map(zbus::match_rule::Builder::build)
+                else {
+                    std::thread::sleep(RECONNECT_BACKOFF);
+                    continue;
+                };
+                let Ok(iter) = zbus::blocking::MessageIterator::for_match_rule(rule, &conn, None)
+                else {
+                    std::thread::sleep(RECONNECT_BACKOFF);
+                    continue;
+                };
+                for _ in iter {
                     listener_flag.notify();
                 }
+                // Iterator exhausted (bus lost/restarted): reconnect after backoff.
+                std::thread::sleep(RECONNECT_BACKOFF);
             }
         })
     else {
@@ -1376,7 +1379,7 @@ impl DbusClient {
             // Bluetooth Connection..." placeholder title and leave the artist
             // and album lines empty so the UI does not display stale branding.
             (
-                "Waiting for Bluetooth Connection...".into(),
+                super::transport::BT_NO_CONNECTION_TITLE.into(),
                 "".into(),
                 "".into(),
                 0,

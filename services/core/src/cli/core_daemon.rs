@@ -498,6 +498,69 @@ fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
 
 /// Polls the Bluetooth device and publishes playback/PCM changes into `shared`.
 ///
+/// Publishes the authoritative Bluetooth playback snapshot into the shared update.
+///
+/// On `Ok(None)` publishes the connection placeholder so stale optimistic UI
+/// state is cleared; on query errors keeps the last published state. Cover art
+/// changes are decoded here (off the render thread); a failed decode keeps the
+/// previous art and does not advance the dedup path.
+#[cfg(feature = "ui")]
+fn publish_playback_state(
+    bt: &crate::hardware::BluetoothDevice,
+    update: &mut BtSharedUpdate,
+    last_pb: &mut Option<crate::hardware::BtPlaybackState>,
+    last_cover_path: &mut Option<Box<str>>,
+    pre_command_playing: Option<bool>,
+    command_settle_started: Option<Instant>,
+) {
+    const BT_COMMAND_SETTLE: Duration = Duration::from_millis(750);
+    match bt.playback_state() {
+        Ok(Some(ref pb)) => {
+            let settling =
+                pre_command_playing
+                    .zip(command_settle_started)
+                    .is_some_and(|(pre, started)| {
+                        started.elapsed() < BT_COMMAND_SETTLE && pb.is_playing() == pre
+                    });
+            if !settling && last_pb.as_ref() != Some(pb) {
+                let cover_path = pb.cover_art_path.clone();
+                if *last_cover_path != cover_path {
+                    // A failed decode keeps the previously published art (never
+                    // blanks it) and pins `last_cover_path` so a persistently
+                    // broken file is not re-decoded every tick.
+                    if let Some(path) = cover_path.as_ref() {
+                        if let Some(buffer) = decode_cover_buffer(path) {
+                            update.cover = Some(Some(buffer));
+                            *last_cover_path = cover_path;
+                        } else {
+                            tracing::warn!("cover decode failed for {path}");
+                        }
+                    } else {
+                        update.cover = Some(None);
+                        *last_cover_path = None;
+                    }
+                }
+                update.playback = Some(pb.clone());
+                *last_pb = Some(pb.clone());
+            }
+        }
+        Ok(None) => {
+            let placeholder = crate::hardware::BtPlaybackState::default();
+            if last_pb.as_ref() != Some(&placeholder) {
+                if last_cover_path.is_some() {
+                    update.cover = Some(None);
+                    *last_cover_path = None;
+                }
+                update.playback = Some(placeholder.clone());
+                *last_pb = Some(placeholder);
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "playback_state query failed; keeping last state");
+        }
+    }
+}
+
 /// Runs on the dedicated `bt-monitor` thread until `running` is cleared.
 /// Panics here are re-raised by the render loop's `join()` so a dead monitor
 /// fails the daemon instead of leaving the playback UI silently stale.
@@ -536,58 +599,44 @@ fn bt_monitor_loop(
             command_settle_started = Some(Instant::now());
         }
         for command in drained {
-            match command {
+            // A failed command is logged (never silently dropped) so operators can
+            // diagnose why the authoritative state failed to reconcile the
+            // optimistic UI flip; the next authoritative publish corrects the UI.
+            if let Err(e) = match command {
                 crate::hardware::TransportCommand::TogglePlayPause => {
-                    let _ = bt.player_toggle();
+                    bt.player_toggle().map(|_| ())
                 }
-                crate::hardware::TransportCommand::NextTrack => {
-                    let _ = bt.player_next();
-                }
-                crate::hardware::TransportCommand::PreviousTrack => {
-                    let _ = bt.player_previous();
-                }
-                crate::hardware::TransportCommand::Seek(pos) => {
-                    let _ = bt.player_seek(pos);
-                }
+                crate::hardware::TransportCommand::NextTrack => bt.player_next(),
+                crate::hardware::TransportCommand::PreviousTrack => bt.player_previous(),
+                crate::hardware::TransportCommand::Seek(pos) => bt.player_seek(pos),
+            } {
+                tracing::warn!(error = %e, "Bluetooth transport command failed");
             }
         }
 
         let mut update = BtSharedUpdate::default();
 
-        // Publish the authoritative state. When the player is gone (disconnect,
-        // D-Bus error, or a failed transport command), publish the placeholder
-        // default so the render thread clears stale optimistic UI state instead
-        // of freezing the last known track.
-        if let Ok(Some(ref pb)) = bt.playback_state() {
-            let settling =
-                pre_command_playing
-                    .zip(command_settle_started)
-                    .is_some_and(|(pre, started)| {
-                        started.elapsed() < BT_COMMAND_SETTLE && pb.is_playing() == pre
-                    });
-            if !settling && last_pb.as_ref() != Some(pb) {
-                let cover_path = pb.cover_art_path.clone();
-                if last_cover_path != cover_path {
-                    update.cover = Some(match cover_path.as_ref() {
-                        Some(path) => decode_cover_buffer(path),
-                        None => None,
-                    });
-                    last_cover_path = cover_path;
-                }
-                update.playback = Some(pb.clone());
-                last_pb = Some(pb.clone());
-            }
-        } else {
-            let placeholder = crate::hardware::BtPlaybackState::default();
-            if last_pb.as_ref() != Some(&placeholder) {
-                if last_cover_path.is_some() {
-                    update.cover = Some(None);
-                    last_cover_path = None;
-                }
-                update.playback = Some(placeholder.clone());
-                last_pb = Some(placeholder);
+        // Force-publish one authoritative snapshot after the settle window expires:
+        // if the command failed silently (or the peer never changed status), the
+        // shell's optimistic flip must be reconciled instead of diverging forever.
+        if let Some(started) = command_settle_started {
+            if started.elapsed() >= BT_COMMAND_SETTLE {
+                command_settle_started = None;
+                pre_command_playing = None;
+                last_pb = None;
             }
         }
+
+        // Publish the authoritative state; transient D-Bus errors keep the last
+        // published state instead of flashing the placeholder over live playback.
+        publish_playback_state(
+            bt,
+            &mut update,
+            &mut last_pb,
+            &mut last_cover_path,
+            pre_command_playing,
+            command_settle_started,
+        );
         if let Ok(ref pcms) = bt.audio_pcms() {
             if last_pcms.as_ref() != Some(pcms) {
                 if let Some(active) = pcms.iter().find(|p| p.running).or_else(|| pcms.first()) {
@@ -613,12 +662,14 @@ fn bt_monitor_loop(
 
         let deadline = Instant::now() + BT_KEEP_ALIVE;
         while running.load(Ordering::Relaxed) && Instant::now() < deadline {
-            let slice = (deadline - Instant::now()).min(BT_WAIT_SLICE);
-            let _ = bt.wait_for_property_change(slice);
-            if !commands.is_empty() {
-                break;
-            }
-            if !commands.is_empty() {
+            let slice = deadline
+                .saturating_duration_since(Instant::now())
+                .min(BT_WAIT_SLICE);
+            // A `true` return means a PropertiesChanged signal arrived: breaking
+            // out re-polls immediately so track/status/position changes surface
+            // without waiting for the remaining keep-alive window.
+            let signaled = bt.wait_for_property_change(slice);
+            if signaled || !commands.is_empty() {
                 break;
             }
         }
