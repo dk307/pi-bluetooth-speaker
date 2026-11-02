@@ -467,19 +467,63 @@ struct CoverState {
 
 /// Optimistic-UI convergence state for a pending transport command.
 ///
-/// Only play/pause flips the shell's `is_playing` optimistically, so only that
-/// command arms this window: while it is active, a snapshot whose status still
-/// matches the pre-command status is suppressed. Next/Previous/Seek leave the
-/// AVRCP status unchanged and must publish metadata updates immediately.
+/// How the optimistic UI was updated ahead of the authoritative state.
+///
+/// Play/pause moves the status indicator; seek scrubs the progress bar. Both
+/// are applied optimistically by the shell before the peer confirms, so both
+/// can be reverted by a stale pre-command snapshot.
+#[cfg(feature = "ui")]
+#[derive(Debug)]
+enum SettleKind {
+    /// Suppress snapshots still reporting the pre-command playing state.
+    Toggle {
+        /// Playing state observed before the optimistic flip was applied.
+        pre_playing: bool,
+    },
+    /// Suppress snapshots still reporting the pre-seek AVRCP position.
+    Seek {
+        /// Target position (ms) the shell scrubbed the progress bar to.
+        target_ms: u32,
+    },
+}
+
+/// A settle window during which snapshots conflicting with the shell's
+/// optimistic state are suppressed. The window expires after
+/// [`BT_COMMAND_SETTLE`] and the expiry force-publishes one authoritative
+/// snapshot, so a failed command always reconciles.
 #[cfg(feature = "ui")]
 #[derive(Debug)]
 struct SettleWindow {
-    /// Playing state observed before the optimistic flip was applied.
-    pre_playing: bool,
+    /// Which optimistic update this window protects.
+    kind: SettleKind,
     /// When the command was issued; the window expires after
     /// [`BT_COMMAND_SETTLE`].
     started: Instant,
 }
+
+impl SettleWindow {
+    /// Reports whether `pb` still conflicts with the optimistic state this
+    /// window protects (and is therefore withheld from the shell).
+    fn suppresses(&self, pb: &crate::hardware::BtPlaybackState) -> bool {
+        if self.started.elapsed() >= BT_COMMAND_SETTLE {
+            return false;
+        }
+        match &self.kind {
+            SettleKind::Toggle { pre_playing } => pb.is_playing() == *pre_playing,
+            SettleKind::Seek { target_ms } => {
+                (i64::from(pb.position_ms) - i64::from(*target_ms)).abs()
+                    > i64::from(BT_SEEK_STALE_TOLERANCE_MS)
+            }
+        }
+    }
+}
+
+/// Maximum AVRCP position distance (ms) from a seek target that is treated as
+/// caught up; larger distances during a settle window are stale pre-seek
+/// snapshots and are suppressed. Tiny seeks within this tolerance publish
+/// immediately (a snap-back is visually indistinguishable).
+#[cfg(feature = "ui")]
+const BT_SEEK_STALE_TOLERANCE_MS: u32 = 800;
 
 /// Decodes cover art (upscaling first) into a cross-thread pixel buffer.
 ///
@@ -560,9 +604,7 @@ fn publish_playback_state(
                 *settle = None;
                 *last_pb = None;
             }
-            let settling = settle.as_ref().is_some_and(|w| {
-                w.started.elapsed() < BT_COMMAND_SETTLE && pb.is_playing() == w.pre_playing
-            });
+            let settling = settle.as_ref().is_some_and(|w| w.suppresses(pb));
             if !settling && last_pb.as_ref() != Some(pb) {
                 update.playback = Some(pb.clone());
                 *last_pb = Some(pb.clone());
@@ -639,17 +681,33 @@ fn bt_monitor_loop(
 
     while running.load(Ordering::Relaxed) {
         let drained = commands.drain();
-        // Only play/pause flips the shell's `is_playing` optimistically, so it
-        // is the only command whose post-command snapshot can revert the flip;
-        // Next/Previous/Seek leave the status unchanged and must publish freely.
-        // The window is only (re)armed on a toggle so an in-flight window
-        // survives unrelated command batches within the settle period.
-        if drained
+        // Play/pause flips the shell's status indicator and seek scrubs the
+        // progress bar, both optimistically ahead of peer confirmation. A
+        // snapshot fetched immediately after either command can still carry
+        // the pre-command state (AVRCP lags by hundreds of milliseconds), so
+        // conflicting snapshots are suppressed until the peer catches up. The
+        // window is only re-armed on a fresh optimistic command so an
+        // in-flight window survives unrelated command batches.
+        let toggle = drained
             .iter()
-            .any(|c| matches!(c, crate::hardware::TransportCommand::TogglePlayPause))
-        {
+            .any(|c| matches!(c, crate::hardware::TransportCommand::TogglePlayPause));
+        let seek = drained.iter().find_map(|c| match c {
+            crate::hardware::TransportCommand::Seek(pos) => Some(*pos),
+            _ => None,
+        });
+        if toggle || seek.is_some() {
+            // A toggle arm wins when both land in one batch: the status flip is
+            // the more visible artifact, and a same-batch seek is rare.
             settle = last_pb.as_ref().map(|pre| SettleWindow {
-                pre_playing: pre.is_playing(),
+                kind: if toggle {
+                    SettleKind::Toggle {
+                        pre_playing: pre.is_playing(),
+                    }
+                } else {
+                    SettleKind::Seek {
+                        target_ms: seek.unwrap_or_default(),
+                    }
+                },
                 started: Instant::now(),
             });
         }
@@ -667,6 +725,14 @@ fn bt_monitor_loop(
             } {
                 tracing::warn!(error = %e, "Bluetooth transport command failed");
             }
+        }
+
+        // A command that landed during the blocking snapshot query must not
+        // race a pre-command publish: skip this tick and re-drain immediately
+        // so the optimistic flip (applied while the query was in flight) is
+        // never reverted by stale state.
+        if !commands.is_empty() {
+            continue;
         }
 
         let mut update = BtSharedUpdate::default();
@@ -1145,6 +1211,39 @@ mod tests {
     }
 
     #[test]
+    fn settle_window_suppresses_stale_seek_position() {
+        // A snapshot still carrying the pre-seek AVRCP position (far from the
+        // scrub target) is suppressed so the optimistic scrubber is not
+        // snapped back; once the peer reports near the target it publishes.
+        let fresh = Instant::now();
+        let stale = SettleWindow {
+            kind: SettleKind::Seek { target_ms: 120_000 },
+            started: fresh,
+        };
+        let mut far = playback(None, true);
+        far.position_ms = 1_000;
+        assert!(stale.suppresses(&far), "pre-seek position is stale");
+        let mut near = playback(None, true);
+        near.position_ms = 120_400;
+        assert!(!stale.suppresses(&near), "caught-up position publishes");
+    }
+
+    #[test]
+    fn settle_window_releases_on_expiry() {
+        let mut pb = playback(None, true);
+        pb.position_ms = 1_000;
+        let mut w = SettleWindow {
+            kind: SettleKind::Seek { target_ms: 120_000 },
+            started: Instant::now(),
+        };
+        assert!(w.suppresses(&pb));
+        w.started = Instant::now()
+            .checked_sub(BT_COMMAND_SETTLE + Duration::from_secs(1))
+            .expect("monotonic instant before start");
+        assert!(!w.suppresses(&pb), "expired window never suppresses");
+    }
+
+    #[test]
     fn publish_suppresses_matching_settle_snapshot() {
         let (bt, mock) = BluetoothDevice::new_mocked();
         // The mocked snapshot must differ from `last_pb` (advanced position,
@@ -1157,7 +1256,7 @@ mod tests {
         let mut last_pb = Some(playback(None, true));
         let mut cover = CoverState::default();
         let mut settle = Some(SettleWindow {
-            pre_playing: true,
+            kind: SettleKind::Toggle { pre_playing: true },
             started: Instant::now(),
         });
         publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
@@ -1173,7 +1272,7 @@ mod tests {
             .checked_sub(BT_COMMAND_SETTLE + Duration::from_secs(1))
             .expect("monotonic instant before start");
         let mut settle = Some(SettleWindow {
-            pre_playing: true,
+            kind: SettleKind::Toggle { pre_playing: true },
             started,
         });
         let mut last_pb: Option<crate::hardware::BtPlaybackState> = None;

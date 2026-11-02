@@ -82,14 +82,22 @@ impl CoreConfig {
 
     /// Persists this configuration as pretty JSON to `path`.
     ///
+    /// The bytes are staged in a sibling temp file and atomically renamed over
+    /// the target, so a power loss mid-write can never leave a truncated
+    /// config that bricks the appliance at boot.
+    ///
     /// # Errors
-    /// Returns [`ConfigError`] if serialization or the file write fails.
+    /// Returns [`ConfigError`] if serialization, the temp-file write, or the
+    /// rename fails.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
         let mut raw = serde_json::to_string_pretty(self)
             .map_err(|e| ConfigError::parse(format!("config {}", path.display()), e))?;
         raw.push('\n');
-        std::fs::write(path, raw)
-            .map_err(|e| ConfigError::io(format!("failed to write config {}", path.display()), e))
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, raw)
+            .map_err(|e| ConfigError::io(format!("failed to write config {}", tmp.display()), e))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| ConfigError::io(format!("failed to install config {}", path.display()), e))
     }
 
     /// Resolves the effective CLI-independent configuration path.
