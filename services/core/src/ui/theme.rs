@@ -284,4 +284,25 @@ mod tests {
             .to_string();
         assert!(err.contains("unknown theme preset 'bogus'"), "{err}");
     }
+
+    #[test]
+    fn deserializes_from_owned_value_and_reader() {
+        // Regression: the Deserialize impl must not require zero-copy
+        // `&'de str` borrows — `from_value`/`from_reader` hold owned strings.
+        for (slug, expected) in [
+            ("peppy", ThemePreset::Peppy),
+            ("marantz", ThemePreset::MarantzAmber),
+        ] {
+            let value = serde_json::Value::String(slug.to_owned());
+            assert_eq!(
+                serde_json::from_value::<ThemePreset>(value.clone()).unwrap(),
+                expected
+            );
+            let cursor = std::io::Cursor::new(value.to_string());
+            assert_eq!(
+                serde_json::from_reader::<_, ThemePreset>(cursor).unwrap(),
+                expected
+            );
+        }
+    }
 }
