@@ -6,8 +6,8 @@ use std::fs;
 use std::sync::Mutex;
 
 use speaker_core::cli::core_daemon::{
-    CoreCliOptions, ScreenTarget, headless_requested, parse_cli_args_from, parse_marquee_fps,
-    parse_preview_secs, parse_tab_arg, print_usage,
+    CoreCliOptions, ScreenTarget, headless_requested, parse_cli_args_from, parse_preview_secs,
+    parse_tab_arg, print_usage,
 };
 #[cfg(feature = "ui")]
 use speaker_core::cli::core_daemon::{
@@ -57,37 +57,37 @@ fn parse_preview_secs_rejects_sign_prefixes_and_non_numeric() {
 }
 
 #[test]
-fn parse_marquee_fps_accepts_only_30_and_60() {
-    assert_eq!(parse_marquee_fps("30").unwrap(), 30);
-    assert_eq!(parse_marquee_fps("60").unwrap(), 60);
-    for bad in [
-        "0", "1", "15", "45", "90", "120", "+30", "-30", "abc", "", "30.0",
-    ] {
-        assert!(
-            parse_marquee_fps(bad)
-                .unwrap_err()
-                .contains("expected 30 or 60"),
-            "'{bad}' must be rejected"
-        );
-    }
-}
-
-#[test]
-fn parse_cli_args_marquee_fps_flag() {
+fn parse_cli_args_config_flag() {
     let _guard = lock_env();
-    let parsed = parse_cli_args_from(["--marquee-fps".into(), "30".into()]).unwrap();
+    let parsed = parse_cli_args_from(["--config".into(), "/tmp/custom.json".into()]).unwrap();
     let CliParse::Options(opts) = parsed else {
         panic!("expected options");
     };
-    assert_eq!(opts.marquee_fps, Some(30));
-    let parsed = parse_cli_args_from(["-m".into(), "60".into()]).unwrap();
+    assert_eq!(
+        opts.config.as_deref(),
+        Some(std::path::Path::new("/tmp/custom.json"))
+    );
+    let parsed = parse_cli_args_from(["-c".into(), "cfg.json".into()]).unwrap();
     let CliParse::Options(opts) = parsed else {
         panic!("expected options");
     };
-    assert_eq!(opts.marquee_fps, Some(60));
-    let err = parse_cli_args_from(["--marquee-fps".into(), "45".into()]).unwrap_err();
-    assert!(err.contains("expected 30 or 60"));
+    assert_eq!(
+        opts.config.as_deref(),
+        Some(std::path::Path::new("cfg.json"))
+    );
+    let err = parse_cli_args_from(["-c".into()]).unwrap_err();
+    assert!(err.contains("missing value"));
     assert!(!err.contains("Backtrace") && !err.contains("panicked"));
+    assert!(
+        parse_cli_args_from(["--marquee-fps".into(), "30".into()])
+            .unwrap_err()
+            .contains("unknown option")
+    );
+    assert!(
+        parse_cli_args_from(["--theme".into(), "peppy".into()])
+            .unwrap_err()
+            .contains("unknown option")
+    );
 }
 
 #[test]
@@ -313,7 +313,7 @@ fn parse_cli_args_flags_and_values() {
         CliParse::Options(o) => {
             assert!(o.preview_secs.is_none());
             assert_eq!(o.screen, ScreenTarget::Appliance);
-            assert!(o.theme.is_none());
+            assert!(o.config.is_none());
             assert!(o.tab.is_none());
         }
         other => panic!("expected Options, got {other:?}"),
@@ -355,18 +355,13 @@ fn parse_cli_args_flags_and_values() {
         other => panic!("expected Options, got {other:?}"),
     }
 
-    match parsed(&["--theme", "peppy", "-T", "vu"]).unwrap() {
+    match parsed(&["-c", "override.json", "-T", "vu"]).unwrap() {
         CliParse::Options(o) => {
-            assert_eq!(o.theme, Some(speaker_core::ui::ThemePreset::Peppy));
+            assert_eq!(
+                o.config.as_deref(),
+                Some(std::path::Path::new("override.json"))
+            );
             assert_eq!(o.tab, Some(1));
-        }
-        other => panic!("expected Options, got {other:?}"),
-    }
-
-    match parsed(&["-t", "marantz", "--tab", "settings"]).unwrap() {
-        CliParse::Options(o) => {
-            assert_eq!(o.theme, Some(speaker_core::ui::ThemePreset::MarantzAmber));
-            assert_eq!(o.tab, Some(5));
         }
         other => panic!("expected Options, got {other:?}"),
     }
@@ -424,37 +419,57 @@ fn parse_cli_args_flags_and_values() {
 #[cfg(feature = "ui")]
 #[test]
 fn run_app_headless_executes_successfully() {
+    use speaker_core::config::CoreConfig;
+
     let _guard = lock_env();
     // SAFETY: tests are serialized by ENV_GUARD; no other test thread reads
     // SPEAKER_CORE_HEADLESS while this guard is held.
     unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "1") };
 
-    let code = run_app(CoreCliOptions {
-        marquee_fps: None,
+    let code = run_app(&CoreCliOptions {
+        config: None,
         preview_secs: Some(1),
         screen: ScreenTarget::Splash,
-        theme: None,
         tab: None,
     });
     assert_eq!(code, std::process::ExitCode::SUCCESS);
 
-    let code_appliance = run_app(CoreCliOptions {
-        marquee_fps: None,
+    // A config file with a theme override and reduced marquee rate drives the UI.
+    let dir = ScopedTempDir::new("run_app_cfg");
+    let cfg_path = dir.path().join("config.json");
+    CoreConfig {
+        theme: Some(speaker_core::ui::ThemePreset::Peppy),
+        marquee_fps: 30,
+    }
+    .save(&cfg_path)
+    .expect("save config");
+
+    let code_appliance = run_app(&CoreCliOptions {
+        config: Some(cfg_path),
         preview_secs: Some(1),
         screen: ScreenTarget::Appliance,
-        theme: Some(speaker_core::ui::ThemePreset::Peppy),
         tab: Some(1),
     });
     assert_eq!(code_appliance, std::process::ExitCode::SUCCESS);
 
-    let code_shell = run_app(CoreCliOptions {
-        marquee_fps: None,
+    let code_shell = run_app(&CoreCliOptions {
+        config: None,
         preview_secs: Some(1),
         screen: ScreenTarget::Shell,
-        theme: Some(speaker_core::ui::ThemePreset::Peppy),
         tab: Some(1),
     });
     assert_eq!(code_shell, std::process::ExitCode::SUCCESS);
+
+    // A malformed config must fail the daemon with a hard error.
+    let bad_path = dir.path().join("bad.json");
+    std::fs::write(&bad_path, "{not json").expect("write malformed config");
+    let code_bad = run_app(&CoreCliOptions {
+        config: Some(bad_path),
+        preview_secs: Some(1),
+        screen: ScreenTarget::Shell,
+        tab: None,
+    });
+    assert_eq!(code_bad, std::process::ExitCode::FAILURE);
 
     // SAFETY: same serialized-guard invariant as above.
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
