@@ -1449,20 +1449,25 @@ impl DbusClient {
         let objects = proxy.get_managed_objects()?;
 
         let (adapter, devices, mut playback) = Self::parse_bluez_all(&objects, target_adapter)?;
-        self.resolve_cover_art(&mut playback);
+        Self::fill_cached_cover_art(&mut playback, &self.cache_dir);
         Ok((adapter, devices, playback))
     }
 
-    fn resolve_cover_art(&self, playback: &mut Option<BtPlaybackState>) {
-        if let Some(pb) = playback {
-            if let Some(addr) = pb.device_address {
-                if let Some(port) = pb.obex_port {
-                    let _ = self.ensure_obex_session(addr, port);
-                    if let Some(ref handle) = pb.image_handle {
-                        pb.cover_art_path = self.fetch_cover_art(addr, handle);
-                    }
-                }
-            }
+    /// Fills `cover_art_path` from the on-disk cache only, without any OBEX
+    /// traffic. Snapshot queries must never block on a cover-art transfer:
+    /// fetching is an explicit, separately-driven step ([`Self::fetch_cover_art`]).
+    ///
+    /// Mirrors the mock backend, which also resolves `cover_art_path` from the
+    /// cache (or an explicitly set override) when it is not already present.
+    fn fill_cached_cover_art(playback: &mut Option<BtPlaybackState>, cache_dir: &std::path::Path) {
+        let Some(pb) = playback else {
+            return;
+        };
+        if pb.cover_art_path.is_some() {
+            return;
+        }
+        if let (Some(addr), Some(handle)) = (pb.device_address, pb.image_handle.as_ref()) {
+            pb.cover_art_path = cover_art_cached_path_in(cache_dir, addr, handle);
         }
     }
 
@@ -1580,7 +1585,13 @@ impl DbusClient {
         }
     }
 
-    fn fetch_cover_art(&self, addr: BtAddress, handle: &str) -> Option<Box<str>> {
+    /// Fetches cover art for `handle`, blocking until the transfer completes.
+    ///
+    /// Fast cache hits return immediately. On a cache miss the attempt starts
+    /// right away and is retried until the [`BIP_TRACK_SETTLE_MS`] budget is
+    /// exhausted (fail-fast instead of a blind settle sleep); a persistent
+    /// failure returns `None` and the caller decides when to retry.
+    fn fetch_cover_art(&self, addr: BtAddress, port: u16, handle: &str) -> Option<Box<str>> {
         if let Some(cached) = cover_art_cached_path_in(&self.cache_dir, addr, handle) {
             return Some(cached);
         }
@@ -1590,7 +1601,36 @@ impl DbusClient {
             return None;
         }
 
-        let session_path = self.prepare_bip_transfer(addr)?;
+        let deadline = Instant::now() + Duration::from_millis(BIP_TRACK_SETTLE_MS);
+        loop {
+            match self.attempt_cover_art_fetch(addr, port, handle) {
+                Some(path) => return Some(path),
+                None if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(BIP_POLL_INTERVAL_MS));
+                }
+                None => {
+                    tracing::debug!(
+                        handle,
+                        settle_ms = BIP_TRACK_SETTLE_MS,
+                        "cover art fetch failed within the track-settle budget"
+                    );
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// Runs one cover-art fetch attempt: link tuning, OBEX session
+    /// establishment, and the tiered BIP transfer pipeline (native pull,
+    /// variant step-down, thumbnail fallback). Returns `None` on any failure;
+    /// the retry budget is enforced by the caller.
+    fn attempt_cover_art_fetch(
+        &self,
+        addr: BtAddress,
+        port: u16,
+        handle: &str,
+    ) -> Option<Box<str>> {
+        let session_path = self.prepare_bip_transfer(addr, port)?;
         let image_proxy = self.build_image_proxy(session_path.as_str())?;
 
         let (cache_path, sanitized_mac, sanitized_handle) =
@@ -1667,18 +1707,14 @@ impl DbusClient {
         )
     }
 
-    /// Runs one-time socket/HCI link tuning, waits for the phone's AVRCP `TrackChanged`
-    /// state machine to settle, and returns the cached-or-new BIP OBEX session path.
-    fn prepare_bip_transfer(&self, addr: BtAddress) -> Option<OwnedObjectPath> {
+    /// Runs one-time socket/HCI link tuning and establishes (or reuses) the BIP
+    /// OBEX session for the device. Replaces the former unconditional 650 ms
+    /// settle sleep: the caller retries this attempt within the settle budget
+    /// while the phone is not ready yet, instead of idling up front.
+    fn prepare_bip_transfer(&self, addr: BtAddress, port: u16) -> Option<OwnedObjectPath> {
         self.tune_bt_socket_buffers();
         self.tune_acl_link(addr);
-
-        // Settle wait: let the phone finish its AVRCP TrackChanged state machine
-        // before we hammer it with OBEX session/transfer requests.
-        thread::sleep(Duration::from_millis(BIP_TRACK_SETTLE_MS));
-
-        let session_lock = self.state();
-        session_lock.obex_session.as_ref().map(|(_, p)| p.clone())
+        self.ensure_obex_session(addr, port)
     }
 
     /// Builds a blocking `Image1` proxy on top of an existing BIP OBEX session path.
@@ -2102,8 +2138,22 @@ impl DbusClient {
             .and_then(zbus::blocking::proxy::Builder::build)?;
         let objects = proxy.get_managed_objects()?;
         let (_, _, mut playback) = Self::parse_bluez_all(&objects, None)?;
-        self.resolve_cover_art(&mut playback);
+        Self::fill_cached_cover_art(&mut playback, &self.cache_dir);
         Ok(playback)
+    }
+
+    /// Fetches cover art for the device described by a playback snapshot.
+    ///
+    /// Deliberately decoupled from [`Self::playback_state`]: snapshot queries
+    /// must stay latency-bound (title/artist surface instantly) while the slow
+    /// OBEX transfer runs separately (e.g. on a dedicated worker thread).
+    /// Requires the snapshot to carry a device address, a non-zero OBEX port,
+    /// and an image handle; otherwise no art can be fetched.
+    pub(crate) fn fetch_cover_art_state(&self, pb: &BtPlaybackState) -> Option<Box<str>> {
+        let addr = pb.device_address?;
+        let port = pb.obex_port.filter(|&p| p > 0)?;
+        let handle = pb.image_handle.as_deref()?;
+        self.fetch_cover_art(addr, port, handle)
     }
 
     pub(crate) fn player_toggle(&self) -> Result<bool, BtError> {
@@ -2690,6 +2740,21 @@ impl BluetoothDeviceMock {
         Ok(pb)
     }
 
+    /// Mirrors the D-Bus backend's cover fetch with its failure modes: an
+    /// injected fault fails the fetch, and absent art yields `None`. The mock
+    /// has no OBEX pipeline, so its "fetch" resolves the on-disk cache path.
+    fn fetch_cover_art(&self, pb: &BtPlaybackState) -> Option<Box<str>> {
+        let state = self.state.read().expect("mock lock poisoned");
+        if state.fault.is_some() {
+            return None;
+        }
+        if let (Some(addr), Some(handle)) = (pb.device_address, pb.image_handle.as_ref()) {
+            cover_art_cached_path_in(&state.cache_dir, addr, handle)
+        } else {
+            None
+        }
+    }
+
     fn player_toggle(&self) -> Result<bool, BtError> {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
@@ -3055,6 +3120,22 @@ impl BluetoothDevice {
     pub async fn playback_state_async(&self) -> Result<Option<BtPlaybackState>, BtError> {
         let dev = self.clone();
         crate::runtime::run_blocking("bluetooth playback read", move || dev.playback_state()).await
+    }
+
+    /// Fetches cover art for the device described by `pb`, blocking until the
+    /// OBEX transfer completes or fails.
+    ///
+    /// Returns the local cache path on success (including an instant cache
+    /// hit), `None` when the snapshot carries no fetchable art or the transfer
+    /// failed. This is the slow half of the cover-art flow: playback snapshot
+    /// queries (`playback_state`) never trigger it, so callers may run it off
+    /// the hot path without stalling metadata updates.
+    #[must_use]
+    pub fn fetch_cover_art(&self, pb: &BtPlaybackState) -> Option<Box<str>> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.fetch_cover_art(pb),
+            Backend::Dbus(dbus) => dbus.fetch_cover_art_state(pb),
+        }
     }
 
     /// Sends a Play command to the active Bluetooth media player.

@@ -14,6 +14,8 @@ use std::rc::Rc;
 #[cfg(feature = "ui")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "ui")]
+use std::sync::mpsc::{TryRecvError, channel};
+#[cfg(feature = "ui")]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(feature = "ui")]
@@ -604,6 +606,32 @@ struct CoverState {
     failed_since: Option<Instant>,
 }
 
+/// Interval between retries of a failed cover-art OBEX fetch for the same track.
+///
+/// The fetch itself already retries internally within the track-settle budget
+/// (`BIP_TRACK_SETTLE_MS`); this backoff only throttles the monitor loop when
+/// the phone persistently refuses transfers (e.g. no OBEX support), so ticks
+/// keep refreshing metadata and position between attempts. A track change
+/// (different image handle) retries immediately.
+#[cfg(feature = "ui")]
+const BT_COVER_FETCH_RETRY: Duration = Duration::from_secs(2);
+
+/// In-flight cover-art OBEX fetch running on a dedicated worker thread.
+///
+/// The monitor thread stays free to refresh metadata and position while the
+/// slow transfer runs; the result (`Some(cache path)` on success, `None` on
+/// failure) arrives through a channel and is consumed on the next monitor tick.
+#[cfg(feature = "ui")]
+struct CoverFetch {
+    /// Track image handle the fetch was started for, used to discard results
+    /// that became stale because the track changed mid-transfer.
+    handle: Box<str>,
+    /// Receiver for the fetch result.
+    rx: std::sync::mpsc::Receiver<Option<Box<str>>>,
+    /// Thread handle; joined (panic re-raised) once the result arrives.
+    join: std::thread::JoinHandle<()>,
+}
+
 /// Optimistic-UI convergence state for a pending transport command.
 ///
 /// How the optimistic UI was updated ahead of the authoritative state.
@@ -717,12 +745,138 @@ fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
     ))
 }
 
+/// Decodes the cover file at `path` and stages the result into `update`.
+///
+/// A failed decode keeps the previously published art (never blanks it) and
+/// schedules a retry after [`COVER_DECODE_RETRY`] elapses.
+#[cfg(feature = "ui")]
+fn publish_cover_art(update: &mut BtSharedUpdate, cover: &mut CoverState, path: &str) {
+    if let Some(buffer) = decode_cover_buffer(path) {
+        update.cover = Some(Some(buffer));
+        cover.path = Some(path.into());
+        cover.failed_since = None;
+    } else {
+        tracing::warn!("cover decode failed for {path}");
+        cover.path = Some(path.into());
+        cover.failed_since = Some(Instant::now());
+    }
+}
+
+/// Joins the cover-fetch worker, re-raising its panic so a crashed fetch fails
+/// the monitor thread (and the daemon) instead of passing silently.
+#[cfg(feature = "ui")]
+fn join_cover_fetch(join: std::thread::JoinHandle<()>) {
+    if let Err(panic) = join.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Consumes the in-flight cover-art fetch result (if any) and spawns a fetch
+/// when the current track advertises art that is not on disk yet.
+///
+/// A successful result is decoded immediately so the art lands with this
+/// tick's delta; a failure arms the retry backoff; a stale result (the track
+/// changed mid-transfer) is dropped — the next snapshot query's cache lookup
+/// picks the fetched file up naturally. A different image handle (track
+/// change) overrides the retry backoff; the same handle honors it.
+#[cfg(feature = "ui")]
+fn cover_fetch_tick(
+    bt: &crate::hardware::BluetoothDevice,
+    cover_fetch: &mut Option<CoverFetch>,
+    fetch_retry_at: &mut Option<Instant>,
+    failed_handle: &mut Option<Box<str>>,
+    last_pb: Option<&crate::hardware::BtPlaybackState>,
+    update: &mut BtSharedUpdate,
+    cover: &mut CoverState,
+) {
+    let Some(fetch) = cover_fetch.take() else {
+        spawn_cover_fetch(bt, cover_fetch, fetch_retry_at, failed_handle, last_pb);
+        return;
+    };
+    match fetch.rx.try_recv() {
+        Ok(result) => {
+            join_cover_fetch(fetch.join);
+            match result {
+                Some(path)
+                    if last_pb
+                        .is_some_and(|pb| pb.image_handle.as_ref() == Some(&fetch.handle)) =>
+                {
+                    publish_cover_art(update, cover, &path);
+                    *failed_handle = None;
+                    *fetch_retry_at = None;
+                }
+                Some(_) => {}
+                None => {
+                    *failed_handle = Some(fetch.handle);
+                    *fetch_retry_at = Some(Instant::now() + BT_COVER_FETCH_RETRY);
+                }
+            }
+        }
+        Err(TryRecvError::Empty) => *cover_fetch = Some(fetch),
+        Err(TryRecvError::Disconnected) => {
+            // A dead worker either panicked (re-raised below) or lost its
+            // channel without a result; both arm the retry backoff.
+            join_cover_fetch(fetch.join);
+            *failed_handle = Some(fetch.handle);
+            *fetch_retry_at = Some(Instant::now() + BT_COVER_FETCH_RETRY);
+        }
+    }
+    spawn_cover_fetch(bt, cover_fetch, fetch_retry_at, failed_handle, last_pb);
+}
+
+/// Spawns a cover-fetch worker when the current track advertises art whose
+/// file is not cached yet, honoring the per-handle retry backoff.
+#[cfg(feature = "ui")]
+fn spawn_cover_fetch(
+    bt: &crate::hardware::BluetoothDevice,
+    cover_fetch: &mut Option<CoverFetch>,
+    fetch_retry_at: &mut Option<Instant>,
+    failed_handle: &mut Option<Box<str>>,
+    last_pb: Option<&crate::hardware::BtPlaybackState>,
+) {
+    if cover_fetch.is_some() {
+        return;
+    }
+    let Some(pb) = last_pb else {
+        return;
+    };
+    if pb.cover_art_path.is_some() {
+        return;
+    }
+    let Some(handle) = pb.image_handle.clone() else {
+        return;
+    };
+    let backoff_active = fetch_retry_at.is_some_and(|at| Instant::now() < at);
+    if backoff_active && failed_handle.as_ref() == Some(&handle) {
+        return;
+    }
+    *failed_handle = None;
+    *fetch_retry_at = None;
+    let (tx, rx) = channel();
+    let bt = bt.clone();
+    let pb = pb.clone();
+    match std::thread::Builder::new()
+        .name("bt-cover-fetch".into())
+        .spawn(move || {
+            let _ = tx.send(bt.fetch_cover_art(&pb));
+        }) {
+        Ok(join) => {
+            *cover_fetch = Some(CoverFetch { handle, rx, join });
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "bt-cover-fetch thread could not be started");
+        }
+    }
+}
+
 /// Queries the Bluetooth device once and stages playback/cover deltas into `update`.
 ///
 /// On `Ok(None)` publishes the connection placeholder so stale optimistic UI
-/// state is cleared; on query errors keeps the last published state. Cover art
-/// changes are decoded here (off the render thread); a failed decode keeps the
-/// previous art and is retried after [`COVER_DECODE_RETRY`] elapses.
+/// state is cleared; on query errors keeps the last published state. Cached
+/// cover art changes are decoded here (off the render thread); a failed decode
+/// keeps the previous art and is retried after [`COVER_DECODE_RETRY`] elapses.
+/// Uncached art (fetch pending on the cover-fetch worker) never blanks the
+/// displayed cover.
 #[cfg(feature = "ui")]
 fn publish_playback_state(
     bt: &crate::hardware::BluetoothDevice,
@@ -761,21 +915,17 @@ fn publish_playback_state(
                 .failed_since
                 .is_some_and(|t| t.elapsed() >= COVER_DECODE_RETRY);
             if cover.path != cover_path || retry_due {
-                if let Some(path) = cover_path.as_ref() {
-                    if let Some(buffer) = decode_cover_buffer(path) {
-                        update.cover = Some(Some(buffer));
-                        cover.path = cover_path;
-                        cover.failed_since = None;
-                    } else {
-                        tracing::warn!("cover decode failed for {path}");
-                        // Keep the previously published art (never blank it)
-                        // and schedule a retry after the backoff.
-                        cover.path = cover_path;
-                        cover.failed_since = Some(Instant::now());
+                match cover_path.as_ref() {
+                    Some(path) => publish_cover_art(update, cover, path),
+                    // No cached file yet: while the track still advertises art
+                    // (an image handle is present) the OBEX fetch is pending
+                    // and the prior art must stay; only a genuinely artless
+                    // track clears the displayed cover.
+                    None if pb.image_handle.is_none() => {
+                        update.cover = Some(None);
+                        *cover = CoverState::default();
                     }
-                } else {
-                    update.cover = Some(None);
-                    *cover = CoverState::default();
+                    None => {}
                 }
             }
         }
@@ -794,6 +944,29 @@ fn publish_playback_state(
             tracing::warn!(error = %e, "playback_state query failed; keeping last state");
         }
     }
+}
+
+/// Arms the optimistic-UI settle window for a local play/pause toggle or seek
+/// command; a toggle arm wins when both land in one batch (the status flip is
+/// the more visible artifact, and a same-batch seek is rare).
+#[cfg(feature = "ui")]
+fn arm_settle_window(
+    toggle: bool,
+    seek: Option<u32>,
+    last_pb: Option<&crate::hardware::BtPlaybackState>,
+) -> Option<SettleWindow> {
+    last_pb.map(|pre| SettleWindow {
+        kind: if toggle {
+            SettleKind::Toggle {
+                pre_playing: pre.is_playing(),
+            }
+        } else {
+            SettleKind::Seek {
+                target_ms: seek.unwrap_or_default(),
+            }
+        },
+        started: Instant::now(),
+    })
 }
 
 /// Runs on the dedicated `bt-monitor` thread until `running` is cleared.
@@ -818,6 +991,9 @@ fn bt_monitor_loop(
     let mut last_pcms: Option<Box<[crate::hardware::BlueAlsaPcm]>> = None;
     let mut cover = CoverState::default();
     let mut settle: Option<SettleWindow> = None;
+    let mut cover_fetch: Option<CoverFetch> = None;
+    let mut fetch_retry_at: Option<Instant> = None;
+    let mut failed_handle: Option<Box<str>> = None;
 
     while running.load(Ordering::Relaxed) {
         let drained = commands.drain();
@@ -836,20 +1012,7 @@ fn bt_monitor_loop(
             _ => None,
         });
         if toggle || seek.is_some() {
-            // A toggle arm wins when both land in one batch: the status flip is
-            // the more visible artifact, and a same-batch seek is rare.
-            settle = last_pb.as_ref().map(|pre| SettleWindow {
-                kind: if toggle {
-                    SettleKind::Toggle {
-                        pre_playing: pre.is_playing(),
-                    }
-                } else {
-                    SettleKind::Seek {
-                        target_ms: seek.unwrap_or_default(),
-                    }
-                },
-                started: Instant::now(),
-            });
+            settle = arm_settle_window(toggle, seek, last_pb.as_ref());
         }
         for command in drained {
             // A failed command is logged (never silently dropped) so operators can
@@ -888,6 +1051,16 @@ fn bt_monitor_loop(
                 last_pcms = Some(pcms.clone());
             }
         }
+
+        cover_fetch_tick(
+            bt,
+            &mut cover_fetch,
+            &mut fetch_retry_at,
+            &mut failed_handle,
+            last_pb.as_ref(),
+            &mut update,
+            &mut cover,
+        );
 
         // A command that landed while the blocking snapshot query ran must not
         // merge a pre-command snapshot. The query already advanced the dedup
@@ -1496,5 +1669,257 @@ mod tests {
             "cover must clear on disconnect"
         );
         assert!(cover.path.is_none());
+    }
+
+    /// Builds a `CoverFetch` whose result is already delivered through the
+    /// channel (result `None` = fetch failed) on a completed worker thread.
+    fn ready_fetch(handle: &str, result: Option<Box<str>>) -> CoverFetch {
+        let (tx, rx) = channel();
+        let _ = tx.send(result);
+        drop(tx);
+        let join = std::thread::spawn(|| {});
+        CoverFetch {
+            handle: handle.into(),
+            rx,
+            join,
+        }
+    }
+
+    #[test]
+    fn cover_fetch_tick_publishes_successful_result() {
+        let dir = ScopedTempDir::try_new("cover_fetch_ok").expect("temp dir");
+        let art = sample_png(dir.path(), "art.png");
+        let art_path: Box<str> = art.display().to_string().into_boxed_str();
+        let mut fetch = Some(ready_fetch("h1", Some(art_path.clone())));
+        let (bt, _mock) = BluetoothDevice::new_mocked();
+        let mut last_pb = Some(playback(Some(&art), true));
+        last_pb.as_mut().expect("pb").image_handle = Some("h1".into());
+        let mut update = BtSharedUpdate::default();
+        let mut cover = CoverState::default();
+        let mut retry_at: Option<Instant> = None;
+        let mut failed: Option<Box<str>> = None;
+        cover_fetch_tick(
+            &bt,
+            &mut fetch,
+            &mut retry_at,
+            &mut failed,
+            last_pb.as_ref(),
+            &mut update,
+            &mut cover,
+        );
+        assert!(
+            fetch.is_none(),
+            "consumed result must not respawn: file now cached"
+        );
+        assert!(
+            update.cover.is_some_and(|c| c.is_some()),
+            "a successful in-budget fetch must publish decoded art"
+        );
+        assert_eq!(cover.path.as_deref(), Some(&*art_path));
+        assert!(
+            retry_at.is_none() && failed.is_none(),
+            "success clears failure state"
+        );
+    }
+
+    #[test]
+    fn cover_fetch_tick_failure_arms_backoff_for_same_handle() {
+        let mut fetch = Some(ready_fetch("h1", None));
+        let (bt, _mock) = BluetoothDevice::new_mocked();
+        let mut last_pb = Some(playback(None, true));
+        last_pb.as_mut().expect("pb").image_handle = Some("h1".into());
+        let mut update = BtSharedUpdate::default();
+        let mut cover = CoverState::default();
+        let mut retry_at: Option<Instant> = None;
+        let mut failed: Option<Box<str>> = None;
+        cover_fetch_tick(
+            &bt,
+            &mut fetch,
+            &mut retry_at,
+            &mut failed,
+            last_pb.as_ref(),
+            &mut update,
+            &mut cover,
+        );
+        assert!(update.cover.is_none(), "a failed fetch must keep prior art");
+        assert_eq!(failed.as_deref(), Some("h1"));
+        assert!(retry_at.is_some(), "failure must arm the retry backoff");
+        assert!(
+            fetch.is_none(),
+            "same-handle spawn must honor the armed backoff"
+        );
+    }
+
+    #[test]
+    fn cover_fetch_tick_drops_stale_result_and_respawns_new_track() {
+        let dir = ScopedTempDir::try_new("cover_fetch_stale").expect("temp dir");
+        let art = sample_png(dir.path(), "stale.png");
+        let mut fetch = Some(ready_fetch(
+            "h1",
+            Some(art.display().to_string().into_boxed_str()),
+        ));
+        let (bt, _mock) = BluetoothDevice::new_mocked();
+        let mut last_pb = Some(playback(None, true));
+        last_pb.as_mut().expect("pb").image_handle = Some("h2".into());
+        let mut update = BtSharedUpdate::default();
+        let mut cover = CoverState::default();
+        let mut retry_at: Option<Instant> = None;
+        let mut failed: Option<Box<str>> = None;
+        cover_fetch_tick(
+            &bt,
+            &mut fetch,
+            &mut retry_at,
+            &mut failed,
+            last_pb.as_ref(),
+            &mut update,
+            &mut cover,
+        );
+        assert!(
+            update.cover.is_none(),
+            "a result for a superseded track must not be published"
+        );
+        assert!(
+            fetch.is_some(),
+            "a track change must immediately spawn the fetch for the new handle"
+        );
+        assert!(retry_at.is_none() && failed.is_none());
+    }
+
+    #[test]
+    fn spawn_cover_fetch_skips_cached_and_inflight_states() {
+        let (bt, _mock) = BluetoothDevice::new_mocked();
+        let mut fetch: Option<CoverFetch> = None;
+        let mut retry_at: Option<Instant> = None;
+        let mut failed: Option<Box<str>> = None;
+        // Cached file (cover path present): never spawn.
+        let cached = playback(Some(Path::new("/cached.png")), true);
+        let mut last_pb = Some(cached);
+        last_pb.as_mut().expect("pb").image_handle = Some("h1".into());
+        spawn_cover_fetch(
+            &bt,
+            &mut fetch,
+            &mut retry_at,
+            &mut failed,
+            last_pb.as_ref(),
+        );
+        assert!(fetch.is_none(), "cached art must not spawn a fetch");
+        // In-flight fetch: never spawn a second one.
+        let mut last_pb = Some(playback(None, true));
+        last_pb.as_mut().expect("pb").image_handle = Some("h1".into());
+        fetch = Some(ready_fetch("h1", None));
+        spawn_cover_fetch(
+            &bt,
+            &mut fetch,
+            &mut retry_at,
+            &mut failed,
+            last_pb.as_ref(),
+        );
+        assert!(fetch.is_some(), "in-flight fetch must not be replaced");
+    }
+
+    #[test]
+    fn publish_keeps_prior_art_while_fetch_pending() {
+        let (bt, mock) = BluetoothDevice::new_mocked();
+        // A track that advertises art (image handle) but whose file is not
+        // cached yet: the fetch is pending on the cover-fetch worker, so the
+        // cover delta must stay `None` (prior art kept, never blanked) while
+        // the new title publishes immediately.
+        let mut pending = playback(None, true);
+        pending.title = "Track Two".into();
+        pending.device_address = Some(crate::hardware::BtAddress::new([0x11; 6]));
+        pending.obex_port = Some(4097);
+        pending.image_handle = Some("h2".into());
+        mock.set_playback(Some(pending));
+        let mut last_pb = Some(playback(Some(Path::new("/prior.png")), true));
+        let mut cover = CoverState {
+            path: Some("/prior.png".into()),
+            failed_since: None,
+        };
+        let mut update = BtSharedUpdate::default();
+        let mut settle = None;
+        publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
+        assert!(
+            update
+                .playback
+                .is_some_and(|pb| pb.title == "Track Two".into()),
+            "new track title must publish while the fetch is pending"
+        );
+        assert!(
+            update.cover.is_none(),
+            "a pending fetch must not blank or replace the prior art"
+        );
+        assert_eq!(cover.path.as_deref(), Some("/prior.png"));
+    }
+
+    /// Runs `bt_monitor_loop` against the mock backend end-to-end: the first
+    /// track publishes cached art, the second track publishes its title
+    /// immediately (decoupled cover fetch) and keeps the prior art while the
+    /// uncached fetch fails (mock has no OBEX), exercising the worker spawn,
+    /// result drain, and failure backoff without hardware.
+    #[test]
+    fn monitor_loop_publishes_track_change_and_keeps_prior_art_during_fetch() {
+        let (bt, mock) = BluetoothDevice::new_mocked();
+        let dir = ScopedTempDir::try_new("bt_monitor_cover").expect("temp dir");
+        mock.set_cover_art_cache_dir(dir.path());
+        let addr = crate::hardware::BtAddress::new([0x21; 6]);
+        let art = sample_png(dir.path(), "art1.png");
+
+        let mut track_one = playback(Some(&art), true);
+        track_one.title = "Track One".into();
+        mock.set_playback(Some(track_one));
+
+        let running = Arc::new(AtomicBool::new(true));
+        let shared: Arc<Mutex<BtSharedUpdate>> = Arc::new(Mutex::new(BtSharedUpdate::default()));
+        let commands = crate::hardware::TransportCommandQueue::new();
+
+        let worker = {
+            let running = Arc::clone(&running);
+            let shared = Arc::clone(&shared);
+            let commands = commands.clone();
+            std::thread::spawn(move || {
+                bt_monitor_loop(&bt, &shared, &commands, &running);
+            })
+        };
+
+        let shared_view = Arc::clone(&shared);
+        let wait_until = |mut pred: Box<dyn FnMut() -> bool>| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !pred() {
+                assert!(
+                    Instant::now() < deadline,
+                    "monitor loop did not converge in time"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait_until(Box::new(move || {
+            let lock = shared_view.lock().unwrap();
+            lock.playback
+                .as_ref()
+                .is_some_and(|pb| pb.title == "Track One".into())
+                && lock.cover.as_ref().is_some_and(Option::is_some)
+        }));
+
+        // Track Two advertises art with no cached file: the title must publish
+        // immediately while the art stays on the previous track (fetch pending
+        // and, with the mock, failing into the retry backoff).
+        let mut track_two = playback(None, true);
+        track_two.title = "Track Two".into();
+        track_two.device_address = Some(addr);
+        track_two.obex_port = Some(4097);
+        track_two.image_handle = Some("h2".into());
+        mock.set_playback(Some(track_two));
+
+        let shared_view = Arc::clone(&shared);
+        wait_until(Box::new(move || {
+            let lock = shared_view.lock().unwrap();
+            lock.playback
+                .as_ref()
+                .is_some_and(|pb| pb.title == "Track Two".into())
+                && lock.cover.as_ref().is_some_and(Option::is_some)
+        }));
+
+        running.store(false, Ordering::Relaxed);
+        worker.join().expect("monitor loop must not panic");
     }
 }

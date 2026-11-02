@@ -62,7 +62,12 @@ pub const BIP_VARIANT_TIMEOUT_MS: u64 = 4_000;
 /// Total watchdog for the baseline `Image1.GetThumbnail` transfer, in milliseconds.
 pub const BIP_THUMBNAIL_TIMEOUT_MS: u64 = 2_500;
 
-/// Settle wait after `TrackChanged` before any OBEX traffic, in milliseconds.
+/// Budget (in milliseconds) within which cover-art fetch attempts are retried
+/// immediately after a track change before giving up.
+///
+/// Replaces the former unconditional settle sleep: attempts fail fast and are
+/// re-issued until the budget is exhausted, letting the phone's AVRCP/OBEX
+/// state machine settle without idling the caller.
 pub const BIP_TRACK_SETTLE_MS: u64 = 650;
 
 /// Default per-device maximum safe native image size in bytes for the zero-descriptor pull.

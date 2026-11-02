@@ -38,6 +38,9 @@ struct Behavior {
     /// Value reported by the `Transferred` property of `Transfer1`.
     transferred: u64,
     create_calls: AtomicUsize,
+    /// Remaining `CreateSession` refusals before the fake phone accepts the
+    /// session (simulates the post-`TrackChanged` settling window).
+    create_failures_remaining: AtomicUsize,
     /// Number of zero-descriptor (native) `Get` calls observed.
     native_get_calls: AtomicUsize,
     last_get_pixel: String,
@@ -157,6 +160,15 @@ impl Client {
         b.create_calls.fetch_add(1, Ordering::SeqCst);
         if !b.create_ok {
             return Err(fdo::Error::Failed("create refused".into()));
+        }
+        // Simulates a phone whose AVRCP/OBEX state machine is not ready yet:
+        // the first `create_failures_remaining` calls are refused, later ones
+        // succeed (used by the fail-fast retry budget tests).
+        let pending = b.create_failures_remaining.load(Ordering::SeqCst);
+        if pending > 0 {
+            b.create_failures_remaining
+                .store(pending - 1, Ordering::SeqCst);
+            return Err(fdo::Error::Failed("track change settling".into()));
         }
         b.session_alive = true;
         Ok(OwnedObjectPath::try_from("/org/bluez/obex/client/session0").unwrap())
@@ -310,6 +322,7 @@ impl Harness {
             status: "complete".into(),
             transferred: 0,
             create_calls: AtomicUsize::new(0),
+            create_failures_remaining: AtomicUsize::new(0),
             native_get_calls: AtomicUsize::new(0),
             last_get_pixel: String::new(),
             device_connected: true,
@@ -392,6 +405,23 @@ impl Harness {
         }
     }
 
+    /// Runs an explicit cover-art fetch (the OBEX transfer path).
+    fn fetch(&self) -> Option<Box<str>> {
+        let pb = self
+            .device
+            .playback_state()
+            .unwrap()
+            .expect("fake player present");
+        self.device.fetch_cover_art(&pb)
+    }
+
+    /// Runs an explicit cover-art fetch and returns the elapsed wall time.
+    fn fetch_timed(&self) -> (Option<Box<str>>, std::time::Duration) {
+        let started = std::time::Instant::now();
+        (self.fetch(), started.elapsed())
+    }
+
+    /// Returns the snapshot-reported cover path (cache lookup only, no OBEX).
     fn cover(&self) -> Option<Box<str>> {
         self.device
             .playback_state()
@@ -444,24 +474,29 @@ impl Drop for Harness {
 #[test]
 fn cover_art_fetched_cached_and_session_recreated() {
     let h = Harness::new("11:00:00:00:00:01", |_| {});
-    let path = h.cover().expect("cover art fetched over OBEX");
+    let path = h.fetch().expect("cover art fetched over OBEX");
     assert!(std::path::Path::new(&*path).exists());
     assert_eq!(h.create_calls(), 1);
 
-    // Cached on disk and live session is reused.
+    // Cached on disk; the snapshot query resolves it from the cache without
+    // session traffic, and a fetch re-hit also reuses the live session.
     assert_eq!(h.cover().as_deref(), Some(&*path));
+    assert_eq!(h.fetch().as_deref(), Some(&*path));
     assert_eq!(h.create_calls(), 1);
 
-    // A dead session is detected and recreated.
+    // A dead session is detected and recreated on the next real fetch (cache
+    // misses recreate it lazily; cache hits never touch the session).
     h.state.lock().unwrap().session_alive = false;
-    assert_eq!(h.cover().as_deref(), Some(&*path));
+    h.remove_cover_files();
+    assert!(h.cover().is_none(), "snapshot query must be cache-only");
+    assert_eq!(h.fetch().as_deref(), Some(&*path));
     assert_eq!(h.create_calls(), 2);
 }
 
 #[test]
 fn cover_art_falls_back_to_get_when_thumbnail_fails() {
     let h = Harness::new("11:00:00:00:00:02", |b| b.thumbnail_ok = false);
-    assert!(h.cover().is_some());
+    assert!(h.fetch().is_some());
 }
 
 #[test]
@@ -471,27 +506,31 @@ fn cover_art_none_when_thumbnail_and_get_fail_and_session_cleared() {
         b.get_ok = false;
         b.native_get_ok = false;
     });
-    assert!(h.cover().is_none());
-    assert_eq!(h.create_calls(), 1);
-    assert!(h.cover().is_none());
-    assert_eq!(
-        h.create_calls(),
-        2,
-        "each failed fetch drops the cached session and the next fetch recreates it"
-    );
+    assert!(h.fetch().is_none());
+    // Every in-budget attempt recreates the dropped session.
+    assert!(h.create_calls() >= 2, "attempts must be retried in-budget");
+    assert!(h.fetch().is_none());
+    assert!(h.create_calls() >= 2);
 }
 
 #[test]
 fn cover_art_none_when_transfer_reports_error() {
     let h = Harness::new("11:00:00:00:00:04", |b| b.status = "error".into());
-    assert!(h.cover().is_none());
+    assert!(h.fetch().is_none());
 }
 
 #[test]
 fn cover_art_none_when_session_creation_refused() {
     let h = Harness::new("11:00:00:00:00:05", |b| b.create_ok = false);
-    assert!(h.cover().is_none());
-    assert_eq!(h.create_calls(), 1);
+    let (cover, elapsed) = h.fetch_timed();
+    assert!(cover.is_none());
+    // The fail-fast retry keeps attempting within the track-settle budget
+    // instead of failing on the first refusal.
+    assert!(h.create_calls() >= 2, "refusals must be retried in-budget");
+    assert!(
+        elapsed >= std::time::Duration::from_millis(speaker_core::hardware::BIP_TRACK_SETTLE_MS),
+        "the retry budget must be exhausted before giving up"
+    );
 }
 
 #[test]
@@ -500,7 +539,25 @@ fn cover_art_none_when_transfer_never_completes() {
         b.status = "active".into();
         b.write_file = false;
     });
-    assert!(h.cover().is_none());
+    assert!(h.fetch().is_none());
+}
+
+/// The first `CreateSession` attempts are refused (phone still settling after
+/// the track change), a later attempt succeeds — the fetch must fail fast and
+/// retry within the settle budget instead of sleeping up front.
+#[test]
+fn cover_art_fails_fast_then_retries_until_success() {
+    let h = Harness::new("11:00:00:00:00:13", |b| {
+        b.create_failures_remaining = AtomicUsize::new(2);
+    });
+    let (cover, elapsed) = h.fetch_timed();
+    let cover = cover.expect("later in-budget attempt must succeed");
+    assert!(std::path::Path::new(&*cover).exists());
+    assert_eq!(h.create_calls(), 3, "exactly the two refusals were retried");
+    assert!(
+        elapsed < std::time::Duration::from_millis(speaker_core::hardware::BIP_TRACK_SETTLE_MS),
+        "a successful in-budget attempt must not wait out the full budget"
+    );
 }
 
 #[test]
@@ -509,7 +566,7 @@ fn cover_art_fetched_via_bip_get_when_range_advertised() {
         b.descriptors = range_descriptors();
         b.native_get_ok = false;
     });
-    let path = h.cover().expect("high-res cover fetched via BIP Get");
+    let path = h.fetch().expect("high-res cover fetched via BIP Get");
     assert!(std::path::Path::new(&*path).exists());
     assert_eq!(h.last_get_pixel(), "800*800");
     assert_eq!(h.create_calls(), 1);
@@ -522,13 +579,13 @@ fn cover_art_falls_back_to_thumbnail_when_bip_get_refused() {
         b.native_get_ok = false;
         b.get_ok = false;
     });
-    assert!(h.cover().is_some());
+    assert!(h.fetch().is_some());
 }
 
 #[test]
 fn cover_art_fetched_via_native_zero_descriptor_pull() {
     let h = Harness::new("11:00:00:00:00:09", |_| {});
-    let path = h.cover().expect("native cover fetched over OBEX");
+    let path = h.fetch().expect("native cover fetched over OBEX");
     assert!(std::path::Path::new(&*path).exists());
     assert_eq!(h.native_get_calls(), 1);
     assert_eq!(
@@ -549,7 +606,7 @@ fn cover_art_native_pull_skipped_when_advertised_size_exceeds_cap() {
             ("size", Value::from(2_000_000u64)),
         ])];
     });
-    let path = h.cover().expect("thumbnail fallback after native skip");
+    let path = h.fetch().expect("thumbnail fallback after native skip");
     assert!(std::path::Path::new(&*path).exists());
     assert_eq!(h.native_get_calls(), 0);
 }
@@ -565,7 +622,7 @@ fn native_cap_persisted_after_native_pull_refusal() {
         ])];
         b.native_get_ok = false;
     });
-    assert!(h.cover().is_some());
+    assert!(h.fetch().is_some());
     let caps = speaker_core::hardware::load_native_caps_in(&h.caps_dir_path());
     assert_eq!(caps.get("11_00_00_00_00_12"), Some(&499_999));
 }
