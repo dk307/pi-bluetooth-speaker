@@ -234,8 +234,10 @@ impl serde::Serialize for ThemePreset {
 
 impl<'de> serde::Deserialize<'de> for ThemePreset {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let slug = <&'de str>::deserialize(deserializer)?;
-        Self::parse_slug(slug).map_err(serde::de::Error::custom)
+        // Own the slug string: the layered `config` reader holds owned values
+        // and cannot guarantee a `&'de str` borrow.
+        let slug = String::deserialize(deserializer)?;
+        Self::parse_slug(&slug).map_err(serde::de::Error::custom)
     }
 }
 

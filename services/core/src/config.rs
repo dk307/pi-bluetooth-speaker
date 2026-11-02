@@ -1,4 +1,5 @@
-//! JSON configuration file loading for the core appliance service.
+//! JSON configuration file loading for the core appliance service via the
+//! layered `config` reader.
 //!
 //! Provides [`CoreConfig`], the strongly typed on-disk configuration storing the
 //! startup [`ThemePreset`] override and the marquee scroll rate, loaded from
@@ -9,6 +10,7 @@ use std::fmt::{self, Formatter};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use config::Config as LayeredConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::diag::DEFAULT_CONFIG_PATH;
@@ -46,7 +48,7 @@ impl Default for CoreConfig {
 }
 
 impl CoreConfig {
-    /// Loads the configuration from `path`.
+    /// Loads the configuration from `path` via the layered `config` reader.
     ///
     /// A missing file is not an error: defaults are returned with a warning so a
     /// fresh appliance boots unconfigured. Any other read failure, malformed
@@ -56,8 +58,8 @@ impl CoreConfig {
     /// Returns [`ConfigError`] for non-missing I/O failures, malformed JSON, or
     /// an invalid `marquee_fps` value.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let raw = match std::fs::read_to_string(path) {
-            Ok(raw) => raw,
+        match std::fs::metadata(path) {
+            Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 tracing::warn!(
                     path = %path.display(),
@@ -71,9 +73,16 @@ impl CoreConfig {
                     e,
                 ));
             }
-        };
-        let config = serde_json::from_str::<Self>(&raw)
-            .map_err(|e| ConfigError::parse(format!("invalid config {}", path.display()), e))?;
+        }
+        let settings = LayeredConfig::builder()
+            .add_source(config::File::from(path))
+            .build()
+            .map_err(|e| {
+                ConfigError::config(format!("failed to read config {}", path.display()), e)
+            })?;
+        let config = settings
+            .try_deserialize::<Self>()
+            .map_err(|e| ConfigError::config(format!("invalid config {}", path.display()), e))?;
         config.validate()?;
         Ok(config)
     }
@@ -88,8 +97,12 @@ impl CoreConfig {
     /// Returns [`ConfigError`] for invalid values, serialization, or file write failures.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
         self.validate()?;
-        let mut raw = serde_json::to_string_pretty(self)
-            .map_err(|e| ConfigError::parse(format!("config {}", path.display()), e))?;
+        let mut raw = serde_json::to_string_pretty(self).map_err(|e| {
+            ConfigError::config(
+                format!("failed to serialize config {}", path.display()),
+                config::ConfigError::Foreign(Box::new(e)),
+            )
+        })?;
         raw.push('\n');
 
         // Write to a sibling temp file, fsync it, then atomically rename it over
@@ -149,9 +162,12 @@ pub(crate) enum ConfigErrorKind {
         context: Box<str>,
         source: io::Error,
     },
-    Parse {
+    /// Failure surfaced by the layered `config` reader: file access, JSON
+    /// parsing, or serde deserialization of the strongly typed [`CoreConfig`].
+    /// The foreign error is boxed to keep [`ConfigError`] small by value.
+    Config {
         context: Box<str>,
-        source: serde_json::Error,
+        source: Box<config::ConfigError>,
     },
     InvalidValue {
         message: Box<str>,
@@ -181,11 +197,11 @@ impl ConfigError {
         })
     }
 
-    /// Builds a JSON (de)serialization failure for a named config operation.
-    pub(crate) fn parse(context: impl Into<Box<str>>, source: serde_json::Error) -> Self {
-        Self::new(ConfigErrorKind::Parse {
+    /// Builds a layered-reader failure for a named config operation.
+    pub(crate) fn config(context: impl Into<Box<str>>, source: config::ConfigError) -> Self {
+        Self::new(ConfigErrorKind::Config {
             context: context.into(),
-            source,
+            source: Box::new(source),
         })
     }
 
@@ -202,10 +218,10 @@ impl ConfigError {
         matches!(self.kind, ConfigErrorKind::Io { .. })
     }
 
-    /// Returns `true` when the config file contained malformed JSON.
+    /// Returns `true` when the layered `config` reader (access/parse/deserialize) failed.
     #[must_use]
-    pub fn is_parse(&self) -> bool {
-        matches!(self.kind, ConfigErrorKind::Parse { .. })
+    pub fn is_config(&self) -> bool {
+        matches!(self.kind, ConfigErrorKind::Config { .. })
     }
 
     /// Returns `true` when a value violated the domain validation rules.
@@ -225,8 +241,8 @@ impl ConfigError {
             ConfigErrorKind::Io { context, source } => {
                 write!(f, "config I/O error: {context}: {source}")
             }
-            ConfigErrorKind::Parse { context, source } => {
-                write!(f, "config parse error: {context}: {source}")
+            ConfigErrorKind::Config { context, source } => {
+                write!(f, "config error: {context}: {source}")
             }
             ConfigErrorKind::InvalidValue { message } => write!(f, "{message}"),
         }
@@ -239,7 +255,7 @@ impl std::error::Error for ConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.kind {
             ConfigErrorKind::Io { source, .. } => Some(source),
-            ConfigErrorKind::Parse { source, .. } => Some(source),
+            ConfigErrorKind::Config { source, .. } => Some(source),
             ConfigErrorKind::InvalidValue { .. } => None,
         }
     }
@@ -315,11 +331,12 @@ mod tests {
         let path = dir.path().join("config.json");
         std::fs::write(&path, "{not json").expect("write");
         let err = CoreConfig::load(&path).expect_err("malformed JSON must fail");
-        assert!(err.is_parse());
-        assert!(err.to_string().contains("invalid config"));
+        assert!(err.is_config());
+        // config-rs reports malformed files as FileParse failures during build().
+        assert!(err.to_string().contains("failed to read config"));
         // Full Display appends the backtrace only when captured (RUST_BACKTRACE=1);
         // `summary()` never contains one regardless of the capture status.
-        assert!(err.summary().contains("config parse error"));
+        assert!(err.summary().contains("config error"));
         assert!(!err.summary().contains("Backtrace"));
         if err.backtrace().status() == std::backtrace::BacktraceStatus::Captured {
             assert!(err.to_string().contains("Backtrace:\n"));
@@ -335,7 +352,7 @@ mod tests {
         let path = dir.path().join("config.json");
         std::fs::write(&path, r#"{"theme": "bogus"}"#).expect("write");
         let err = CoreConfig::load(&path).expect_err("unknown slug must fail");
-        assert!(err.is_parse());
+        assert!(err.is_config());
         assert!(err.to_string().contains("unknown theme preset 'bogus'"));
     }
 
@@ -347,7 +364,7 @@ mod tests {
             std::fs::write(&path, format!(r#"{{"marquee_fps": {bad}}}"#)).expect("write");
             let err = CoreConfig::load(&path).expect_err("bad fps must fail");
             assert!(err.is_invalid_value());
-            assert!(!err.is_parse() && !err.is_io());
+            assert!(!err.is_config() && !err.is_io());
             let rendered = err.to_string();
             assert!(
                 rendered.contains(&format!("invalid marquee fps '{bad}': expected 30 or 60")),
@@ -372,9 +389,10 @@ mod tests {
     fn load_io_failure_on_directory_path() {
         let dir = ScopedTempDir::new("cfg_dir_path");
         let err = CoreConfig::load(dir.path()).expect_err("directory read must fail");
-        assert!(err.is_io());
+        // The layered reader surfaces the EISDIR access failure.
+        assert!(err.is_config());
         assert!(err.to_string().contains("failed to read config"));
-        assert!(err.summary().contains("config I/O error"));
+        assert!(err.summary().contains("config error"));
         assert!(!err.summary().contains("Backtrace"));
         assert!(err.source().is_some());
     }
@@ -464,7 +482,7 @@ mod tests {
     fn error_predicates_and_backtrace_accessor() {
         let err = ConfigError::invalid("synthetic");
         assert!(err.is_invalid_value());
-        assert!(!err.is_io() && !err.is_parse());
+        assert!(!err.is_io() && !err.is_config());
         assert_eq!(err.summary(), "synthetic");
         assert!(matches!(
             err.backtrace().status(),
@@ -472,10 +490,7 @@ mod tests {
         ));
         let io_err = ConfigError::io("ctx", io::Error::other("boom"));
         assert!(io_err.is_io());
-        let parse_err = ConfigError::parse(
-            "ctx",
-            serde_json::from_str::<CoreConfig>("bad").unwrap_err(),
-        );
-        assert!(parse_err.is_parse());
+        let layered_err = ConfigError::config("ctx", config::ConfigError::Message("boom".into()));
+        assert!(layered_err.is_config());
     }
 }
