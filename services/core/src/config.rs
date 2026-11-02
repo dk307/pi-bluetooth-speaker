@@ -150,6 +150,7 @@ impl CoreConfig {
     /// Returns [`ConfigError`] for serialization or file write failures.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
         use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
 
         let mut raw = serde_json::to_string_pretty(self).map_err(|e| {
             ConfigError::config(
@@ -173,6 +174,14 @@ impl CoreConfig {
         file.write_all(raw.as_bytes()).map_err(|e| {
             ConfigError::io(format!("failed to write config {}", path.display()), e)
         })?;
+        // `NamedTempFile` stages with mode 0600; without this the persisted
+        // config would be unreadable by non-root diagnostic CLIs and
+        // provisioning steps. Restore the conventional 0644 mode before
+        // installing via `persist`.
+        file.set_permissions(std::fs::Permissions::from_mode(0o644))
+            .map_err(|e| {
+                ConfigError::io(format!("failed to chmod config {}", path.display()), e)
+            })?;
         file.sync_all().map_err(|e| {
             ConfigError::io(format!("failed to flush config {}", path.display()), e)
         })?;
@@ -527,6 +536,26 @@ mod tests {
             .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(leftovers, vec!["config.json".to_string()]);
+    }
+
+    #[test]
+    fn save_installs_world_readable_mode() {
+        // The tempfile staging path would otherwise persist the config with
+        // mode 0600, locking out non-root diagnostic CLIs and provisioning.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = ScopedTempDir::new("cfg_save_mode");
+        let path = dir.path().join("config.json");
+        CoreConfig {
+            theme: Some(ThemePreset::Peppy),
+            marquee_fps: MarqueeFps::FPS_60,
+        }
+        .save(&path)
+        .expect("save");
+        let mode = std::fs::metadata(&path)
+            .expect("saved config exists")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o644);
     }
 
     #[test]
