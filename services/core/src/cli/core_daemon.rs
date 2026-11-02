@@ -15,8 +15,9 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "ui")]
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 #[cfg(feature = "ui")]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[cfg(feature = "ui")]
 use crate::config::{CoreConfig, DEFAULT_CONFIG_PATH};
