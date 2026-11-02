@@ -29,9 +29,7 @@ jobs:
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          # x86_64 std is installed so the clippy gate can lint x86-gated code
-          # paths (the aarch64 runner otherwise only type-checks aarch64 cfg).
-          targets: aarch64-unknown-linux-gnu,x86_64-unknown-linux-gnu
+          targets: aarch64-unknown-linux-gnu
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
@@ -41,8 +39,8 @@ jobs:
         run: cargo fmt --manifest-path services/core/Cargo.toml --all -- --check
 
       - name: Clippy Lints (deny warnings)
-        # Cross-lint x86-gated code on the ARM runner per AGENTS.md §4.4.
-        run: cargo clippy --manifest-path services/core/Cargo.toml --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
+        # Native aarch64 lints cover the cfg paths the coverage gate executes.
+        run: cargo clippy --manifest-path services/core/Cargo.toml --all-targets -- -D warnings
 
       - name: Configure Target Linker
         run: |
@@ -84,3 +82,26 @@ jobs:
             target/aarch64-unknown-linux-gnu/release/temp-read
             target/aarch64-unknown-linux-gnu/release/light-read
           if-no-files-found: error
+
+  lint-x86-gated:
+    name: Clippy for x86-gated code (x86_64)
+    # x86-gated cfg paths (ui feature) only type-check when the host target is
+    # x86_64; cross-linting that target on the ARM runner cannot build the C
+    # dependencies (yeslogic-fontconfig-sys). Run natively on x86_64 instead.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Clippy Lints (deny warnings)
+        run: cargo clippy --manifest-path services/core/Cargo.toml --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
