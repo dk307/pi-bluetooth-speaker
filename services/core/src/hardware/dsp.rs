@@ -655,7 +655,7 @@ impl DspError {
     }
 }
 
-impl_canonical_error_display!(DspError);
+crate::diag::impl_canonical_error_display!(DspError);
 impl std::error::Error for DspError {}
 
 impl FromJoinError for DspError {

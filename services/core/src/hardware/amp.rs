@@ -908,7 +908,7 @@ impl AmpError {
     }
 }
 
-super::impl_canonical_error_display!(AmpError);
+crate::diag::impl_canonical_error_display!(AmpError);
 
 impl std::error::Error for AmpError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {

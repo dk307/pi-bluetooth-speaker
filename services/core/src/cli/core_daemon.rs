@@ -3,8 +3,11 @@
 //! Provides command-line options parsing, headless detection, display lifecycle
 //! execution, and Slint framebuffer rendering coordination.
 
+// `PathBuf` backs the unconditionally compiled `-c/--config` CLI field;
+// `Path` is only referenced by the ui-gated framebuffer paths.
 #[cfg(feature = "ui")]
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 #[cfg(feature = "ui")]
 use std::rc::Rc;
@@ -15,8 +18,11 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "ui")]
 use std::time::{Duration, Instant};
 
-use crate::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts};
+#[cfg(feature = "ui")]
+use crate::config::CoreConfig;
+use crate::diag::{CliParse, DEFAULT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts};
 use crate::hardware::TempSensor;
+#[cfg(feature = "ui")]
 use crate::ui::theme::ThemePreset;
 #[cfg(feature = "ui")]
 use crate::ui::{AppShell, FrameTiming, Framebuffer, FramebufferError, MainWindow, SplashScreen};
@@ -40,19 +46,19 @@ pub enum ScreenTarget {
 }
 
 /// Appliance service command-line options.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// Theme and marquee scroll rate come from the JSON configuration file
+/// (see [`crate::config::CoreConfig`]), not from command-line flags.
+#[derive(Debug, Clone, Default)]
 pub struct CoreCliOptions {
     /// Optional preview duration in seconds.
     pub preview_secs: Option<u64>,
     /// Screen target to initialize and display.
     pub screen: ScreenTarget,
-    /// Theme preset to apply on startup.
-    #[cfg(feature = "ui")]
-    pub theme: Option<crate::ui::ThemePreset>,
+    /// Optional override of the JSON configuration file path.
+    pub config: Option<PathBuf>,
     /// Navigation dock tab to open on startup (0 to 5).
     pub tab: Option<i32>,
-    /// Marquee scroll rate in fps; `None` means the 60 fps default.
-    pub marquee_fps: Option<u32>,
 }
 
 /// Prints usage text for the core daemon executable.
@@ -65,14 +71,11 @@ pub fn print_usage(bin_name: &str) {
     println!(
         "  -s, --screen <appliance|splash|shell> Target screen to render (default: appliance)"
     );
-    println!(
-        "  -t, --theme <PRESET>        Appliance theme preset (mcintosh, marantz, cyberpunk, studio-dark, peppy)"
-    );
+    println!("  -c, --config <PATH>         JSON config file (default: {DEFAULT_CONFIG_PATH})");
     println!(
         "  -T, --tab <TAB>             Active UI tab on startup (0-5 or name: player, vu, bt, cd, dsp, settings)"
     );
     println!("  -p, --preview <SECS>        Render UI for SECS seconds (preview/testing mode)");
-    println!("  -m, --marquee-fps <30|60>   Marquee scroll rate in fps (default: 60)");
     println!("  -V, --version               Print version and exit");
     println!("  -h, --help                  Print this help text and exit");
 }
@@ -113,21 +116,6 @@ pub fn parse_tab_arg(val: &str) -> Result<i32, String> {
     }
 }
 
-/// Parses and validates a `--marquee-fps <N>` argument value.
-///
-/// Only 30 and 60 are accepted: 60 is the production default and 30 halves the
-/// render load by scrolling 2 px per 33.3 ms tick at identical on-screen speed.
-///
-/// # Errors
-/// Returns an error message for any value other than `30` or `60`.
-pub fn parse_marquee_fps(val: &str) -> Result<u32, String> {
-    match val {
-        "30" => Ok(30),
-        "60" => Ok(60),
-        other => Err(format!("invalid marquee fps '{other}': expected 30 or 60")),
-    }
-}
-
 /// Parses command-line arguments into structured [`CoreCliOptions`].
 ///
 /// # Errors
@@ -142,15 +130,9 @@ where
         match arg.as_str() {
             "-h" | "--help" => return Ok(CliParse::Help),
             "-V" | "--version" => return Ok(CliParse::Version),
-            "-t" | "--theme" => {
-                let val = next_arg_value(&mut iter, "--theme")?;
-                #[cfg(feature = "ui")]
-                {
-                    let preset = crate::ui::ThemePreset::parse_slug(&val)?;
-                    opts.theme = Some(preset);
-                }
-                #[cfg(not(feature = "ui"))]
-                let _ = val;
+            "-c" | "--config" => {
+                let val = next_arg_value(&mut iter, "--config")?;
+                opts.config = Some(PathBuf::from(val));
             }
             "-T" | "--tab" => {
                 let val = next_arg_value(&mut iter, "--tab")?;
@@ -168,10 +150,6 @@ where
                         ));
                     }
                 }
-            }
-            "-m" | "--marquee-fps" => {
-                let val = next_arg_value(&mut iter, "--marquee-fps")?;
-                opts.marquee_fps = Some(parse_marquee_fps(&val)?);
             }
             "-p" | "--preview" => {
                 let val = next_arg_value(&mut iter, "--preview")?;
@@ -750,7 +728,7 @@ pub fn run_shell_on(
 
 /// Executes the core appliance daemon with parsed options.
 #[must_use]
-pub fn run_app(opts: CoreCliOptions) -> ExitCode {
+pub fn run_app(opts: &CoreCliOptions) -> ExitCode {
     let temp_sensor = TempSensor::new();
 
     println!("============================================================");
@@ -759,16 +737,33 @@ pub fn run_app(opts: CoreCliOptions) -> ExitCode {
     println!("  Thermal Sensor: {}", temp_sensor.gpio_info());
 
     #[cfg(feature = "ui")]
-    run_ui_display(
-        opts.screen,
-        opts.preview_secs,
-        opts.theme,
-        opts.tab,
-        opts.marquee_fps.unwrap_or(60),
-    );
+    {
+        let path = CoreConfig::resolve_path(opts.config.as_deref());
+        match CoreConfig::load(&path) {
+            Ok(cfg) => {
+                if let Some(t) = cfg.theme {
+                    tracing::info!("Configured startup theme: {t}");
+                }
+                run_ui_display(
+                    opts.screen,
+                    opts.preview_secs,
+                    cfg.theme,
+                    opts.tab,
+                    cfg.marquee_fps.value(),
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to load config {}", path.display());
+                // Operator-facing rejection: keep it backtrace-free even under
+                // RUST_BACKTRACE=1 (full Display would append the stack trace).
+                eprintln!("  Config Error: {}", e.summary());
+                return ExitCode::FAILURE;
+            }
+        }
+    }
 
     #[cfg(not(feature = "ui"))]
-    let _ = opts;
+    let _ = &opts;
     #[cfg(not(feature = "ui"))]
     println!("  Display: UI feature disabled at compile-time.");
 
@@ -779,7 +774,7 @@ pub fn run_app(opts: CoreCliOptions) -> ExitCode {
 /// CLI main entrypoint for the `core` binary.
 pub fn main() -> ExitCode {
     match resolve_cli_opts(parse_cli_args_from(env_args()), "core", print_usage) {
-        Ok(opts) => run_app(opts),
+        Ok(opts) => run_app(&opts),
         Err(exit_code) => exit_code,
     }
 }
