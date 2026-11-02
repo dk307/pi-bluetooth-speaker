@@ -45,10 +45,7 @@ fn ui_shell_defaults_and_property_updates() {
     assert_eq!(shell.current_tab(), 0);
     assert_eq!(shell.current_theme(), ThemePreset::McIntoshBlue);
     assert_eq!(shell.window().get_active_tab(), 0);
-    assert_eq!(
-        shell.window().get_track_or_device(),
-        "Waiting for Connection..."
-    );
+    assert_eq!(shell.window().get_active_source(), "Bluetooth");
     assert_eq!(shell.window().get_stream_codec(), "aptX-HD");
     assert_eq!(shell.window().get_stream_sample_rate(), "48 kHz");
     assert_eq!(shell.window().get_stream_bit_depth(), "16-bit");
@@ -129,8 +126,8 @@ fn ui_shell_defaults_and_property_updates() {
     assert_eq!(shell.current_tab(), 5);
 
     // Status bar updates
-    shell.set_track_or_device("CD Player");
-    assert_eq!(shell.window().get_track_or_device(), "CD Player");
+    shell.set_source("CD Player");
+    assert_eq!(shell.window().get_active_source(), "CD Player");
 
     shell.set_track_or_device("Dire Straits - Sultans of Swing");
     assert_eq!(
@@ -210,6 +207,7 @@ fn ui_shell_callbacks_and_debug_formatting() {
     assert!(debug_str.contains("active_tab"));
 
     // Invoke callbacks through Slint window bindings
+    shell.window().invoke_source_clicked();
     shell.window().invoke_night_mode_clicked();
     shell.window().invoke_volume_changed(50.0);
     shell.window().invoke_toggle_play_pause();
@@ -365,12 +363,12 @@ fn ui_shell_now_playing_properties_and_playback_state() {
 
     // Direct setters on AppShell
     shell.set_tab(0);
-    shell.set_track_or_device("Bluetooth");
+    shell.set_source("Bluetooth");
     shell.set_track_metadata("Money for Nothing", "Dire Straits", "Brothers in Arms");
     shell.set_volume(78.0);
     shell.set_playback_state(true, 60_000, 500_000);
     assert_eq!(shell.current_tab(), 0);
-    assert_eq!(shell.window().get_track_or_device(), "Bluetooth");
+    assert_eq!(shell.window().get_active_source(), "Bluetooth");
     assert_eq!(shell.window().get_track_title(), "Money for Nothing");
     assert_eq!(shell.window().get_track_artist(), "Dire Straits");
     assert_eq!(shell.window().get_track_album(), "Brothers in Arms");
@@ -498,6 +496,7 @@ fn ui_shell_now_playing_callbacks() {
     shell.window().invoke_previous_track();
     shell.window().invoke_volume_changed(60.0);
     shell.window().invoke_cycle_theme();
+    shell.window().invoke_source_clicked();
     shell.window().invoke_night_mode_clicked();
 
     // Cover image setter
@@ -562,6 +561,7 @@ fn ui_shell_now_playing_callbacks() {
     assert_eq!(bt.status().unwrap().playback.unwrap().position_ms, 115_000);
 
     // Callbacks without panicking
+    shell.window().invoke_stream_pill_clicked();
 }
 
 #[cfg(feature = "ui")]
@@ -576,7 +576,7 @@ fn ui_shell_playback_state_renders_to_framebuffer() {
     let shell = AppShell::new(main_window);
 
     shell.set_tab(0);
-    shell.set_track_or_device("Bluetooth");
+    shell.set_source("Bluetooth");
     shell.set_track_metadata("Money for Nothing", "Dire Straits", "Brothers in Arms");
     shell.set_volume(78.0);
     shell.set_playback_state(true, 60_000, 500_000);
