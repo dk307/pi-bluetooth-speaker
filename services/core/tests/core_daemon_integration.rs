@@ -444,7 +444,7 @@ fn run_app_headless_executes_successfully() {
     let cfg_path = dir.path().join("config.json");
     CoreConfig {
         theme: Some(speaker_core::ui::ThemePreset::Peppy),
-        marquee_fps: 30,
+        marquee_fps: speaker_core::config::MarqueeFps::FPS_30,
     }
     .save(&cfg_path)
     .expect("save config");

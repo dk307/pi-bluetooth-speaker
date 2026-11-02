@@ -24,27 +24,79 @@ pub const DEFAULT_MARQUEE_FPS: u32 = 60;
 /// render load by scrolling 2 px per 33.3 ms tick at identical on-screen speed.
 const MARQUEE_FPS_ALLOWED: [u32; 2] = [30, 60];
 
+/// Strongly typed marquee scroll rate in frames per second.
+///
+/// The appliance display pipeline only supports `30` or `60` fps; an invalid
+/// value cannot inhabit the type, so [`CoreConfig`] never carries one and no
+/// post-deserialization validation pass is required. Serializes transparently
+/// as its raw `u32` rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct MarqueeFps(u32);
+
+impl MarqueeFps {
+    /// Halved-rate preset (2 px per tick scrolling).
+    pub const FPS_30: Self = Self::new(30);
+    /// Production-default rate.
+    pub const FPS_60: Self = Self::new(DEFAULT_MARQUEE_FPS);
+
+    /// Unchecked const constructor for fixed-rate constants.
+    #[must_use]
+    pub const fn new(fps: u32) -> Self {
+        Self(fps)
+    }
+
+    /// Returns the raw scroll rate in fps.
+    #[must_use]
+    pub const fn value(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for MarqueeFps {
+    fn default() -> Self {
+        Self::FPS_60
+    }
+}
+
+impl TryFrom<u32> for MarqueeFps {
+    type Error = ConfigError;
+
+    fn try_from(fps: u32) -> Result<Self, Self::Error> {
+        if MARQUEE_FPS_ALLOWED.contains(&fps) {
+            Ok(Self::new(fps))
+        } else {
+            Err(ConfigError::invalid(format!(
+                "invalid marquee fps '{fps}': expected 30 or 60"
+            )))
+        }
+    }
+}
+
+impl From<MarqueeFps> for u32 {
+    fn from(marquee_fps: MarqueeFps) -> Self {
+        marquee_fps.0
+    }
+}
+
+const _: () = {
+    assert!((30 <= DEFAULT_MARQUEE_FPS) && (DEFAULT_MARQUEE_FPS <= 60));
+};
+
 /// Strongly typed appliance configuration persisted as JSON on disk.
 ///
 /// Missing fields deserialize to their defaults, so minimal config files
-/// (e.g. `{}` or `{"theme": "peppy"}`) remain valid.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// (e.g. `{}` or `{"theme": "peppy"}`) remain valid. [`MarqueeFps`] enforces
+/// the allowed scroll rates at the deserialization boundary, so an invalid
+/// value cannot inhabit this struct.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CoreConfig {
     /// Theme preset override applied on startup; `None` keeps the built-in default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<ThemePreset>,
     /// Marquee scroll rate in fps (`30` or `60`).
-    pub marquee_fps: u32,
-}
-
-impl Default for CoreConfig {
-    fn default() -> Self {
-        Self {
-            theme: None,
-            marquee_fps: DEFAULT_MARQUEE_FPS,
-        }
-    }
+    pub marquee_fps: MarqueeFps,
 }
 
 impl CoreConfig {
@@ -52,11 +104,13 @@ impl CoreConfig {
     ///
     /// A missing file is not an error: defaults are returned with a warning so a
     /// fresh appliance boots unconfigured. Any other read failure, malformed
-    /// JSON, or out-of-range value is a hard [`ConfigError`].
+    /// JSON, an unknown theme slug, or an out-of-range `marquee_fps` is a hard
+    /// [`ConfigError`].
     ///
     /// # Errors
-    /// Returns [`ConfigError`] for non-missing I/O failures, malformed JSON, or
-    /// an invalid `marquee_fps` value.
+    /// Returns [`ConfigError`] for non-missing I/O failures, malformed or
+    /// non-conforming JSON (including invalid domain values), while the file
+    /// exists.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         match std::fs::metadata(path) {
             Ok(_) => {}
@@ -83,20 +137,18 @@ impl CoreConfig {
         let config = settings
             .try_deserialize::<Self>()
             .map_err(|e| ConfigError::config(format!("invalid config {}", path.display()), e))?;
-        config.validate()?;
         Ok(config)
     }
 
     /// Persists this configuration as pretty JSON to `path`.
     ///
-    /// The configuration is validated before anything touches the disk, so an
-    /// invalid value (e.g. a `marquee_fps` outside `{30, 60}`) can never be
-    /// persisted and brick the daemon at the next boot.
+    /// [`MarqueeFps`] makes out-of-domain rates unrepresentable, so every
+    /// persistable configuration is valid by construction and can never brick
+    /// the daemon at the next boot.
     ///
     /// # Errors
-    /// Returns [`ConfigError`] for invalid values, serialization, or file write failures.
+    /// Returns [`ConfigError`] for serialization or file write failures.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
-        self.validate()?;
         let mut raw = serde_json::to_string_pretty(self).map_err(|e| {
             ConfigError::config(
                 format!("failed to serialize config {}", path.display()),
@@ -137,22 +189,6 @@ impl CoreConfig {
             || PathBuf::from(DEFAULT_CONFIG_PATH),
             std::convert::Into::into,
         )
-    }
-
-    /// Rejects configuration values outside the domain supported by the appliance.
-    ///
-    /// # Errors
-    /// Returns [`ConfigError`] with [`ConfigError::is_invalid_value`] when
-    /// `marquee_fps` is neither 30 nor 60.
-    fn validate(&self) -> Result<(), ConfigError> {
-        if MARQUEE_FPS_ALLOWED.contains(&self.marquee_fps) {
-            Ok(())
-        } else {
-            Err(ConfigError::invalid(format!(
-                "invalid marquee fps '{}': expected 30 or 60",
-                self.marquee_fps
-            )))
-        }
     }
 }
 
@@ -272,7 +308,8 @@ mod tests {
     fn defaults_are_sensible() {
         let config = CoreConfig::default();
         assert_eq!(config.theme, None);
-        assert_eq!(config.marquee_fps, 60);
+        assert_eq!(config.marquee_fps, MarqueeFps::FPS_60);
+        assert_eq!(config.marquee_fps.value(), 60);
         assert_eq!(DEFAULT_MARQUEE_FPS, 60);
     }
 
@@ -304,7 +341,7 @@ mod tests {
         let path = dir.path().join("config.json");
         let config = CoreConfig {
             theme: Some(ThemePreset::Peppy),
-            marquee_fps: 30,
+            marquee_fps: MarqueeFps::FPS_30,
         };
         config.save(&path).expect("save");
         let loaded = CoreConfig::load(&path).expect("load");
@@ -322,7 +359,7 @@ mod tests {
         let config: CoreConfig =
             serde_json::from_str(r#"{"theme": "studio-dark"}"#).expect("theme only");
         assert_eq!(config.theme, Some(ThemePreset::StudioDark));
-        assert_eq!(config.marquee_fps, 60);
+        assert_eq!(config.marquee_fps, MarqueeFps::FPS_60);
     }
 
     #[test]
@@ -363,26 +400,64 @@ mod tests {
             let path = dir.path().join("config.json");
             std::fs::write(&path, format!(r#"{{"marquee_fps": {bad}}}"#)).expect("write");
             let err = CoreConfig::load(&path).expect_err("bad fps must fail");
-            assert!(err.is_invalid_value());
-            assert!(!err.is_config() && !err.is_io());
+            // The invalid rate cannot inhabit `MarqueeFps`, so the layered
+            // reader reports it as a deserialize failure.
+            assert!(err.is_config(), "{err}");
             let rendered = err.to_string();
             assert!(
                 rendered.contains(&format!("invalid marquee fps '{bad}': expected 30 or 60")),
                 "{rendered}"
             );
-            assert!(err.source().is_none(), "domain validation has no source");
         }
     }
 
     #[test]
     fn load_accepts_allowed_marquee_fps_values() {
-        for good in [30u32, 60] {
+        for (good, expected) in [(30u32, MarqueeFps::FPS_30), (60, MarqueeFps::FPS_60)] {
             let dir = ScopedTempDir::new("cfg_good_fps");
             let path = dir.path().join("config.json");
             std::fs::write(&path, format!(r#"{{"marquee_fps": {good}}}"#)).expect("write");
             let config = CoreConfig::load(&path).expect("valid fps must load");
-            assert_eq!(config.marquee_fps, good);
+            assert_eq!(config.marquee_fps, expected);
         }
+    }
+
+    #[test]
+    fn marquee_fps_tryfrom_enforces_allowed_values() {
+        for good in [30u32, 60] {
+            assert_eq!(
+                MarqueeFps::try_from(good).expect("allowed rate").value(),
+                good
+            );
+        }
+        for bad in [0u32, 15, 45, 120, u32::MAX] {
+            let err = MarqueeFps::try_from(bad).expect_err("out-of-domain rate must be rejected");
+            assert!(err.is_invalid_value());
+            assert_eq!(
+                err.summary(),
+                format!("invalid marquee fps '{bad}': expected 30 or 60")
+            );
+        }
+    }
+
+    #[test]
+    fn marquee_fps_serde_rejects_invalid_rate() {
+        let err = serde_json::from_str::<MarqueeFps>("45").expect_err("invalid rate");
+        assert!(
+            err.to_string().contains("invalid marquee fps '45'"),
+            "{err}"
+        );
+        let fps: MarqueeFps = serde_json::from_str("30").expect("allowed rate");
+        assert_eq!(fps, MarqueeFps::FPS_30);
+        // Serialization is transparent u32.
+        assert_eq!(
+            serde_json::to_string(&MarqueeFps::FPS_60).expect("serialize"),
+            "60"
+        );
+        // Invalid rates are unrepresentable in CoreConfig, so `save()` can
+        // never persist them.
+        assert_eq!(u32::from(MarqueeFps::FPS_30), 30);
+        assert_eq!(MarqueeFps::default(), MarqueeFps::FPS_60);
     }
 
     #[test]
@@ -416,46 +491,24 @@ mod tests {
     }
 
     #[test]
-    fn save_rejects_invalid_marquee_fps_without_writing() {
-        let dir = ScopedTempDir::new("cfg_save_invalid");
-        let path = dir.path().join("config.json");
-        let config = CoreConfig {
-            theme: None,
-            marquee_fps: 45,
-        };
-        let err = config
-            .save(&path)
-            .expect_err("invalid fps must never be persisted");
-        assert!(err.is_invalid_value());
-        assert!(err.to_string().contains("expected 30 or 60"));
-        // Neither the target nor a temp file may exist.
-        assert!(!path.exists());
-        let tmp = dir.path().join(".config.json.tmp");
-        assert!(
-            !tmp.exists(),
-            "no temp file may be created for invalid config"
-        );
-    }
-
-    #[test]
     fn save_replaces_existing_config_atomically() {
         let dir = ScopedTempDir::new("cfg_save_replace");
         let path = dir.path().join("config.json");
         CoreConfig {
             theme: None,
-            marquee_fps: 60,
+            marquee_fps: MarqueeFps::FPS_60,
         }
         .save(&path)
         .expect("initial save");
         CoreConfig {
             theme: Some(ThemePreset::StudioDark),
-            marquee_fps: 30,
+            marquee_fps: MarqueeFps::FPS_30,
         }
         .save(&path)
         .expect("replacement save");
         let loaded = CoreConfig::load(&path).expect("reload replaced config");
         assert_eq!(loaded.theme, Some(ThemePreset::StudioDark));
-        assert_eq!(loaded.marquee_fps, 30);
+        assert_eq!(loaded.marquee_fps, MarqueeFps::FPS_30);
         // Only the final artifact remains; no temp files left behind.
         let leftovers: Vec<_> = dir
             .path()
@@ -474,8 +527,8 @@ mod tests {
             let dir = ScopedTempDir::new("cfg_extless");
             let path = dir.path().join(name);
             std::fs::write(&path, r#"{"marquee_fps": 30}"#).expect("write");
-            let config = CoreConfig::load(&path).expect("JSON content must load");
-            assert_eq!(config.marquee_fps, 30, "{name}");
+            let config = CoreConfig::load(&path).expect("valid fps must load");
+            assert_eq!(config.marquee_fps, MarqueeFps::FPS_30, "{name}");
         }
     }
 

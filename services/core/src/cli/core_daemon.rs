@@ -749,7 +749,7 @@ pub fn run_app(opts: &CoreCliOptions) -> ExitCode {
                     opts.preview_secs,
                     cfg.theme,
                     opts.tab,
-                    cfg.marquee_fps,
+                    cfg.marquee_fps.value(),
                 );
             }
             Err(e) => {
