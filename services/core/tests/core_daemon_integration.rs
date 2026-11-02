@@ -182,23 +182,43 @@ fn run_ui_display_missing_device_returns_early() {
 }
 
 #[cfg(feature = "ui")]
-#[test]
-fn run_splash_on_mocked_renders_and_tracks_counters() {
-    let (mut fb, ctrl) = Framebuffer::new_mocked();
-    assert!(fb.is_mocked());
-    run_splash_on(&mut fb, Some(0), None);
-    assert_eq!(fb.unblank_count(), 1);
-    assert_eq!(fb.render_count(), 1);
-    assert_eq!(ctrl.counters(), (1, 1));
+fn instant_probes(text: Result<&'static str, &'static str>) -> speaker_core::ui::BootProbe {
+    use speaker_core::ui::BootProbe;
+
+    BootProbe::from_probes(std::array::from_fn(|_| {
+        Box::new(move || text.map(Into::into).map_err(Into::into))
+            as Box<dyn FnOnce() -> Result<Box<str>, Box<str>> + Send>
+    }))
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_splash_on_mocked_zero_preview_skips_loop() {
+fn run_splash_on_mocked_drains_checks_and_renders_frames() {
+    let (mut fb, ctrl) = Framebuffer::new_mocked();
+    assert!(fb.is_mocked());
+    run_splash_on(&mut fb, instant_probes(Ok("all good")), None, None);
+    assert_eq!(fb.unblank_count(), 1);
+    assert!(
+        fb.render_count() >= 2,
+        "initial frame plus check-loop frames"
+    );
+    assert_eq!(ctrl.counters(), (1, fb.render_count()));
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn run_splash_on_mocked_failed_probes_still_terminate() {
     let (mut fb, _ctrl) = Framebuffer::new_mocked();
-    run_splash_on(&mut fb, Some(0), None);
-    // Initial render + no loop iterations for zero-length preview
-    assert_eq!(fb.render_count(), 1);
+    run_splash_on(&mut fb, instant_probes(Err("probe blew up")), None, None);
+    assert!(fb.render_count() >= 2);
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn run_splash_on_mocked_zero_preview_exits_after_checks() {
+    let (mut fb, _ctrl) = Framebuffer::new_mocked();
+    run_splash_on(&mut fb, instant_probes(Ok("ok")), Some(0), None);
+    assert!(fb.render_count() >= 2);
 }
 
 #[cfg(feature = "ui")]
@@ -206,18 +226,23 @@ fn run_splash_on_mocked_zero_preview_skips_loop() {
 fn run_splash_on_mocked_reports_unblank_failure_and_continues() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     ctrl.set_unblank_error("simulated unblank failure");
-    run_splash_on(&mut fb, Some(0), Some(speaker_core::ui::ThemePreset::Peppy));
+    run_splash_on(
+        &mut fb,
+        instant_probes(Ok("ok")),
+        None,
+        Some(speaker_core::ui::ThemePreset::Peppy),
+    );
     // Unblank failure is non-fatal: splash still initializes and renders
     assert_eq!(fb.unblank_count(), 0);
-    assert_eq!(fb.render_count(), 1);
+    assert!(fb.render_count() >= 2);
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_splash_on_mocked_render_error_skips_loop() {
+fn run_splash_on_mocked_render_error_still_joins_check_thread() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     ctrl.set_render_error("simulated render failure");
-    run_splash_on(&mut fb, Some(0), None);
+    run_splash_on(&mut fb, instant_probes(Ok("ok")), None, None);
     assert_eq!(fb.render_count(), 0);
     assert_eq!(ctrl.counters(), (1, 0));
 }

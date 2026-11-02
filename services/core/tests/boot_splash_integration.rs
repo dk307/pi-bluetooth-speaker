@@ -1,83 +1,59 @@
-//! Integration tests for the Clean Startup Splash Screen component.
+//! Integration tests for the equalizer boot splash screen component.
+
+use slint::ComponentHandle;
+use speaker_core::ui::{Bgrx8888Pixel, BootCheckLine, Framebuffer, SplashScreen};
+
+#[cfg(feature = "ui")]
+fn splash_on_mocked_fb() -> (
+    Framebuffer,
+    std::rc::Rc<slint::platform::software_renderer::MinimalSoftwareWindow>,
+    SplashScreen,
+) {
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let splash = SplashScreen::new().expect("Failed to initialize SplashScreen");
+    splash.show().expect("Failed to show SplashScreen");
+    fb.render_frame(&window).expect("Render frame failed");
+    (fb, window, splash)
+}
 
 #[cfg(feature = "ui")]
 #[test]
-fn splash_screen_defaults_and_property_updates() {
-    use speaker_core::ui::{Framebuffer, SplashScreen};
+fn splash_screen_current_check_default_and_updates() {
+    let (_fb, _window, splash) = splash_on_mocked_fb();
 
-    let fb = Framebuffer::new_mocked().0;
-    let _window = fb.init_platform().expect("Failed to initialize platform");
+    // The single check line starts with a running placeholder.
+    let default_line = splash.get_current_check();
+    assert!(default_line.running);
+    assert!(!default_line.ok);
 
-    let splash = SplashScreen::new().expect("Failed to initialize SplashScreen");
+    splash.set_current_check(BootCheckLine {
+        text: "CamillaDSP: running".into(),
+        running: false,
+        ok: true,
+    });
+    let line = splash.get_current_check();
+    assert_eq!(line.text, "CamillaDSP: running");
+    assert!(!line.running && line.ok);
 
-    // Verify initial default properties
-    assert_eq!(splash.get_progress(), 100.0);
-    assert_eq!(splash.get_status_text(), "System Ready");
-    assert!(splash.get_amp_status().contains("MA12070P"));
-    assert!(splash.get_dsp_status().contains("CamillaDSP"));
-    assert!(splash.get_bt_status().contains("BlueZ 5"));
-    assert!(splash.get_display_status().contains("800x480"));
-    assert!(splash.get_sensor_status().contains("DS18B20"));
-
-    // Verify dynamic property mutations
-    splash.set_progress(45.0);
-    assert_eq!(splash.get_progress(), 45.0);
-
-    splash.set_status_text("Initializing Active Crossover Filters...".into());
-    assert_eq!(
-        splash.get_status_text(),
-        "Initializing Active Crossover Filters..."
-    );
-
-    splash.set_amp_status("InnoMaker Merus MA12070P (Fault Cleared)".into());
-    assert_eq!(
-        splash.get_amp_status(),
-        "InnoMaker Merus MA12070P (Fault Cleared)"
-    );
-
-    splash.set_dsp_status("CamillaDSP 48kHz / 32-bit LE (Locked)".into());
-    assert_eq!(
-        splash.get_dsp_status(),
-        "CamillaDSP 48kHz / 32-bit LE (Locked)"
-    );
-
-    splash.set_bt_status("Pixel 10 Pro XL Connected via aptX-HD".into());
-    assert_eq!(
-        splash.get_bt_status(),
-        "Pixel 10 Pro XL Connected via aptX-HD"
-    );
-
-    splash.set_sensor_status("DS18B20 41.2°C | BH1750 145.0 Lux".into());
-    assert_eq!(
-        splash.get_sensor_status(),
-        "DS18B20 41.2°C | BH1750 145.0 Lux"
-    );
-
-    // Verify NaN and boundary progress values
-    splash.set_progress(f32::NAN);
-    assert!(splash.get_progress().is_nan());
-    splash.set_progress(-10.0);
-    assert_eq!(splash.get_progress(), -10.0);
-    splash.set_progress(150.0);
-    assert_eq!(splash.get_progress(), 150.0);
+    // Failed checks carry their detail text.
+    splash.set_current_check(BootCheckLine {
+        text: "I2S Amplifier: live faults: OTW".into(),
+        running: false,
+        ok: false,
+    });
+    let line = splash.get_current_check();
+    assert!(!line.running && !line.ok);
+    assert!(line.text.contains("OTW"));
 }
 
 #[cfg(feature = "ui")]
 #[test]
 fn splash_screen_renders_to_framebuffer() {
-    use slint::ComponentHandle;
-    use speaker_core::ui::{Bgrx8888Pixel, Framebuffer, SplashScreen};
-
-    let mut fb = Framebuffer::new_mocked().0;
-    let window = fb.init_platform().expect("Failed to initialize platform");
-    let splash = SplashScreen::new().expect("Failed to initialize SplashScreen");
-
-    splash.show().expect("Failed to show SplashScreen");
-    let rendered = fb.render_frame(&window).expect("Render frame failed");
-    assert!(rendered);
+    let (fb, _window, _splash) = splash_on_mocked_fb();
     assert_eq!(fb.render_count(), 1);
 
-    // Verify non-empty pixel render (background color #090d12 is non-zero)
+    // Verify non-empty pixel render (theme chassis color is non-zero).
     let non_zero_pixels = fb
         .pixels()
         .iter()
@@ -87,4 +63,19 @@ fn splash_screen_renders_to_framebuffer() {
         non_zero_pixels > 0,
         "Rendered frame must contain drawn pixels"
     );
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn splash_screen_renders_check_line() {
+    let (mut fb, window, splash) = splash_on_mocked_fb();
+    assert_eq!(fb.render_count(), 1);
+
+    splash.set_current_check(BootCheckLine {
+        text: "Bluetooth Stack: 1 connected | streaming".into(),
+        running: false,
+        ok: true,
+    });
+    fb.render_frame(&window).expect("Render frame failed");
+    assert_eq!(fb.render_count(), 2);
 }

@@ -22,7 +22,10 @@ use crate::hardware::TempSensor;
 #[cfg(feature = "ui")]
 use crate::ui::theme::ThemePreset;
 #[cfg(feature = "ui")]
-use crate::ui::{AppShell, FrameTiming, Framebuffer, FramebufferError, MainWindow, SplashScreen};
+use crate::ui::{
+    AppShell, BootCheckLine, BootCheckStatus, BootCheckUpdate, BootProbe, FrameTiming, Framebuffer,
+    FramebufferError, MainWindow, SplashScreen,
+};
 #[cfg(feature = "ui")]
 use slint::ComponentHandle;
 #[cfg(feature = "ui")]
@@ -241,15 +244,17 @@ pub fn run_ui_display_on_path(
 
     match screen {
         ScreenTarget::Appliance => {
-            // Default appliance sequence: POST splash screen, then main UI shell
-            let splash_secs = preview_secs.map_or(2, |p| p.min(2));
-            run_splash_on(&mut fb, Some(splash_secs), theme);
-            let remaining_preview = preview_secs.and_then(|p| p.checked_sub(splash_secs));
+            // Default appliance sequence: boot checks on the splash screen
+            // (no artificial minimum display time), then the main UI shell
+            // (now-playing) until stopped.
+            let splash_start = Instant::now();
+            run_splash_on(&mut fb, BootProbe::real(), preview_secs, theme);
+            let remaining_preview =
+                preview_secs.map(|p| p.saturating_sub(splash_start.elapsed().as_secs()));
             run_shell_on(&mut fb, remaining_preview, theme, tab, marquee_fps);
         }
         ScreenTarget::Splash => {
-            let splash_secs = preview_secs.or(Some(2));
-            run_splash_on(&mut fb, splash_secs, theme);
+            run_splash_on(&mut fb, BootProbe::real(), preview_secs, theme);
         }
         ScreenTarget::Shell => {
             run_shell_on(&mut fb, preview_secs, theme, tab, marquee_fps);
@@ -323,23 +328,153 @@ pub fn run_ui_lifecycle<C, F>(
     println!("  Display: Render loop finished.");
 }
 
+/// Applies one boot-check update to the splash screen's single check line.
+#[cfg(feature = "ui")]
+fn apply_check_update(splash: &SplashScreen, update: &BootCheckUpdate) {
+    let line = BootCheckLine {
+        text: slint::SharedString::from(&*update.text),
+        running: update.status == BootCheckStatus::Running,
+        ok: update.status == BootCheckStatus::Passed,
+    };
+    splash.set_current_check(line);
+}
+
+/// Hard upper bound for the splash when no `preview_secs` window is given, so
+/// a hung hardware probe (blocking D-Bus/I2C/sysfs call) can never stall the
+/// appliance boot indefinitely.
+const MAX_SPLASH_WAIT: Duration = Duration::from_secs(30);
+
 /// Runs the splash lifecycle against an opened framebuffer backend.
+///
+/// Boot checks run on a background thread; the render loop drains their
+/// updates into the single bottom check line and exits immediately once all
+/// checks have settled (no artificial minimum display time) or once the
+/// deadline expires, whichever comes first. `preview_secs` bounds the splash;
+/// without it `MAX_SPLASH_WAIT` applies. If the deadline expires with checks
+/// still running (a hung probe), the worker is abandoned with a warning so
+/// boot always proceeds; a worker panic is re-raised on the normal path only.
+///
+/// # Panics
+/// Re-raises a panic from the `boot-checks` worker when it finished normally.
 #[cfg(feature = "ui")]
 pub fn run_splash_on(
     fb: &mut Framebuffer,
+    probe: BootProbe,
     preview_secs: Option<u64>,
     theme: Option<crate::ui::ThemePreset>,
 ) {
-    run_ui_lifecycle(fb, "Boot splash screen", preview_secs, || {
-        let splash = SplashScreen::new().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        if let Some(t) = theme {
-            t.apply_splash(&splash);
+    if let Err(e) = fb.unblank() {
+        report_display(tracing::Level::WARN, "Failed to unblank display", &e);
+    }
+
+    let window = match fb.init_platform() {
+        Ok(win) => win,
+        Err(e) => {
+            report_display(tracing::Level::ERROR, "Failed to initialize platform", &e);
+            return;
         }
-        splash
-            .show()
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        Ok(splash)
-    });
+    };
+
+    let splash = match SplashScreen::new() {
+        Ok(splash) => splash,
+        Err(e) => {
+            report_display(
+                tracing::Level::ERROR,
+                "Failed to initialize Boot splash screen",
+                &e,
+            );
+            return;
+        }
+    };
+    if let Some(t) = theme {
+        t.apply_splash(&splash);
+    }
+    if let Err(e) = splash.show() {
+        report_display(
+            tracing::Level::WARN,
+            "Failed to show Boot splash screen",
+            &e,
+        );
+        return;
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel::<BootCheckUpdate>();
+    // Graceful degradation instead of a panic (M-PANIC-IS-STOP): if the worker
+    // thread cannot be spawned (resource exhaustion), boot checks are skipped
+    // with a warning and the appliance still boots into the shell.
+    let checks = match std::thread::Builder::new()
+        .name("boot-checks".into())
+        .spawn(move || probe.run(&mut |update| drop(tx.send(update))))
+    {
+        Ok(handle) => Some(handle),
+        Err(err) => {
+            tracing::warn!("Failed to spawn boot-checks worker, skipping checks: {err}");
+            println!("  Warning: boot checks skipped (worker spawn failed).");
+            None
+        }
+    };
+    let mut checks_done = checks.is_none();
+
+    'render: {
+        match fb.render_frame(&window) {
+            Ok(true) => {
+                tracing::info!("Boot splash screen rendered to /dev/fb0 successfully");
+                println!("  Display: Boot splash screen rendered to /dev/fb0 successfully!");
+            }
+            Ok(false) => {
+                tracing::debug!("Screen buffer already current");
+                println!("  Display: Screen buffer already current.");
+            }
+            Err(e) => {
+                report_display(tracing::Level::ERROR, "Failed to render frame", &e);
+                break 'render;
+            }
+        }
+
+        let start = Instant::now();
+        // Hard upper bound: without a preview window the splash may still not
+        // wait forever on a hung hardware probe (blocking D-Bus/I2C calls).
+        let deadline = preview_secs.map_or(MAX_SPLASH_WAIT, Duration::from_secs);
+        tracing::info!("Running UI render loop");
+        println!("  Display: Running UI render loop...");
+
+        loop {
+            loop {
+                match rx.try_recv() {
+                    Ok(update) => apply_check_update(&splash, &update),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        checks_done = true;
+                        break;
+                    }
+                }
+            }
+
+            slint::platform::update_timers_and_animations();
+            if let Err(e) = fb.render_frame(&window) {
+                report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
+                break;
+            }
+
+            if checks_done || start.elapsed() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+    }
+
+    if checks_done {
+        if let Some(handle) = checks {
+            if let Err(err) = handle.join() {
+                std::panic::resume_unwind(err);
+            }
+        }
+    } else {
+        tracing::warn!("Boot checks did not finish within the splash window; abandoning worker");
+    }
+
+    tracing::info!("Splash render loop finished");
+    println!("  Display: Splash render loop finished.");
 }
 
 /// Fully-initialized shell plus its Bluetooth transport wiring.
