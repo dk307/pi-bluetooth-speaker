@@ -514,12 +514,28 @@ fn bt_monitor_loop(
     // thread dies. Slices cap command latency while waiting.
     const BT_KEEP_ALIVE: Duration = Duration::from_secs(1);
     const BT_WAIT_SLICE: Duration = Duration::from_millis(100);
+    // The peer's AVRCP Status property can lag a local transport command by hundreds
+    // of milliseconds. Publishing the immediately-post-command snapshot would revert
+    // the shell's optimistic UI flip back to the pre-command state until the peer
+    // catches up. While the settle window is active, suppress publishing snapshots
+    // whose status still matches the last published pre-command status; the first
+    // genuinely-changed status (or window expiry) publishes normally.
+    const BT_COMMAND_SETTLE: Duration = Duration::from_millis(750);
     let mut last_pb: Option<crate::hardware::BtPlaybackState> = None;
     let mut last_pcms: Option<Box<[crate::hardware::BlueAlsaPcm]>> = None;
     let mut last_cover_path: Option<Box<str>> = None;
+    let mut pre_command_playing: Option<bool> = None;
+    let mut command_settle_started: Option<Instant> = None;
 
     while running.load(Ordering::Relaxed) {
-        for command in commands.drain() {
+        let drained = commands.drain();
+        if !drained.is_empty() {
+            pre_command_playing = last_pb
+                .as_ref()
+                .map(crate::hardware::BtPlaybackState::is_playing);
+            command_settle_started = Some(Instant::now());
+        }
+        for command in drained {
             match command {
                 crate::hardware::TransportCommand::TogglePlayPause => {
                     let _ = bt.player_toggle();
@@ -543,7 +559,13 @@ fn bt_monitor_loop(
         // default so the render thread clears stale optimistic UI state instead
         // of freezing the last known track.
         if let Ok(Some(ref pb)) = bt.playback_state() {
-            if last_pb.as_ref() != Some(pb) {
+            let settling =
+                pre_command_playing
+                    .zip(command_settle_started)
+                    .is_some_and(|(pre, started)| {
+                        started.elapsed() < BT_COMMAND_SETTLE && pb.is_playing() == pre
+                    });
+            if !settling && last_pb.as_ref() != Some(pb) {
                 let cover_path = pb.cover_art_path.clone();
                 if last_cover_path != cover_path {
                     update.cover = Some(match cover_path.as_ref() {
