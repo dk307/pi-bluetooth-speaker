@@ -577,3 +577,57 @@ fn player_seek_translates_absolute_ms_to_relative_us() {
     assert_eq!(h.seek_calls(), 1);
     assert_eq!(h.last_seek_offset_us(), 15_000_000);
 }
+
+/// Regression test for the listener-thread leak: dropping the `DbusClient`
+/// closes the connection so the blocked `MessageIterator::next` unblocks and
+/// the `bt-dbus-signals` thread exits (it cannot observe the stop flag while
+/// parked on a quiet bus).
+#[test]
+fn listener_thread_released_on_client_drop() {
+    fn thread_count() -> usize {
+        std::fs::read_to_string("/proc/self/status")
+            .expect("read /proc/self/status")
+            .lines()
+            .find_map(|l| l.strip_prefix("Threads:"))
+            .expect("Threads line")
+            .trim()
+            .parse()
+            .expect("thread count")
+    }
+
+    let mut daemon = Command::new("dbus-daemon")
+        .args(["--session", "--nofork", "--print-address=1"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("dbus-daemon must be installed to run integration tests");
+    let addr = BufReader::new(daemon.stdout.take().unwrap())
+        .lines()
+        .next()
+        .unwrap()
+        .unwrap();
+    let client = zbus::blocking::connection::Builder::address(addr.trim())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let before = thread_count();
+    let device = BluetoothDevice::with_connection(client);
+    let with_listener = thread_count();
+    assert!(
+        with_listener > before,
+        "listener thread must be spawned with the client"
+    );
+
+    drop(device);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while thread_count() > before && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let after = thread_count();
+    assert!(
+        after <= before,
+        "listener thread must exit after the client is dropped (before={before}, after={after})"
+    );
+
+    daemon.kill().expect("kill dbus-daemon");
+}

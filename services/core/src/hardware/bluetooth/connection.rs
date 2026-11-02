@@ -1173,7 +1173,7 @@ const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
 /// If the system bus cannot be reached, the thread retries with backoff and
 /// callers fall back to the keep-alive timeout polling path meanwhile.
 fn spawn_properties_changed_listener(
-    conn: Connection,
+    conn_slot: Arc<Mutex<Option<Connection>>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) -> Arc<ChangeFlag> {
     let flag = Arc::new(ChangeFlag::default());
@@ -1192,11 +1192,21 @@ fn spawn_properties_changed_listener(
             // setup failure or iterator exhaustion (bus lost) the thread sleeps
             // a backoff interval and rebuilds the rule/iterator, honoring the
             // stop flag between attempts (the keep-alive polling fallback covers
-            // the gap while a blocked `next()` cannot observe the flag).
+            // the gap while a blocked `next()` cannot observe the flag; the
+            // connection is closed by `DbusClient::drop` to unblock a parked
+            // `next()`).
             loop {
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
                     return;
                 }
+                let Some(conn) = conn_slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                else {
+                    // Slot emptied by drop: the connection has been closed.
+                    return;
+                };
                 let Ok(rule) = zbus::MatchRule::builder()
                     .msg_type(zbus::message::Type::Signal)
                     .interface("org.freedesktop.DBus.Properties")
@@ -1238,8 +1248,10 @@ fn spawn_properties_changed_listener(
 
 /// D-Bus client executing direct queries against systemd, `BlueZ`, and `BlueALSA`.
 ///
-/// Deliberately not `Clone`: the `Drop` impl signals the per-client listener
-/// thread to stop, which must only happen when the last owner is dropped.
+/// Deliberately not `Clone`: the `Drop` impl stops the per-client listener
+/// thread and closes the shared D-Bus connection, which must only happen when
+/// the last owner is dropped (the drop tears the connection down for every
+/// other holder of the same `Connection` clone).
 #[derive(Debug)]
 pub struct DbusClient {
     conn: Connection,
@@ -1248,6 +1260,9 @@ pub struct DbusClient {
     state: Arc<Mutex<DbusClientState>>,
     change_flag: Arc<ChangeFlag>,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Owned slot for the listener thread: emptied (and the connection closed)
+    /// on drop so the thread's blocked `MessageIterator::next` unblocks.
+    conn_slot: Arc<Mutex<Option<Connection>>>,
 }
 
 /// Snapshot of `BlueZ` adapter, connected/paired devices, and media player state.
@@ -1256,20 +1271,46 @@ pub type BluezSnapshot = (Option<BtAdapter>, Box<[BtDevice]>, Option<BtPlaybackS
 impl Drop for DbusClient {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        // The listener thread blocks inside `MessageIterator::next` and cannot
+        // observe the `stop` flag on a quiet bus; closing the connection makes
+        // the blocked iterator fail immediately, and the thread then sees the
+        // flag and exits. This releases the one-thread-per-boot leak from
+        // `probe_bluetooth()` and the per-test accumulation in integration
+        // tests. Trade-off: the client must be the last owner of the
+        // connection, since closing it affects every other holder.
+        let taken = self
+            .conn_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(conn) = taken {
+            if let Err(e) = conn.close() {
+                tracing::warn!("failed to close D-Bus connection on drop: {e}");
+            }
+        }
     }
 }
 
 impl DbusClient {
     #[must_use]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "constructor takes ownership of the caller's connection; the slot requires an owned value"
+    )]
     pub fn new(conn: Connection) -> Self {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let conn_slot: Arc<Mutex<Option<Connection>>> = Arc::new(Mutex::new(Some(conn.clone())));
         Self {
             conn: conn.clone(),
             device_caps_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             state: Arc::new(Mutex::new(DbusClientState::default())),
-            change_flag: spawn_properties_changed_listener(conn, Arc::clone(&stop)),
+            change_flag: spawn_properties_changed_listener(
+                Arc::clone(&conn_slot),
+                Arc::clone(&stop),
+            ),
             stop,
+            conn_slot,
         }
     }
 
