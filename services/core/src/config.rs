@@ -2,7 +2,7 @@
 //!
 //! Provides [`CoreConfig`], the strongly typed on-disk configuration storing the
 //! startup [`ThemePreset`] override and the marquee scroll rate, loaded from
-//! [`DEFAULT_CONFIG_PATH`] (overridable via the `-c/--config` CLI flag).
+//! `crate::diag::DEFAULT_CONFIG_PATH` (overridable via the `-c/--config` CLI flag).
 
 use std::backtrace::Backtrace;
 use std::fmt::{self, Formatter};
@@ -11,11 +11,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::diag::DEFAULT_CONFIG_PATH;
 use crate::hardware::impl_canonical_error_display;
 use crate::ui::ThemePreset;
-
-/// Default filesystem path of the appliance JSON configuration file.
-pub const DEFAULT_CONFIG_PATH: &str = "/etc/speaker-core/config.json";
 
 /// Production default marquee scroll rate (fps).
 pub const DEFAULT_MARQUEE_FPS: u32 = 60;
@@ -88,8 +86,30 @@ impl CoreConfig {
         let mut raw = serde_json::to_string_pretty(self)
             .map_err(|e| ConfigError::parse(format!("config {}", path.display()), e))?;
         raw.push('\n');
-        std::fs::write(path, raw)
-            .map_err(|e| ConfigError::io(format!("failed to write config {}", path.display()), e))
+
+        // Write to a sibling temp file, fsync it, then atomically rename it over
+        // the target: a power loss mid-write can never leave a truncated config
+        // that would brick the daemon at the next boot (malformed JSON is a hard
+        // error by contract).
+        let tmp = match path.file_name() {
+            Some(name) => path.with_file_name(format!(".{}.tmp", name.to_string_lossy())),
+            None => path.with_file_name(".speaker-core.json.tmp"),
+        };
+        let write_result = (|| -> Result<(), io::Error> {
+            let mut file = std::fs::File::create(&tmp)?;
+            std::io::Write::write_all(&mut file, raw.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&tmp, path)
+        })();
+        if let Err(e) = write_result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(ConfigError::io(
+                format!("failed to write config {}", path.display()),
+                e,
+            ));
+        }
+        Ok(())
     }
 
     /// Resolves the effective CLI-independent configuration path.
@@ -358,11 +378,51 @@ mod tests {
     fn save_io_failure_on_directory_target() {
         let dir = ScopedTempDir::new("cfg_save_dir");
         let config = CoreConfig::default();
+        // Renaming the temp file over an existing directory must fail.
         let err = config
-            .save(&dir.path().join("missing-dir/config.json"))
-            .expect_err("write into missing directory must fail");
+            .save(dir.path())
+            .expect_err("rename over directory must fail");
         assert!(err.is_io());
         assert!(err.to_string().contains("failed to write config"));
+        // The temp file must never linger after a failed save.
+        let leftover_count = dir
+            .path()
+            .read_dir()
+            .map_or(usize::MAX, std::iter::Iterator::count);
+
+        assert_eq!(
+            leftover_count, 0,
+            "temp file must be cleaned up on failed save"
+        );
+    }
+
+    #[test]
+    fn save_replaces_existing_config_atomically() {
+        let dir = ScopedTempDir::new("cfg_save_replace");
+        let path = dir.path().join("config.json");
+        CoreConfig {
+            theme: None,
+            marquee_fps: 60,
+        }
+        .save(&path)
+        .expect("initial save");
+        CoreConfig {
+            theme: Some(ThemePreset::StudioDark),
+            marquee_fps: 30,
+        }
+        .save(&path)
+        .expect("replacement save");
+        let loaded = CoreConfig::load(&path).expect("reload replaced config");
+        assert_eq!(loaded.theme, Some(ThemePreset::StudioDark));
+        assert_eq!(loaded.marquee_fps, 30);
+        // Only the final artifact remains; no temp files left behind.
+        let leftovers: Vec<_> = dir
+            .path()
+            .read_dir()
+            .expect("read dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(leftovers, vec!["config.json".to_string()]);
     }
 
     #[test]

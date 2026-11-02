@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "ui")]
-use crate::config::{CoreConfig, DEFAULT_CONFIG_PATH};
-use crate::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts};
+use crate::config::CoreConfig;
+use crate::diag::{CliParse, DEFAULT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts};
 use crate::hardware::TempSensor;
 #[cfg(feature = "ui")]
 use crate::ui::theme::ThemePreset;
@@ -60,12 +60,6 @@ pub struct CoreCliOptions {
 
 /// Prints usage text for the core daemon executable.
 pub fn print_usage(bin_name: &str) {
-    #[cfg(feature = "ui")]
-    let default_config_path = DEFAULT_CONFIG_PATH;
-    // `crate::config` is ui-gated (it stores `ThemePreset`), so the daemon binary
-    // built without the `ui` feature needs the path literal restated here.
-    #[cfg(not(feature = "ui"))]
-    let default_config_path = "/etc/speaker-core/config.json";
     println!("DietPi Bluetooth Speaker & DSP Core Appliance Service");
     println!();
     println!("Usage: {bin_name} [OPTIONS]");
@@ -74,7 +68,7 @@ pub fn print_usage(bin_name: &str) {
     println!(
         "  -s, --screen <appliance|splash|shell> Target screen to render (default: appliance)"
     );
-    println!("  -c, --config <PATH>         JSON config file (default: {default_config_path})");
+    println!("  -c, --config <PATH>         JSON config file (default: {DEFAULT_CONFIG_PATH})");
     println!(
         "  -T, --tab <TAB>             Active UI tab on startup (0-5 or name: player, vu, bt, cd, dsp, settings)"
     );
@@ -757,7 +751,9 @@ pub fn run_app(opts: &CoreCliOptions) -> ExitCode {
             }
             Err(e) => {
                 tracing::error!(error = %e, "failed to load config {}", path.display());
-                eprintln!("  Config Error: {e}");
+                // Operator-facing rejection: keep it backtrace-free even under
+                // RUST_BACKTRACE=1 (full Display would append the stack trace).
+                eprintln!("  Config Error: {}", e.summary());
                 return ExitCode::FAILURE;
             }
         }

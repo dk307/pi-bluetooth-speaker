@@ -18,6 +18,9 @@ static TEMP_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// Foot-candles per lux conversion multiplier (1 lx ≈ 0.092903 fc).
 pub const LUX_TO_FOOT_CANDLES: f32 = 0.092_903;
 
+/// Default on-disk JSON configuration path for the core appliance service.
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/speaker-core/config.json";
+
 /// Output formatting mode for CLI diagnostic utilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
