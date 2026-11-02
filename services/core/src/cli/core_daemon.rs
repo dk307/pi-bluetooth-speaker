@@ -704,16 +704,21 @@ fn bt_monitor_loop(
         }
 
         if update.playback.is_some() || update.pcm.is_some() || update.cover.is_some() {
-            if let Ok(mut lock) = shared.lock() {
-                if update.playback.is_some() {
-                    lock.playback = update.playback;
-                }
-                if update.pcm.is_some() {
-                    lock.pcm = update.pcm;
-                }
-                if update.cover.is_some() {
-                    lock.cover = update.cover;
-                }
+            // A poisoned mutex is recovered (not silently dropped): the snapshot
+            // was already computed and the dedup state advanced, so losing it
+            // here would skip that state until the device changes again.
+            let mut lock = shared.lock().unwrap_or_else(|p| {
+                tracing::warn!("BtSharedUpdate mutex poisoned; recovering inner state");
+                p.into_inner()
+            });
+            if update.playback.is_some() {
+                lock.playback = update.playback;
+            }
+            if update.pcm.is_some() {
+                lock.pcm = update.pcm;
+            }
+            if update.cover.is_some() {
+                lock.cover = update.cover;
             }
         }
 
@@ -846,7 +851,17 @@ pub fn run_render_loop(
 
 /// Applies queued Bluetooth playback/PCM/cover updates from the worker to the shell.
 fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpdate>>) {
-    if let Ok(mut lock) = shared_state.try_lock() {
+    // A poisoned guard is recovered so a panicked worker cannot permanently
+    // freeze the UI; a busy lock is simply skipped until the next frame.
+    let lock = match shared_state.try_lock() {
+        Ok(lock) => Some(lock),
+        Err(std::sync::TryLockError::Poisoned(err)) => {
+            tracing::warn!("BtSharedUpdate mutex poisoned; recovering inner state");
+            Some(err.into_inner())
+        }
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    };
+    if let Some(mut lock) = lock {
         if let Some(pb) = lock.playback.take() {
             shell.apply_bluetooth_playback(&pb);
         }

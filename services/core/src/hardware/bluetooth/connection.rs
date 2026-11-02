@@ -1129,41 +1129,37 @@ impl ChangeFlag {
     /// Waits up to `timeout` for a change notification. Returns `true` when a
     /// change was signaled (consuming the flag), `false` on keep-alive timeout.
     pub(crate) fn wait(&self, timeout: Duration) -> bool {
-        let changed = {
-            let mut ready = self.ready.lock().unwrap_or_else(|p| {
-                tracing::warn!("ChangeFlag mutex poisoned; recovering inner state");
-                p.into_inner()
-            });
-            let mut changed = *ready;
-            if !changed {
-                let deadline = Instant::now() + timeout;
-                loop {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        break;
-                    }
-                    let Ok((guard, res)) = self.cv.wait_timeout(ready, remaining) else {
-                        break;
-                    };
-                    ready = guard;
-                    if *ready {
-                        changed = true;
-                        break;
-                    }
-                    if res.timed_out() {
-                        break;
-                    }
-                }
-            }
-            // The guard drops at the end of this block, before the re-lock below:
-            // breaking out of the wait loop leaves `ready` holding the mutex, and
-            // re-locking it in the same scope would self-deadlock.
-            changed
-        };
-        *self.ready.lock().unwrap_or_else(|p| {
+        let mut ready = self.ready.lock().unwrap_or_else(|p| {
             tracing::warn!("ChangeFlag mutex poisoned; recovering inner state");
             p.into_inner()
-        }) = false;
+        });
+        // Consume the flag under the same lock acquisition that observed it: a
+        // separate later clear would erase any notify() landing between the wait
+        // returning and the clear, delaying the wake by a full keep-alive period.
+        // Clearing before waiting is safe because notify() also signals the
+        // condvar, so a change arriving mid-wait still wakes this waiter.
+        let changed = *ready;
+        *ready = false;
+        if !changed {
+            let deadline = Instant::now() + timeout;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let Ok((guard, res)) = self.cv.wait_timeout(ready, remaining) else {
+                    break;
+                };
+                ready = guard;
+                if *ready {
+                    *ready = false;
+                    return true;
+                }
+                if res.timed_out() {
+                    break;
+                }
+            }
+        }
         changed
     }
 }
@@ -1911,7 +1907,6 @@ impl DbusClient {
     }
 }
 
-/// Validates whether a file on disk is a fully flushed, complete JPEG image.
 impl DbusClient {
     /// Parses `BlueZ` managed objects into adapter and device models.
     ///
