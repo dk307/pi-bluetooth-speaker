@@ -18,6 +18,41 @@ static TEMP_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// Foot-candles per lux conversion multiplier (1 lx ≈ 0.092903 fc).
 pub const LUX_TO_FOOT_CANDLES: f32 = 0.092_903;
 
+macro_rules! impl_canonical_error_display {
+    ($err:ident) => {
+        impl $err {
+            /// Returns a single-line error description without any captured backtrace.
+            ///
+            /// Safe for embedding inside machine-oriented `NDJSON` telemetry streams where
+            /// multi-line stack traces when `RUST_BACKTRACE=1` would bloat or corrupt line records.
+            #[must_use]
+            pub fn summary(&self) -> String {
+                struct Summary<'a>(&'a $err);
+                impl std::fmt::Display for Summary<'_> {
+                    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        self.0.fmt_kind(f)
+                    }
+                }
+                Summary(self).to_string()
+            }
+        }
+
+        impl std::fmt::Display for $err {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.fmt_kind(f)?;
+                if self.backtrace.status() == std::backtrace::BacktraceStatus::Captured {
+                    write!(f, "\nBacktrace:\n{}", self.backtrace)?;
+                }
+                Ok(())
+            }
+        }
+    };
+}
+pub(crate) use impl_canonical_error_display;
+
+/// Default on-disk JSON configuration path for the core appliance service.
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/speaker-core/config.json";
+
 /// Output formatting mode for CLI diagnostic utilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {

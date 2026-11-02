@@ -505,7 +505,7 @@ impl TempError {
     }
 }
 
-super::impl_canonical_error_display!(TempError);
+crate::diag::impl_canonical_error_display!(TempError);
 
 impl std::error::Error for TempError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {

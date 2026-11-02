@@ -462,7 +462,7 @@ impl EncoderError {
     }
 }
 
-super::impl_canonical_error_display!(EncoderError);
+crate::diag::impl_canonical_error_display!(EncoderError);
 
 impl std::error::Error for EncoderError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {

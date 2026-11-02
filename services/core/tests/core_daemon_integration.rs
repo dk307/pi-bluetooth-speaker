@@ -77,6 +77,7 @@ fn parse_cli_args_config_flag() {
     );
     let err = parse_cli_args_from(["-c".into()]).unwrap_err();
     assert!(err.contains("missing value"));
+    assert!(!err.contains("Backtrace") && !err.contains("panicked"));
     assert!(
         parse_cli_args_from(["--marquee-fps".into(), "30".into()])
             .unwrap_err()
@@ -453,8 +454,14 @@ fn run_app_headless_executes_successfully() {
     // SPEAKER_CORE_HEADLESS while this guard is held.
     unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "1") };
 
+    // Absent config paths keep the test hermetic on any host (no reliance on
+    // the real /etc/speaker-core/config.json) while exercising the
+    // missing-file defaults branch.
+    let dir = ScopedTempDir::new("run_app_cfg");
+    let absent = dir.path().join("absent.json");
+
     let code = run_app(&CoreCliOptions {
-        config: None,
+        config: Some(absent),
         preview_secs: Some(1),
         screen: ScreenTarget::Splash,
         tab: None,
@@ -462,11 +469,10 @@ fn run_app_headless_executes_successfully() {
     assert_eq!(code, std::process::ExitCode::SUCCESS);
 
     // A config file with a theme override and reduced marquee rate drives the UI.
-    let dir = ScopedTempDir::new("run_app_cfg");
     let cfg_path = dir.path().join("config.json");
     CoreConfig {
         theme: Some(speaker_core::ui::ThemePreset::Peppy),
-        marquee_fps: 30,
+        marquee_fps: speaker_core::config::MarqueeFps::FPS_30,
     }
     .save(&cfg_path)
     .expect("save config");
@@ -480,7 +486,7 @@ fn run_app_headless_executes_successfully() {
     assert_eq!(code_appliance, std::process::ExitCode::SUCCESS);
 
     let code_shell = run_app(&CoreCliOptions {
-        config: None,
+        config: Some(dir.path().join("defaults-shell.json")),
         preview_secs: Some(1),
         screen: ScreenTarget::Shell,
         tab: Some(1),

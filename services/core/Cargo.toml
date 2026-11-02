@@ -55,7 +55,11 @@ zbus = { version = "=5.19.0", default-features = false, features = ["tokio", "bl
 
 # Serialization & JSON-RPC
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.140"
+serde_json = "=1.0.154"
+tempfile = { version = "=3.17.1", default-features = false }
+
+# Layered Configuration File Reader (JSON sources; JSON writer stays serde_json)
+config = { version = "=0.15.27", default-features = false, features = ["json"] }
 
 # Raspberry Pi Hardware Peripherals (GPIO, Hardware PWM, I2C)
 rppal = { version = "=0.22.1", features = ["hal"] }

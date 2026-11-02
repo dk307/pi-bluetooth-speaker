@@ -732,7 +732,7 @@ impl BtError {
     }
 }
 
-crate::hardware::impl_canonical_error_display!(BtError);
+crate::diag::impl_canonical_error_display!(BtError);
 
 impl std::error::Error for BtError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {

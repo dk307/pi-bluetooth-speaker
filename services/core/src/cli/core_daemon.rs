@@ -3,8 +3,8 @@
 //! Provides command-line options parsing, headless detection, display lifecycle
 //! execution, and Slint framebuffer rendering coordination.
 
-// `PathBuf` is used unconditionally by `CoreCliOptions::config`, which is
-// parsed even in non-ui builds (the `-c/--config` flag exists for both).
+// `PathBuf` backs the unconditionally compiled `-c/--config` CLI field;
+// `Path` is only referenced by the ui-gated framebuffer paths.
 #[cfg(feature = "ui")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -20,8 +20,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 #[cfg(feature = "ui")]
-use crate::config::{CoreConfig, DEFAULT_CONFIG_PATH};
-use crate::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts};
+use crate::config::CoreConfig;
+use crate::diag::{CliParse, DEFAULT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts};
 use crate::hardware::TempSensor;
 #[cfg(feature = "ui")]
 use crate::ui::theme::ThemePreset;
@@ -1277,12 +1277,14 @@ pub fn run_app(opts: &CoreCliOptions) -> ExitCode {
                     opts.preview_secs,
                     cfg.theme,
                     opts.tab,
-                    cfg.marquee_fps,
+                    cfg.marquee_fps.value(),
                 );
             }
             Err(e) => {
                 tracing::error!(error = %e, "failed to load config {}", path.display());
-                eprintln!("  Config Error: {e}");
+                // Operator-facing rejection: keep it backtrace-free even under
+                // RUST_BACKTRACE=1 (full Display would append the stack trace).
+                eprintln!("  Config Error: {}", e.summary());
                 return ExitCode::FAILURE;
             }
         }

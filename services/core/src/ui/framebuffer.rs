@@ -255,7 +255,7 @@ impl FramebufferError {
     }
 }
 
-crate::hardware::impl_canonical_error_display!(FramebufferError);
+crate::diag::impl_canonical_error_display!(FramebufferError);
 
 impl std::error::Error for FramebufferError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
