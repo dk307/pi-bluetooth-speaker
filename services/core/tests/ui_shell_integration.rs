@@ -377,6 +377,48 @@ fn ui_shell_now_playing_properties_and_playback_state() {
     assert!(shell.is_playing());
 }
 
+/// A snapshot whose track advertises art (`ImgHandle`) but whose file is not
+/// cached yet means the OBEX fetch is pending — the displayed cover must stay
+/// (a pending fetch must never blank working art, or a later playback tick
+/// would flip the UI back to the placeholder mid-transfer).
+#[test]
+fn ui_shell_pending_fetch_keeps_cover_art() {
+    use speaker_core::hardware::{BtAddress, BtPlaybackState};
+    use speaker_core::ui::{AppShell, Framebuffer, MainWindow};
+
+    let fb = Framebuffer::new_mocked().0;
+    let _window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+    let pending = BtPlaybackState {
+        device_address: Some(BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])),
+        device_name: "Pixel Phone".into(),
+        status: "playing".into(),
+        title: "Telegraph Road".into(),
+        artist: "Dire Straits".into(),
+        album: "Love over Gold".into(),
+        position_ms: 300_000,
+        duration_ms: 860_000,
+        player_path: None,
+        obex_port: Some(4097),
+        image_handle: Some("2698226".into()),
+        cover_art_path: None,
+    };
+    shell.set_has_cover_art(true);
+    shell.apply_bluetooth_playback(&pending);
+    assert!(
+        shell.window().get_has_cover_art(),
+        "a pending fetch (handle advertised, no cached path) must keep displayed art"
+    );
+    // A genuinely artless track still clears the cover.
+    let artless = BtPlaybackState {
+        image_handle: None,
+        ..pending
+    };
+    shell.apply_bluetooth_playback(&artless);
+    assert!(!shell.window().get_has_cover_art());
+}
+
 const TINY_PNG: &[u8] = &[
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,

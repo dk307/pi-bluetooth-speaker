@@ -426,9 +426,15 @@ impl AppShell {
         }
 
         // Cover art is loaded and upscaled by the `bt-monitor` worker (off the render
-        // thread) and pushed through the shared worker update channel; this method only
-        // clears the cover when the playback snapshot carries no path.
-        if playback.cover_art_path.is_none() && w.get_has_cover_art() {
+        // thread) and pushed through the shared worker update channel; this method
+        // only clears the cover when the snapshot genuinely carries no art. An
+        // advertised `ImgHandle` without a cached file means the fetch is pending on
+        // the cover-fetch worker — clearing here would blank the art on every 250 ms
+        // position tick while the (slow) OBEX transfer is in flight.
+        if playback.cover_art_path.is_none()
+            && playback.image_handle.is_none()
+            && w.get_has_cover_art()
+        {
             w.set_has_cover_art(false);
         }
     }
