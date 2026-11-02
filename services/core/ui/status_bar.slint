@@ -30,6 +30,12 @@ export component TopStatusBar inherits Rectangle {
     // Display stream specs (sample rate & bit depth) only for codecs where specifications can vary
     in property <bool> show_stream_specs: !root.is_fixed_spec_codec;
 
+    // Dynamic volume icon level (volume-0 … volume-4; 0 lowest, 4 highest)
+    property <int> vol_level: volume_value <= 0.0 ? 0 :
+        (volume_value <= 25.0 ? 1 :
+        (volume_value <= 50.0 ? 2 :
+        (volume_value <= 75.0 ? 3 : 4)));
+
     callback source_clicked();
     callback night_mode_clicked();
     callback volume_clicked();
@@ -50,20 +56,12 @@ export component TopStatusBar inherits Rectangle {
                 HorizontalLayout {
                     spacing: 8px;
 
-                    // Bluetooth Source Icon
+                    // Bluetooth Source Logo (icon + wordmark)
                     Image {
-                        source: @image-url("../../../assets/icons/bluetooth-rune.svg");
+                        source: @image-url("../../../assets/icons/bluetooth-logo-word.svg");
                         colorize: Theme.active.primary_accent;
-                        width: 18px;
+                        height: 22px;
                         image-fit: contain;
-                    }
-
-                    Text {
-                        text: root.active_source;
-                        color: Theme.active.primary_accent;
-                        font-size: 17px;
-                        font-weight: 700;
-                        vertical-alignment: center;
                     }
                 }
             }
@@ -160,8 +158,32 @@ export component TopStatusBar inherits Rectangle {
                         HorizontalLayout {
                             spacing: 8px;
 
-                            if !root.is_muted : Image {
-                                source: @image-url("../../../assets/icons/volume-up.svg");
+                            if !root.is_muted && root.vol_level == 0 : Image {
+                                source: @image-url("../../../assets/icons/volume-0.svg");
+                                colorize: Theme.active.secondary_accent;
+                                width: 44px;
+                                image-fit: contain;
+                            }
+                            if !root.is_muted && root.vol_level == 1 : Image {
+                                source: @image-url("../../../assets/icons/volume-1.svg");
+                                colorize: Theme.active.secondary_accent;
+                                width: 44px;
+                                image-fit: contain;
+                            }
+                            if !root.is_muted && root.vol_level == 2 : Image {
+                                source: @image-url("../../../assets/icons/volume-2.svg");
+                                colorize: Theme.active.secondary_accent;
+                                width: 44px;
+                                image-fit: contain;
+                            }
+                            if !root.is_muted && root.vol_level == 3 : Image {
+                                source: @image-url("../../../assets/icons/volume-3.svg");
+                                colorize: Theme.active.secondary_accent;
+                                width: 44px;
+                                image-fit: contain;
+                            }
+                            if !root.is_muted && root.vol_level == 4 : Image {
+                                source: @image-url("../../../assets/icons/volume-4.svg");
                                 colorize: Theme.active.secondary_accent;
                                 width: 44px;
                                 image-fit: contain;
@@ -202,13 +224,12 @@ export component TopStatusBar inherits Rectangle {
                         border-width: 1px;
                         border-color: Theme.active.card_border;
 
-                        Text {
-                            text: "DIM";
-                            font-size: 15px;
-                            font-weight: 800;
-                            color: Theme.active.text_muted;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        Image {
+                            source: @image-url("../../../assets/icons/brightness.svg");
+                            colorize: Theme.active.text_muted;
+                            width: 24px;
+                            height: 24px;
+                            image-fit: contain;
                         }
 
                         TouchArea {
