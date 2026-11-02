@@ -5,6 +5,8 @@
 //! by both the `core` daemon and standalone hardware diagnostic utilities.
 
 pub mod cli;
+#[cfg(feature = "ui")]
+pub mod config;
 pub mod diag;
 pub mod hardware;
 pub mod runtime;

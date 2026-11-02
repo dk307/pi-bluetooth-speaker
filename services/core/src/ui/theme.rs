@@ -225,3 +225,61 @@ impl Display for ThemePreset {
         f.write_str(self.display_name())
     }
 }
+
+impl serde::Serialize for ThemePreset {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.slug())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ThemePreset {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let slug = <&'de str>::deserialize(deserializer)?;
+        Self::parse_slug(slug).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serializes_to_slug() {
+        for preset in [
+            ThemePreset::McIntoshBlue,
+            ThemePreset::MarantzAmber,
+            ThemePreset::CyberpunkNeon,
+            ThemePreset::StudioDark,
+            ThemePreset::Peppy,
+        ] {
+            let json = serde_json::to_string(&preset).unwrap();
+            assert_eq!(json, format!("\"{}\"", preset.slug()));
+        }
+    }
+
+    #[test]
+    fn deserializes_slug_and_aliases() {
+        for (slug, expected) in [
+            ("mcintosh", ThemePreset::McIntoshBlue),
+            ("marantz", ThemePreset::MarantzAmber),
+            ("cyberpunk", ThemePreset::CyberpunkNeon),
+            ("studio-dark", ThemePreset::StudioDark),
+            ("peppy", ThemePreset::Peppy),
+            ("blue", ThemePreset::McIntoshBlue),
+            ("gold", ThemePreset::Peppy),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<ThemePreset>(&format!("\"{slug}\"")).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_slug() {
+        let err = serde_json::from_str::<ThemePreset>("\"bogus\"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown theme preset 'bogus'"), "{err}");
+    }
+}

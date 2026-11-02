@@ -2,6 +2,7 @@
 
 /// Simulates the `bt-monitor` worker: drains queued transport commands,
 /// executes them on the device, and applies authoritative state to the UI.
+#[cfg(feature = "ui")]
 fn drain_worker_commands(
     bt: &speaker_core::hardware::BluetoothDevice,
     commands: &speaker_core::hardware::TransportCommandQueue,

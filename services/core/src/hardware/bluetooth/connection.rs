@@ -1125,9 +1125,7 @@ impl ChangeFlag {
 
     /// Waits up to `timeout` for a change notification, consuming it if present.
     ///
-    /// Returns `true` when a change was signaled, `false` on timeout (keep-alive).
-    /// Waits up to `timeout` for a change notification. Returns `true` when a
-    /// change was signaled (consuming the flag), `false` on keep-alive timeout.
+    /// Returns `true` when a change was signaled, `false` on keep-alive timeout.
     pub(crate) fn wait(&self, timeout: Duration) -> bool {
         let mut ready = self.ready.lock().unwrap_or_else(|p| {
             tracing::warn!("ChangeFlag mutex poisoned; recovering inner state");
@@ -1164,16 +1162,16 @@ impl ChangeFlag {
     }
 }
 
+/// Backoff between D-Bus signal-listener reconnection attempts after a setup
+/// failure or iterator exhaustion (transient bus restart).
+const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
+
 /// Spawns a background thread that watches for `org.freedesktop.DBus.Properties`
 /// change signals from `org.bluez` and `org.bluealsa` on the system bus and wakes
 /// the shared [`ChangeFlag`] whenever one arrives.
 ///
 /// If the system bus cannot be reached, the thread retries with backoff and
 /// callers fall back to the keep-alive timeout polling path meanwhile.
-/// Backoff between D-Bus signal-listener reconnection attempts after a setup
-/// failure or iterator exhaustion (transient bus restart).
-const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
-
 fn spawn_properties_changed_listener(
     conn: Connection,
     stop: Arc<std::sync::atomic::AtomicBool>,

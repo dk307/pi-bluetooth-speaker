@@ -255,6 +255,12 @@ impl TransportCommandQueue {
     }
 
     /// Enqueues a transport command for execution on the `bt-monitor` worker.
+    ///
+    /// # Errors
+    /// Never: a poisoned mutex is recovered with `into_inner` so the enqueue
+    /// still lands. When the 32-entry backlog is already full the new command
+    /// is dropped and logged — seek/navigation commands have no authoritative
+    /// reconciliation, so overflow is surfaced at warn level, not debug.
     pub fn push(&self, command: TransportCommand) {
         let mut lock = match self.queue.lock() {
             Ok(lock) => lock,
@@ -264,12 +270,13 @@ impl TransportCommandQueue {
             }
         };
         // Bounded to 32 commands: rapid-fire clicks can never accumulate an
-        // unbounded backlog, and each dropped overflow command is harmless
-        // (the next authoritative state publish reconciles the UI).
+        // unbounded backlog. Play/pause drops reconcile on the next publish,
+        // but seek/navigation drops have no such reconciliation, so overflow
+        // is surfaced at warn level for operators.
         if lock.len() < 32 {
             lock.push_back(command);
         } else {
-            tracing::debug!("transport command queue full; dropping {command:?}");
+            tracing::warn!("transport command queue full; dropping {command:?}");
         }
     }
 

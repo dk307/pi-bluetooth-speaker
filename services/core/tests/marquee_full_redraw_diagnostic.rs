@@ -78,11 +78,15 @@ fn shell_frame_loop_has_no_persistent_full_window_redraws() {
                 usize::try_from(size.width).unwrap_or(0),
                 usize::try_from(size.height).unwrap_or(0),
             );
-            let rects: Vec<String> = region
-                .iter()
-                .map(|(pos, size)| format!("({},{},{},{})", pos.x, pos.y, size.width, size.height))
-                .collect();
+            // Rect formatting allocates per frame; keep it inside the sampling
+            // branch so the histogram never perturbs the frame timing it measures.
             if frame % 100 == 0 {
+                let rects: Vec<String> = region
+                    .iter()
+                    .map(|(pos, size)| {
+                        format!("({},{},{},{})", pos.x, pos.y, size.width, size.height)
+                    })
+                    .collect();
                 *rect_histogram
                     .entry(format!("frame {frame}: {}", rects.join(" ")))
                     .or_default() += 1;
