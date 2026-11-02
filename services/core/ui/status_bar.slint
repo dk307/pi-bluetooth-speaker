@@ -225,6 +225,8 @@ export component TopStatusBar inherits Rectangle {
                         border-color: Theme.active.card_border;
 
                         Image {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
                             source: @image-url("../../../assets/icons/brightness.svg");
                             colorize: Theme.active.text_muted;
                             width: 24px;
