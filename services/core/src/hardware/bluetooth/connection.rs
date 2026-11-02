@@ -1210,8 +1210,16 @@ fn spawn_properties_changed_listener(
                     std::thread::sleep(RECONNECT_BACKOFF);
                     continue;
                 };
-                for _ in iter {
-                    listener_flag.notify();
+                for msg in iter.flatten() {
+                    // Only wake the monitor for Bluetooth-related objects; an
+                    // unfiltered rule would re-query BlueZ/BlueALSA for every
+                    // unrelated PropertiesChanged on a busy system bus.
+                    if msg.header().path().is_some_and(|p| {
+                        let p = p.as_str();
+                        p.starts_with("/org/bluez") || p.starts_with("/org/bluealsa")
+                    }) {
+                        listener_flag.notify();
+                    }
                     if stop.load(std::sync::atomic::Ordering::Relaxed) {
                         break;
                     }

@@ -91,7 +91,11 @@ impl CoreConfig {
     /// Returns [`ConfigError`] if serialization, the temp-file write or
     /// flush, or the rename fails.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        // Persisting values that load() would reject would brick the appliance
+        // at boot (run_app treats load failure as fatal), so saved configs are
+        // validated with the same rules load applies.
         use std::io::Write;
+        self.validate()?;
         let mut raw = serde_json::to_string_pretty(self)
             .map_err(|e| ConfigError::parse(format!("config {}", path.display()), e))?;
         raw.push('\n');
