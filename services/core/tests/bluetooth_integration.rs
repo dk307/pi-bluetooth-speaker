@@ -1156,8 +1156,8 @@ fn playback_state_and_duration_formatting() {
     assert_eq!(def.status.as_ref(), "stopped");
     assert!(!def.is_playing());
     assert_eq!(def.title.as_ref(), "Waiting for Bluetooth Connection...");
-    assert_eq!(def.artist.as_ref(), "DietPi Audiophile Speaker");
-    assert_eq!(def.album.as_ref(), "High-Resolution DSP Sink");
+    assert_eq!(def.artist.as_ref(), "");
+    assert_eq!(def.album.as_ref(), "");
     assert_eq!(def.position_ms, 0);
     assert_eq!(def.duration_ms, 0);
     assert_eq!(def.player_path, None);
@@ -1512,8 +1512,8 @@ fn parse_bluez_all_adapter_filtering_and_fallback() {
     assert!(!min_pb.is_playing());
     assert_eq!(min_pb.device_name.as_ref(), "Bluetooth Audio Device");
     assert_eq!(min_pb.title.as_ref(), "Waiting for Bluetooth Connection...");
-    assert_eq!(min_pb.artist.as_ref(), "DietPi Audiophile Speaker");
-    assert_eq!(min_pb.album.as_ref(), "High-Resolution DSP Sink");
+    assert_eq!(min_pb.artist.as_ref(), "");
+    assert_eq!(min_pb.album.as_ref(), "");
     assert_eq!(min_pb.position_ms, 0);
     assert_eq!(min_pb.duration_ms, 0);
 }

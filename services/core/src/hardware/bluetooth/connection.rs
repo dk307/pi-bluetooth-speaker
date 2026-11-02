@@ -1367,17 +1367,18 @@ impl DbusClient {
         let (title, artist, album, duration_ms) = if let Some(track_val) = props.get("Track") {
             let title = get_track_prop_str(track_val, "Title")
                 .unwrap_or_else(|| "Waiting for Bluetooth Track...".into());
-            let artist = get_track_prop_str(track_val, "Artist")
-                .unwrap_or_else(|| "DietPi Audiophile Speaker".into());
-            let album = get_track_prop_str(track_val, "Album")
-                .unwrap_or_else(|| "High-Resolution DSP Sink".into());
+            let artist = get_track_prop_str(track_val, "Artist").unwrap_or_default();
+            let album = get_track_prop_str(track_val, "Album").unwrap_or_default();
             let duration_ms = get_track_prop_u32(track_val, "Duration").unwrap_or(0);
             (title, artist, album, duration_ms)
         } else {
+            // Disconnected / no track published yet: keep the "Waiting for
+            // Bluetooth Connection..." placeholder title and leave the artist
+            // and album lines empty so the UI does not display stale branding.
             (
                 "Waiting for Bluetooth Connection...".into(),
-                "DietPi Audiophile Speaker".into(),
-                "High-Resolution DSP Sink".into(),
+                "".into(),
+                "".into(),
                 0,
             )
         };

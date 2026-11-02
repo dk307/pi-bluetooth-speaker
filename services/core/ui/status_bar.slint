@@ -69,20 +69,6 @@ export component TopStatusBar inherits Rectangle {
             }
         }
 
-        // Center: Track / Client Quick Info (fills the vertical of the 60px status bar)
-        VerticalLayout {
-            alignment: center;
-            Text {
-                text: root.track_or_device;
-                color: Theme.active.text_primary;
-                font-size: 26px;
-                font-weight: 800;
-                vertical-alignment: center;
-                overflow: elide;
-                max-width: 360px;
-            }
-        }
-
         // Right: Audio Codec, Sample Rate, Bit Depth Badges + Volume + DIM Toggle (Vertically centered)
         VerticalLayout {
             alignment: center;
@@ -234,13 +220,37 @@ export component TopStatusBar inherits Rectangle {
                 }
             }
         }
+    }
 
-        // Divider line under the top bar (mirrors the line above the bottom dock)
-        Rectangle {
-            y: parent.height - self.height;
-            width: parent.width;
-            height: 1px;
-            background: Theme.active.card_border;
+    // Center: Track / Client Quick Info — a full-width overlay stretched across
+    // the bar (out of the flow layout so space-between of side elements can't
+    // shift it). HorizontalLayout { alignment: center } centers the text element
+    // horizontally on the bar; VerticalLayout centers it vertically. No
+    // TouchArea here, so clicks pass through to the side elements underneath.
+    VerticalLayout {
+        height: parent.height;
+        alignment: center;
+
+        HorizontalLayout {
+            alignment: center;
+
+            Text {
+                text: root.track_or_device;
+                color: Theme.active.text_primary;
+                font-size: 26px;
+                font-weight: 800;
+                vertical-alignment: center;
+                overflow: elide;
+                max-width: 360px;
+            }
         }
+    }
+
+    // Divider line under the top bar (mirrors the line above the bottom dock)
+    Rectangle {
+        y: parent.height - self.height;
+        width: parent.width;
+        height: 1px;
+        background: Theme.active.card_border;
     }
 }
