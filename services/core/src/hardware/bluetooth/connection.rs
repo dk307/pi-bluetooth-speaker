@@ -1174,8 +1174,10 @@ impl ChangeFlag {
 ///
 /// If the system bus cannot be reached, the thread retries with backoff and
 /// callers fall back to the keep-alive timeout polling path meanwhile.
-fn spawn_properties_changed_listener() -> Arc<ChangeFlag> {
-    const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+fn spawn_properties_changed_listener(
+    conn: Connection,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> Arc<ChangeFlag> {
     let flag = Arc::new(ChangeFlag::default());
     let listener_flag = Arc::clone(&flag);
     let Ok(join) = std::thread::Builder::new()
@@ -1185,36 +1187,35 @@ fn spawn_properties_changed_listener() -> Arc<ChangeFlag> {
             // per-sender blocking iterators (each `next()` would block forever on
             // its own sender). Extra wakeups from unrelated services are cheap:
             // they just trigger one extra state re-poll on the monitor thread.
-            loop {
-                let Ok(conn) = Connection::system() else {
-                    std::thread::sleep(RECONNECT_BACKOFF);
-                    continue;
-                };
-                let Ok(rule) = zbus::MatchRule::builder()
-                    .msg_type(zbus::message::Type::Signal)
-                    .interface("org.freedesktop.DBus.Properties")
-                    .map(zbus::match_rule::Builder::build)
-                else {
-                    std::thread::sleep(RECONNECT_BACKOFF);
-                    continue;
-                };
-                let Ok(iter) = zbus::blocking::MessageIterator::for_match_rule(rule, &conn, None)
-                else {
-                    std::thread::sleep(RECONNECT_BACKOFF);
-                    continue;
-                };
-                for _ in iter {
-                    listener_flag.notify();
+            //
+            // The listener shares the client's connection instead of opening a
+            // second system-bus connection so that private-bus integration tests
+            // and injected connections observe the signals under test. On rule
+            // setup failure or iterator exhaustion (bus lost) the thread exits;
+            // the keep-alive polling fallback covers any lost signal delivery.
+            let Ok(rule) = zbus::MatchRule::builder()
+                .msg_type(zbus::message::Type::Signal)
+                .interface("org.freedesktop.DBus.Properties")
+                .map(zbus::match_rule::Builder::build)
+            else {
+                return;
+            };
+            let Ok(iter) = zbus::blocking::MessageIterator::for_match_rule(rule, &conn, None)
+            else {
+                return;
+            };
+            for _ in iter {
+                listener_flag.notify();
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
                 }
-                // Iterator exhausted (bus lost/restarted): reconnect after backoff.
-                std::thread::sleep(RECONNECT_BACKOFF);
             }
+            // Iterator exhausted (bus lost) or shutdown signaled: exit the thread.
         })
     else {
         // Thread spawn failed: rely on the keep-alive fallback only.
         return flag;
     };
-    // Detached listener: the process-lifetime thread keeps the flag warm.
     drop(join);
     flag
 }
@@ -1227,20 +1228,29 @@ pub struct DbusClient {
     cache_dir: std::path::PathBuf,
     state: Arc<Mutex<DbusClientState>>,
     change_flag: Arc<ChangeFlag>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Snapshot of `BlueZ` adapter, connected/paired devices, and media player state.
 pub type BluezSnapshot = (Option<BtAdapter>, Box<[BtDevice]>, Option<BtPlaybackState>);
 
+impl Drop for DbusClient {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl DbusClient {
     #[must_use]
     pub fn new(conn: Connection) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         Self {
-            conn,
+            conn: conn.clone(),
             device_caps_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             state: Arc::new(Mutex::new(DbusClientState::default())),
-            change_flag: spawn_properties_changed_listener(),
+            change_flag: spawn_properties_changed_listener(conn, Arc::clone(&stop)),
+            stop,
         }
     }
 
@@ -2626,6 +2636,7 @@ impl BluetoothDeviceMock {
         }
         if let Some(ref mut p) = state.playback {
             p.status = "playing".into();
+            self.change_flag.notify();
             Ok(())
         } else {
             Err(BtError::no_active_player("no active mock player"))
@@ -2639,6 +2650,7 @@ impl BluetoothDeviceMock {
         }
         if let Some(ref mut p) = state.playback {
             p.status = "paused".into();
+            self.change_flag.notify();
             Ok(())
         } else {
             Err(BtError::no_active_player("no active mock player"))
@@ -2673,6 +2685,7 @@ impl BluetoothDeviceMock {
             } else {
                 p.status = "paused".into();
             }
+            self.change_flag.notify();
             Ok(next_playing)
         } else {
             Err(BtError::no_active_player("no active mock player"))
@@ -2686,6 +2699,7 @@ impl BluetoothDeviceMock {
         }
         if let Some(ref mut p) = state.playback {
             p.position_ms = 0;
+            self.change_flag.notify();
             Ok(())
         } else {
             Err(BtError::no_active_player("no active mock player"))
@@ -2699,6 +2713,7 @@ impl BluetoothDeviceMock {
         }
         if let Some(ref mut p) = state.playback {
             p.position_ms = 0;
+            self.change_flag.notify();
             Ok(())
         } else {
             Err(BtError::no_active_player("no active mock player"))
@@ -2712,6 +2727,7 @@ impl BluetoothDeviceMock {
         }
         if let Some(ref mut p) = state.playback {
             p.position_ms = position_ms.min(p.duration_ms);
+            self.change_flag.notify();
             Ok(())
         } else {
             Err(BtError::no_active_player("no active mock player"))

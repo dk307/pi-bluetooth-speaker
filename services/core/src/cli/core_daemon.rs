@@ -453,6 +453,50 @@ struct BtSharedUpdate {
 #[cfg(feature = "ui")]
 type CoverPixelBuffer = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
 
+/// Interval between retries of a failed cover-art decode for the same path.
+///
+/// A failed decode must not block a future successful retry (the file may still
+/// be written by OBEX), but re-decoding on every monitor tick would repeatedly
+/// pay a full Lanczos3 resize on the worker for a persistently broken file.
+#[cfg(feature = "ui")]
+const COVER_DECODE_RETRY: Duration = Duration::from_secs(10);
+
+/// Peer status can lag a local transport command by hundreds of milliseconds, so
+/// a post-command snapshot may still carry the pre-command playing state. This
+/// window bounds how long such an unchanged snapshot is suppressed to keep the
+/// shell's optimistic flip from reverting.
+#[cfg(feature = "ui")]
+const BT_COMMAND_SETTLE: Duration = Duration::from_millis(750);
+
+/// Tracks the cover-art dedup key and when the current path last failed to
+/// decode, so the retry backoff in [`COVER_DECODE_RETRY`] can gate re-attempts.
+#[cfg(feature = "ui")]
+#[derive(Debug, Default)]
+struct CoverState {
+    /// Path whose art is currently reflected in the published state (or the
+    /// path of the last failed decode attempt while awaiting its retry).
+    path: Option<Box<str>>,
+    /// Instant of the most recent failed decode attempt, if the last attempt
+    /// for [`CoverState::path`] failed; `None` once a decode succeeded.
+    failed_since: Option<Instant>,
+}
+
+/// Optimistic-UI convergence state for a pending transport command.
+///
+/// Only play/pause flips the shell's `is_playing` optimistically, so only that
+/// command arms this window: while it is active, a snapshot whose status still
+/// matches the pre-command status is suppressed. Next/Previous/Seek leave the
+/// AVRCP status unchanged and must publish metadata updates immediately.
+#[cfg(feature = "ui")]
+#[derive(Debug)]
+struct SettleWindow {
+    /// Playing state observed before the optimistic flip was applied.
+    pre_playing: bool,
+    /// When the command was issued; the window expires after
+    /// [`BT_COMMAND_SETTLE`].
+    started: Instant,
+}
+
 /// Decodes cover art (upscaling first) into a cross-thread pixel buffer.
 ///
 /// Runs on the `bt-monitor` worker thread: small AVRCP cover art is upscaled to
@@ -503,44 +547,45 @@ fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
 /// On `Ok(None)` publishes the connection placeholder so stale optimistic UI
 /// state is cleared; on query errors keeps the last published state. Cover art
 /// changes are decoded here (off the render thread); a failed decode keeps the
-/// previous art and does not advance the dedup path.
+/// previous art and is retried after [`COVER_DECODE_RETRY`] elapses.
 #[cfg(feature = "ui")]
 fn publish_playback_state(
     bt: &crate::hardware::BluetoothDevice,
     update: &mut BtSharedUpdate,
     last_pb: &mut Option<crate::hardware::BtPlaybackState>,
-    last_cover_path: &mut Option<Box<str>>,
-    pre_command_playing: Option<bool>,
-    command_settle_started: Option<Instant>,
+    cover: &mut CoverState,
+    settle: &mut Option<SettleWindow>,
 ) {
-    const BT_COMMAND_SETTLE: Duration = Duration::from_millis(750);
     match bt.playback_state() {
         Ok(Some(ref pb)) => {
-            let settling =
-                pre_command_playing
-                    .zip(command_settle_started)
-                    .is_some_and(|(pre, started)| {
-                        started.elapsed() < BT_COMMAND_SETTLE && pb.is_playing() == pre
-                    });
+            let settling = settle.as_ref().is_some_and(|w| {
+                w.started.elapsed() < BT_COMMAND_SETTLE && pb.is_playing() == w.pre_playing
+            });
             if !settling && last_pb.as_ref() != Some(pb) {
                 let cover_path = pb.cover_art_path.clone();
-                if *last_cover_path != cover_path {
-                    // A failed decode keeps the previously published art (never
-                    // blanks it) and pins `last_cover_path` so a persistently
-                    // broken file is not re-decoded every tick.
+                // A changed path always attempts a decode; an unchanged path is
+                // re-attempted only once the retry backoff has elapsed, so a
+                // persistently broken file cannot trigger a full Lanczos3 resize
+                // on every tick while a transient failure is still retried.
+                let retry_due = cover
+                    .failed_since
+                    .is_some_and(|t| t.elapsed() >= COVER_DECODE_RETRY);
+                if cover.path != cover_path || retry_due {
                     if let Some(path) = cover_path.as_ref() {
                         if let Some(buffer) = decode_cover_buffer(path) {
                             update.cover = Some(Some(buffer));
-                            *last_cover_path = cover_path;
+                            cover.path = cover_path;
+                            cover.failed_since = None;
                         } else {
                             tracing::warn!("cover decode failed for {path}");
-                            // Pin the path even on failure so a persistently
-                            // broken file is not re-decoded on every tick.
-                            *last_cover_path = cover_path;
+                            // Keep the previously published art (never blank it)
+                            // and schedule a retry after the backoff.
+                            cover.path = cover_path;
+                            cover.failed_since = Some(Instant::now());
                         }
                     } else {
                         update.cover = Some(None);
-                        *last_cover_path = None;
+                        *cover = CoverState::default();
                     }
                 }
                 update.playback = Some(pb.clone());
@@ -550,9 +595,9 @@ fn publish_playback_state(
         Ok(None) => {
             let placeholder = crate::hardware::BtPlaybackState::default();
             if last_pb.as_ref() != Some(&placeholder) {
-                if last_cover_path.is_some() {
+                if cover.path.is_some() {
                     update.cover = Some(None);
-                    *last_cover_path = None;
+                    *cover = CoverState::default();
                 }
                 update.playback = Some(placeholder.clone());
                 *last_pb = Some(placeholder);
@@ -580,26 +625,28 @@ fn bt_monitor_loop(
     // thread dies. Slices cap command latency while waiting.
     const BT_KEEP_ALIVE: Duration = Duration::from_secs(1);
     const BT_WAIT_SLICE: Duration = Duration::from_millis(100);
-    // The peer's AVRCP Status property can lag a local transport command by hundreds
-    // of milliseconds. Publishing the immediately-post-command snapshot would revert
-    // the shell's optimistic UI flip back to the pre-command state until the peer
-    // catches up. While the settle window is active, suppress publishing snapshots
-    // whose status still matches the last published pre-command status; the first
-    // genuinely-changed status (or window expiry) publishes normally.
-    const BT_COMMAND_SETTLE: Duration = Duration::from_millis(750);
     let mut last_pb: Option<crate::hardware::BtPlaybackState> = None;
     let mut last_pcms: Option<Box<[crate::hardware::BlueAlsaPcm]>> = None;
-    let mut last_cover_path: Option<Box<str>> = None;
-    let mut pre_command_playing: Option<bool> = None;
-    let mut command_settle_started: Option<Instant> = None;
+    let mut cover = CoverState::default();
+    let mut settle: Option<SettleWindow> = None;
 
     while running.load(Ordering::Relaxed) {
         let drained = commands.drain();
         if !drained.is_empty() {
-            pre_command_playing = last_pb
+            // Only play/pause flips the shell's `is_playing` optimistically, so it
+            // is the only command whose post-command snapshot can revert the flip;
+            // Next/Previous/Seek leave the status unchanged and must publish freely.
+            settle = last_pb
                 .as_ref()
-                .map(crate::hardware::BtPlaybackState::is_playing);
-            command_settle_started = Some(Instant::now());
+                .map(|pre| SettleWindow {
+                    pre_playing: pre.is_playing(),
+                    started: Instant::now(),
+                })
+                .filter(|_| {
+                    drained
+                        .iter()
+                        .any(|c| matches!(c, crate::hardware::TransportCommand::TogglePlayPause))
+                });
         }
         for command in drained {
             // A failed command is logged (never silently dropped) so operators can
@@ -622,24 +669,17 @@ fn bt_monitor_loop(
         // Force-publish one authoritative snapshot after the settle window expires:
         // if the command failed silently (or the peer never changed status), the
         // shell's optimistic flip must be reconciled instead of diverging forever.
-        if let Some(started) = command_settle_started {
-            if started.elapsed() >= BT_COMMAND_SETTLE {
-                command_settle_started = None;
-                pre_command_playing = None;
-                last_pb = None;
-            }
+        if settle
+            .as_ref()
+            .is_some_and(|w| w.started.elapsed() >= BT_COMMAND_SETTLE)
+        {
+            settle = None;
+            last_pb = None;
         }
 
         // Publish the authoritative state; transient D-Bus errors keep the last
         // published state instead of flashing the placeholder over live playback.
-        publish_playback_state(
-            bt,
-            &mut update,
-            &mut last_pb,
-            &mut last_cover_path,
-            pre_command_playing,
-            command_settle_started,
-        );
+        publish_playback_state(bt, &mut update, &mut last_pb, &mut cover, &mut settle);
         if let Ok(ref pcms) = bt.audio_pcms() {
             if last_pcms.as_ref() != Some(pcms) {
                 if let Some(active) = pcms.iter().find(|p| p.running).or_else(|| pcms.first()) {
