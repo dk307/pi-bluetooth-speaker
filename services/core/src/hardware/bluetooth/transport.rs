@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::connection::BtAddress;
 
+/// Active `BlueALSA` audio transport PCM stream information.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlueAlsaPcm {
     /// D-Bus object path for this audio PCM stream.
@@ -158,6 +159,7 @@ impl BtPlaybackState {
     }
 }
 
+/// Decodes a `BlueALSA` 16-bit PCM format identifier into a human-readable name.
 #[must_use]
 pub fn decode_pcm_format(id: u16) -> Box<str> {
     if id == 0 {

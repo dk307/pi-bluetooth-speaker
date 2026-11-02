@@ -283,9 +283,8 @@ impl BtDevice {
     }
 }
 
-/// Active `BlueALSA` audio transport PCM stream information.
+/// Raspberry Pi Bluetooth controller chip and transport bus metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-
 pub struct BluetoothHardwareInfo {
     /// Controller chip model.
     pub chip: Box<str>,
@@ -1131,10 +1130,10 @@ impl ChangeFlag {
     /// change was signaled (consuming the flag), `false` on keep-alive timeout.
     pub(crate) fn wait(&self, timeout: Duration) -> bool {
         let changed = {
-            let Ok(mut ready) = self.ready.lock() else {
-                std::thread::sleep(timeout);
-                return false;
-            };
+            let mut ready = self.ready.lock().unwrap_or_else(|p| {
+                tracing::warn!("ChangeFlag mutex poisoned; recovering inner state");
+                p.into_inner()
+            });
             let mut changed = *ready;
             if !changed {
                 let deadline = Instant::now() + timeout;
@@ -1161,9 +1160,10 @@ impl ChangeFlag {
             // re-locking it in the same scope would self-deadlock.
             changed
         };
-        if let Ok(mut r) = self.ready.lock() {
-            *r = false;
-        }
+        *self.ready.lock().unwrap_or_else(|p| {
+            tracing::warn!("ChangeFlag mutex poisoned; recovering inner state");
+            p.into_inner()
+        }) = false;
         changed
     }
 }
@@ -1475,8 +1475,17 @@ impl DbusClient {
         .is_ok()
     }
 
+    /// Recovers the client state from a poisoned mutex so a panicked holder's
+    /// data survives instead of silently dropping OBEX sessions or tuning state.
+    fn state(&self) -> std::sync::MutexGuard<'_, DbusClientState> {
+        self.state.lock().unwrap_or_else(|p| {
+            tracing::warn!("DbusClientState mutex poisoned; recovering inner state");
+            p.into_inner()
+        })
+    }
+
     fn ensure_obex_session(&self, addr: BtAddress, port: u16) -> Option<OwnedObjectPath> {
-        let mut session_lock = self.state.lock().ok()?;
+        let mut session_lock = self.state();
         if let Some((cached_addr, ref path)) = session_lock.obex_session {
             if cached_addr == addr && self.is_obex_session_alive(path.as_str()) {
                 return Some(path.clone());
@@ -1504,9 +1513,7 @@ impl DbusClient {
 
     /// Raises kernel Bluetooth socket read-buffer limits once per process (`sysctl`).
     fn tune_bt_socket_buffers(&self) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
+        let mut state = self.state();
         if state.socket_tuned {
             return;
         }
@@ -1539,9 +1546,7 @@ impl DbusClient {
     /// (`hcitool sr` + `hcitool lst`) to avoid L2CAP flow-control starvation (0x08).
     fn tune_acl_link(&self, addr: BtAddress) {
         let mac = addr.to_string();
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
+        let mut state = self.state();
         if state.acl_tuned.contains(&addr) {
             return;
         }
@@ -1621,9 +1626,7 @@ impl DbusClient {
                         "OBEX Image1 Get({}) failed for handle {handle}",
                         candidate.pixel
                     );
-                    if let Ok(mut lock) = self.state.lock() {
-                        lock.obex_session = None;
-                    }
+                    self.state().obex_session = None;
                     cap = candidate.area - 1;
                     let _ = store_device_cap_in(&self.device_caps_dir, &sanitized_mac, cap);
                     if !self.ensure_device_acl_connected(addr) {
@@ -1672,7 +1675,7 @@ impl DbusClient {
         // before we hammer it with OBEX session/transfer requests.
         thread::sleep(Duration::from_millis(BIP_TRACK_SETTLE_MS));
 
-        let session_lock = self.state.lock().ok()?;
+        let session_lock = self.state();
         session_lock.obex_session.as_ref().map(|(_, p)| p.clone())
     }
 
@@ -1792,9 +1795,7 @@ impl DbusClient {
             .or_else(|_| image_proxy.get(cache_path, handle, &empty_props));
         let Ok((transfer_path, _)) = transfer_res else {
             tracing::debug!("OBEX Image1 GetThumbnail/Get failed for handle {handle}");
-            if let Ok(mut lock) = self.state.lock() {
-                lock.obex_session = None;
-            }
+            self.state().obex_session = None;
             return None;
         };
         match self.wait_for_transfer(transfer_path.as_str(), BIP_THUMBNAIL_TIMEOUT_MS) {
@@ -1804,9 +1805,7 @@ impl DbusClient {
             }
             _ => {
                 let _ = std::fs::remove_file(cache_path_buf);
-                if let Ok(mut lock) = self.state.lock() {
-                    lock.obex_session = None;
-                }
+                self.state().obex_session = None;
                 None
             }
         }
