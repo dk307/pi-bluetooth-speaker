@@ -17,17 +17,20 @@ mod generated {
     slint::include_modules!();
 }
 
+pub mod boot;
 pub(crate) mod framebuffer;
 pub(crate) mod marquee;
 pub(crate) mod shell;
 pub(crate) mod theme;
 
 #[doc(inline)]
+pub use boot::{BootCheckId, BootCheckStatus, BootCheckUpdate, BootProbe};
+#[doc(inline)]
 pub use framebuffer::{
     Bgrx8888Pixel, FrameTiming, Framebuffer, FramebufferError, FramebufferMockCtrl, MarqueeRowSpec,
 };
 #[doc(inline)]
-pub use generated::{MainWindow, SplashScreen, Theme, ThemePalette};
+pub use generated::{BootCheckLine, MainWindow, SplashScreen, Theme, ThemePalette};
 #[doc(inline)]
 pub use marquee::{
     MarqueeStrip, MarqueeStripCache, MarqueeStripRasterizer, MarqueeTypography, RgbaPremulPixel,
