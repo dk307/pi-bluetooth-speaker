@@ -56,11 +56,11 @@ export component TopStatusBar inherits Rectangle {
                 HorizontalLayout {
                     spacing: 8px;
 
-                    // Bluetooth Source Logo (icon + wordmark)
+                    // Bluetooth Source Logo (icon + wordmark; full bar height)
                     Image {
                         source: @image-url("../../../assets/icons/bluetooth-logo-word.svg");
                         colorize: Theme.active.primary_accent;
-                        height: 22px;
+                        height: parent.height;
                         image-fit: contain;
                     }
                 }
