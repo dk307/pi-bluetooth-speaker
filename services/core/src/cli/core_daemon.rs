@@ -3,8 +3,11 @@
 //! Provides command-line options parsing, headless detection, display lifecycle
 //! execution, and Slint framebuffer rendering coordination.
 
+// `PathBuf` is used unconditionally by `CoreCliOptions::config`, which is
+// parsed even in non-ui builds (the `-c/--config` flag exists for both).
 #[cfg(feature = "ui")]
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 #[cfg(feature = "ui")]
 use std::rc::Rc;
@@ -501,6 +504,7 @@ struct SettleWindow {
     started: Instant,
 }
 
+#[cfg(feature = "ui")]
 impl SettleWindow {
     /// Reports whether `pb` still conflicts with the optimistic state this
     /// window protects (and is therefore withheld from the shell).
@@ -906,6 +910,7 @@ pub fn run_render_loop(
 }
 
 /// Applies queued Bluetooth playback/PCM/cover updates from the worker to the shell.
+#[cfg(feature = "ui")]
 fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpdate>>) {
     // A poisoned guard is recovered so a panicked worker cannot permanently
     // freeze the UI; a busy lock is simply skipped until the next frame.
@@ -944,6 +949,7 @@ fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpda
 /// # Errors
 ///
 /// Propagates [`FramebufferError`] from the capture render or region snapshots.
+#[cfg(feature = "ui")]
 fn sync_marquee_overlay(
     fb: &mut Framebuffer,
     shell: &AppShell,
@@ -980,6 +986,7 @@ fn sync_marquee_overlay(
 }
 
 /// Adaptive power-saving sleep when the UI is completely static (0% CPU at idle).
+#[cfg(feature = "ui")]
 fn idle_sleep() {
     let timer_duration = slint::platform::duration_until_next_timer_update();
     let sleep_duration = match timer_duration {
@@ -991,6 +998,7 @@ fn idle_sleep() {
 
 /// Aggregated frame phase timings for render-loop CPU diagnostics.
 #[derive(Debug, Default)]
+#[cfg(feature = "ui")]
 struct FrameLoopTiming {
     frames: u64,
     rendered: u64,
@@ -1004,6 +1012,7 @@ struct FrameLoopTiming {
     max_dirty_box: (u32, u32, u32, u32),
 }
 
+#[cfg(feature = "ui")]
 impl FrameLoopTiming {
     fn record(&mut self, timing: &FrameTiming) {
         self.frames += 1;
