@@ -39,26 +39,22 @@ export component TopStatusBar inherits Rectangle {
         padding-right: 18px;
         alignment: space-between;
 
-        // Left: Source Pill (Vertically centered in 60px status bar)
+        // Left: Bluetooth Source (icon + label, no pill badge; vertically centered)
         VerticalLayout {
             alignment: center;
-            Rectangle {
-                height: 42px;
-                background: Theme.active.card_surface;
-                border-radius: self.height / 2;
-                border-width: 1px;
-                border-color: Theme.active.card_border;
+            TouchArea {
+                clicked => {
+                    root.source_clicked();
+                }
 
                 HorizontalLayout {
-                    padding-left: 14px;
-                    padding-right: 16px;
                     spacing: 8px;
 
                     // Bluetooth Source Icon
                     Image {
                         source: @image-url("../../../assets/icons/bluetooth-rune.svg");
                         colorize: Theme.active.primary_accent;
-                        width: 15px;
+                        width: 18px;
                         image-fit: contain;
                     }
 
@@ -70,26 +66,6 @@ export component TopStatusBar inherits Rectangle {
                         vertical-alignment: center;
                     }
                 }
-
-                TouchArea {
-                    clicked => {
-                        root.source_clicked();
-                    }
-                }
-            }
-        }
-
-        // Center: Track / Client Quick Info (Vertically centered in 60px status bar)
-        VerticalLayout {
-            alignment: center;
-            Text {
-                text: root.track_or_device;
-                color: Theme.active.text_primary;
-                font-size: 20px;
-                font-weight: 700;
-                vertical-alignment: center;
-                overflow: elide;
-                max-width: 360px;
             }
         }
 
@@ -244,5 +220,37 @@ export component TopStatusBar inherits Rectangle {
                 }
             }
         }
+    }
+
+    // Center: Track / Client Quick Info — a full-width overlay stretched across
+    // the bar (out of the flow layout so space-between of side elements can't
+    // shift it). HorizontalLayout { alignment: center } centers the text element
+    // horizontally on the bar; VerticalLayout centers it vertically. No
+    // TouchArea here, so clicks pass through to the side elements underneath.
+    VerticalLayout {
+        height: parent.height;
+        alignment: center;
+
+        HorizontalLayout {
+            alignment: center;
+
+            Text {
+                text: root.track_or_device;
+                color: Theme.active.text_primary;
+                font-size: 26px;
+                font-weight: 800;
+                vertical-alignment: center;
+                overflow: elide;
+                max-width: 320px;
+            }
+        }
+    }
+
+    // Divider line under the top bar (mirrors the line above the bottom dock)
+    Rectangle {
+        y: parent.height - self.height;
+        width: parent.width;
+        height: 1px;
+        background: Theme.active.card_border;
     }
 }

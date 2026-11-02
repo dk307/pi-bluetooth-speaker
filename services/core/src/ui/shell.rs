@@ -9,7 +9,6 @@
 
 use std::cell::RefCell;
 use std::fmt::{self, Debug, Formatter};
-use std::sync::{Arc, Mutex};
 
 use slint::ComponentHandle;
 
@@ -21,7 +20,6 @@ use super::theme::ThemePreset;
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
-    last_cover_path: Arc<Mutex<Option<Box<str>>>>,
     strips: RefCell<MarqueeStripCache>,
 }
 
@@ -40,7 +38,6 @@ impl AppShell {
     pub fn new(window: MainWindow) -> Self {
         let shell = Self {
             window,
-            last_cover_path: Arc::new(Mutex::new(None)),
             strips: RefCell::new(MarqueeStripCache::default()),
         };
 
@@ -290,7 +287,7 @@ impl AppShell {
     /// apply state themselves to avoid blocking D-Bus/OBEX round-trips on the
     /// render thread.
     pub fn refresh_playback_display(&self, playback: &crate::hardware::BtPlaybackState) {
-        Self::apply_playback_to_window(&self.window, &self.last_cover_path, playback);
+        Self::apply_playback_to_window(&self.window, playback);
     }
 
     /// Updates the audio stream inspector pill details.
@@ -370,12 +367,10 @@ impl AppShell {
     }
 
     /// Sets whether cover art is present.
+    ///
+    /// Cover art path tracking (dedup) lives on the `bt-monitor` worker; the shell
+    /// only mirrors the presence flag and the decoded image pushed by the worker.
     pub fn set_has_cover_art(&self, has_art: bool) {
-        if !has_art {
-            if let Ok(mut last) = self.last_cover_path.lock() {
-                *last = None;
-            }
-        }
         self.window.set_has_cover_art(has_art);
     }
 
@@ -387,15 +382,11 @@ impl AppShell {
 
     /// Applies state from a [`crate::hardware::BtPlaybackState`] point-in-time snapshot.
     pub fn apply_bluetooth_playback(&self, playback: &crate::hardware::BtPlaybackState) {
-        Self::apply_playback_to_window(&self.window, &self.last_cover_path, playback);
+        Self::apply_playback_to_window(&self.window, playback);
         self.refresh_marquee_strips();
     }
 
-    fn apply_playback_to_window(
-        w: &MainWindow,
-        cover_cache: &Mutex<Option<Box<str>>>,
-        playback: &crate::hardware::BtPlaybackState,
-    ) {
+    fn apply_playback_to_window(w: &MainWindow, playback: &crate::hardware::BtPlaybackState) {
         // Only notify Slint property bindings when the value actually changed: the
         // Bluetooth worker re-applies state every 250 ms position tick, and
         // unconditional `set_track_*` calls invalidate `MarqueeText` layout bindings
@@ -434,58 +425,12 @@ impl AppShell {
             w.set_track_or_device(playback.device_name.as_ref().into());
         }
 
-        if let Ok(mut last) = cover_cache.lock() {
-            if let Some(ref path) = playback.cover_art_path {
-                if last.as_deref() != Some(path.as_ref()) {
-                    let load_path =
-                        Self::upscale_cover_art(path.as_ref()).unwrap_or_else(|| path.clone());
-                    if let Ok(img) =
-                        slint::Image::load_from_path(std::path::Path::new(load_path.as_ref()))
-                    {
-                        w.set_cover_image(img);
-                        w.set_has_cover_art(true);
-                    } else {
-                        w.set_has_cover_art(false);
-                    }
-                    *last = Some(path.clone());
-                }
-            } else if last.is_some() {
-                w.set_has_cover_art(false);
-                *last = None;
-            }
+        // Cover art is loaded and upscaled by the `bt-monitor` worker (off the render
+        // thread) and pushed through the shared worker update channel; this method only
+        // clears the cover when the playback snapshot carries no path.
+        if playback.cover_art_path.is_none() && w.get_has_cover_art() {
+            w.set_has_cover_art(false);
         }
-    }
-
-    /// Upscales small AVRCP cover art to panel resolution with Lanczos3,
-    /// caching the result next to the source file.
-    fn upscale_cover_art(path: &str) -> Option<Box<str>> {
-        const TARGET_COVER_SIZE: u32 = 480;
-        tracing::debug!("UPSCALE_IN {:?}", path);
-        let src = std::path::Path::new(path);
-        let file_name = src.file_name()?;
-        let mut upscaled_name = file_name.to_os_string();
-        upscaled_name.push(".480.jpg");
-        let out_path = src.with_file_name(upscaled_name);
-        let out_str = out_path.to_str()?.to_owned().into_boxed_str();
-
-        if out_path.is_file() {
-            return Some(out_str);
-        }
-
-        let img = image::open(src).ok()?;
-        if img.width() >= TARGET_COVER_SIZE || img.height() >= TARGET_COVER_SIZE {
-            return Some(Box::<str>::from(path));
-        }
-
-        let upscaled = img.resize_exact(
-            TARGET_COVER_SIZE,
-            TARGET_COVER_SIZE,
-            image::imageops::FilterType::Lanczos3,
-        );
-        upscaled
-            .save_with_format(&out_path, image::ImageFormat::Jpeg)
-            .ok()?;
-        Some(out_str)
     }
 
     /// Applies a theme preset to the UI shell.
@@ -532,41 +477,42 @@ impl AppShell {
         next
     }
 
-    /// Wires the UI shell transport callbacks to an interactive [`crate::hardware::BluetoothDevice`].
-    pub fn wire_bluetooth_transport(&self, bt: crate::hardware::BluetoothDevice) {
-        let bt_toggle = bt.clone();
+    /// Wires the UI shell transport callbacks to the `bt-monitor` worker command queue.
+    ///
+    /// Every callback applies an optimistic local UI update and pushes a
+    /// [`crate::hardware::TransportCommand`] onto the queue; the `bt-monitor` worker
+    /// executes the blocking D-Bus round-trips off the render thread and publishes
+    /// authoritative state back through the shared worker update channel.
+    pub fn wire_bluetooth_transport(&self, commands: &crate::hardware::TransportCommandQueue) {
+        let commands_toggle = commands.clone();
         let win = self.window.as_weak();
         self.window.on_toggle_play_pause(move || {
             if let Some(w) = win.upgrade() {
-                // `player_toggle` already returns the optimistic next state; do NOT
-                // call `playback_state()` here — it resolves cover art over blocking
-                // OBEX and would freeze the render thread for seconds. The bt-monitor
-                // worker re-applies authoritative state (incl. cover) every tick.
-                if let Ok(next_state) = bt_toggle.player_toggle() {
-                    w.set_is_playing(next_state);
-                }
+                // Optimistic local toggle: the worker's next authoritative publish
+                // (within one monitor tick) reconciles the real player state.
+                commands_toggle.push(crate::hardware::TransportCommand::TogglePlayPause);
+                w.set_is_playing(!w.get_is_playing());
             }
         });
 
-        let bt_next = bt.clone();
+        let commands_next = commands.clone();
         self.window.on_next_track(move || {
-            // Fire-and-forget: skip the blocking `playback_state()` round-trip
-            // (it resolves cover art over OBEX and freezes the render thread);
-            // the bt-monitor worker refreshes state and cover within one tick.
-            let _ = bt_next.player_next();
+            commands_next.push(crate::hardware::TransportCommand::NextTrack);
         });
 
-        let bt_prev = bt.clone();
+        let commands_prev = commands.clone();
         self.window.on_previous_track(move || {
-            let _ = bt_prev.player_previous();
+            commands_prev.push(crate::hardware::TransportCommand::PreviousTrack);
         });
 
-        let bt_seek = bt;
+        let commands_seek = commands.clone();
         let win = self.window.as_weak();
         self.window.on_seek(move |ratio| {
             if let Some(w) = win.upgrade() {
+                // Optimistic scrub: move the progress bar immediately, then let the
+                // worker translate the absolute position into a D-Bus `Seek` call.
                 let pos = Self::apply_seek_ratio(&w, ratio);
-                let _ = bt_seek.player_seek(pos);
+                commands_seek.push(crate::hardware::TransportCommand::Seek(pos));
             }
         });
     }

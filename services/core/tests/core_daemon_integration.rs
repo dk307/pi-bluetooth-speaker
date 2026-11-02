@@ -11,7 +11,7 @@ use speaker_core::cli::core_daemon::{
 };
 #[cfg(feature = "ui")]
 use speaker_core::cli::core_daemon::{
-    init_shell, report_display, run_app, run_render_loop, run_shell_on, run_splash_on,
+    ShellInit, init_shell, report_display, run_app, run_render_loop, run_shell_on, run_splash_on,
     run_ui_display, run_ui_display_on_path, run_ui_lifecycle,
 };
 use speaker_core::diag::CliParse;
@@ -183,23 +183,43 @@ fn run_ui_display_missing_device_returns_early() {
 }
 
 #[cfg(feature = "ui")]
-#[test]
-fn run_splash_on_mocked_renders_and_tracks_counters() {
-    let (mut fb, ctrl) = Framebuffer::new_mocked();
-    assert!(fb.is_mocked());
-    run_splash_on(&mut fb, Some(0), None);
-    assert_eq!(fb.unblank_count(), 1);
-    assert_eq!(fb.render_count(), 1);
-    assert_eq!(ctrl.counters(), (1, 1));
+fn instant_probes(text: Result<&'static str, &'static str>) -> speaker_core::ui::BootProbe {
+    use speaker_core::ui::BootProbe;
+
+    BootProbe::from_probes(std::array::from_fn(|_| {
+        Box::new(move || text.map(Into::into).map_err(Into::into))
+            as Box<dyn FnOnce() -> Result<Box<str>, Box<str>> + Send>
+    }))
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_splash_on_mocked_zero_preview_skips_loop() {
+fn run_splash_on_mocked_drains_checks_and_renders_frames() {
+    let (mut fb, ctrl) = Framebuffer::new_mocked();
+    assert!(fb.is_mocked());
+    run_splash_on(&mut fb, instant_probes(Ok("all good")), None, None);
+    assert_eq!(fb.unblank_count(), 1);
+    assert!(
+        fb.render_count() >= 2,
+        "initial frame plus check-loop frames"
+    );
+    assert_eq!(ctrl.counters(), (1, fb.render_count()));
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn run_splash_on_mocked_failed_probes_still_terminate() {
     let (mut fb, _ctrl) = Framebuffer::new_mocked();
-    run_splash_on(&mut fb, Some(0), None);
-    // Initial render + no loop iterations for zero-length preview
-    assert_eq!(fb.render_count(), 1);
+    run_splash_on(&mut fb, instant_probes(Err("probe blew up")), None, None);
+    assert!(fb.render_count() >= 2);
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn run_splash_on_mocked_zero_preview_exits_after_checks() {
+    let (mut fb, _ctrl) = Framebuffer::new_mocked();
+    run_splash_on(&mut fb, instant_probes(Ok("ok")), Some(0), None);
+    assert!(fb.render_count() >= 2);
 }
 
 #[cfg(feature = "ui")]
@@ -207,18 +227,23 @@ fn run_splash_on_mocked_zero_preview_skips_loop() {
 fn run_splash_on_mocked_reports_unblank_failure_and_continues() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     ctrl.set_unblank_error("simulated unblank failure");
-    run_splash_on(&mut fb, Some(0), Some(speaker_core::ui::ThemePreset::Peppy));
+    run_splash_on(
+        &mut fb,
+        instant_probes(Ok("ok")),
+        None,
+        Some(speaker_core::ui::ThemePreset::Peppy),
+    );
     // Unblank failure is non-fatal: splash still initializes and renders
     assert_eq!(fb.unblank_count(), 0);
-    assert_eq!(fb.render_count(), 1);
+    assert!(fb.render_count() >= 2);
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_splash_on_mocked_render_error_skips_loop() {
+fn run_splash_on_mocked_render_error_still_joins_check_thread() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     ctrl.set_render_error("simulated render failure");
-    run_splash_on(&mut fb, Some(0), None);
+    run_splash_on(&mut fb, instant_probes(Ok("ok")), None, None);
     assert_eq!(fb.render_count(), 0);
     assert_eq!(ctrl.counters(), (1, 0));
 }
@@ -281,16 +306,19 @@ fn run_render_loop_mocked_and_bluetooth_paths() {
 
     // 1. None bluetooth path breaking on render failure
     ctrl.set_render_error("simulated loop failure");
-    run_render_loop(&mut fb, &window, &shell, None, Some(10));
+    let commands = speaker_core::hardware::TransportCommandQueue::new();
+    run_render_loop(&mut fb, &window, &shell, None, &commands, Some(10));
 
     // 2. Bluetooth sync branch with mocked BluetoothDevice breaking on render failure
     let (bt, _) = speaker_core::hardware::BluetoothDevice::new_mocked();
     ctrl.set_render_error("simulated bt loop failure");
-    run_render_loop(&mut fb, &window, &shell, Some(&bt), Some(10));
+    let commands = speaker_core::hardware::TransportCommandQueue::new();
+    run_render_loop(&mut fb, &window, &shell, Some(&bt), &commands, Some(10));
 
     // 3. Bluetooth sync branch running short preview loop to completion (clear fault first)
     ctrl.clear_render_error();
-    run_render_loop(&mut fb, &window, &shell, Some(&bt), Some(1));
+    let commands = speaker_core::hardware::TransportCommandQueue::new();
+    run_render_loop(&mut fb, &window, &shell, Some(&bt), &commands, Some(1));
 
     // 4. run_shell_on with render error
     ctrl.set_render_error("simulated shell render error");
@@ -598,7 +626,7 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
     let (fb, _) = Framebuffer::new_mocked();
     let _window = fb.init_platform().unwrap();
     let main_window = MainWindow::new().unwrap();
-    let (shell, _) = init_shell(
+    let ShellInit { shell, .. } = init_shell(
         main_window,
         false,
         Some(speaker_core::ui::ThemePreset::Peppy),
@@ -611,7 +639,11 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
 
     // 3. init_shell with mocked_device = true exercises mocked Bluetooth path and playback sync
     let main_window_mock = MainWindow::new().unwrap();
-    let (shell_mock, bt_mock) = init_shell(
+    let ShellInit {
+        shell: shell_mock,
+        bt: bt_mock,
+        ..
+    } = init_shell(
         main_window_mock,
         true,
         Some(speaker_core::ui::ThemePreset::CyberpunkNeon),

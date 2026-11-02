@@ -6,8 +6,8 @@ export component MainViewport inherits Rectangle {
 
     in-out property <int> active_tab: 0;
     in-out property <string> track_title: "Waiting for Bluetooth Connection...";
-    in-out property <string> track_artist: "DietPi Audiophile Speaker";
-    in-out property <string> track_album: "High-Resolution DSP Sink";
+    in-out property <string> track_artist: "";
+    in-out property <string> track_album: "";
     in-out property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit -> DSP 32-bit";
     in-out property <string> position_text: "00:00";
     in-out property <string> duration_text: "00:00";
@@ -35,11 +35,11 @@ export component MainViewport inherits Rectangle {
 
     // Tab 0: Now Playing
     if root.active_tab == 0 : VerticalLayout {
-        padding: 16px;
+        padding: 0px;
 
         Rectangle {
             background: @linear-gradient(150deg, Theme.active.card_surface 0%, Theme.active.chassis 100%);
-            border-radius: 16px;
+            border-radius: 0px;
             border-width: 1px;
             border-color: Theme.active.card_border;
             clip: true;

@@ -1,24 +1,15 @@
-//! Bluetooth and `BlueALSA` hardware subsystem abstraction via D-Bus.
+//! Bluetooth controller, D-Bus client, and device connection logic.
 //!
-//! Provides strongly-typed, mockable interfaces for the Broadcom BCM43438 Bluetooth
-//! controller and the `BlueALSA` audio streaming pipeline on the Raspberry Pi 3 Model B.
-//! Connects directly to the Linux system bus via `zbus` for `BlueZ` 5 (`org.bluez`),
-//! `BlueALSA` (`org.bluealsa`), and systemd (`org.freedesktop.systemd1`).
-//! Supports adapter status inspection, remote device discovery, connection state,
-//! real-time `BlueALSA` PCM audio stream telemetry, and radio controls.
-//!
-//! Conforms to Microsoft Pragmatic Rust Guidelines:
-//! - Mockable external I/O via inherent [`BluetoothDevice::new_mocked`] (`M-MOCKABLE-SYSCALLS`)
-//! - Strongly typed invariants via [`BtAddress`] and [`ServiceState`] (`M-STRONG-TYPES-GUARD`)
-//! - Canonical error reporting via [`BtError`] (`M-ERRORS-CANONICAL-STRUCTS`)
-//! - Non-blocking async queries via [`crate::runtime::run_blocking`] (`M-SERVICES-CLONE`)
+//! Core newtypes (`BtAddress`), controller hardware info, systemd/BlueZ D-Bus
+//! client, the in-memory mock controller, and the user-facing `BluetoothDevice`
+//! facade with its transport command plumbing.
 
 use std::backtrace::Backtrace;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,6 +19,16 @@ use zbus::names::OwnedInterfaceName;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use crate::runtime::FromJoinError;
+
+use super::cover_art::{
+    BIP_DEFAULT_CAP_PX, BIP_DEFAULT_NATIVE_BYTES_CAP, BIP_NATIVE_TIMEOUT_MS, BIP_POLL_INTERVAL_MS,
+    BIP_STALL_TIMEOUT_MS, BIP_THUMBNAIL_TIMEOUT_MS, BIP_TRACK_SETTLE_MS, BIP_VARIANT_TIMEOUT_MS,
+    BT_SOCKET_RMEM_DEFAULT, BT_SOCKET_RMEM_MAX, COVER_ART_CACHE_DIR, HCI_SUPERVISION_TIMEOUT_SLOTS,
+    clean_old_cover_art_in, cover_art_cached_path_in, cover_art_path_for_in,
+    ensure_cover_art_cache_dir_in, is_complete_jpeg, load_device_caps_in, load_native_caps_in,
+    native_image_size, select_bip_candidates, store_device_cap_in, store_native_cap_in,
+};
+use super::transport::{BlueAlsaPcm, BtPlaybackState, decode_pcm_format, format_volume_bytes};
 
 /// Number of octets in a standard Bluetooth MAC address.
 pub const BT_ADDRESS_OCTETS: usize = 6;
@@ -282,154 +283,7 @@ impl BtDevice {
     }
 }
 
-/// Active `BlueALSA` audio transport PCM stream information.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BlueAlsaPcm {
-    /// D-Bus object path for this audio PCM stream.
-    pub pcm_path: Box<str>,
-    /// Associated remote device MAC address.
-    pub device_address: BtAddress,
-    /// Human-readable device name resolved from connected device map.
-    pub resolved_name: Box<str>,
-    /// Audio transport mode (e.g. `A2DP-sink`, `A2DP-source`, `HFP-AG`).
-    pub transport: Box<str>,
-    /// Whether audio is actively streaming across the transport.
-    pub running: bool,
-    /// Bluetooth audio codec negotiated for this stream (e.g. `AAC`, `SBC`, `aptX`, `LDAC`).
-    pub selected_codec: Box<str>,
-    /// Available codecs supported by this PCM stream.
-    pub available_codecs: Box<[Box<str>]>,
-    /// Sampling rate in Hz (e.g. 44100, 48000).
-    pub sampling_rate: u32,
-    /// Number of audio channels (e.g. 2 for stereo).
-    pub channels: u8,
-    /// PCM sample format decoded from the 16-bit identifier (e.g. `S16_LE`).
-    pub format: Box<str>,
-    /// Hardware volume levels per channel (e.g. `L: 127 R: 127`), if reported.
-    pub volume: Option<Box<str>>,
-    /// Average volume level as a percentage (0..=100), if reported.
-    pub volume_percent: Option<u8>,
-    /// Whether audio output is muted (any channel volume high bit set).
-    pub muted: bool,
-    /// Audio transmission latency in milliseconds, if reported.
-    pub delay: Option<Box<str>>,
-}
-
-impl BlueAlsaPcm {
-    /// Returns a human-readable stream state description.
-    #[must_use]
-    pub fn stream_state_description(&self) -> &'static str {
-        if self.running {
-            "STREAMING (Active)"
-        } else {
-            "STANDBY / PAUSED (Connected)"
-        }
-    }
-}
-
-/// Computes the playback progress ratio clamped to `0.0..=1.0`.
-///
-/// A zero or unknown duration maps to `0.0`. Shared between
-/// [`BtPlaybackState::progress_ratio`] and the UI shell so the ratio logic has
-/// a single source of truth.
-#[must_use]
-pub fn playback_progress_ratio(position_ms: u32, duration_ms: u32) -> f32 {
-    if duration_ms == 0 {
-        0.0
-    } else {
-        (position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
-    }
-}
-
-/// Formats a duration in milliseconds into a user-friendly string (`MM:SS` or `HH:MM:SS`).
-#[must_use]
-pub fn format_duration_ms(ms: u32) -> String {
-    let total_secs = ms / 1000;
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
-    if hours > 0 {
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes:02}:{seconds:02}")
-    }
-}
-
-/// Active Bluetooth AVRCP media player playback state and track metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BtPlaybackState {
-    /// Associated remote device MAC address, if known.
-    pub device_address: Option<BtAddress>,
-    /// Remote device name or alias.
-    pub device_name: Box<str>,
-    /// Playback status (e.g. `playing`, `paused`, `stopped`).
-    pub status: Box<str>,
-    /// Current track title.
-    pub title: Box<str>,
-    /// Track artist.
-    pub artist: Box<str>,
-    /// Track album.
-    pub album: Box<str>,
-    /// Elapsed playback position in milliseconds.
-    pub position_ms: u32,
-    /// Total track duration in milliseconds.
-    pub duration_ms: u32,
-    /// Path to player D-Bus object (e.g. `/org/bluez/hci0/dev_.../player0`).
-    pub player_path: Option<Box<str>>,
-    /// OBEX BIP L2CAP PSM port (AVRCP 1.6 Cover Art), if advertised by remote player.
-    pub obex_port: Option<u16>,
-    /// Track image handle (e.g. "1000001") for AVRCP Cover Art over OBEX BIP.
-    pub image_handle: Option<Box<str>>,
-    /// Local cache path to downloaded cover art image (e.g. `/var/cache/speaker-covers/...jpg`).
-    pub cover_art_path: Option<Box<str>>,
-}
-
-impl Default for BtPlaybackState {
-    fn default() -> Self {
-        Self {
-            device_address: None,
-            device_name: "Bluetooth Audio Device".into(),
-            status: "stopped".into(),
-            title: "Waiting for Bluetooth Connection...".into(),
-            artist: "DietPi Audiophile Speaker".into(),
-            album: "High-Resolution DSP Sink".into(),
-            position_ms: 0,
-            duration_ms: 0,
-            player_path: None,
-            obex_port: None,
-            image_handle: None,
-            cover_art_path: None,
-        }
-    }
-}
-
-impl BtPlaybackState {
-    /// Returns `true` if playback status is "playing" (case-insensitive).
-    #[must_use]
-    pub fn is_playing(&self) -> bool {
-        self.status.eq_ignore_ascii_case("playing")
-    }
-
-    /// Returns the progress ratio between 0.0 and 1.0.
-    #[must_use]
-    pub fn progress_ratio(&self) -> f32 {
-        playback_progress_ratio(self.position_ms, self.duration_ms)
-    }
-
-    /// Formats the elapsed position as `MM:SS`.
-    #[must_use]
-    pub fn format_position(&self) -> String {
-        format_duration_ms(self.position_ms)
-    }
-
-    /// Formats the track duration as `MM:SS`.
-    #[must_use]
-    pub fn format_duration(&self) -> String {
-        format_duration_ms(self.duration_ms)
-    }
-}
-
-/// Raspberry Pi 3 hardware controller specifications.
+/// Raspberry Pi Bluetooth controller chip and transport bus metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BluetoothHardwareInfo {
     /// Controller chip model.
@@ -778,6 +632,7 @@ impl BtError {
         .with_source(source)
     }
 
+    #[cfg(feature = "test-util")]
     pub(crate) fn dbus(details: impl Into<Box<str>>) -> Self {
         Self::new(BtErrorKind::Dbus {
             details: details.into(),
@@ -1166,72 +1021,7 @@ fn get_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Box<
     }
 }
 
-/// Decodes a `BlueALSA` 16-bit PCM format identifier (e.g. `0x8410` → `S16_2LE`).
-///
-/// Encoding per `BlueALSA` `BA_TRANSPORT_PCM_FORMAT`: bit 15 = signed, bit 14 = big-endian,
-/// bits 8–13 = physical bytes per sample, bits 0–7 = bit width.
-#[must_use]
-pub fn decode_pcm_format(id: u16) -> Box<str> {
-    if id == 0 {
-        return "Invalid".into();
-    }
-    let signed = (id >> 15) & 1 == 1;
-    let big_endian = (id >> 14) & 1 == 1;
-    let bytes_per_sample = ((id >> 8) & 0x3F) as u8;
-    let width = (id & 0xFF) as u8;
-
-    if width == 0 || bytes_per_sample == 0 || u16::from(bytes_per_sample) * 8 < u16::from(width) {
-        return "Invalid".into();
-    }
-
-    let sign = if signed { 'S' } else { 'U' };
-    let endian = if big_endian { "BE" } else { "LE" };
-    if bytes_per_sample == 1 {
-        format!("{sign}{width}{endian}").into()
-    } else {
-        format!("{sign}{width}_{bytes_per_sample}{endian}").into()
-    }
-}
-
-/// Renders `BlueALSA` per-channel volume bytes (`(muted << 7) | level`) and calculates average volume percent.
-///
-/// Uses channel names when provided (`ChannelMap`), falling back to generic indices.
-/// Returns `(formatted_channel_string, is_muted, volume_percent)`.
-#[must_use]
-pub fn format_volume_bytes(
-    bytes: &[u8],
-    channel_names: Option<&[Box<str>]>,
-) -> (Option<Box<str>>, bool, Option<u8>) {
-    if bytes.is_empty() {
-        return (None, false, None);
-    }
-    let muted = bytes.iter().any(|b| b & 0x80 != 0);
-    let mut total_level: u32 = 0;
-    let volume = bytes
-        .iter()
-        .enumerate()
-        .map(|(i, b)| {
-            let level = b & 0x7F;
-            total_level += u32::from(level);
-            let name = channel_names
-                .and_then(|names| names.get(i))
-                .map_or_else(|| format!("CH{i}"), std::string::ToString::to_string);
-            format!("{name}: {level}")
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let avg_level = f64::from(total_level) / (bytes.len() as f64);
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "percentage clamped 0.0..=100.0 fits in u8"
-    )]
-    let percent = ((avg_level / 127.0) * 100.0).round().clamp(0.0, 100.0) as u8;
-
-    (Some(volume.into()), muted, Some(percent))
-}
-
+/// Reports whether the D-Bus error means the queried systemd unit does not exist.
 #[must_use]
 pub fn is_no_such_unit_error(err: &zbus::Error) -> bool {
     match err {
@@ -1300,31 +1090,194 @@ pub fn is_service_absent_fdo_error(err: &zbus::fdo::Error) -> bool {
     }
 }
 
+/// Consolidated mutable D-Bus client state protected by a single mutex.
+///
+/// This groups the OBEX session cache, Bluetooth ACL tuning history, and socket
+/// tuning flags together to reduce lock contention and code complexity.
+
+#[derive(Debug, Default)]
+struct DbusClientState {
+    /// Active OBEX file transfer session (target device address and path).
+    obex_session: Option<(BtAddress, OwnedObjectPath)>,
+    /// MAC addresses whose ACL links have been tuned.
+    acl_tuned: HashSet<BtAddress>,
+    /// Whether Bluetooth socket buffers have been tuned.
+    socket_tuned: bool,
+}
+
+/// Shared change-notification flag used by the D-Bus backend and the mock to wake
+/// property monitors when the subsystem state may have changed (event-driven instead
+/// of fixed-interval polling).
+#[derive(Debug, Default)]
+pub(crate) struct ChangeFlag {
+    ready: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl ChangeFlag {
+    /// Marks a change as pending and wakes all waiting monitors.
+    pub(crate) fn notify(&self) {
+        if let Ok(mut ready) = self.ready.lock() {
+            *ready = true;
+            self.cv.notify_all();
+        }
+    }
+
+    /// Waits up to `timeout` for a change notification, consuming it if present.
+    ///
+    /// Returns `true` when a change was signaled, `false` on keep-alive timeout.
+    pub(crate) fn wait(&self, timeout: Duration) -> bool {
+        let mut ready = self.ready.lock().unwrap_or_else(|p| {
+            tracing::warn!("ChangeFlag mutex poisoned; recovering inner state");
+            p.into_inner()
+        });
+        // Consume the flag under the same lock acquisition that observed it: a
+        // separate later clear would erase any notify() landing between the wait
+        // returning and the clear, delaying the wake by a full keep-alive period.
+        // Clearing before waiting is safe because notify() also signals the
+        // condvar, so a change arriving mid-wait still wakes this waiter.
+        let changed = *ready;
+        *ready = false;
+        if !changed {
+            let deadline = Instant::now() + timeout;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let Ok((guard, res)) = self.cv.wait_timeout(ready, remaining) else {
+                    break;
+                };
+                ready = guard;
+                if *ready {
+                    *ready = false;
+                    return true;
+                }
+                if res.timed_out() {
+                    break;
+                }
+            }
+        }
+        changed
+    }
+}
+
+/// Backoff between D-Bus signal-listener reconnection attempts after a setup
+/// failure or iterator exhaustion (transient bus restart).
+const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
+
+/// Spawns a background thread that watches for `org.freedesktop.DBus.Properties`
+/// change signals from `org.bluez` and `org.bluealsa` on the system bus and wakes
+/// the shared [`ChangeFlag`] whenever one arrives.
+///
+/// If the system bus cannot be reached, the thread retries with backoff and
+/// callers fall back to the keep-alive timeout polling path meanwhile.
+fn spawn_properties_changed_listener(
+    conn: Connection,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> Arc<ChangeFlag> {
+    let flag = Arc::new(ChangeFlag::default());
+    let listener_flag = Arc::clone(&flag);
+    let Ok(join) = std::thread::Builder::new()
+        .name("bt-dbus-signals".into())
+        .spawn(move || {
+            // A single unfiltered PropertiesChanged rule avoids the deadlock of
+            // per-sender blocking iterators (each `next()` would block forever on
+            // its own sender). Extra wakeups from unrelated services are cheap:
+            // they just trigger one extra state re-poll on the monitor thread.
+            //
+            // The listener shares the client's connection instead of opening a
+            // second system-bus connection so that private-bus integration tests
+            // and injected connections observe the signals under test. On rule
+            // setup failure or iterator exhaustion (bus lost) the thread sleeps
+            // a backoff interval and rebuilds the rule/iterator, honoring the
+            // stop flag between attempts (the keep-alive polling fallback covers
+            // the gap while a blocked `next()` cannot observe the flag).
+            loop {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                let Ok(rule) = zbus::MatchRule::builder()
+                    .msg_type(zbus::message::Type::Signal)
+                    .interface("org.freedesktop.DBus.Properties")
+                    .map(zbus::match_rule::Builder::build)
+                else {
+                    std::thread::sleep(RECONNECT_BACKOFF);
+                    continue;
+                };
+                let Ok(iter) = zbus::blocking::MessageIterator::for_match_rule(rule, &conn, None)
+                else {
+                    std::thread::sleep(RECONNECT_BACKOFF);
+                    continue;
+                };
+                for msg in iter.flatten() {
+                    // Only wake the monitor for Bluetooth-related objects; an
+                    // unfiltered rule would re-query BlueZ/BlueALSA for every
+                    // unrelated PropertiesChanged on a busy system bus.
+                    if msg.header().path().is_some_and(|p| {
+                        let p = p.as_str();
+                        p.starts_with("/org/bluez") || p.starts_with("/org/bluealsa")
+                    }) {
+                        listener_flag.notify();
+                    }
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                }
+                // Iterator exhausted (bus lost): back off and rebuild.
+                std::thread::sleep(RECONNECT_BACKOFF);
+            }
+        })
+    else {
+        // Thread spawn failed: rely on the keep-alive fallback only.
+        return flag;
+    };
+    drop(join);
+    flag
+}
+
 /// D-Bus client executing direct queries against systemd, `BlueZ`, and `BlueALSA`.
-#[derive(Clone, Debug)]
+///
+/// Deliberately not `Clone`: the `Drop` impl signals the per-client listener
+/// thread to stop, which must only happen when the last owner is dropped.
+#[derive(Debug)]
 pub struct DbusClient {
     conn: Connection,
-    obex_session: Arc<Mutex<Option<(BtAddress, OwnedObjectPath)>>>,
     device_caps_dir: std::path::PathBuf,
     cache_dir: std::path::PathBuf,
-    acl_tuned: Arc<Mutex<HashSet<BtAddress>>>,
-    socket_tuned: Arc<Mutex<bool>>,
+    state: Arc<Mutex<DbusClientState>>,
+    change_flag: Arc<ChangeFlag>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Snapshot of `BlueZ` adapter, connected/paired devices, and media player state.
 pub type BluezSnapshot = (Option<BtAdapter>, Box<[BtDevice]>, Option<BtPlaybackState>);
 
+impl Drop for DbusClient {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl DbusClient {
     #[must_use]
     pub fn new(conn: Connection) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         Self {
-            conn,
-            obex_session: Arc::new(Mutex::new(None)),
+            conn: conn.clone(),
             device_caps_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
-            acl_tuned: Arc::new(Mutex::new(HashSet::new())),
-            socket_tuned: Arc::new(Mutex::new(false)),
+            state: Arc::new(Mutex::new(DbusClientState::default())),
+            change_flag: spawn_properties_changed_listener(conn, Arc::clone(&stop)),
+            stop,
         }
+    }
+
+    /// Waits up to `timeout` for a D-Bus property-change notification.
+    ///
+    /// Returns `true` when a change was signaled, `false` on timeout (keep-alive).
+    pub(crate) fn wait_for_change(&self, timeout: Duration) -> bool {
+        self.change_flag.wait(timeout)
     }
 
     pub(crate) fn check_services(&self) -> Result<BluetoothServices, BtError> {
@@ -1446,17 +1399,18 @@ impl DbusClient {
         let (title, artist, album, duration_ms) = if let Some(track_val) = props.get("Track") {
             let title = get_track_prop_str(track_val, "Title")
                 .unwrap_or_else(|| "Waiting for Bluetooth Track...".into());
-            let artist = get_track_prop_str(track_val, "Artist")
-                .unwrap_or_else(|| "DietPi Audiophile Speaker".into());
-            let album = get_track_prop_str(track_val, "Album")
-                .unwrap_or_else(|| "High-Resolution DSP Sink".into());
+            let artist = get_track_prop_str(track_val, "Artist").unwrap_or_default();
+            let album = get_track_prop_str(track_val, "Album").unwrap_or_default();
             let duration_ms = get_track_prop_u32(track_val, "Duration").unwrap_or(0);
             (title, artist, album, duration_ms)
         } else {
+            // Disconnected / no track published yet: keep the "Waiting for
+            // Bluetooth Connection..." placeholder title and leave the artist
+            // and album lines empty so the UI does not display stale branding.
             (
-                "Waiting for Bluetooth Connection...".into(),
-                "DietPi Audiophile Speaker".into(),
-                "High-Resolution DSP Sink".into(),
+                super::transport::BT_NO_CONNECTION_TITLE.into(),
+                "".into(),
+                "".into(),
                 0,
             )
         };
@@ -1523,13 +1477,22 @@ impl DbusClient {
         .is_ok()
     }
 
+    /// Recovers the client state from a poisoned mutex so a panicked holder's
+    /// data survives instead of silently dropping OBEX sessions or tuning state.
+    fn state(&self) -> std::sync::MutexGuard<'_, DbusClientState> {
+        self.state.lock().unwrap_or_else(|p| {
+            tracing::warn!("DbusClientState mutex poisoned; recovering inner state");
+            p.into_inner()
+        })
+    }
+
     fn ensure_obex_session(&self, addr: BtAddress, port: u16) -> Option<OwnedObjectPath> {
-        let mut session_lock = self.obex_session.lock().ok()?;
-        if let Some((cached_addr, ref path)) = *session_lock {
+        let mut session_lock = self.state();
+        if let Some((cached_addr, ref path)) = session_lock.obex_session {
             if cached_addr == addr && self.is_obex_session_alive(path.as_str()) {
                 return Some(path.clone());
             }
-            *session_lock = None;
+            session_lock.obex_session = None;
         }
 
         let client = ObexClientProxyBlocking::new(&self.conn).ok()?;
@@ -1540,7 +1503,7 @@ impl DbusClient {
         match client.create_session(&addr.to_string(), &args) {
             Ok(new_path) => {
                 tracing::info!("Created OBEX BIP session at {new_path} for device {addr}");
-                *session_lock = Some((addr, new_path.clone()));
+                session_lock.obex_session = Some((addr, new_path.clone()));
                 Some(new_path)
             }
             Err(e) => {
@@ -1552,10 +1515,8 @@ impl DbusClient {
 
     /// Raises kernel Bluetooth socket read-buffer limits once per process (`sysctl`).
     fn tune_bt_socket_buffers(&self) {
-        let Ok(mut tuned) = self.socket_tuned.lock() else {
-            return;
-        };
-        if *tuned {
+        let mut state = self.state();
+        if state.socket_tuned {
             return;
         }
         let rmem_max_arg = format!("net.core.rmem_max={BT_SOCKET_RMEM_MAX}");
@@ -1577,7 +1538,7 @@ impl DbusClient {
                 rmem_default = BT_SOCKET_RMEM_DEFAULT,
                 "Raised kernel Bluetooth socket read buffers"
             );
-            *tuned = true;
+            state.socket_tuned = true;
         } else {
             tracing::warn!("sysctl socket buffer tuning failed; will retry on next transfer");
         }
@@ -1587,10 +1548,8 @@ impl DbusClient {
     /// (`hcitool sr` + `hcitool lst`) to avoid L2CAP flow-control starvation (0x08).
     fn tune_acl_link(&self, addr: BtAddress) {
         let mac = addr.to_string();
-        let Ok(mut tuned) = self.acl_tuned.lock() else {
-            return;
-        };
-        if tuned.contains(&addr) {
+        let mut state = self.state();
+        if state.acl_tuned.contains(&addr) {
             return;
         }
         let slot_arg = HCI_SUPERVISION_TIMEOUT_SLOTS.to_string();
@@ -1610,7 +1569,7 @@ impl DbusClient {
                 slots = HCI_SUPERVISION_TIMEOUT_SLOTS,
                 "Tuned ACL link (role switch + supervision timeout)"
             );
-            tuned.insert(addr);
+            state.acl_tuned.insert(addr);
         } else {
             tracing::warn!(
                 mac,
@@ -1669,9 +1628,7 @@ impl DbusClient {
                         "OBEX Image1 Get({}) failed for handle {handle}",
                         candidate.pixel
                     );
-                    if let Ok(mut lock) = self.obex_session.lock() {
-                        *lock = None;
-                    }
+                    self.state().obex_session = None;
                     cap = candidate.area - 1;
                     let _ = store_device_cap_in(&self.device_caps_dir, &sanitized_mac, cap);
                     if !self.ensure_device_acl_connected(addr) {
@@ -1720,8 +1677,8 @@ impl DbusClient {
         // before we hammer it with OBEX session/transfer requests.
         thread::sleep(Duration::from_millis(BIP_TRACK_SETTLE_MS));
 
-        let session_lock = self.obex_session.lock().ok()?;
-        session_lock.as_ref().map(|(_, p)| p.clone())
+        let session_lock = self.state();
+        session_lock.obex_session.as_ref().map(|(_, p)| p.clone())
     }
 
     /// Builds a blocking `Image1` proxy on top of an existing BIP OBEX session path.
@@ -1840,9 +1797,7 @@ impl DbusClient {
             .or_else(|_| image_proxy.get(cache_path, handle, &empty_props));
         let Ok((transfer_path, _)) = transfer_res else {
             tracing::debug!("OBEX Image1 GetThumbnail/Get failed for handle {handle}");
-            if let Ok(mut lock) = self.obex_session.lock() {
-                *lock = None;
-            }
+            self.state().obex_session = None;
             return None;
         };
         match self.wait_for_transfer(transfer_path.as_str(), BIP_THUMBNAIL_TIMEOUT_MS) {
@@ -1852,9 +1807,7 @@ impl DbusClient {
             }
             _ => {
                 let _ = std::fs::remove_file(cache_path_buf);
-                if let Ok(mut lock) = self.obex_session.lock() {
-                    *lock = None;
-                }
+                self.state().obex_session = None;
                 None
             }
         }
@@ -1958,391 +1911,6 @@ impl DbusClient {
             Err(_) => false,
         }
     }
-}
-
-/// Validates whether a file on disk is a fully flushed, complete JPEG image.
-///
-/// Ensures both the SOI marker (`0xFF, 0xD8`) and the EOI marker (`0xFF, 0xD9`)
-/// are present so Slint never attempts to decode a partially written transfer buffer.
-#[must_use]
-pub fn is_complete_jpeg(path: &std::path::Path) -> bool {
-    use std::io::{Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
-    let Ok(len) = f.metadata().map(|m| m.len()) else {
-        return false;
-    };
-    if len < 100 {
-        return false;
-    }
-    let mut header = [0u8; 2];
-    if f.read_exact(&mut header).is_err() || header != [0xFF, 0xD8] {
-        return false;
-    }
-    if f.seek(SeekFrom::End(-2)).is_err() {
-        return false;
-    }
-    let mut footer = [0u8; 2];
-    if f.read_exact(&mut footer).is_err() {
-        return false;
-    }
-    footer == [0xFF, 0xD9]
-}
-
-/// Maximum accepted OBEX native image size in bytes.
-///
-/// Larger descriptors risk Android `TransactionTooLargeException` crashes on the
-/// phone side when the bitmaps are scaled during the Binder IPC reply.
-pub const BIP_MAX_NATIVE_BYTES: u64 = 280_000;
-
-/// Default per-device resolution ceiling in pixels (800x800).
-pub const BIP_DEFAULT_CAP_PX: u32 = 640_000;
-
-/// Minimum pixel area for a Tier-1 candidate; 200x200 is reserved for the thumbnail tier.
-pub const BIP_MIN_HIGHRES_PX: u32 = 40_000;
-
-/// Poll interval for OBEX `Transfer1` progress watchdogs, in milliseconds.
-pub const BIP_POLL_INTERVAL_MS: u64 = 80;
-
-/// Stall watchdog: abort a transfer only after this many milliseconds with zero byte progress.
-pub const BIP_STALL_TIMEOUT_MS: u64 = 2_500;
-
-/// Total watchdog for the zero-descriptor native pull, in milliseconds.
-pub const BIP_NATIVE_TIMEOUT_MS: u64 = 8_000;
-
-/// Total watchdog for an explicit high-res variant transfer, in milliseconds.
-pub const BIP_VARIANT_TIMEOUT_MS: u64 = 4_000;
-
-/// Total watchdog for the baseline `Image1.GetThumbnail` transfer, in milliseconds.
-pub const BIP_THUMBNAIL_TIMEOUT_MS: u64 = 2_500;
-
-/// Settle wait after `TrackChanged` before any OBEX traffic, in milliseconds.
-pub const BIP_TRACK_SETTLE_MS: u64 = 650;
-
-/// Default per-device maximum safe native image size in bytes for the zero-descriptor pull.
-pub const BIP_DEFAULT_NATIVE_BYTES_CAP: u64 = 1_500_000;
-
-/// ACL link supervision timeout in Bluetooth clock slots (32000 slots = 20 s).
-pub const HCI_SUPERVISION_TIMEOUT_SLOTS: u32 = 32_000;
-
-/// Raised kernel socket receive buffer ceiling (`net.core.rmem_max`), in bytes.
-pub const BT_SOCKET_RMEM_MAX: u32 = 2_097_152;
-
-/// Raised kernel socket receive buffer default (`net.core.rmem_default`), in bytes.
-pub const BT_SOCKET_RMEM_DEFAULT: u32 = 1_048_576;
-
-/// Synthetic explicit targets used when a BIP descriptor advertises an open range.
-pub const BIP_SYNTHETIC_TARGETS: [(u32, u32); 3] = [(800, 800), (600, 600), (400, 400)];
-
-/// A concrete BIP image variant selected for an `Image1.Get` transfer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BipImageCandidate {
-    /// BIP `Pixel` descriptor string, e.g. `600*600`.
-    pub pixel: String,
-    /// BIP `Encoding` string, e.g. `JPEG`.
-    pub encoding: String,
-    /// Pixel area `width * height` used for step-down ordering.
-    pub area: u32,
-}
-
-/// Parses a BIP `Pixel` descriptor like `600*600` or a range `0*0-65535*65535`.
-#[must_use]
-pub fn parse_bip_pixel(s: &str) -> Option<(u32, u32)> {
-    let first = s.split('-').next()?;
-    let (w, h) = first.split_once('*')?;
-    let w = w.trim().parse::<u32>().ok()?;
-    let h = h.trim().parse::<u32>().ok()?;
-    Some((w, h))
-}
-
-/// Whether a BIP `Pixel` descriptor is an open-ended range (min `0*0`).
-#[must_use]
-pub fn is_bip_pixel_range(s: &str) -> bool {
-    s.split('-').next() == Some("0*0")
-}
-
-/// Returns the maximum advertised native image `Size` in bytes across all descriptors.
-///
-/// Compares the `Size` key case-insensitively (BIP descriptors are case-insensitive in
-/// practice) and returns 0 when no descriptor advertises a parseable byte count, meaning
-/// the native size is unknown and a zero-descriptor pull is safe to attempt.
-#[must_use]
-pub fn native_image_size<S: ::std::hash::BuildHasher>(
-    descriptors: &[HashMap<String, OwnedValue, S>],
-) -> u64 {
-    descriptors
-        .iter()
-        .filter_map(|descriptor| {
-            descriptor
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("Size"))
-                .and_then(|(_, v)| v.downcast_ref::<u64>().ok())
-        })
-        .max()
-        .unwrap_or(0)
-}
-
-/// Selects BIP `Get` candidates from `Image1.Properties` descriptors, descending by pixel area.
-///
-/// Descriptors advertising `Size` above [`BIP_MAX_NATIVE_BYTES`] are discarded, as are
-/// candidates above the per-device pixel ceiling or at/below [`BIP_MIN_HIGHRES_PX`]
-/// (the 200x200 baseline is reserved for the thumbnail fallback tier). Open range
-/// descriptors are expanded into the explicit [`BIP_SYNTHETIC_TARGETS`] that fit the ceiling.
-#[must_use]
-pub fn select_bip_candidates(
-    descriptors: &[HashMap<String, OwnedValue>],
-    max_cap_px: u32,
-) -> Vec<BipImageCandidate> {
-    let mut out: Vec<BipImageCandidate> = Vec::new();
-    for descriptor in descriptors {
-        // BIP descriptors are case-insensitive in practice (obexd emits lowercase keys).
-        let get_value = |key: &str| -> Option<&OwnedValue> {
-            descriptor
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(key))
-                .map(|(_, v)| v)
-        };
-        let get_str = |key: &str| -> Option<String> {
-            get_value(key)
-                .and_then(|v| v.downcast_ref::<&str>().ok())
-                .map(str::to_owned)
-        };
-        let (Some(pixel), Some(encoding)) = (get_str("Pixel"), get_str("Encoding")) else {
-            continue;
-        };
-        // `Size` is in bytes; BIP `MaxSize` is in kilobytes.
-        let size_bytes = get_value("Size")
-            .and_then(|v| v.downcast_ref::<u64>().ok())
-            .unwrap_or(0);
-        let max_size_kb = get_value("MaxSize")
-            .and_then(|v| v.downcast_ref::<u64>().ok())
-            .unwrap_or(0);
-        if size_bytes > BIP_MAX_NATIVE_BYTES || max_size_kb > BIP_MAX_NATIVE_BYTES / 1024 {
-            continue;
-        }
-        if is_bip_pixel_range(&pixel) {
-            for (w, h) in BIP_SYNTHETIC_TARGETS {
-                let Some(area) = w.checked_mul(h) else {
-                    continue;
-                };
-                if area <= max_cap_px && area > BIP_MIN_HIGHRES_PX {
-                    out.push(BipImageCandidate {
-                        pixel: format!("{w}*{h}"),
-                        encoding: encoding.clone(),
-                        area,
-                    });
-                }
-            }
-            continue;
-        }
-        let Some((w, h)) = parse_bip_pixel(&pixel) else {
-            continue;
-        };
-        // Descriptor dimensions come from the remote phone's `Image1.Properties`
-        // (peer-controlled OBEX data); reject any pair whose product overflows `u32`
-        // instead of wrapping around and letting a huge candidate pass the cap filter.
-        let Some(area) = w.checked_mul(h) else {
-            continue;
-        };
-        if area > max_cap_px || area <= BIP_MIN_HIGHRES_PX {
-            continue;
-        }
-        out.push(BipImageCandidate {
-            pixel,
-            encoding,
-            area,
-        });
-    }
-    out.sort_by_key(|a| std::cmp::Reverse(a.area));
-    out.dedup_by(|a, b| a.pixel == b.pixel && a.encoding == b.encoding);
-    out
-}
-
-/// Per-device resolution ceilings keyed by sanitized MAC address.
-pub type DeviceCaps = HashMap<String, u32>;
-
-/// Name of the persistent per-device BIP resolution ceiling file.
-pub const DEVICE_CAPS_FILENAME: &str = "device_caps.json";
-
-/// Loads per-device BIP pixel ceilings from a directory (hermetic variant).
-#[must_use]
-pub fn load_device_caps_in(dir: &std::path::Path) -> DeviceCaps {
-    std::fs::read_to_string(dir.join(DEVICE_CAPS_FILENAME))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<DeviceCaps>(&raw).ok())
-        .unwrap_or_default()
-}
-
-/// Persists a single device ceiling into a caps file (read-modify-write).
-///
-/// # Errors
-/// Returns an error string when the file cannot be written.
-pub fn store_device_cap_in(
-    dir: &std::path::Path,
-    sanitized_mac: &str,
-    max_px: u32,
-) -> Result<(), Box<str>> {
-    let mut caps = load_device_caps_in(dir);
-    caps.insert(sanitized_mac.to_owned(), max_px);
-    let raw =
-        serde_json::to_string(&caps).map_err(|e| Box::<str>::from(format!("caps encode: {e}")))?;
-    std::fs::write(dir.join(DEVICE_CAPS_FILENAME), raw)
-        .map_err(|e| Box::<str>::from(format!("cannot write {DEVICE_CAPS_FILENAME}: {e}")))
-}
-
-/// Per-device native-pull byte ceilings keyed by sanitized MAC address.
-pub type NativeCaps = HashMap<String, u64>;
-
-/// Name of the persistent per-device native byte ceiling file.
-pub const NATIVE_CAPS_FILENAME: &str = "native_caps.json";
-
-/// Loads per-device native byte ceilings from a directory (hermetic variant).
-#[must_use]
-pub fn load_native_caps_in(dir: &std::path::Path) -> NativeCaps {
-    std::fs::read_to_string(dir.join(NATIVE_CAPS_FILENAME))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<NativeCaps>(&raw).ok())
-        .unwrap_or_default()
-}
-
-/// Persists a single native byte ceiling into a caps file (read-modify-write).
-///
-/// # Errors
-/// Returns an error string when the file cannot be written.
-pub fn store_native_cap_in(
-    dir: &std::path::Path,
-    sanitized_mac: &str,
-    max_bytes: u64,
-) -> Result<(), Box<str>> {
-    let mut caps = load_native_caps_in(dir);
-    caps.insert(sanitized_mac.to_owned(), max_bytes);
-    let raw = serde_json::to_string(&caps)
-        .map_err(|e| Box::<str>::from(format!("native caps encode: {e}")))?;
-    std::fs::write(dir.join(NATIVE_CAPS_FILENAME), raw)
-        .map_err(|e| Box::<str>::from(format!("cannot write {NATIVE_CAPS_FILENAME}: {e}")))
-}
-
-/// Root-only spool directory for OBEX cover art cache files.
-///
-/// A predictable path under the world-writable `/tmp` would let a local process
-/// win a TOCTOU symlink race against the privileged `obexd` transfer write; a
-/// root-owned `0700` directory closes that window.
-pub const COVER_ART_CACHE_DIR: &str = "/var/cache/speaker-covers";
-
-/// Creates the cover art cache directory (defaulting to [`COVER_ART_CACHE_DIR`]) with
-/// `0700` permissions if needed.
-///
-/// # Errors
-/// Returns an error string when the directory cannot be created or locked down.
-fn ensure_cover_art_cache_dir_in(dir: &std::path::Path) -> Result<(), Box<str>> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(dir)
-        .map_err(|e| Box::<str>::from(format!("cannot create {}: {e}", dir.display())))?;
-    let mut perms = std::fs::metadata(dir)
-        .map_err(|e| Box::<str>::from(format!("cannot stat {}: {e}", dir.display())))?
-        .permissions();
-    perms.set_mode(0o700);
-    std::fs::set_permissions(dir, perms)
-        .map_err(|e| Box::<str>::from(format!("cannot chmod {}: {e}", dir.display())))?;
-    Ok(())
-}
-
-/// Returns the deterministic cache path and sanitized MAC/handle for an OBEX cover art handle.
-#[must_use]
-pub fn cover_art_path_for(addr: BtAddress, handle: &str) -> Option<(String, String, String)> {
-    cover_art_path_for_in(std::path::Path::new(COVER_ART_CACHE_DIR), addr, handle)
-}
-
-/// Directory-parametrized variant of [`cover_art_path_for`] (testable without the
-/// production cache directory).
-#[must_use]
-pub fn cover_art_path_for_in(
-    dir: &std::path::Path,
-    addr: BtAddress,
-    handle: &str,
-) -> Option<(String, String, String)> {
-    let sanitized_mac = addr.to_string().replace([':', '-'], "_");
-    let sanitized_handle: String = handle
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-        .collect();
-    if sanitized_handle.is_empty() {
-        return None;
-    }
-    let cache_path = format!(
-        "{}/speaker-cover-{sanitized_mac}-{sanitized_handle}.jpg",
-        dir.display()
-    );
-    Some((cache_path, sanitized_mac, sanitized_handle))
-}
-
-/// Checks if cover art is already cached on disk and cleans obsolete images.
-#[must_use]
-pub fn cover_art_cached_path(addr: BtAddress, handle: &str) -> Option<Box<str>> {
-    cover_art_cached_path_in(std::path::Path::new(COVER_ART_CACHE_DIR), addr, handle)
-}
-
-/// Directory-parametrized variant of [`cover_art_cached_path`] (testable without the
-/// production cache directory).
-#[must_use]
-pub fn cover_art_cached_path_in(
-    dir: &std::path::Path,
-    addr: BtAddress,
-    handle: &str,
-) -> Option<Box<str>> {
-    let (cache_path, sanitized_mac, sanitized_handle) = cover_art_path_for_in(dir, addr, handle)?;
-    cover_art_cached_path_in_dir(dir, &cache_path, &sanitized_mac, &sanitized_handle)
-}
-
-/// Path-parametrized cache validity check (internal helper of [`cover_art_cached_path_in`]).
-fn cover_art_cached_path_in_dir(
-    dir: &std::path::Path,
-    cache_path: &str,
-    sanitized_mac: &str,
-    sanitized_handle: &str,
-) -> Option<Box<str>> {
-    let cache_path_buf = std::path::PathBuf::from(cache_path);
-    if is_complete_jpeg(&cache_path_buf) {
-        clean_cover_art_in_dir(dir, sanitized_mac, sanitized_handle);
-        return Some(Box::<str>::from(cache_path));
-    }
-    None
-}
-
-/// Cleans old cover art files in the target directory for a device address except the active handle.
-pub fn clean_cover_art_in_dir(dir: &std::path::Path, sanitized_mac: &str, current_handle: &str) {
-    let prefix = format!("speaker-cover-{sanitized_mac}-");
-    let current_filename = format!("speaker-cover-{sanitized_mac}-{current_handle}.jpg");
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            if let Ok(file_name) = entry.file_name().into_string() {
-                if file_name.starts_with(&prefix)
-                    && std::path::Path::new(&file_name)
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg"))
-                    && file_name != current_filename
-                {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
-    }
-}
-
-/// Cleans old cover art files in the cache directory for a device address except the active handle.
-pub fn clean_old_cover_art(sanitized_mac: &str, current_handle: &str) {
-    clean_cover_art_in_dir(
-        std::path::Path::new(COVER_ART_CACHE_DIR),
-        sanitized_mac,
-        current_handle,
-    );
-}
-
-/// Directory-parametrized variant of [`clean_old_cover_art`] (testable without the
-/// production cache directory).
-pub fn clean_old_cover_art_in(dir: &std::path::Path, sanitized_mac: &str, current_handle: &str) {
-    clean_cover_art_in_dir(dir, sanitized_mac, current_handle);
 }
 
 impl DbusClient {
@@ -2748,6 +2316,7 @@ impl DbusClient {
 }
 
 // ============================================================================
+
 // In-Memory Mock Controller (M-MOCKABLE-SYSCALLS)
 // ============================================================================
 
@@ -2755,6 +2324,7 @@ impl DbusClient {
 #[derive(Debug, Clone)]
 pub struct BluetoothDeviceMock {
     state: Arc<RwLock<MockState>>,
+    change_flag: Arc<ChangeFlag>,
 }
 
 #[derive(Debug)]
@@ -2770,6 +2340,7 @@ struct MockState {
 
 impl BluetoothDeviceMock {
     fn new() -> Self {
+        let change_flag = Arc::new(ChangeFlag::default());
         let adapter_addr = BtAddress::new([0xDC, 0xA6, 0x32, 0x11, 0x22, 0x33]);
         let phone_addr = BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
@@ -2842,6 +2413,7 @@ impl BluetoothDeviceMock {
 
         Self {
             state: Arc::new(RwLock::new(state)),
+            change_flag,
         }
     }
 
@@ -2852,6 +2424,8 @@ impl BluetoothDeviceMock {
     pub fn set_services(&self, services: BluetoothServices) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.services = services;
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated local adapter properties.
@@ -2861,6 +2435,8 @@ impl BluetoothDeviceMock {
     pub fn set_adapter(&self, adapter: Option<BtAdapter>) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.adapter = adapter;
+
+        self.change_flag.notify();
     }
 
     /// Adds or updates a simulated remote device.
@@ -2878,6 +2454,8 @@ impl BluetoothDeviceMock {
         } else {
             state.devices.push(device);
         }
+
+        self.change_flag.notify();
     }
 
     /// Clears all simulated remote devices.
@@ -2887,6 +2465,8 @@ impl BluetoothDeviceMock {
     pub fn clear_devices(&self) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.devices.clear();
+
+        self.change_flag.notify();
     }
 
     /// Adds a simulated `BlueALSA` audio PCM stream.
@@ -2896,6 +2476,8 @@ impl BluetoothDeviceMock {
     pub fn add_pcm(&self, pcm: BlueAlsaPcm) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.pcms.push(pcm);
+
+        self.change_flag.notify();
     }
 
     /// Clears all simulated `BlueALSA` audio PCM streams.
@@ -2905,6 +2487,8 @@ impl BluetoothDeviceMock {
     pub fn clear_pcms(&self) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.pcms.clear();
+
+        self.change_flag.notify();
     }
 
     /// Injects or clears a simulated hardware fault.
@@ -2914,6 +2498,8 @@ impl BluetoothDeviceMock {
     pub fn set_fault(&self, fault: Option<Box<str>>) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.fault = fault;
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated adapter radio power state.
@@ -2925,6 +2511,8 @@ impl BluetoothDeviceMock {
         if let Some(ref mut adapter) = state.adapter {
             adapter.powered = powered;
         }
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated adapter discoverable state.
@@ -2936,6 +2524,8 @@ impl BluetoothDeviceMock {
         if let Some(ref mut adapter) = state.adapter {
             adapter.discoverable = discoverable;
         }
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated adapter pairable state.
@@ -2947,6 +2537,8 @@ impl BluetoothDeviceMock {
         if let Some(ref mut adapter) = state.adapter {
             adapter.pairable = pairable;
         }
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated media player playback state.
@@ -2956,6 +2548,8 @@ impl BluetoothDeviceMock {
     pub fn set_playback(&self, playback: Option<BtPlaybackState>) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.playback = playback;
+
+        self.change_flag.notify();
     }
 
     /// Updates the simulated playback status (e.g. `playing`, `paused`, `stopped`).
@@ -2968,6 +2562,8 @@ impl BluetoothDeviceMock {
         if let Some(ref mut p) = state.playback {
             p.status = status;
         }
+
+        self.change_flag.notify();
     }
 
     /// Updates the simulated track metadata and total duration.
@@ -2983,6 +2579,8 @@ impl BluetoothDeviceMock {
             p.duration_ms = duration_ms;
             p.position_ms = 0;
         }
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated playback position in milliseconds.
@@ -2994,6 +2592,8 @@ impl BluetoothDeviceMock {
         if let Some(ref mut p) = state.playback {
             p.position_ms = position_ms.min(p.duration_ms);
         }
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated album cover art path directly.
@@ -3005,6 +2605,8 @@ impl BluetoothDeviceMock {
         if let Some(ref mut p) = state.playback {
             p.cover_art_path = cover_art_path;
         }
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated image handle and OBEX BIP PSM port.
@@ -3017,6 +2619,8 @@ impl BluetoothDeviceMock {
             p.image_handle = handle;
             p.obex_port = port;
         }
+
+        self.change_flag.notify();
     }
 
     /// Overrides the cover art cache directory used for simulated cache lookups.
@@ -3030,6 +2634,16 @@ impl BluetoothDeviceMock {
     pub fn set_cover_art_cache_dir(&self, dir: &std::path::Path) {
         let mut state = self.state.write().expect("mock lock poisoned");
         dir.clone_into(&mut state.cache_dir);
+
+        self.change_flag.notify();
+    }
+
+    /// Blocks until a mock property changes or `timeout` elapses.
+    ///
+    /// Returns `true` when a change was signaled, `false` on keep-alive timeout.
+    #[must_use]
+    pub fn wait_for_property_change(&self, timeout: Duration) -> bool {
+        self.change_flag.wait(timeout)
     }
 
     fn player_play(&self) -> Result<(), BtError> {
@@ -3039,6 +2653,7 @@ impl BluetoothDeviceMock {
         }
         if let Some(ref mut p) = state.playback {
             p.status = "playing".into();
+            self.change_flag.notify();
             Ok(())
         } else {
             Err(BtError::no_active_player("no active mock player"))
@@ -3052,6 +2667,7 @@ impl BluetoothDeviceMock {
         }
         if let Some(ref mut p) = state.playback {
             p.status = "paused".into();
+            self.change_flag.notify();
             Ok(())
         } else {
             Err(BtError::no_active_player("no active mock player"))
@@ -3086,6 +2702,7 @@ impl BluetoothDeviceMock {
             } else {
                 p.status = "paused".into();
             }
+            self.change_flag.notify();
             Ok(next_playing)
         } else {
             Err(BtError::no_active_player("no active mock player"))
@@ -3099,6 +2716,7 @@ impl BluetoothDeviceMock {
         }
         if let Some(ref mut p) = state.playback {
             p.position_ms = 0;
+            self.change_flag.notify();
             Ok(())
         } else {
             Err(BtError::no_active_player("no active mock player"))
@@ -3112,6 +2730,7 @@ impl BluetoothDeviceMock {
         }
         if let Some(ref mut p) = state.playback {
             p.position_ms = 0;
+            self.change_flag.notify();
             Ok(())
         } else {
             Err(BtError::no_active_player("no active mock player"))
@@ -3125,6 +2744,7 @@ impl BluetoothDeviceMock {
         }
         if let Some(ref mut p) = state.playback {
             p.position_ms = position_ms.min(p.duration_ms);
+            self.change_flag.notify();
             Ok(())
         } else {
             Err(BtError::no_active_player("no active mock player"))
@@ -3225,8 +2845,6 @@ enum Backend {
     Mock(BluetoothDeviceMock),
 }
 
-/// Raspberry Pi Bluetooth controller and `BlueALSA` audio subsystem client.
-///
 /// Thread-safe, cheaply cloneable (`Arc`-backed handle per `M-SERVICES-CLONE`),
 /// providing native D-Bus inspection and control methods over `zbus`.
 #[derive(Clone)]
@@ -3270,6 +2888,17 @@ impl BluetoothDevice {
     pub fn with_connection(conn: Connection) -> Self {
         Self {
             backend: Arc::new(Backend::Dbus(DbusClient::new(conn))),
+        }
+    }
+
+    /// Blocks until a Bluetooth property changes or `timeout` elapses.
+    ///
+    /// Returns `true` when a change was signaled, `false` on keep-alive timeout.
+    #[must_use]
+    pub fn wait_for_property_change(&self, timeout: Duration) -> bool {
+        match &*self.backend {
+            Backend::Dbus(dbus) => dbus.wait_for_change(timeout),
+            Backend::Mock(mock) => mock.wait_for_property_change(timeout),
         }
     }
 
@@ -3593,9 +3222,10 @@ impl BluetoothDevice {
 pub mod test_helpers {
     use super::BtError;
     pub use super::{
-        DbusClient, ManagedObjects, format_volume_bytes, is_no_such_unit_error,
-        is_service_absent_error, is_service_absent_fdo_error, parse_hciconfig_version,
+        DbusClient, ManagedObjects, is_no_such_unit_error, is_service_absent_error,
+        is_service_absent_fdo_error, parse_hciconfig_version,
     };
+    pub use crate::hardware::bluetooth::transport::format_volume_bytes;
     use crate::runtime::FromJoinError;
 
     /// Creates a `BtError::dbus` error for testing.

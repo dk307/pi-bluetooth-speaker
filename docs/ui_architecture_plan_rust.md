@@ -515,7 +515,7 @@ export component PeppyMeterView {
 ---
 
 ### Screen 8: Ethernet Network Setup (DHCP & Static Configuration)
-* **Interface Status:** Displays `eth0` link speed (100 Mbps Full Duplex), MAC address, and current IP (`192.168.2.110`).
+* **Interface Status:** Displays `eth0` link speed (100 Mbps Full Duplex), MAC address, and current IP (`192.168.2.120`).
 * **Mode Selection:** `DHCP (Automatic)` vs. `Static IP (Manual)`.
 * **Touch Numeric Keypad:** Dedicated on-screen keypad to enter IP, Subnet Mask, Gateway, and DNS with 30-second failsafe rollback.
 
@@ -523,7 +523,7 @@ export component PeppyMeterView {
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ ETHERNET CONFIGURATION (eth0)                                [Mode: Static ▼]│
 ├──────────────────────────────────────┬───────────────────────────────────────┤
-│ IP ADDRESS:     192.168.2.110        │     [ 1 ]    [ 2 ]    [ 3 ]           │
+│ IP ADDRESS:     192.168.2.120        │     [ 1 ]    [ 2 ]    [ 3 ]           │
 │ SUBNET MASK:    255.255.255.0        │     [ 4 ]    [ 5 ]    [ 6 ]           │
 │ GATEWAY:        192.168.2.1          │     [ 7 ]    [ 8 ]    [ 9 ]           │
 │ PRIMARY DNS:    1.1.1.1              │     [ . ]    [ 0 ]    [ ⌫ ]           │
@@ -1200,7 +1200,7 @@ The simulator boots the full Slint UI in a native desktop window (via `backend-w
 
 ### 9.6. On-Target Verification & Hardware POST (On the Live Pi 3)
 
-When the binary is deployed to the physical appliance at `192.168.2.110`, verification proceeds in three automated tiers:
+When the binary is deployed to the physical appliance at `192.168.2.120`, verification proceeds in three automated tiers:
 
 1. **Self-Contained Power-On Self-Test (POST):**
    * Built directly into the boot sequence (`Screen 9: Splash Screen`).
@@ -1223,7 +1223,7 @@ When the binary is deployed to the physical appliance at `192.168.2.110`, verifi
 3. **Automated Baseline Audit Script ([`baseline/verify.sh`](../baseline/verify.sh)):**
    * Run remotely over SSH:
      ```bash
-     ssh root@192.168.2.110 "/root/baseline/verify.sh"
+     ssh root@192.168.2.120 "/root/baseline/verify.sh"
      ```
    * Verifies all 25 critical kernel modules, ports, sound cards, and systemd services.
 

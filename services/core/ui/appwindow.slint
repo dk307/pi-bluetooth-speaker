@@ -1,4 +1,4 @@
-import { SplashScreen } from "splash.slint";
+import { BootCheckLine, SplashScreen } from "splash.slint";
 import { Theme, ThemePalette } from "theme.slint";
 import { TopStatusBar } from "status_bar.slint";
 import { MainViewport } from "viewport.slint";
@@ -15,7 +15,7 @@ import "../../../assets/fonts/Inter-SemiBold.ttf";
 import "../../../assets/fonts/Inter-Bold.ttf";
 import "../../../assets/fonts/Inter-ExtraBold.ttf";
 
-export { SplashScreen, Theme, ThemePalette, MarqueeRasterizer }
+export { BootCheckLine, SplashScreen, Theme, ThemePalette, MarqueeRasterizer }
 
 export component MainWindow inherits Window {
     title: "DietPi Audiophile Console";
@@ -32,8 +32,8 @@ export component MainWindow inherits Window {
     in-out property <string> stream_bit_depth: "16-bit";
     in-out property <bool> show_stream_specs <=> status_bar.show_stream_specs;
     in-out property <string> track_title: "Waiting for Bluetooth Connection...";
-    in-out property <string> track_artist: "DietPi Speaker";
-    in-out property <string> track_album: "Audiophile DSP Sink";
+    in-out property <string> track_artist: "";
+    in-out property <string> track_album: "";
     in-out property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit -> DSP 32-bit";
     in-out property <string> position_text: "00:00";
     in-out property <string> duration_text: "00:00";

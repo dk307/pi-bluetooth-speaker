@@ -13,8 +13,8 @@ This document defines the behavioral, architectural, and engineering rules for A
   ```bash
   cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins
   ```
-* **Live Hardware Testing via SSH (`root@192.168.2.110`):**
-  * You can test compiled `aarch64` binaries directly on the live Raspberry Pi 3 over SSH at `root@192.168.2.110`.
+* **Live Hardware Testing via SSH (`root@192.168.2.120`):**
+  * You can test compiled `aarch64` binaries directly on the live Raspberry Pi 3 over SSH at `root@192.168.2.120`.
   * **Strict Non-Destructive Rule:** **Do NOT modify any persistent files, configurations, or running services on the SSH server.** Copy test/utility binaries only to `/tmp/<binary>`, execute them, and remove `/tmp/<binary>` immediately afterward. **Exception:** when the user explicitly asks to deploy/install release binaries, copy them to `/usr/local/bin` (never touch configs or services, and do not restart services unless asked).
 
 ---

@@ -149,6 +149,8 @@ impl CoreConfig {
     /// # Errors
     /// Returns [`ConfigError`] for serialization or file write failures.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        use std::io::Write;
+
         let mut raw = serde_json::to_string_pretty(self).map_err(|e| {
             ConfigError::config(
                 format!("failed to serialize config {}", path.display()),
@@ -157,28 +159,29 @@ impl CoreConfig {
         })?;
         raw.push('\n');
 
-        // Write to a sibling temp file, fsync it, then atomically rename it over
-        // the target: a power loss mid-write can never leave a truncated config
-        // that would brick the daemon at the next boot (malformed JSON is a hard
-        // error by contract).
-        let tmp = match path.file_name() {
-            Some(name) => path.with_file_name(format!(".{}.tmp", name.to_string_lossy())),
-            None => path.with_file_name(".speaker-core.json.tmp"),
-        };
-        let write_result = (|| -> Result<(), io::Error> {
-            let mut file = std::fs::File::create(&tmp)?;
-            std::io::Write::write_all(&mut file, raw.as_bytes())?;
-            file.sync_all()?;
-            drop(file);
-            std::fs::rename(&tmp, path)
-        })();
-        if let Err(e) = write_result {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(ConfigError::io(
-                format!("failed to write config {}", path.display()),
-                e,
-            ));
-        }
+        // The `tempfile` crate stages the bytes in a sibling temp file, which
+        // is fsynced and then atomically renamed over the target via
+        // `persist`: a power loss mid-write can never leave a truncated config
+        // that would brick the daemon at the next boot (malformed JSON is a
+        // hard error by contract). A failed persist consumes the temp file and
+        // deletes it on drop, so no `.tmp` litter survives a failed save.
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let tmp = tempfile::Builder::new().tempfile_in(parent).map_err(|e| {
+            ConfigError::io(format!("failed to create config {}", path.display()), e)
+        })?;
+        let mut file = tmp.as_file();
+        file.write_all(raw.as_bytes()).map_err(|e| {
+            ConfigError::io(format!("failed to write config {}", path.display()), e)
+        })?;
+        file.sync_all().map_err(|e| {
+            ConfigError::io(format!("failed to flush config {}", path.display()), e)
+        })?;
+        tmp.persist(path).map_err(|e| {
+            ConfigError::io(
+                format!("failed to install config {}", path.display()),
+                e.error,
+            )
+        })?;
         Ok(())
     }
 
@@ -483,11 +486,18 @@ mod tests {
             .save(&target)
             .expect_err("rename over directory must fail");
         assert!(err.is_io());
-        assert!(err.to_string().contains("failed to write config"));
-        // The temp file lives as a sibling of the rename target; it must be
-        // cleaned up after the failed save.
-        let tmp = dir.path().join(".blocked.tmp");
-        assert!(!tmp.exists(), "temp file must be removed on failed save");
+        assert!(err.to_string().contains("failed to install config"));
+        // The temp file lives as a sibling of the rename target; a failed
+        // persist consumes it, so no `.tmp` litter may survive the save.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("list dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp file must be removed on failed save"
+        );
     }
 
     #[test]

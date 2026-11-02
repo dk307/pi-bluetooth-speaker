@@ -1,5 +1,36 @@
 //! Integration tests for the UI Shell and Unified Global Theme System (Sections 3 & 3.1).
 
+/// Simulates the `bt-monitor` worker: drains queued transport commands,
+/// executes them on the device, and applies authoritative state to the UI.
+#[cfg(feature = "ui")]
+fn drain_worker_commands(
+    bt: &speaker_core::hardware::BluetoothDevice,
+    commands: &speaker_core::hardware::TransportCommandQueue,
+    shell: &speaker_core::ui::AppShell,
+) {
+    for command in commands.drain() {
+        match command {
+            speaker_core::hardware::TransportCommand::TogglePlayPause => {
+                let _ = bt.player_toggle();
+            }
+            speaker_core::hardware::TransportCommand::NextTrack => {
+                let _ = bt.player_next();
+            }
+            speaker_core::hardware::TransportCommand::PreviousTrack => {
+                let _ = bt.player_previous();
+            }
+            speaker_core::hardware::TransportCommand::Seek(pos) => {
+                let _ = bt.player_seek(pos);
+            }
+        }
+    }
+    if let Ok(status) = bt.status() {
+        if let Some(playback) = status.playback {
+            shell.refresh_playback_display(&playback);
+        }
+    }
+}
+
 #[cfg(feature = "ui")]
 #[test]
 fn ui_shell_defaults_and_property_updates() {
@@ -385,6 +416,10 @@ fn ui_shell_cover_art_and_pcm_stream_updates() {
         cover_art_path: Some(img_path.to_string_lossy().to_string().into_boxed_str()),
     };
     shell.apply_bluetooth_playback(&playback);
+    // The bt-monitor worker decodes and publishes the cover via set_cover_image;
+    // apply_bluetooth_playback itself only clears the cover when no path is present.
+    let cover_image = slint::Image::load_from_path(&img_path).expect("test cover image");
+    shell.set_cover_image(cover_image);
     assert!(shell.window().get_has_cover_art());
 
     // Resetting cover art path clears has_cover_art
@@ -492,32 +527,38 @@ fn ui_shell_now_playing_callbacks() {
     assert_eq!(shell.window().get_progress_ratio(), 0.0);
     assert_eq!(shell.window().get_position_text(), "00:00");
 
-    // Wire interactive bluetooth transport
+    // Wire interactive bluetooth transport via the decoupled command queue.
     let (bt, _) = speaker_core::hardware::BluetoothDevice::new_mocked();
-    shell.wire_bluetooth_transport(bt.clone());
+    let commands = speaker_core::hardware::TransportCommandQueue::new();
+    shell.wire_bluetooth_transport(&commands);
 
     // Initial mock state is playing
     assert!(bt.status().unwrap().playback.unwrap().is_playing());
+    if let Some(playback) = bt.status().unwrap().playback.as_ref() {
+        shell.refresh_playback_display(playback);
+    }
+    assert!(shell.is_playing());
     shell.window().invoke_toggle_play_pause();
+    // The optimistic UI update flips is_playing immediately on the render thread.
+    assert!(!shell.is_playing());
+    drain_worker_commands(&bt, &commands, &shell);
     assert!(!bt.status().unwrap().playback.unwrap().is_playing());
     assert!(!shell.is_playing());
+
     shell.window().invoke_toggle_play_pause();
+    assert!(shell.is_playing());
+    drain_worker_commands(&bt, &commands, &shell);
     assert!(bt.status().unwrap().playback.unwrap().is_playing());
     assert!(shell.is_playing());
 
     shell.window().invoke_next_track();
-    // The transport callbacks are fire-and-forget; simulate the bt-monitor
-    // worker applying the fresh state on its next tick.
-    if let Some(playback) = bt.status().unwrap().playback.as_ref() {
-        shell.refresh_playback_display(playback);
-    }
+    drain_worker_commands(&bt, &commands, &shell);
     assert_eq!(shell.window().get_track_title(), "Money for Nothing");
     shell.window().invoke_previous_track();
-    if let Some(playback) = bt.status().unwrap().playback.as_ref() {
-        shell.refresh_playback_display(playback);
-    }
+    drain_worker_commands(&bt, &commands, &shell);
     assert_eq!(shell.window().get_track_title(), "Money for Nothing");
     shell.window().invoke_seek(0.5);
+    drain_worker_commands(&bt, &commands, &shell);
     assert_eq!(bt.status().unwrap().playback.unwrap().position_ms, 115_000);
 
     // Callbacks without panicking
