@@ -82,20 +82,29 @@ impl CoreConfig {
 
     /// Persists this configuration as pretty JSON to `path`.
     ///
-    /// The bytes are staged in a sibling temp file and atomically renamed over
-    /// the target, so a power loss mid-write can never leave a truncated
-    /// config that bricks the appliance at boot.
+    /// The bytes are staged in a sibling temp file, flushed to disk with
+    /// `sync_all`, and atomically renamed over the target, so a power loss
+    /// mid-write can never leave a truncated config that bricks the
+    /// appliance at boot.
     ///
     /// # Errors
-    /// Returns [`ConfigError`] if serialization, the temp-file write, or the
-    /// rename fails.
+    /// Returns [`ConfigError`] if serialization, the temp-file write or
+    /// flush, or the rename fails.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        use std::io::Write;
         let mut raw = serde_json::to_string_pretty(self)
             .map_err(|e| ConfigError::parse(format!("config {}", path.display()), e))?;
         raw.push('\n');
         let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, raw)
+        let mut file = std::fs::File::create(&tmp).map_err(|e| {
+            ConfigError::io(format!("failed to create config {}", tmp.display()), e)
+        })?;
+        file.write_all(raw.as_bytes())
             .map_err(|e| ConfigError::io(format!("failed to write config {}", tmp.display()), e))?;
+        // Flush to the SD card before the rename: without fsync the journal can
+        // commit an empty target file on a power cut between rename and flush.
+        file.sync_all()
+            .map_err(|e| ConfigError::io(format!("failed to flush config {}", tmp.display()), e))?;
         std::fs::rename(&tmp, path)
             .map_err(|e| ConfigError::io(format!("failed to install config {}", path.display()), e))
     }
@@ -356,7 +365,8 @@ mod tests {
             .save(&dir.path().join("missing-dir/config.json"))
             .expect_err("write into missing directory must fail");
         assert!(err.is_io());
-        assert!(err.to_string().contains("failed to write config"));
+        // File::create fails before any write when the parent dir is missing.
+        assert!(err.to_string().contains("failed to create config"));
     }
 
     #[test]

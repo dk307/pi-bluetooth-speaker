@@ -29,7 +29,9 @@ jobs:
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-gnu
+          # x86_64 std is installed so the clippy gate can lint x86-gated code
+          # paths (the aarch64 runner otherwise only type-checks aarch64 cfg).
+          targets: aarch64-unknown-linux-gnu,x86_64-unknown-linux-gnu
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
@@ -39,7 +41,8 @@ jobs:
         run: cargo fmt --manifest-path services/core/Cargo.toml --all -- --check
 
       - name: Clippy Lints (deny warnings)
-        run: cargo clippy --manifest-path services/core/Cargo.toml --all-targets -- -D warnings
+        # Cross-lint x86-gated code on the ARM runner per AGENTS.md §4.4.
+        run: cargo clippy --manifest-path services/core/Cargo.toml --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
 
       - name: Configure Target Linker
         run: |

@@ -727,10 +727,10 @@ fn bt_monitor_loop(
             }
         }
 
-        // A command that landed during the blocking snapshot query must not
-        // race a pre-command publish: skip this tick and re-drain immediately
-        // so the optimistic flip (applied while the query was in flight) is
-        // never reverted by stale state.
+        // A command queued between the drain and the snapshot query would make
+        // the query execute a stale pre-command publish; skip the query so the
+        // fresh command is executed first and the next tick reads post-command
+        // state.
         if !commands.is_empty() {
             continue;
         }
@@ -747,6 +747,16 @@ fn bt_monitor_loop(
                 }
                 last_pcms = Some(pcms.clone());
             }
+        }
+
+        // A command that landed while the blocking snapshot query ran must not
+        // merge a pre-command snapshot. The query already advanced the dedup
+        // state, so it is reset here to force a full re-publish on the next
+        // tick (after the fresh commands are executed).
+        if !commands.is_empty() {
+            last_pb = None;
+            cover.path = None;
+            continue;
         }
 
         if update.playback.is_some() || update.pcm.is_some() || update.cover.is_some() {
