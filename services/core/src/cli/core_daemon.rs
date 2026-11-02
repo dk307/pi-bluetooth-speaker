@@ -508,6 +508,12 @@ fn bt_monitor_loop(
     commands: &crate::hardware::TransportCommandQueue,
     running: &AtomicBool,
 ) {
+    // Signal-driven wait with a keep-alive fallback: PropertiesChanged
+    // signals wake the loop immediately (via the shared ChangeFlag); the
+    // deadline guarantees periodic re-poll even if the D-Bus listener
+    // thread dies. Slices cap command latency while waiting.
+    const BT_KEEP_ALIVE: Duration = Duration::from_secs(1);
+    const BT_WAIT_SLICE: Duration = Duration::from_millis(100);
     let mut last_pb: Option<crate::hardware::BtPlaybackState> = None;
     let mut last_pcms: Option<Box<[crate::hardware::BlueAlsaPcm]>> = None;
     let mut last_cover_path: Option<Box<str>> = None;
@@ -529,15 +535,6 @@ fn bt_monitor_loop(
                 }
             }
         }
-
-        let is_playing = last_pb
-            .as_ref()
-            .is_some_and(crate::hardware::BtPlaybackState::is_playing);
-        let poll_interval = if is_playing {
-            Duration::from_millis(250)
-        } else {
-            Duration::from_millis(750)
-        };
 
         let mut update = BtSharedUpdate::default();
 
@@ -592,9 +589,16 @@ fn bt_monitor_loop(
             }
         }
 
-        let deadline = Instant::now() + poll_interval;
+        let deadline = Instant::now() + BT_KEEP_ALIVE;
         while running.load(Ordering::Relaxed) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(25));
+            let slice = (deadline - Instant::now()).min(BT_WAIT_SLICE);
+            let _ = bt.wait_for_property_change(slice);
+            if !commands.is_empty() {
+                break;
+            }
+            if !commands.is_empty() {
+                break;
+            }
         }
     }
 }

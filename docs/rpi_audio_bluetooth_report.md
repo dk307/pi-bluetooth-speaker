@@ -293,8 +293,16 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
   Restart=always
   RestartSec=2
   ```
-  - `Requires=bluealsa.service` + `After=bluealsa.service` ensures the daemon is fully stopped/started before the forwarder binds to its D-Bus name.
-  - `Restart=always` and `RestartSec=2` act as a self-healing backstop: if the D-Bus registration handshake still slips through during fast boot cycles, systemd immediately re-spawns the forwarder until the D-Bus name is present.
+  - `Requires=bluealsa.service` + `After=bluealsa.service` ensures the daemon is fully stopped before the forwarder (re)starts.
+
+- **Why `After=` alone is insufficient — `Type=dbus` is mandatory:** With `bluealsa.service` configured as `Type=simple`, systemd considers it "started" the moment the process forks — long before `bluealsad` registers `org.bluealsa` on the system bus. The boot race therefore recurs on every cold start or combined stack restart (observed in the journal as `bluealsad: Couldn't get HCI version: Network is down` alongside the aplay PCM-list error). Critically, `bluealsa-aplay` does **not** exit on the failed PCM list: it logs the error and continues running in a degraded state with no PCM watching, so `Restart=always` never fires and volume sync stays dead until a manual restart.
+  - **Fix:** `bluealsa.service` MUST use:
+    ```ini
+    [Service]
+    Type=dbus
+    BusName=org.bluealsa
+    ```
+    With `Type=dbus`, systemd defines bluealsa as started only when `org.bluealsa` actually appears on the bus, making the `After=`/`Requires=` ordering in `bluealsa-aplay.service` genuinely effective. This matches the pattern already used by `obex.service` (`Type=dbus`, `BusName=org.bluez.obex`). Other services are safe as-is: `bt-agent` depends on `bluetooth.service`, which is `Type=notify` upstream (readiness-tracked); `camilladsp` has no D-Bus dependency (ALSA-only, with `Restart=always` as retry).
 
 ### 7.3. ALSA Routing Configuration (`/etc/asound.conf`)
 - **Module:** `snd-aloop` loaded via `/etc/modules-load.d/snd-aloop.conf`

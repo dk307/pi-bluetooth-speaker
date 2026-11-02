@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1109,6 +1109,113 @@ struct DbusClientState {
     socket_tuned: bool,
 }
 
+/// Shared change-notification flag used by the D-Bus backend and the mock to wake
+/// property monitors when the subsystem state may have changed (event-driven instead
+/// of fixed-interval polling).
+#[derive(Debug, Default)]
+pub(crate) struct ChangeFlag {
+    ready: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl ChangeFlag {
+    /// Marks a change as pending and wakes all waiting monitors.
+    pub(crate) fn notify(&self) {
+        if let Ok(mut ready) = self.ready.lock() {
+            *ready = true;
+            self.cv.notify_all();
+        }
+    }
+
+    /// Waits up to `timeout` for a change notification, consuming it if present.
+    ///
+    /// Returns `true` when a change was signaled, `false` on timeout (keep-alive).
+    /// Waits up to `timeout` for a change notification. Returns `true` when a
+    /// change was signaled (consuming the flag), `false` on keep-alive timeout.
+    pub(crate) fn wait(&self, timeout: Duration) -> bool {
+        let changed = {
+            let Ok(mut ready) = self.ready.lock() else {
+                std::thread::sleep(timeout);
+                return false;
+            };
+            let mut changed = *ready;
+            if !changed {
+                let deadline = Instant::now() + timeout;
+                loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    let Ok((guard, res)) = self.cv.wait_timeout(ready, remaining) else {
+                        break;
+                    };
+                    ready = guard;
+                    if *ready {
+                        changed = true;
+                        break;
+                    }
+                    if res.timed_out() {
+                        break;
+                    }
+                }
+            }
+            // The guard drops at the end of this block, before the re-lock below:
+            // breaking out of the wait loop leaves `ready` holding the mutex, and
+            // re-locking it in the same scope would self-deadlock.
+            changed
+        };
+        if let Ok(mut r) = self.ready.lock() {
+            *r = false;
+        }
+        changed
+    }
+}
+
+/// Spawns a background thread that watches for `org.freedesktop.DBus.Properties`
+/// change signals from `org.bluez` and `org.bluealsa` on the system bus and wakes
+/// the shared [`ChangeFlag`] whenever one arrives.
+///
+/// If the system bus cannot be reached, the thread exits immediately and callers
+/// fall back to the keep-alive timeout polling path.
+fn spawn_properties_changed_listener() -> Arc<ChangeFlag> {
+    let flag = Arc::new(ChangeFlag::default());
+    let listener_flag = Arc::clone(&flag);
+    let Ok(join) = std::thread::Builder::new()
+        .name("bt-dbus-signals".into())
+        .spawn(move || {
+            let Ok(conn) = Connection::system() else {
+                return;
+            };
+            // A single unfiltered PropertiesChanged rule avoids the deadlock of
+            // per-sender blocking iterators (each `next()` would block forever on
+            // its own sender). Extra wakeups from unrelated services are cheap:
+            // they just trigger one extra state re-poll on the monitor thread.
+            let Ok(rule) = zbus::MatchRule::builder()
+                .msg_type(zbus::message::Type::Signal)
+                .interface("org.freedesktop.DBus.Properties")
+                .map(zbus::match_rule::Builder::build)
+            else {
+                return;
+            };
+            let Ok(mut iter) = zbus::blocking::MessageIterator::for_match_rule(rule, &conn, None)
+            else {
+                return;
+            };
+            loop {
+                if iter.next().is_some() {
+                    listener_flag.notify();
+                }
+            }
+        })
+    else {
+        // Thread spawn failed: rely on the keep-alive fallback only.
+        return flag;
+    };
+    // Detached listener: the process-lifetime thread keeps the flag warm.
+    drop(join);
+    flag
+}
+
 /// D-Bus client executing direct queries against systemd, `BlueZ`, and `BlueALSA`.
 #[derive(Clone, Debug)]
 pub struct DbusClient {
@@ -1116,6 +1223,7 @@ pub struct DbusClient {
     device_caps_dir: std::path::PathBuf,
     cache_dir: std::path::PathBuf,
     state: Arc<Mutex<DbusClientState>>,
+    change_flag: Arc<ChangeFlag>,
 }
 
 /// Snapshot of `BlueZ` adapter, connected/paired devices, and media player state.
@@ -1129,7 +1237,15 @@ impl DbusClient {
             device_caps_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             state: Arc::new(Mutex::new(DbusClientState::default())),
+            change_flag: spawn_properties_changed_listener(),
         }
+    }
+
+    /// Waits up to `timeout` for a D-Bus property-change notification.
+    ///
+    /// Returns `true` when a change was signaled, `false` on timeout (keep-alive).
+    pub(crate) fn wait_for_change(&self, timeout: Duration) -> bool {
+        self.change_flag.wait(timeout)
     }
 
     pub(crate) fn check_services(&self) -> Result<BluetoothServices, BtError> {
@@ -2177,6 +2293,7 @@ impl DbusClient {
 #[derive(Debug, Clone)]
 pub struct BluetoothDeviceMock {
     state: Arc<RwLock<MockState>>,
+    change_flag: Arc<ChangeFlag>,
 }
 
 #[derive(Debug)]
@@ -2192,6 +2309,7 @@ struct MockState {
 
 impl BluetoothDeviceMock {
     fn new() -> Self {
+        let change_flag = Arc::new(ChangeFlag::default());
         let adapter_addr = BtAddress::new([0xDC, 0xA6, 0x32, 0x11, 0x22, 0x33]);
         let phone_addr = BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
@@ -2264,6 +2382,7 @@ impl BluetoothDeviceMock {
 
         Self {
             state: Arc::new(RwLock::new(state)),
+            change_flag,
         }
     }
 
@@ -2274,6 +2393,8 @@ impl BluetoothDeviceMock {
     pub fn set_services(&self, services: BluetoothServices) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.services = services;
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated local adapter properties.
@@ -2283,6 +2404,8 @@ impl BluetoothDeviceMock {
     pub fn set_adapter(&self, adapter: Option<BtAdapter>) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.adapter = adapter;
+
+        self.change_flag.notify();
     }
 
     /// Adds or updates a simulated remote device.
@@ -2300,6 +2423,8 @@ impl BluetoothDeviceMock {
         } else {
             state.devices.push(device);
         }
+
+        self.change_flag.notify();
     }
 
     /// Clears all simulated remote devices.
@@ -2309,6 +2434,8 @@ impl BluetoothDeviceMock {
     pub fn clear_devices(&self) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.devices.clear();
+
+        self.change_flag.notify();
     }
 
     /// Adds a simulated `BlueALSA` audio PCM stream.
@@ -2318,6 +2445,8 @@ impl BluetoothDeviceMock {
     pub fn add_pcm(&self, pcm: BlueAlsaPcm) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.pcms.push(pcm);
+
+        self.change_flag.notify();
     }
 
     /// Clears all simulated `BlueALSA` audio PCM streams.
@@ -2327,6 +2456,8 @@ impl BluetoothDeviceMock {
     pub fn clear_pcms(&self) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.pcms.clear();
+
+        self.change_flag.notify();
     }
 
     /// Injects or clears a simulated hardware fault.
@@ -2336,6 +2467,8 @@ impl BluetoothDeviceMock {
     pub fn set_fault(&self, fault: Option<Box<str>>) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.fault = fault;
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated adapter radio power state.
@@ -2347,6 +2480,8 @@ impl BluetoothDeviceMock {
         if let Some(ref mut adapter) = state.adapter {
             adapter.powered = powered;
         }
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated adapter discoverable state.
@@ -2358,6 +2493,8 @@ impl BluetoothDeviceMock {
         if let Some(ref mut adapter) = state.adapter {
             adapter.discoverable = discoverable;
         }
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated adapter pairable state.
@@ -2369,6 +2506,8 @@ impl BluetoothDeviceMock {
         if let Some(ref mut adapter) = state.adapter {
             adapter.pairable = pairable;
         }
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated media player playback state.
@@ -2378,6 +2517,8 @@ impl BluetoothDeviceMock {
     pub fn set_playback(&self, playback: Option<BtPlaybackState>) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.playback = playback;
+
+        self.change_flag.notify();
     }
 
     /// Updates the simulated playback status (e.g. `playing`, `paused`, `stopped`).
@@ -2390,6 +2531,8 @@ impl BluetoothDeviceMock {
         if let Some(ref mut p) = state.playback {
             p.status = status;
         }
+
+        self.change_flag.notify();
     }
 
     /// Updates the simulated track metadata and total duration.
@@ -2405,6 +2548,8 @@ impl BluetoothDeviceMock {
             p.duration_ms = duration_ms;
             p.position_ms = 0;
         }
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated playback position in milliseconds.
@@ -2416,6 +2561,8 @@ impl BluetoothDeviceMock {
         if let Some(ref mut p) = state.playback {
             p.position_ms = position_ms.min(p.duration_ms);
         }
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated album cover art path directly.
@@ -2427,6 +2574,8 @@ impl BluetoothDeviceMock {
         if let Some(ref mut p) = state.playback {
             p.cover_art_path = cover_art_path;
         }
+
+        self.change_flag.notify();
     }
 
     /// Sets the simulated image handle and OBEX BIP PSM port.
@@ -2439,6 +2588,8 @@ impl BluetoothDeviceMock {
             p.image_handle = handle;
             p.obex_port = port;
         }
+
+        self.change_flag.notify();
     }
 
     /// Overrides the cover art cache directory used for simulated cache lookups.
@@ -2452,6 +2603,16 @@ impl BluetoothDeviceMock {
     pub fn set_cover_art_cache_dir(&self, dir: &std::path::Path) {
         let mut state = self.state.write().expect("mock lock poisoned");
         dir.clone_into(&mut state.cache_dir);
+
+        self.change_flag.notify();
+    }
+
+    /// Blocks until a mock property changes or `timeout` elapses.
+    ///
+    /// Returns `true` when a change was signaled, `false` on keep-alive timeout.
+    #[must_use]
+    pub fn wait_for_property_change(&self, timeout: Duration) -> bool {
+        self.change_flag.wait(timeout)
     }
 
     fn player_play(&self) -> Result<(), BtError> {
@@ -2690,6 +2851,17 @@ impl BluetoothDevice {
     pub fn with_connection(conn: Connection) -> Self {
         Self {
             backend: Arc::new(Backend::Dbus(DbusClient::new(conn))),
+        }
+    }
+
+    /// Blocks until a Bluetooth property changes or `timeout` elapses.
+    ///
+    /// Returns `true` when a change was signaled, `false` on keep-alive timeout.
+    #[must_use]
+    pub fn wait_for_property_change(&self, timeout: Duration) -> bool {
+        match &*self.backend {
+            Backend::Dbus(dbus) => dbus.wait_for_change(timeout),
+            Backend::Mock(mock) => mock.wait_for_property_change(timeout),
         }
     }
 

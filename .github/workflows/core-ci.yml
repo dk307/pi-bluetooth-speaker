@@ -35,6 +35,12 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      - name: Check Formatting
+        run: cargo fmt --manifest-path services/core/Cargo.toml --all -- --check
+
+      - name: Clippy Lints (deny warnings)
+        run: cargo clippy --manifest-path services/core/Cargo.toml --all-targets -- -D warnings
+
       - name: Configure Target Linker
         run: |
           if ! command -v aarch64-linux-gnu-gcc &>/dev/null; then

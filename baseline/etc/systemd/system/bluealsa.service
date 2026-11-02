@@ -4,7 +4,8 @@ After=bluetooth.service
 Requires=bluetooth.service
 
 [Service]
-Type=simple
+Type=dbus
+BusName=org.bluealsa
 User=root
 StateDirectory=bluealsa
 ExecStart=/usr/bin/bluealsa -S -p a2dp-sink \
