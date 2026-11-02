@@ -426,17 +426,11 @@ impl AppShell {
         }
 
         // Cover art is loaded and upscaled by the `bt-monitor` worker (off the render
-        // thread) and pushed through the shared worker update channel; this method
-        // only clears the cover when the snapshot genuinely carries no art. An
-        // advertised `ImgHandle` without a cached file means the fetch is pending on
-        // the cover-fetch worker — clearing here would blank the art on every 250 ms
-        // position tick while the (slow) OBEX transfer is in flight.
-        if playback.cover_art_path.is_none()
-            && playback.image_handle.is_none()
-            && w.get_has_cover_art()
-        {
-            w.set_has_cover_art(false);
-        }
+        // thread) and pushed through the shared worker update channel; playback
+        // snapshots never clear it. A snapshot carrying no cached path means a
+        // handle-less track or a fetch pending on the cover-fetch worker — blanking
+        // here would drop working art on every 250 ms position tick. Only an
+        // explicit device-disconnect delta clears the displayed cover.
     }
 
     /// Applies a theme preset to the UI shell.

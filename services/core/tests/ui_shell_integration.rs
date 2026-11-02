@@ -410,13 +410,17 @@ fn ui_shell_pending_fetch_keeps_cover_art() {
         shell.window().get_has_cover_art(),
         "a pending fetch (handle advertised, no cached path) must keep displayed art"
     );
-    // A genuinely artless track still clears the cover.
+    // A handle-less track also keeps the displayed art: playback snapshots
+    // never blank the cover (only an explicit device-disconnect delta does).
     let artless = BtPlaybackState {
         image_handle: None,
         ..pending
     };
     shell.apply_bluetooth_playback(&artless);
-    assert!(!shell.window().get_has_cover_art());
+    assert!(
+        shell.window().get_has_cover_art(),
+        "a snapshot must never blank displayed art"
+    );
 }
 
 const TINY_PNG: &[u8] = &[
@@ -464,9 +468,13 @@ fn ui_shell_cover_art_and_pcm_stream_updates() {
     shell.set_cover_image(cover_image);
     assert!(shell.window().get_has_cover_art());
 
-    // Resetting cover art path clears has_cover_art
+    // Clearing the snapshot path must NOT blank the display: playback
+    // snapshots never clear art; only an explicit disconnect delta does
+    // (the monitor loop publishes `update.cover = Some(None)` on Ok(None)).
     playback.cover_art_path = None;
     shell.apply_bluetooth_playback(&playback);
+    assert!(shell.window().get_has_cover_art());
+    shell.set_has_cover_art(false);
     assert!(!shell.window().get_has_cover_art());
 
     // Apply BlueAlsaPcm stream audio parameters
