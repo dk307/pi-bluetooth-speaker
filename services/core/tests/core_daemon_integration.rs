@@ -240,10 +240,12 @@ fn run_splash_on_mocked_reports_unblank_failure_and_continues() {
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_splash_on_mocked_render_error_still_joins_check_thread() {
+fn run_splash_on_mocked_render_error_abandons_worker_without_render() {
     let (mut fb, ctrl) = Framebuffer::new_mocked();
     ctrl.set_render_error("simulated render failure");
     run_splash_on(&mut fb, instant_probes(Ok("ok")), None, None);
+    // On a render failure the worker is abandoned (the check thread is
+    // intentionally NOT joined and the splash never renders).
     assert_eq!(fb.render_count(), 0);
     assert_eq!(ctrl.counters(), (1, 0));
 }
