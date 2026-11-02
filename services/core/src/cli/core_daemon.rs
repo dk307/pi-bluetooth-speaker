@@ -534,6 +534,9 @@ fn publish_playback_state(
                             *last_cover_path = cover_path;
                         } else {
                             tracing::warn!("cover decode failed for {path}");
+                            // Pin the path even on failure so a persistently
+                            // broken file is not re-decoded on every tick.
+                            *last_cover_path = cover_path;
                         }
                     } else {
                         update.cover = Some(None);

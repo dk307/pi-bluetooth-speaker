@@ -110,6 +110,9 @@ component AmbientWaveIndicator inherits Rectangle {
     // changes must not re-run HorizontalLayout measurement (which would
     // invalidate the whole Now Playing column every 180 ms tick).
     Rectangle {
+        width: 100%;
+        height: 100%;
+
         Rectangle {
             x: 0px;
             width: 4px;

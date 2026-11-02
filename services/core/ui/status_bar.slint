@@ -42,29 +42,29 @@ export component TopStatusBar inherits Rectangle {
         // Left: Bluetooth Source (icon + label, no pill badge; vertically centered)
         VerticalLayout {
             alignment: center;
-            HorizontalLayout {
-                spacing: 8px;
-
-                // Bluetooth Source Icon
-                Image {
-                    source: @image-url("../../../assets/icons/bluetooth-rune.svg");
-                    colorize: Theme.active.primary_accent;
-                    width: 18px;
-                    image-fit: contain;
-                }
-
-                Text {
-                    text: root.active_source;
-                    color: Theme.active.primary_accent;
-                    font-size: 17px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                }
-            }
-
             TouchArea {
                 clicked => {
                     root.source_clicked();
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    // Bluetooth Source Icon
+                    Image {
+                        source: @image-url("../../../assets/icons/bluetooth-rune.svg");
+                        colorize: Theme.active.primary_accent;
+                        width: 18px;
+                        image-fit: contain;
+                    }
+
+                    Text {
+                        text: root.active_source;
+                        color: Theme.active.primary_accent;
+                        font-size: 17px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }
