@@ -1174,6 +1174,10 @@ impl ChangeFlag {
 ///
 /// If the system bus cannot be reached, the thread retries with backoff and
 /// callers fall back to the keep-alive timeout polling path meanwhile.
+/// Backoff between D-Bus signal-listener reconnection attempts after a setup
+/// failure or iterator exhaustion (transient bus restart).
+const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
+
 fn spawn_properties_changed_listener(
     conn: Connection,
     stop: Arc<std::sync::atomic::AtomicBool>,
@@ -1191,26 +1195,36 @@ fn spawn_properties_changed_listener(
             // The listener shares the client's connection instead of opening a
             // second system-bus connection so that private-bus integration tests
             // and injected connections observe the signals under test. On rule
-            // setup failure or iterator exhaustion (bus lost) the thread exits;
-            // the keep-alive polling fallback covers any lost signal delivery.
-            let Ok(rule) = zbus::MatchRule::builder()
-                .msg_type(zbus::message::Type::Signal)
-                .interface("org.freedesktop.DBus.Properties")
-                .map(zbus::match_rule::Builder::build)
-            else {
-                return;
-            };
-            let Ok(iter) = zbus::blocking::MessageIterator::for_match_rule(rule, &conn, None)
-            else {
-                return;
-            };
-            for _ in iter {
-                listener_flag.notify();
+            // setup failure or iterator exhaustion (bus lost) the thread sleeps
+            // a backoff interval and rebuilds the rule/iterator, honoring the
+            // stop flag between attempts (the keep-alive polling fallback covers
+            // the gap while a blocked `next()` cannot observe the flag).
+            loop {
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
+                    return;
                 }
+                let Ok(rule) = zbus::MatchRule::builder()
+                    .msg_type(zbus::message::Type::Signal)
+                    .interface("org.freedesktop.DBus.Properties")
+                    .map(zbus::match_rule::Builder::build)
+                else {
+                    std::thread::sleep(RECONNECT_BACKOFF);
+                    continue;
+                };
+                let Ok(iter) = zbus::blocking::MessageIterator::for_match_rule(rule, &conn, None)
+                else {
+                    std::thread::sleep(RECONNECT_BACKOFF);
+                    continue;
+                };
+                for _ in iter {
+                    listener_flag.notify();
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                }
+                // Iterator exhausted (bus lost): back off and rebuild.
+                std::thread::sleep(RECONNECT_BACKOFF);
             }
-            // Iterator exhausted (bus lost) or shutdown signaled: exit the thread.
         })
     else {
         // Thread spawn failed: rely on the keep-alive fallback only.
@@ -1221,7 +1235,10 @@ fn spawn_properties_changed_listener(
 }
 
 /// D-Bus client executing direct queries against systemd, `BlueZ`, and `BlueALSA`.
-#[derive(Clone, Debug)]
+///
+/// Deliberately not `Clone`: the `Drop` impl signals the per-client listener
+/// thread to stop, which must only happen when the last owner is dropped.
+#[derive(Debug)]
 pub struct DbusClient {
     conn: Connection,
     device_caps_dir: std::path::PathBuf,

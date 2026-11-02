@@ -513,22 +513,32 @@ fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
     upscaled_name.push(".480.jpg");
     let out_path = src.with_file_name(upscaled_name);
 
-    let img = if out_path.is_file() {
-        image::open(&out_path).ok()?
-    } else {
-        let img = image::open(src).ok()?;
-        if img.width() >= TARGET_COVER_SIZE || img.height() >= TARGET_COVER_SIZE {
-            img
-        } else {
-            let upscaled = img.resize_exact(
-                TARGET_COVER_SIZE,
-                TARGET_COVER_SIZE,
-                image::imageops::FilterType::Lanczos3,
-            );
-            upscaled
-                .save_with_format(&out_path, image::ImageFormat::Jpeg)
-                .ok()?;
-            upscaled
+    // A corrupt cache file (truncated by a power loss mid-write) must not
+    // poison the path forever: remove it and regenerate from the intact
+    // source so the next decode retry succeeds.
+    let img = match image::open(&out_path) {
+        Ok(img) => img,
+        Err(e) => {
+            if out_path.is_file() {
+                tracing::warn!(error = %e, "corrupt cover cache {}; regenerating", out_path.display());
+                let _ = std::fs::remove_file(&out_path);
+            }
+            let img = image::open(src).ok()?;
+            if img.width() >= TARGET_COVER_SIZE || img.height() >= TARGET_COVER_SIZE {
+                img
+            } else {
+                let upscaled = img.resize_exact(
+                    TARGET_COVER_SIZE,
+                    TARGET_COVER_SIZE,
+                    image::imageops::FilterType::Lanczos3,
+                );
+                // A failed cache write must not discard the already-decoded
+                // image; the in-memory buffer still renders this frame.
+                if let Err(e) = upscaled.save_with_format(&out_path, image::ImageFormat::Jpeg) {
+                    tracing::warn!(error = %e, "cover cache write failed for {}", out_path.display());
+                }
+                upscaled
+            }
         }
     };
 
