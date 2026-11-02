@@ -7,24 +7,24 @@ export struct BootCheckLine {
 }
 
 // One boot check row: status glyph plus live status text (theme main font).
+// The row is content-sized so the parent layout can center it horizontally.
 component CheckRow inherits HorizontalLayout {
     in property <BootCheckLine> check;
 
-    spacing: 10px;
+    spacing: 14px;
 
     Text {
         text: check.running ? "●" : (check.ok ? "✓" : "✗");
         color: check.running ? Theme.active.text_muted
             : (check.ok ? Theme.active.primary_accent : Theme.active.needle_peak);
         vertical-alignment: center;
-        font-size: 14px;
+        font-size: 28px;
     }
     Text {
         text: check.text;
         color: Theme.active.text_primary;
-        font-size: 14px;
+        font-size: 28px;
         vertical-alignment: center;
-        horizontal-stretch: 1;
         overflow: elide;
     }
 }
@@ -44,7 +44,7 @@ component EqBars inherits Rectangle {
     Rectangle {
         x: 0 * (bar-width + bar-gap);
         width: bar-width;
-        y: parent.height - self.height;
+        y: (parent.height - self.height) / 2;
         height: bar-min-height + Math.max(Math.sin(360deg * animation-tick() / 1.2s), 0.0) * (parent.height - bar-min-height);
         border-radius: self.width / 2;
         background: Theme.active.primary_accent;
@@ -53,7 +53,7 @@ component EqBars inherits Rectangle {
     Rectangle {
         x: 1 * (bar-width + bar-gap);
         width: bar-width;
-        y: parent.height - self.height;
+        y: (parent.height - self.height) / 2;
         height: bar-min-height + Math.max(Math.sin(360deg * (animation-tick() + 0.3s) / 0.9s), 0.0) * (parent.height - bar-min-height);
         border-radius: self.width / 2;
         background: Theme.active.primary_accent;
@@ -62,7 +62,7 @@ component EqBars inherits Rectangle {
     Rectangle {
         x: 2 * (bar-width + bar-gap);
         width: bar-width;
-        y: parent.height - self.height;
+        y: (parent.height - self.height) / 2;
         height: bar-min-height + Math.max(Math.sin(360deg * (animation-tick() + 0.6s) / 1.4s), 0.0) * (parent.height - bar-min-height);
         border-radius: self.width / 2;
         background: Theme.active.primary_accent;
@@ -71,7 +71,7 @@ component EqBars inherits Rectangle {
     Rectangle {
         x: 3 * (bar-width + bar-gap);
         width: bar-width;
-        y: parent.height - self.height;
+        y: (parent.height - self.height) / 2;
         height: bar-min-height + Math.max(Math.sin(360deg * (animation-tick() + 0.9s) / 1.1s), 0.0) * (parent.height - bar-min-height);
         border-radius: self.width / 2;
         background: Theme.active.primary_accent;
@@ -107,9 +107,13 @@ export component SplashScreen inherits Window {
             }
         }
 
-        // Bottom: the current boot check line only.
-        CheckRow {
-            check: root.current_check;
+        // Bottom: the current boot check line only, horizontally centered.
+        HorizontalLayout {
+            alignment: center;
+
+            CheckRow {
+                check: root.current_check;
+            }
         }
     }
 }
