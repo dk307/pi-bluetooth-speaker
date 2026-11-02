@@ -482,7 +482,7 @@ impl LightError {
     }
 }
 
-super::impl_canonical_error_display!(LightError);
+crate::diag::impl_canonical_error_display!(LightError);
 
 impl std::error::Error for LightError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::diag::DEFAULT_CONFIG_PATH;
-use crate::hardware::impl_canonical_error_display;
+use crate::diag::impl_canonical_error_display;
 use crate::ui::ThemePreset;
 
 /// Production default marquee scroll rate (fps).
@@ -80,9 +80,14 @@ impl CoreConfig {
 
     /// Persists this configuration as pretty JSON to `path`.
     ///
+    /// The configuration is validated before anything touches the disk, so an
+    /// invalid value (e.g. a `marquee_fps` outside `{30, 60}`) can never be
+    /// persisted and brick the daemon at the next boot.
+    ///
     /// # Errors
-    /// Returns [`ConfigError`] if serialization or the file write fails.
+    /// Returns [`ConfigError`] for invalid values, serialization, or file write failures.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        self.validate()?;
         let mut raw = serde_json::to_string_pretty(self)
             .map_err(|e| ConfigError::parse(format!("config {}", path.display()), e))?;
         raw.push('\n');
@@ -379,20 +384,38 @@ mod tests {
         let dir = ScopedTempDir::new("cfg_save_dir");
         let config = CoreConfig::default();
         // Renaming the temp file over an existing directory must fail.
+        let target = dir.path().join("blocked");
+        std::fs::create_dir(&target).expect("create blocking directory");
         let err = config
-            .save(dir.path())
+            .save(&target)
             .expect_err("rename over directory must fail");
         assert!(err.is_io());
         assert!(err.to_string().contains("failed to write config"));
-        // The temp file must never linger after a failed save.
-        let leftover_count = dir
-            .path()
-            .read_dir()
-            .map_or(usize::MAX, std::iter::Iterator::count);
+        // The temp file lives as a sibling of the rename target; it must be
+        // cleaned up after the failed save.
+        let tmp = dir.path().join(".blocked.tmp");
+        assert!(!tmp.exists(), "temp file must be removed on failed save");
+    }
 
-        assert_eq!(
-            leftover_count, 0,
-            "temp file must be cleaned up on failed save"
+    #[test]
+    fn save_rejects_invalid_marquee_fps_without_writing() {
+        let dir = ScopedTempDir::new("cfg_save_invalid");
+        let path = dir.path().join("config.json");
+        let config = CoreConfig {
+            theme: None,
+            marquee_fps: 45,
+        };
+        let err = config
+            .save(&path)
+            .expect_err("invalid fps must never be persisted");
+        assert!(err.is_invalid_value());
+        assert!(err.to_string().contains("expected 30 or 60"));
+        // Neither the target nor a temp file may exist.
+        assert!(!path.exists());
+        let tmp = dir.path().join(".config.json.tmp");
+        assert!(
+            !tmp.exists(),
+            "no temp file may be created for invalid config"
         );
     }
 
