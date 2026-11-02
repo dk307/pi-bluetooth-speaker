@@ -1,173 +1,115 @@
 import { Theme } from "theme.slint";
 
-// One POST checklist row: vector status dot, fixed-width label, live status text.
-component PostCheckRow inherits HorizontalLayout {
-    in property <string> label;
-    in property <string> status;
-    spacing: 10px;
-
-    Rectangle {
-        width: 8px;
-        height: 8px;
-        border-radius: 4px;
-        background: Theme.active.primary_accent;
-        y: 4px;
-    }
-    Text { text: root.label; color: Theme.active.text_muted; font-size: 13px; width: 140px; }
-    Text { text: root.status; color: Theme.active.text_primary; font-size: 13px; font-weight: 500; }
+export struct BootCheckLine {
+    text: string,
+    running: bool,
+    ok: bool,
 }
 
-export { Theme }
+// One boot check row: status glyph plus live status text (theme main font).
+component CheckRow inherits HorizontalLayout {
+    in property <BootCheckLine> check;
+
+    spacing: 10px;
+
+    Text {
+        text: check.running ? "●" : (check.ok ? "✓" : "✗");
+        color: check.running ? Theme.active.text_muted
+            : (check.ok ? Theme.active.primary_accent : Theme.active.needle_peak);
+        vertical-alignment: center;
+        font-size: 14px;
+    }
+    Text {
+        text: check.text;
+        color: Theme.active.text_primary;
+        font-size: 14px;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+}
+
+// Animated equalizer logo band (svg-accurate: four rounded bars, per-bar
+// period/phase/opacity). Bars are absolutely positioned so they stay
+// bottom-aligned while the animation-tick() height binding re-evaluates.
+component EqBars inherits Rectangle {
+    background: transparent;
+
+    property <length> bar-width: 40px;
+    property <length> bar-gap: 30px;
+    property <length> bar-min-height: 24px;
+
+    width: 4 * bar-width + 3 * bar-gap;
+
+    Rectangle {
+        x: 0 * (bar-width + bar-gap);
+        width: bar-width;
+        y: parent.height - self.height;
+        height: bar-min-height + Math.max(Math.sin(360deg * animation-tick() / 1.2s), 0.0) * (parent.height - bar-min-height);
+        border-radius: self.width / 2;
+        background: Theme.active.primary_accent;
+        opacity: 1.0;
+    }
+    Rectangle {
+        x: 1 * (bar-width + bar-gap);
+        width: bar-width;
+        y: parent.height - self.height;
+        height: bar-min-height + Math.max(Math.sin(360deg * (animation-tick() + 0.3s) / 0.9s), 0.0) * (parent.height - bar-min-height);
+        border-radius: self.width / 2;
+        background: Theme.active.primary_accent;
+        opacity: 0.85;
+    }
+    Rectangle {
+        x: 2 * (bar-width + bar-gap);
+        width: bar-width;
+        y: parent.height - self.height;
+        height: bar-min-height + Math.max(Math.sin(360deg * (animation-tick() + 0.6s) / 1.4s), 0.0) * (parent.height - bar-min-height);
+        border-radius: self.width / 2;
+        background: Theme.active.primary_accent;
+        opacity: 1.0;
+    }
+    Rectangle {
+        x: 3 * (bar-width + bar-gap);
+        width: bar-width;
+        y: parent.height - self.height;
+        height: bar-min-height + Math.max(Math.sin(360deg * (animation-tick() + 0.9s) / 1.1s), 0.0) * (parent.height - bar-min-height);
+        border-radius: self.width / 2;
+        background: Theme.active.primary_accent;
+        opacity: 0.7;
+    }
+}
 
 export component SplashScreen inherits Window {
-    title: "DietPi Audiophile Console";
     width: 800px;
     height: 480px;
     background: Theme.active.chassis;
-    default-font-family: "sans-serif";
+    default-font-family: Theme.active.font_family;
 
-    in-out property <float> progress: 100.0;
-    in-out property <string> status_text: "System Ready";
-    in-out property <string> amp_status: "InnoMaker Merus MA12070P (OK)";
-    in-out property <string> dsp_status: "CamillaDSP Active Crossover (Connected)";
-    in-out property <string> bt_status: "BlueZ 5 / UB500 RTL8761B (Ready)";
-    in-out property <string> display_status: "Freenove 4.3\" DSI 800x480 (Active)";
-    in-out property <string> sensor_status: "DS18B20 1-Wire & BH1750 I2C (Online)";
+    // Single bottom check line, replaced as each boot check progresses.
+    in property <BootCheckLine> current_check: {
+        text: "Starting system checks …",
+        running: true,
+        ok: false,
+    };
 
     VerticalLayout {
-        alignment: center;
-        spacing: 16px;
-        padding: 20px;
+        padding: 40px;
+        spacing: 20px;
 
-        // Branding Header
-        VerticalLayout {
-            alignment: center;
-            spacing: 4px;
-
-            Text {
-                text: "DIETPI AUDIOPHILE CONSOLE";
-                color: Theme.active.primary_accent;
-                font-size: 24px;
-                font-weight: 800;
-                horizontal-alignment: center;
-            }
-
-            Text {
-                text: "High-Resolution Digital Audio Sink & DSP Engine";
-                color: Theme.active.text_muted;
-                font-size: 13px;
-                font-weight: 500;
-                horizontal-alignment: center;
-            }
-
-            Text {
-                text: "Appliance Release v2.0 (ARM Cortex-A53 / NEON)";
-                color: Theme.active.secondary_accent;
-                font-size: 11px;
-                font-weight: 600;
-                horizontal-alignment: center;
-            }
-        }
-
-        // Center POST Verification Card
+        // Logo band fills all leftover space; equalizer stays vertically centered.
         Rectangle {
-            width: 620px;
-            background: Theme.active.card_surface;
-            border-radius: 12px;
-            border-color: Theme.active.card_border;
-            border-width: 1px;
-            clip: true;
+            background: transparent;
+            vertical-stretch: 1;
 
-            VerticalLayout {
-                padding: 16px;
-                spacing: 10px;
-
-                // Progress Bar Header
-                HorizontalLayout {
-                    alignment: space-between;
-                    Text {
-                        text: "HARDWARE INITIALIZATION (POST)";
-                        color: Theme.active.secondary_accent;
-                        font-size: 12px;
-                        font-weight: 700;
-                    }
-                    Text {
-                        text: "\{root.progress >= 0.0 ? (root.progress > 100.0 ? 100 : Math.round(root.progress)) : 0}%";
-                        color: Theme.active.primary_accent;
-                        font-size: 12px;
-                        font-weight: 700;
-                    }
-                }
-
-                // Progress Bar Track
-                Rectangle {
-                    height: 6px;
-                    background: Theme.active.card_border;
-                    border-radius: 3px;
-
-                    Rectangle {
-                        x: 0px;
-                        y: 0px;
-                        width: parent.width * ((root.progress >= 0.0 && root.progress <= 100.0 ? root.progress : (root.progress > 100.0 ? 100.0 : 0.0)) / 100.0);
-                        height: parent.height;
-                        background: Theme.active.primary_accent;
-                        border-radius: 3px;
-                    }
-                }
-
-                // POST Checklist Items
-                VerticalLayout {
-                    spacing: 6px;
-                    padding-top: 6px;
-
-                    PostCheckRow {
-                        label: "I2S Amplifier:";
-                        status: root.amp_status;
-                    }
-
-                    PostCheckRow {
-                        label: "CamillaDSP:";
-                        status: root.dsp_status;
-                    }
-
-                    PostCheckRow {
-                        label: "Bluetooth Stack:";
-                        status: root.bt_status;
-                    }
-
-                    PostCheckRow {
-                        label: "DSI Touchscreen:";
-                        status: root.display_status;
-                    }
-
-                    PostCheckRow {
-                        label: "Sensors & Bus:";
-                        status: root.sensor_status;
-                    }
-                }
+            EqBars {
+                y: (parent.height - self.height) / 2;
+                height: 120px;
             }
         }
 
-        // Status Footer
-        HorizontalLayout {
-            alignment: center;
-            spacing: 8px;
-
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                background: Theme.active.primary_accent;
-                y: 4px;
-            }
-
-            Text {
-                text: root.status_text;
-                color: Theme.active.text_primary;
-                font-size: 13px;
-                font-weight: 600;
-                horizontal-alignment: center;
-            }
+        // Bottom: the current boot check line only.
+        CheckRow {
+            check: root.current_check;
         }
     }
 }
