@@ -250,7 +250,7 @@ pub fn run_ui_display_on_path(
             let splash_start = Instant::now();
             run_splash_on(&mut fb, BootProbe::real(), preview_secs, theme);
             let remaining_preview =
-                preview_secs.and_then(|p| p.checked_sub(splash_start.elapsed().as_secs()));
+                preview_secs.map(|p| p.saturating_sub(splash_start.elapsed().as_secs()));
             run_shell_on(&mut fb, remaining_preview, theme, tab, marquee_fps);
         }
         ScreenTarget::Splash => {
@@ -339,15 +339,23 @@ fn apply_check_update(splash: &SplashScreen, update: &BootCheckUpdate) {
     splash.set_current_check(line);
 }
 
+/// Hard upper bound for the splash when no `preview_secs` window is given, so
+/// a hung hardware probe (blocking D-Bus/I2C/sysfs call) can never stall the
+/// appliance boot indefinitely.
+const MAX_SPLASH_WAIT: Duration = Duration::from_secs(30);
+
 /// Runs the splash lifecycle against an opened framebuffer backend.
 ///
 /// Boot checks run on a background thread; the render loop drains their
 /// updates into the single bottom check line and exits immediately once all
-/// checks have settled (no artificial minimum display time) unless a
-/// `preview_secs` window is requested.
+/// checks have settled (no artificial minimum display time) or once the
+/// deadline expires, whichever comes first. `preview_secs` bounds the splash;
+/// without it `MAX_SPLASH_WAIT` applies. If the deadline expires with checks
+/// still running (a hung probe), the worker is abandoned with a warning so
+/// boot always proceeds; a worker panic is re-raised on the normal path only.
 ///
 /// # Panics
-/// Panics if the `boot-checks` worker thread cannot be spawned.
+/// Re-raises a panic from the `boot-checks` worker when it finished normally.
 #[cfg(feature = "ui")]
 pub fn run_splash_on(
     fb: &mut Framebuffer,
@@ -391,58 +399,78 @@ pub fn run_splash_on(
     }
 
     let (tx, rx) = std::sync::mpsc::channel::<BootCheckUpdate>();
-    let checks = std::thread::Builder::new()
+    // Graceful degradation instead of a panic (M-PANIC-IS-STOP): if the worker
+    // thread cannot be spawned (resource exhaustion), boot checks are skipped
+    // with a warning and the appliance still boots into the shell.
+    let checks = match std::thread::Builder::new()
         .name("boot-checks".into())
         .spawn(move || probe.run(&mut |update| drop(tx.send(update))))
-        .expect("failed to spawn boot-check thread");
-
-    match fb.render_frame(&window) {
-        Ok(true) => {
-            tracing::info!("Boot splash screen rendered to /dev/fb0 successfully");
-            println!("  Display: Boot splash screen rendered to /dev/fb0 successfully!");
+    {
+        Ok(handle) => Some(handle),
+        Err(err) => {
+            tracing::warn!("Failed to spawn boot-checks worker, skipping checks: {err}");
+            println!("  Warning: boot checks skipped (worker spawn failed).");
+            None
         }
-        Ok(false) => {
-            tracing::debug!("Screen buffer already current");
-            println!("  Display: Screen buffer already current.");
-        }
-        Err(e) => {
-            report_display(tracing::Level::ERROR, "Failed to render frame", &e);
-            return;
-        }
-    }
+    };
+    let mut checks_done = checks.is_none();
 
-    let start = Instant::now();
-    let deadline = preview_secs.map(Duration::from_secs);
-    let mut checks_done = false;
-    tracing::info!("Running UI render loop");
-    println!("  Display: Running UI render loop...");
-
-    loop {
-        loop {
-            match rx.try_recv() {
-                Ok(update) => apply_check_update(&splash, &update),
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    checks_done = true;
-                    break;
-                }
+    'render: {
+        match fb.render_frame(&window) {
+            Ok(true) => {
+                tracing::info!("Boot splash screen rendered to /dev/fb0 successfully");
+                println!("  Display: Boot splash screen rendered to /dev/fb0 successfully!");
+            }
+            Ok(false) => {
+                tracing::debug!("Screen buffer already current");
+                println!("  Display: Screen buffer already current.");
+            }
+            Err(e) => {
+                report_display(tracing::Level::ERROR, "Failed to render frame", &e);
+                break 'render;
             }
         }
 
-        slint::platform::update_timers_and_animations();
-        if let Err(e) = fb.render_frame(&window) {
-            report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
-            break;
-        }
+        let start = Instant::now();
+        // Hard upper bound: without a preview window the splash may still not
+        // wait forever on a hung hardware probe (blocking D-Bus/I2C calls).
+        let deadline = preview_secs.map_or(MAX_SPLASH_WAIT, Duration::from_secs);
+        tracing::info!("Running UI render loop");
+        println!("  Display: Running UI render loop...");
 
-        if checks_done && deadline.is_none_or(|duration| start.elapsed() >= duration) {
-            break;
+        loop {
+            loop {
+                match rx.try_recv() {
+                    Ok(update) => apply_check_update(&splash, &update),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        checks_done = true;
+                        break;
+                    }
+                }
+            }
+
+            slint::platform::update_timers_and_animations();
+            if let Err(e) = fb.render_frame(&window) {
+                report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
+                break;
+            }
+
+            if checks_done || start.elapsed() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(16));
         }
-        std::thread::sleep(Duration::from_millis(16));
     }
 
-    if let Err(err) = checks.join() {
-        std::panic::resume_unwind(err);
+    if checks_done {
+        if let Some(handle) = checks {
+            if let Err(err) = handle.join() {
+                std::panic::resume_unwind(err);
+            }
+        }
+    } else {
+        tracing::warn!("Boot checks did not finish within the splash window; abandoning worker");
     }
 
     tracing::info!("Splash render loop finished");

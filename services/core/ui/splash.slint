@@ -30,9 +30,16 @@ component CheckRow inherits HorizontalLayout {
 }
 
 // Animated equalizer logo band (svg-accurate: four rounded bars, per-bar
-// period/phase/opacity). Bars are absolutely positioned so they stay
-// bottom-aligned while the animation-tick() height binding re-evaluates.
+// period/phase/opacity). Bars are absolutely positioned, vertically centered,
+// and oscillate symmetrically up AND down around the band center.
+//
+// Animation is driven by the parent's integer frame clock (advanced by a
+// Slint Timer, M-NO-PERPETUAL-ANIMATION-DRIVER): per-bar periods/phases are
+// quantized to frames of the ~60 Hz tick (1.2s->72, 0.9s->54, 1.4s->84,
+// 1.1s->66 frames; phases 0/0.3s/0.6s/0.9s -> 0/18/36/54 frames).
 component EqBars inherits Rectangle {
+    in property <int> frame-clock;
+
     background: transparent;
 
     property <length> bar-width: 40px;
@@ -45,7 +52,7 @@ component EqBars inherits Rectangle {
         x: 0 * (bar-width + bar-gap);
         width: bar-width;
         y: (parent.height - self.height) / 2;
-        height: bar-min-height + Math.max(Math.sin(360deg * animation-tick() / 1.2s), 0.0) * (parent.height - bar-min-height);
+        height: bar-min-height + Math.max(Math.sin(360deg * Math.mod(frame-clock, 72) * 1.0 / 72), 0.0) * (parent.height - bar-min-height);
         border-radius: self.width / 2;
         background: Theme.active.primary_accent;
         opacity: 1.0;
@@ -54,7 +61,7 @@ component EqBars inherits Rectangle {
         x: 1 * (bar-width + bar-gap);
         width: bar-width;
         y: (parent.height - self.height) / 2;
-        height: bar-min-height + Math.max(Math.sin(360deg * (animation-tick() + 0.3s) / 0.9s), 0.0) * (parent.height - bar-min-height);
+        height: bar-min-height + Math.max(Math.sin(360deg * Math.mod(frame-clock + 18, 54) * 1.0 / 54), 0.0) * (parent.height - bar-min-height);
         border-radius: self.width / 2;
         background: Theme.active.primary_accent;
         opacity: 0.85;
@@ -63,7 +70,7 @@ component EqBars inherits Rectangle {
         x: 2 * (bar-width + bar-gap);
         width: bar-width;
         y: (parent.height - self.height) / 2;
-        height: bar-min-height + Math.max(Math.sin(360deg * (animation-tick() + 0.6s) / 1.4s), 0.0) * (parent.height - bar-min-height);
+        height: bar-min-height + Math.max(Math.sin(360deg * Math.mod(frame-clock + 36, 84) * 1.0 / 84), 0.0) * (parent.height - bar-min-height);
         border-radius: self.width / 2;
         background: Theme.active.primary_accent;
         opacity: 1.0;
@@ -72,7 +79,7 @@ component EqBars inherits Rectangle {
         x: 3 * (bar-width + bar-gap);
         width: bar-width;
         y: (parent.height - self.height) / 2;
-        height: bar-min-height + Math.max(Math.sin(360deg * (animation-tick() + 0.9s) / 1.1s), 0.0) * (parent.height - bar-min-height);
+        height: bar-min-height + Math.max(Math.sin(360deg * Math.mod(frame-clock + 54, 66) * 1.0 / 66), 0.0) * (parent.height - bar-min-height);
         border-radius: self.width / 2;
         background: Theme.active.primary_accent;
         opacity: 0.7;
@@ -92,6 +99,18 @@ export component SplashScreen inherits Window {
         ok: false,
     };
 
+    // Integer frame clock advanced by a Timer while the splash is visible
+    // (the splash is transient, so the equalizer animation is always needed).
+    in-out property <int> eq_frame: 0;
+
+    Timer {
+        interval: 16.65ms;
+        running: true;
+        triggered() => {
+            root.eq_frame += 1;
+        }
+    }
+
     VerticalLayout {
         padding: 40px;
         spacing: 20px;
@@ -102,6 +121,7 @@ export component SplashScreen inherits Window {
             vertical-stretch: 1;
 
             EqBars {
+                frame-clock: root.eq_frame;
                 y: (parent.height - self.height) / 2;
                 height: 120px;
             }
