@@ -896,6 +896,10 @@ fn bt_monitor_loop(
         if !commands.is_empty() {
             last_pb = None;
             cover.path = None;
+            // The query also advanced the PCM dedup state; reset it so a PCM
+            // change observed mid-query is re-published after the fresh
+            // commands execute instead of being silently deduped away.
+            last_pcms = None;
             continue;
         }
 
