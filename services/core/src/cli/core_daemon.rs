@@ -915,18 +915,12 @@ fn publish_playback_state(
                 .failed_since
                 .is_some_and(|t| t.elapsed() >= COVER_DECODE_RETRY);
             if cover.path != cover_path || retry_due {
-                match cover_path.as_ref() {
-                    Some(path) => publish_cover_art(update, cover, path),
-                    // No cached file yet: while the track still advertises art
-                    // (an image handle is present) the OBEX fetch is pending
-                    // and the prior art must stay; only a genuinely artless
-                    // track clears the displayed cover.
-                    None if pb.image_handle.is_none() => {
-                        update.cover = Some(None);
-                        *cover = CoverState::default();
-                    }
-                    None => {}
+                if let Some(path) = cover_path.as_ref() {
+                    publish_cover_art(update, cover, path);
                 }
+                // No cached file (handle-less track or fetch pending) keeps the
+                // previously published art: a snapshot never blanks the cover;
+                // only a device disconnect clears it explicitly.
             }
         }
         Ok(None) => {
