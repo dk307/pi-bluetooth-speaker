@@ -75,7 +75,7 @@ impl CoreConfig {
             }
         }
         let settings = LayeredConfig::builder()
-            .add_source(config::File::from(path))
+            .add_source(config::File::from(path).format(config::FileFormat::Json))
             .build()
             .map_err(|e| {
                 ConfigError::config(format!("failed to read config {}", path.display()), e)
@@ -464,6 +464,19 @@ mod tests {
             .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(leftovers, vec!["config.json".to_string()]);
+    }
+
+    #[test]
+    fn load_ignores_path_extension_for_json_format() {
+        // The on-disk contract is always JSON regardless of the operator's
+        // filename choice: format detection is pinned, not guessed.
+        for name in ["config.txt", "conf", "settings.json"] {
+            let dir = ScopedTempDir::new("cfg_extless");
+            let path = dir.path().join(name);
+            std::fs::write(&path, r#"{"marquee_fps": 30}"#).expect("write");
+            let config = CoreConfig::load(&path).expect("JSON content must load");
+            assert_eq!(config.marquee_fps, 30, "{name}");
+        }
     }
 
     #[test]

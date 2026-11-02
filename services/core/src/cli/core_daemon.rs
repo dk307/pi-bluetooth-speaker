@@ -3,8 +3,11 @@
 //! Provides command-line options parsing, headless detection, display lifecycle
 //! execution, and Slint framebuffer rendering coordination.
 
+// `PathBuf` backs the unconditionally compiled `-c/--config` CLI field;
+// `Path` is only referenced by the ui-gated framebuffer paths.
 #[cfg(feature = "ui")]
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 #[cfg(feature = "ui")]
 use std::rc::Rc;
