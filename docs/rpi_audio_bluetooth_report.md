@@ -365,6 +365,107 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 - **Limiter Release (`H.Limiter Rls`):** Slow
 - **Power Management (`R.Power Mode` / `Q.PM Prof`):** Dynamic power mode / PMF0
 
+### 7.6. AVRCP Absolute Volume Synchronization & Calibration
+
+#### 7.6.1. Volume Sync Architecture (BlueZ ↔ bluealsa-aplay ↔ Merus)
+Volume control is a **three-stage chain**, and a failure at any stage freezes the physical amplifier:
+
+1. **BlueZ (bluetoothd) — AVRCP TG controller:** Exclusively owns the AVCTP/AVRCP connection (PSM 0x0017) and the SDP records. It receives `SetAbsoluteVolume` (PDU 0x50) commands from the phone (CT, Category 2) and exposes the current volume as `org.bluez.MediaTransport1.Volume` (0..127) on each active transport (`/org/bluez/hci0/dev_<mac>/fdN`). bluez-alsa is only a D-Bus client here — it never touches AVCTP itself.
+2. **bluealsad / bluez-alsa 5.0.0:** Maps the D-Bus `Volume` property into its internal PCM volume model and signals changes to `bluealsa-aplay`.
+3. **bluealsa-aplay mixer binding:** With `-M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"` (`SoftVolume: false`), every transport volume event is translated directly into the Merus MA12070P hardware register `A.Mstr Vol` (0..144 raw steps, -144 dB..0 dB), leaving the digital path to CamillaDSP bit-perfect.
+
+**Critical BlueZ gate (Rank 1 root cause of "volume stuck at 0"):** `bluetoothd`'s AVRCP target init only registers the Volume-Changed notification (AVRCP event 0x0D) with the phone if `btd_device_get_volume()` returns a valid value. If the device info file `/var/lib/bluetooth/<adapter_mac>/<device_mac>/info` has **no `Volume=` entry** under `[General]`, this returns -1 and the phone is never told the sink supports absolute volume — the phone then never sends volume updates, and the transport volume stays frozen (observed: stuck at 10/127 ≈ 8% while the Merus mixer stayed at a stale 107/144). Seeding `Volume=64` once in the info file bootstrap-resolves this; afterwards BlueZ persists the phone's last volume automatically on every change.
+
+**Critical BlueZ gate (Rank 2 root cause — ControllerMode collision):** With BlueZ 5.82 on a `ControllerMode = dual` adapter, the BLE Media Control (MCP) profile collides with Classic AVRCP on modern Android (Pixel) devices, and the AVRCP TG feature init is skipped. The transport then exposes **no `SetVolume` method** and a read-only `Volume` property. Fix: set `ControllerMode = bredr` in `/etc/bluetooth/main.conf` and re-pair. The device `Class` must also be a loudspeaker CoD (`0x240414`), not a generic audio class.
+
+#### 7.6.2. Applied Configuration Fixes (2026-11-03)
+Persistent changes deployed to the Pi (previous values recoverable from backups):
+
+1. `/etc/bluetooth/main.conf` (backup: `/tmp/main.conf.bak`) — full deployed content:
+   ```ini
+   [General]
+   Experimental = true
+   Name = DietPi Speaker
+   Class = 0x240414            ; loudspeaker CoD (was 0x240418)
+   DiscoverableTimeout = 0
+   PairableTimeout = 0
+   ControllerMode = bredr      ; added (was unset -> dual)
+
+   [Policy]
+   AutoEnable = true
+   ```
+2. `/var/lib/bluetooth/20:E1:5D:B2:16:BF/30:E0:44:67:38:A2/info` (BlueZ per-device store; backup: `/tmp/info.bak`) — the `Volume=64` seed under `[General]` is the applied change (see 7.6.1). Relevant sections of the deployed file:
+   ```ini
+   [LinkKey]
+   Key=C5F3E0CC822AD31CD20B08BA98FC5171
+   Type=4
+   PINLength=0
+
+   [General]
+   Name=Pixel 10 Pro XL
+   Class=0x5a420c
+   SupportedTechnologies=BR/EDR;
+   Trusted=true
+   Volume=64                    ; one-time seed (BlueZ rewrites this automatically afterwards)
+   Blocked=false
+   Services=00001105-...;0000110a-...;0000110c-...;0000110d-...;...  ; A2DP + AVRCP UUIDs (110c/110d/110e)
+   ```
+   Note: the `Key=` link key is per-pairing (changes on re-pair) — the documented constant is the `Volume=64` line's presence under `[General]`.
+
+After changing BlueZ configuration, a **full re-pair** is required for the changes to take effect (both stacks cache SDP records and volume capability flags):
+```bash
+bluetoothctl remove 30:E0:44:67:38:A2   # on the Pi (then "Forget" the device on the Pixel, re-pair)
+```
+
+#### 7.6.3. Bluetooth Controller Configuration (`/etc/bluetooth/main.conf`)
+- **File:** `/etc/bluetooth/main.conf` (BlueZ 5.82 daemon config)
+- **Purpose:** Defines the Classic/BLE mode split and device class, both critical for AVRCP absolute volume (see 7.6.1) and correct device-type advertisement to phones.
+- **Full deployed content (2026-11-03):**
+  ```ini
+  [General]
+  Experimental = true        # required for bluez-alsa battery/codec extras
+  Name = DietPi Speaker
+  Class = 0x240414           # Bluetooth loudspeaker CoD (Major: Audio/Video, Minor: Loudspeaker)
+  DiscoverableTimeout = 0    # permanently discoverable
+  PairableTimeout = 0        # permanently pairable
+  ControllerMode = bredr     # Classic BT only — excludes BLE MCP/CCP profile collisions on Pixel phones
+
+  [Policy]
+  AutoEnable = true          # power adapter on automatically at boot
+  ```
+- **Class code breakdown (`0x240414`):** Major Device Class = Audio/Video, Minor Device Class = Loudspeaker, Service Classes = Rendering. Phones use this to present the sink as a speaker and to select appropriate volume UX. The previous value `0x240418` mapped to Minor = Headphones.
+- **ControllerMode implications:** The default is `dual` (Classic + BLE). On BlueZ 5.82, BLE Media Control Profile (MCP) server registration can collide with Classic AVRCP target init on Android 15+ phones, causing `MediaTransport1.SetVolume` to be missing and the transport `Volume` property to be read-only (transport stuck; volume sync dead). `bredr` removes the collision by disabling all BLE GATT server profiles on this controller.
+
+#### 7.6.4. Verified Volume Mapping (Transport → Merus Hardware Mixer)
+Measured calibration after the fixes (transport `MediaTransport1.Volume` set via `busctl set-property ... org.bluez.MediaTransport1 Volume q <v>`; mixer read via `amixer -c sndrpimerusamp sget 'A.Mstr Vol'`):
+
+| Transport (AVRCP) | Mixer raw (`A.Mstr Vol`) | Attenuation | Note |
+|---|---|---|---|
+| 0 | 0 | −144 dB | hard mute |
+| 32 (25%) | 124 | −20 dB | bottom of working range |
+| 64 (50%) | 134 | −10 dB | ≈ −10 dB per 32 steps |
+| 96 (75%) | 140 | −4 dB | ≈ −5 dB per 32 steps |
+| 127 (100%) | 144 | 0 dB | full output |
+
+The mapping is **perceptually curved, not linear**: bluez-alsa dB-maps AVRCP volume into the mixer's declared range so phone volume steps sound evenly loud. Endpoints are exact (0 → mute, 127 → 0 dB); the −144 dB range is only reachable at V=0, and above that the curve compresses into roughly the top −20 dB. Do **not** assume the linear `V × 144/127` scaling when predicting mixer positions from transport volume.
+
+#### 7.6.5. Volume Sync Verification Commands
+```bash
+# Transport volume + State (10..127; healthy phone-initiated sync tracks this)
+ssh root@192.168.2.120 "busctl get-property org.bluez /org/bluez/hci0/dev_30_E0_44_67_38_A2/fd0 org.bluez.MediaTransport1 State Volume"
+
+# SetVolume method must exist on the transport (proves AVRCP TG init succeeded)
+ssh root@192.168.2.120 "busctl introspect org.bluez /org/bluez/hci0/dev_30_E0_44_67_38_A2/fd0 org.bluez.MediaTransport1 | grep -E 'SetVolume|Volume'"
+
+# BlueALSA-side volume (must equal transport volume; SoftVolume must be false)
+ssh root@192.168.2.120 "bluealsa-cli info /org/bluealsa/hci0/dev_30_E0_44_67_38_A2/a2dpsnk/source | grep -E 'Volume|Soft'"
+
+# Merus hardware mixer position (follows transport volume per the table in 7.6.3)
+ssh root@192.168.2.120 "amixer -c sndrpimerusamp sget 'A.Mstr Vol' | grep Mono"
+```
+
+Healthy-state checklist after (re)connection: transport `State = active` and `Volume` writable; `SetVolume` present on `MediaTransport1`; `bluealsa-cli` `Volume` equals transport `Volume`; `SoftVolume: false`; mixer follows transport per 7.6.3. If the mixer is stuck after boot, check for the stale `asound.state` restore (`A.Mstr Vol Volume value 0`) and verify the boot-race fix in 7.2 is still deployed.
+
 ---
 
 ## 8. Listening Ports & Network Services
