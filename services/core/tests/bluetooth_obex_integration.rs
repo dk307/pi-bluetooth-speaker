@@ -42,6 +42,8 @@ struct Behavior {
     native_get_calls: AtomicUsize,
     last_get_pixel: String,
     device_connected: bool,
+    /// PSM port reported by the fake `MediaPlayer1` (`ObexPort`).
+    obex_port: u16,
     /// Position (milliseconds) reported by the fake `MediaPlayer1`.
     position_ms: u32,
     /// Number of `Seek` calls observed on the fake `MediaPlayer1`.
@@ -121,7 +123,10 @@ impl ObjectManager {
             "Position".into(),
             Value::from(b.position_ms).try_into().unwrap(),
         );
-        props.insert("ObexPort".into(), Value::from(4097u16).try_into().unwrap());
+        props.insert(
+            "ObexPort".into(),
+            Value::from(b.obex_port).try_into().unwrap(),
+        );
         let mut ifaces = HashMap::new();
         ifaces.insert("org.bluez.MediaPlayer1".to_string(), props);
         let mut out = HashMap::new();
@@ -313,6 +318,7 @@ impl Harness {
             native_get_calls: AtomicUsize::new(0),
             last_get_pixel: String::new(),
             device_connected: true,
+            obex_port: 4097,
             position_ms: 45_000,
             seek_calls: AtomicUsize::new(0),
             last_seek_offset_us: 0,
@@ -671,5 +677,74 @@ fn cover_art_fetch_failure_arms_retry_backoff() {
         2,
         "per-tick session ensure plus one worker attempt hit exactly the \
          breaker threshold; backoff and breaker then suppress everything else"
+    );
+}
+
+#[test]
+fn session_is_recreated_when_psm_port_changes_without_breaker_trip() {
+    let h = Harness::new("11:00:00:00:00:41", |_| {});
+    h.remove_cover_files();
+    assert!(h.cover().is_some());
+    assert_eq!(h.create_calls(), 1);
+
+    // Phone re-registers BIP on a different L2CAP PSM: the cached session
+    // (bound to the old PSM) must be torn down and a new one created — and a
+    // PSM change is normal operation, so the breaker must NOT be fed.
+    h.remove_cover_files();
+    h.state.lock().unwrap().obex_port = 4098;
+    assert!(h.cover().is_some(), "cover resolves on the new PSM");
+    assert_eq!(
+        h.create_calls(),
+        2,
+        "session must be recreated on PSM change"
+    );
+}
+
+#[test]
+fn reconnect_resets_breaker_and_releases_stale_session() {
+    let h = Harness::new("11:00:00:00:00:42", |b| b.create_ok = false);
+
+    // Establish the connected baseline, then trip the OBEX breaker (2
+    // consecutive CreateSession failures from the tick ensure + worker).
+    let _ = h.device.playback_state();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(
+        h.create_calls(),
+        2,
+        "breaker trips at the failure threshold"
+    );
+
+    // Simulate a phone disconnect/reconnect cycle.
+    h.state.lock().unwrap().device_connected = false;
+    let _ = h.device.playback_state();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    h.state.lock().unwrap().device_connected = true;
+    h.state.lock().unwrap().create_ok = true;
+    h.remove_cover_files();
+
+    // After the reconnect edge the breaker is reset: CreateSession is
+    // attempted again despite the open cooldown, and the cover resolves.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut resolved = false;
+    while std::time::Instant::now() < deadline {
+        if h.device
+            .playback_state()
+            .unwrap()
+            .expect("player present")
+            .cover_art_path
+            .is_some()
+        {
+            resolved = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        resolved,
+        "cover must resolve after reconnect resets the breaker"
+    );
+    assert!(
+        h.create_calls() > 2,
+        "CreateSession was suppressed by an open breaker"
     );
 }

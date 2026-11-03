@@ -1118,8 +1118,14 @@ pub fn is_service_absent_fdo_error(err: &zbus::fdo::Error) -> bool {
 
 #[derive(Debug, Default)]
 struct DbusClientState {
-    /// Active OBEX file transfer session (target device address and path).
-    obex_session: Option<(BtAddress, OwnedObjectPath)>,
+    /// Active OBEX file transfer session (target device address, PSM port, path).
+    obex_session: Option<(BtAddress, u16, OwnedObjectPath)>,
+    /// Devices observed with `Device1.Connected == true` (drives reconnect
+    /// edge detection for the AOSP `notifyDeviceConnected` equivalent).
+    connected_devices: HashSet<BtAddress>,
+    /// Addresses seen connected at least once (distinguishes daemon-start
+    /// baseline from a genuine reconnect edge).
+    ever_connected: HashSet<BtAddress>,
     /// Consecutive OBEX transport failures feeding the circuit breaker.
     obex_failures: u32,
     /// Number of times the breaker has tripped (drives exponential cooldown).
@@ -1302,7 +1308,7 @@ impl Drop for DbusClient {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         // Tear down any live OBEX session while the D-Bus connection is still
         // usable so obexd releases the single-client BIP slot on the phone.
-        if let Some((_, path)) = self.state().obex_session.take() {
+        if let Some((_, _, path)) = self.state().obex_session.take() {
             self.teardown_obex_session(&path);
         }
         let taken = self.conn_slot.lock().unwrap().take();
@@ -1606,23 +1612,86 @@ impl DbusClient {
     /// hold the state mutex; the session is taken under the lock and the D-Bus
     /// round-trip happens outside it.
     fn clear_obex_session(&self) {
-        let path = self.state().obex_session.take().map(|(_, p)| p);
+        let path = self.state().obex_session.take().map(|(_, _, p)| p);
         if let Some(path) = path {
             self.teardown_obex_session(&path);
         }
     }
 
+    /// AOSP `notifyDeviceConnected` equivalent: detects a `Device1.Connected`
+    /// false→true edge and, on reconnect, releases any stale BIP session for
+    /// the device and resets the circuit breaker so the first fetch on the
+    /// new link gets a fresh session immediately.
+    ///
+    /// The first observation only establishes the baseline (the daemon may
+    /// have started while the phone was already connected); only a genuinely
+    /// observed drop followed by a reconnect triggers the teardown.
+    fn notify_device_connection(&self, addr: BtAddress) {
+        let dev_path = format!("/org/bluez/hci0/dev_{}", addr.to_string().replace(':', "_"));
+        let Some(connected) = ObexDeviceProxyBlocking::builder(&self.conn())
+            .path(dev_path.as_str())
+            .ok()
+            .and_then(|b| b.build().ok())
+            .and_then(|p| p.connected().ok())
+        else {
+            return;
+        };
+        let mut state = self.state();
+        if !connected {
+            state.connected_devices.remove(&addr);
+            return;
+        }
+        // Steady-state connected: nothing to do.
+        if !state.connected_devices.insert(addr) {
+            return;
+        }
+        // `ever_connected` only misses this address on the very first
+        // observation (the daemon may have started while the phone was
+        // already connected) — baseline only. A device seen connected
+        // before, then dropped, then re-connected is a fresh-link edge.
+        if !state.ever_connected.insert(addr) {
+            // Reconnect edge: any cached session for this device is bound to
+            // a dead transport, and the breaker may have been tripped by that
+            // dying link — release both so the fresh link starts clean.
+            let stale_session = state.obex_session.take();
+            state.obex_failures = 0;
+            state.obex_trips = 0;
+            state.obex_open_until = None;
+            drop(state);
+            if let Some((session_addr, session_port, path)) = stale_session {
+                if session_addr == addr {
+                    tracing::info!("Device {addr} reconnected; releasing stale BIP session {path}");
+                    self.teardown_obex_session(&path);
+                } else {
+                    let mut state = self.state();
+                    state.obex_session = Some((session_addr, session_port, path));
+                }
+            }
+            tracing::info!("OBEX circuit breaker reset after reconnect of {addr}");
+        }
+    }
+
     fn ensure_obex_session(&self, addr: BtAddress, port: u16) -> Option<OwnedObjectPath> {
         let mut session_lock = self.state();
-        if let Some((cached_addr, ref path)) = session_lock.obex_session {
-            if cached_addr == addr && self.is_obex_session_alive(path.as_str()) {
+        if let Some((cached_addr, cached_port, ref path)) = session_lock.obex_session {
+            if cached_addr == addr
+                && cached_port == port
+                && self.is_obex_session_alive(path.as_str())
+            {
                 return Some(path.clone());
             }
             let stale = path.clone();
             session_lock.obex_session = None;
-            // A dead session is a transport-level failure: feed the breaker so
-            // repeated invalid sessions stop triggering recreate storms.
-            Self::record_obex_failure(&mut session_lock);
+            // A session that vanished on the same mac/PSM is a transport-level
+            // failure: feed the breaker so repeated invalid sessions stop
+            // triggering recreate storms. A mac/PSM *change* is the phone
+            // re-registering BIP (normal operation, AOSP tears down too) and
+            // must not trip the breaker.
+            if cached_addr == addr && cached_port == port {
+                Self::record_obex_failure(&mut session_lock);
+            } else {
+                tracing::info!("OBEX BIP session {stale} superseded (mac/PSM change)");
+            }
             drop(session_lock);
             self.teardown_obex_session(&stale);
             session_lock = self.state();
@@ -1648,7 +1717,7 @@ impl DbusClient {
                 session_lock.obex_failures = 0;
                 session_lock.obex_trips = 0;
                 session_lock.obex_open_until = None;
-                session_lock.obex_session = Some((addr, new_path.clone()));
+                session_lock.obex_session = Some((addr, port, new_path.clone()));
                 Some(new_path)
             }
             Err(e) => {
@@ -1905,7 +1974,10 @@ impl DbusClient {
         thread::sleep(Duration::from_millis(BIP_TRACK_SETTLE_MS));
 
         let session_lock = self.state();
-        session_lock.obex_session.as_ref().map(|(_, p)| p.clone())
+        session_lock
+            .obex_session
+            .as_ref()
+            .map(|(_, _, p)| p.clone())
     }
 
     /// Builds a blocking `Image1` proxy on top of an existing BIP OBEX session path.
@@ -3326,6 +3398,7 @@ impl BluetoothDevice {
         // ImgHandle: on AOSP the cover-art flow only advertises handles while a
         // client session exists, so skipping the ensure would deadlock future
         // tracks into permanent "no ImgHandle".
+        dbus.notify_device_connection(addr);
         let _ = dbus.ensure_obex_session(addr, port);
         let Some(handle) = pb.image_handle.clone() else {
             tracing::debug!(
