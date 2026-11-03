@@ -297,20 +297,14 @@ pub(super) fn ensure_cover_art_cache_dir_in(dir: &std::path::Path) -> Result<(),
     Ok(())
 }
 
-/// Sanitizes a BIP image handle into a filesystem-safe cache filename component.
+/// Validates a BIP image handle per the AOSP `is_valid_img_handle` contract.
 ///
-/// Keeps ASCII alphanumerics plus `_` and `-`; returns `None` when nothing remains.
+/// A valid handle is exactly 7 ASCII digits; anything else is rejected so a
+/// malformed handle can never reach an OBEX `Get` round-trip.
 #[must_use]
-pub fn sanitize_bip_handle(handle: &str) -> Option<String> {
-    let sanitized: String = handle
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-        .collect();
-    if sanitized.is_empty() {
-        None
-    } else {
-        Some(sanitized)
-    }
+pub fn validate_bip_handle(handle: &str) -> Option<String> {
+    let valid = handle.len() == 7 && handle.bytes().all(|b| b.is_ascii_digit());
+    valid.then(|| handle.to_string())
 }
 
 /// Returns the deterministic cache path and sanitized MAC/handle for an OBEX cover art handle.
@@ -328,7 +322,7 @@ pub fn cover_art_path_for_in(
     handle: &str,
 ) -> Option<(String, String, String)> {
     let sanitized_mac = addr.to_string().replace([':', '-'], "_");
-    let sanitized_handle = sanitize_bip_handle(handle)?;
+    let sanitized_handle = validate_bip_handle(handle)?;
     let cache_path = format!(
         "{}/speaker-cover-{sanitized_mac}-{sanitized_handle}.jpg",
         dir.display()

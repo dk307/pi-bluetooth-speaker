@@ -18,13 +18,15 @@ use std::sync::{Arc, Mutex};
 
 use speaker_core::diag::ScopedTempDir;
 use speaker_core::hardware::BluetoothDevice;
+use speaker_core::hardware::validate_bip_handle;
 use zbus::fdo;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 /// Tunable behaviour of the fake `BlueZ`/OBEX service.
 struct Behavior {
     mac_path: String,
-    handle: String,
+    /// `ImgHandle` reported in the fake `MediaPlayer1` Track (`None` omits it).
+    handle: Option<String>,
     create_ok: bool,
     session_alive: bool,
     properties_ok: bool,
@@ -43,7 +45,7 @@ struct Behavior {
     last_get_pixel: String,
     device_connected: bool,
     /// PSM port reported by the fake `MediaPlayer1` (`ObexPort`).
-    obex_port: u16,
+    obex_port: Option<u16>,
     /// Position (milliseconds) reported by the fake `MediaPlayer1`.
     position_ms: u32,
     /// Number of `Seek` calls observed on the fake `MediaPlayer1`.
@@ -109,7 +111,9 @@ impl ObjectManager {
         let b = self.0.lock().unwrap();
         let mut track: HashMap<&str, Value<'_>> = HashMap::new();
         track.insert("Title", Value::from("Song"));
-        track.insert("ImgHandle", Value::from(b.handle.as_str()));
+        if let Some(handle) = &b.handle {
+            track.insert("ImgHandle", Value::from(handle.as_str()));
+        }
         let mut props: HashMap<String, OwnedValue> = HashMap::new();
         props.insert("Status".into(), Value::from("playing").try_into().unwrap());
         props.insert(
@@ -123,10 +127,9 @@ impl ObjectManager {
             "Position".into(),
             Value::from(b.position_ms).try_into().unwrap(),
         );
-        props.insert(
-            "ObexPort".into(),
-            Value::from(b.obex_port).try_into().unwrap(),
-        );
+        if let Some(port) = b.obex_port {
+            props.insert("ObexPort".into(), Value::from(port).try_into().unwrap());
+        }
         let mut ifaces = HashMap::new();
         ifaces.insert("org.bluez.MediaPlayer1".to_string(), props);
         let mut out = HashMap::new();
@@ -303,7 +306,7 @@ impl Harness {
         let mac_us = mac.replace(':', "_");
         let mut b = Behavior {
             mac_path: format!("/org/bluez/hci0/dev_{mac_us}"),
-            handle: format!("h{mac_us}"),
+            handle: Some("1669286".to_string()),
             create_ok: true,
             session_alive: true,
             properties_ok: true,
@@ -318,7 +321,7 @@ impl Harness {
             native_get_calls: AtomicUsize::new(0),
             last_get_pixel: String::new(),
             device_connected: true,
-            obex_port: 4097,
+            obex_port: Some(4097),
             position_ms: 45_000,
             seek_calls: AtomicUsize::new(0),
             last_seek_offset_us: 0,
@@ -691,7 +694,7 @@ fn session_is_recreated_when_psm_port_changes_without_breaker_trip() {
     // (bound to the old PSM) must be torn down and a new one created — and a
     // PSM change is normal operation, so the breaker must NOT be fed.
     h.remove_cover_files();
-    h.state.lock().unwrap().obex_port = 4098;
+    h.state.lock().unwrap().obex_port = Some(4098);
     assert!(h.cover().is_some(), "cover resolves on the new PSM");
     assert_eq!(
         h.create_calls(),
@@ -746,5 +749,128 @@ fn reconnect_resets_breaker_and_releases_stale_session() {
     assert!(
         h.create_calls() > 2,
         "CreateSession was suppressed by an open breaker"
+    );
+}
+
+#[test]
+fn bip_handle_validation_matches_aosp_contract() {
+    // Valid: exactly 7 ASCII digits (what AOSP phones advertise in Track.ImgHandle).
+    for (raw, expected) in [
+        ("1669286", Some("1669286")),
+        ("0000000", Some("0000000")),
+        // Invalid: wrong length, non-digits, whitespace, empty.
+        ("166928", None),
+        ("16692861", None),
+        ("h11_00_00_00_00_01", None),
+        ("16692a6", None),
+        ("1669 86", None),
+        ("", None),
+    ] {
+        assert_eq!(
+            validate_bip_handle(raw).as_deref(),
+            expected,
+            "unexpected validation outcome for {raw:?}"
+        );
+    }
+}
+
+#[test]
+fn cover_art_skipped_for_malformed_handle() {
+    let h = Harness::new("11:00:00:00:00:51", |b| {
+        b.handle = Some("not-a-handle".to_string());
+    });
+    assert!(
+        h.cover().is_none(),
+        "a malformed ImgHandle must never reach an OBEX Get"
+    );
+    // The BIP session is still kept alive (AOSP liveness contract) even for a
+    // malformed handle; only the fetch itself is skipped.
+    assert_eq!(
+        h.create_calls(),
+        1,
+        "session ensure runs per tick; the OBEX fetch must be skipped"
+    );
+}
+
+#[test]
+fn cover_art_fetch_skipped_while_session_breaker_open() {
+    let h = Harness::new("11:00:00:00:00:61", |b| b.create_ok = false);
+
+    // Tick 1: per-tick session ensure plus the worker attempt consume exactly
+    // the breaker threshold (2 consecutive CreateSession failures).
+    let _ = h.device.playback_state().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Further ticks hit the open breaker: `ensure_obex_session` must skip the
+    // CreateSession round-trip entirely instead of hammering obexd.
+    for _ in 0..4 {
+        let _ = h.device.playback_state().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    assert_eq!(
+        h.create_calls(),
+        2,
+        "CreateSession must be skipped while the OBEX breaker is open"
+    );
+}
+
+#[test]
+fn reconnect_releases_live_stale_session_and_resets_state() {
+    let h = Harness::new("11:00:00:00:00:62", |_| {});
+
+    // Establish a live cached BIP session.
+    let path = h.cover().expect("cover resolves and session is cached");
+    assert_eq!(h.create_calls(), 1);
+
+    // Baseline async tick: `notify_device_connection` records the device as
+    // connected (first-ever observation is baseline only).
+    let _ = h.device.playback_state().unwrap();
+
+    // Drop the link, then reconnect. Both edges go through the async poll
+    // path; the reconnect edge tears the still-cached stale session down and
+    // resets breaker bookkeeping.
+    h.state.lock().unwrap().device_connected = false;
+    let _ = h.device.playback_state().unwrap();
+    h.state.lock().unwrap().device_connected = true;
+    let _ = h.device.playback_state().unwrap();
+
+    // The next fetch recreates the session on the fresh link (cache miss).
+    h.remove_cover_files();
+    let repathed = h.cover().expect("cover resolves after reconnect");
+    assert!(std::path::Path::new(&*repathed).exists());
+    assert_eq!(
+        h.create_calls(),
+        2,
+        "stale session released; fresh one created"
+    );
+    assert_eq!(repathed, path, "same handle caches to the same path");
+}
+#[test]
+fn cover_art_skipped_when_track_has_no_img_handle() {
+    let h = Harness::new("11:00:00:00:00:63", |b| b.handle = None);
+
+    let pb = h.device.playback_state().unwrap().expect("player present");
+    assert!(
+        pb.cover_art_path.is_none(),
+        "no ImgHandle means no cover art for this track"
+    );
+    // The BIP session is still kept alive (AOSP liveness contract) so the
+    // phone starts advertising ImgHandle on the next track.
+    assert_eq!(h.create_calls(), 1);
+}
+
+#[test]
+fn cover_art_skipped_when_no_obex_port() {
+    let h = Harness::new("11:00:00:00:00:64", |b| b.obex_port = None);
+
+    let pb = h.device.playback_state().unwrap().expect("player present");
+    assert!(
+        pb.cover_art_path.is_none(),
+        "no ObexPort means no BIP flow at all"
+    );
+    assert_eq!(
+        h.create_calls(),
+        0,
+        "no CreateSession may be attempted without an ObexPort"
     );
 }

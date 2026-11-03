@@ -26,10 +26,10 @@ use super::cover_art::{
     BT_SOCKET_RMEM_DEFAULT, BT_SOCKET_RMEM_MAX, COVER_ART_CACHE_DIR, HCI_SUPERVISION_TIMEOUT_SLOTS,
     clean_old_cover_art_in, cover_art_cached_path_in, cover_art_path_for_in,
     ensure_cover_art_cache_dir_in, is_complete_jpeg, load_device_caps_in, load_native_caps_in,
-    native_image_size, sanitize_bip_handle, select_bip_candidates, store_device_cap_in,
-    store_native_cap_in,
+    native_image_size, select_bip_candidates, store_device_cap_in, store_native_cap_in,
 };
 use super::transport::{BlueAlsaPcm, BtPlaybackState, decode_pcm_format, format_volume_bytes};
+use super::validate_bip_handle;
 
 /// Number of consecutive OBEX transport failures that trip the circuit breaker.
 const OBEX_BREAKER_FAILURE_THRESHOLD: u32 = 2;
@@ -1891,7 +1891,7 @@ impl DbusClient {
         fetch_started: Instant,
     ) -> Option<Box<str>> {
         let cache_path_buf = std::path::PathBuf::from(cache_path);
-        let sanitized_handle = sanitize_bip_handle(handle)?;
+        let sanitized_handle = validate_bip_handle(handle)?;
 
         let native_breaker_tripped = {
             let state = self.state();
