@@ -17,6 +17,10 @@ name = "core"
 path = "src/main.rs"
 
 [[bin]]
+name = "bt-manager"
+path = "src/bin/bt-manager.rs"
+
+[[bin]]
 name = "temp-read"
 path = "src/bin/temp-read.rs"
 
