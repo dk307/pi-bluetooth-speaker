@@ -8,6 +8,7 @@
 use std::backtrace::Backtrace;
 use std::fmt::{self, Formatter};
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use config::Config as LayeredConfig;
@@ -597,5 +598,18 @@ mod tests {
         assert!(io_err.is_io());
         let layered_err = ConfigError::config("ctx", config::ConfigError::Message("boom".into()));
         assert!(layered_err.is_config());
+    }
+}
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    #[test]
+    fn save_installs_world_readable_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        CoreConfig::default().save(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
     }
 }

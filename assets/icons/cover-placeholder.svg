@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1e24" />
+      <stop offset="100%" stop-color="#121216" />
+    </linearGradient>
+    <linearGradient id="accent-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff6b6b" />
+      <stop offset="100%" stop-color="#5f27cd" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="256" height="256" fill="url(#bg-grad)" />
+  
+  <!-- Outer Disc & Grooves -->
+  <circle cx="128" cy="128" r="88" fill="#0d0d11" stroke="#2a2a35" stroke-width="2" />
+  <circle cx="128" cy="128" r="74" fill="none" stroke="#1f1f27" stroke-width="1.5" stroke-dasharray="120 20" />
+  <circle cx="128" cy="128" r="60" fill="none" stroke="#1f1f27" stroke-width="1.5" stroke-dasharray="80 30" />
+  <circle cx="128" cy="128" r="46" fill="none" stroke="#2a2a35" stroke-width="1" />
+  
+  <!-- Center Label -->
+  <circle cx="128" cy="128" r="30" fill="url(#accent-grad)" />
+  
+  <!-- Spindle Hole -->
+  <circle cx="128" cy="128" r="8" fill="#121216" />
+</svg>

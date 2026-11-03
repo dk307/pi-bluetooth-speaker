@@ -266,7 +266,7 @@ export component NowPlayingView inherits Rectangle {
                     vertical-alignment: center;
                 }
 
-                // 2. Vinyl Record Graphic (when no Bluetooth cover art)
+                // 2. Cover Art Placeholder (when no Bluetooth cover art)
                 if !root.has_cover_art : Image {
                     width: 78%;
                     height: 78%;
@@ -412,20 +412,12 @@ export component NowPlayingView inherits Rectangle {
                             alignment: center;
                             HorizontalLayout {
                                 alignment: center;
-                                spacing: 4px;
-
-                                Rectangle {
-                                    width: 4px;
-                                    height: 22px;
-                                    border-radius: 2px;
-                                    background: Theme.active.text_primary;
-                                }
 
                                 Image {
-                                    source: @image-url("../../../assets/icons/left.svg");
+                                    source: @image-url("../../../assets/icons/previous.svg");
                                     colorize: Theme.active.text_primary;
-                                    width: 16px;
-                                    height: 22px;
+                                    width: 24px;
+                                    height: 24px;
                                     image-fit: contain;
                                     vertical-alignment: center;
                                 }
@@ -493,29 +485,21 @@ export component NowPlayingView inherits Rectangle {
                         border-width: 1px;
                         border-color: Theme.active.card_border;
 
-                        VerticalLayout {
-                            alignment: center;
-                            HorizontalLayout {
+                            VerticalLayout {
                                 alignment: center;
-                                spacing: 4px;
+                                HorizontalLayout {
+                                    alignment: center;
 
-                                Image {
-                                    source: @image-url("../../../assets/icons/right.svg");
-                                    colorize: Theme.active.text_primary;
-                                    width: 16px;
-                                    height: 22px;
-                                    image-fit: contain;
-                                    vertical-alignment: center;
-                                }
-
-                                Rectangle {
-                                    width: 4px;
-                                    height: 22px;
-                                    border-radius: 2px;
-                                    background: Theme.active.text_primary;
+                                    Image {
+                                        source: @image-url("../../../assets/icons/next.svg");
+                                        colorize: Theme.active.text_primary;
+                                        width: 24px;
+                                        height: 24px;
+                                        image-fit: contain;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
-                        }
 
                         TouchArea {
                             clicked => {

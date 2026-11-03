@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="25 0 345 100">
+  <!-- Bluetooth Bindrune Symbol -->
+  <path d="M 28 34 L 62 66 L 45 80 V 20 L 62 34 L 28 66" fill="none" stroke="#0082FC" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" />
+
+  <!-- Bluetooth Wordmark -->
+  <text x="85" y="52" fill="#0082FC" font-family="&#39;Franklin Gothic Medium&#39;, &#39;Franklin Gothic&#39;, &#39;ITC Franklin Gothic&#39;, sans-serif" font-size="46" font-weight="500" letter-spacing="-0.5px" dominant-baseline="middle">Bluetooth</text>
+</svg>

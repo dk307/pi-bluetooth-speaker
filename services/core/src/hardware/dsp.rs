@@ -1134,6 +1134,29 @@ impl DspDevice {
         }
     }
 
+    /// Runs an optional telemetry query, logging failures at debug level.
+    ///
+    /// Unlike [`Self::send_command`], a failed query is not fatal: the field is
+    /// reported as absent and a debug log records why it went missing.
+    async fn optional_query<S>(ws: &mut S, cmd: &str) -> Option<serde_json::Value>
+    where
+        S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error>
+            + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+            + Unpin,
+    {
+        match Self::send_command(ws, cmd).await {
+            Ok(value) => Some(value),
+            Err(e) => {
+                tracing::debug!(
+                    command = cmd,
+                    error = %e,
+                    "optional DSP telemetry query failed; skipping field"
+                );
+                None
+            }
+        }
+    }
+
     async fn reset_hardware_clipped(host: DspHost, port: DspPort) -> Result<(), DspError> {
         let mut ws = Self::connect_ws(&host, port).await?;
         Self::send_command(&mut ws, "ResetClippedSamples").await?;
@@ -1141,10 +1164,6 @@ impl DspDevice {
         Ok(())
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Sequentially queries all CamillaDSP WebSocket pipeline telemetry fields"
-    )]
     async fn query_hardware_status(
         host: DspHost,
         port: DspPort,
@@ -1153,21 +1172,18 @@ impl DspDevice {
         let mut ws = Self::connect_ws(&host, port).await?;
 
         // 1. Version
-        let version = Self::send_command(&mut ws, "GetVersion")
+        let version = Self::optional_query(&mut ws, "GetVersion")
             .await
-            .ok()
             .and_then(|v| v.as_str().map(Into::into));
 
         // 2. Config Title
-        let config_title = Self::send_command(&mut ws, "GetConfigTitle")
+        let config_title = Self::optional_query(&mut ws, "GetConfigTitle")
             .await
-            .ok()
             .and_then(|v| v.as_str().map(Into::into));
 
         // 3. Config File Path
-        let config_path = Self::send_command(&mut ws, "GetConfigFilePath")
+        let config_path = Self::optional_query(&mut ws, "GetConfigFilePath")
             .await
-            .ok()
             .and_then(|v| v.as_str().map(Into::into));
 
         // 4. State (mandatory core telemetry)
@@ -1185,9 +1201,8 @@ impl DspDevice {
             .ok_or_else(|| DspError::protocol_error("invalid GetProcessingLoad float response"))?;
 
         // 6. Resampler Load (optional v4 feature)
-        let resampler_load = Self::send_command(&mut ws, "GetResamplerLoad")
+        let resampler_load = Self::optional_query(&mut ws, "GetResamplerLoad")
             .await
-            .ok()
             .and_then(|v| v.as_f64().map(|f| f as f32));
 
         // 7. Rate Adjust (mandatory core telemetry)
@@ -1210,9 +1225,8 @@ impl DspDevice {
         })?;
 
         // 10. Capture Rate (optional, present when capture stream active)
-        let capture_rate = Self::send_command(&mut ws, "GetCaptureRate")
+        let capture_rate = Self::optional_query(&mut ws, "GetCaptureRate")
             .await
-            .ok()
             .and_then(|v| v.as_u64().map(|u| u as u32));
 
         // 11. Stop Reason (mandatory core telemetry)
@@ -1223,14 +1237,12 @@ impl DspDevice {
         let stop_reason = StopReason::parse_reason(stop_str);
 
         // 12. Volume & Mute
-        let volume_db = Self::send_command(&mut ws, "GetVolume")
+        let volume_db = Self::optional_query(&mut ws, "GetVolume")
             .await
-            .ok()
             .and_then(|v| v.as_f64().map(|f| f as f32));
 
-        let muted = Self::send_command(&mut ws, "GetMute")
+        let muted = Self::optional_query(&mut ws, "GetMute")
             .await
-            .ok()
             .and_then(|v| v.as_bool());
 
         // 13. Levels: Try GetSignalLevels first, fallback to individual queries
@@ -1238,24 +1250,20 @@ impl DspDevice {
             if let Ok(levels_val) = Self::send_command(&mut ws, "GetSignalLevels").await {
                 parse_levels_object(&levels_val)
             } else {
-                let cap_p = Self::send_command(&mut ws, "GetCaptureSignalPeak")
+                let cap_p = Self::optional_query(&mut ws, "GetCaptureSignalPeak")
                     .await
-                    .ok()
                     .map(|v| parse_f32_list(&v))
                     .unwrap_or_default();
-                let cap_r = Self::send_command(&mut ws, "GetCaptureSignalRms")
+                let cap_r = Self::optional_query(&mut ws, "GetCaptureSignalRms")
                     .await
-                    .ok()
                     .map(|v| parse_f32_list(&v))
                     .unwrap_or_default();
-                let play_p = Self::send_command(&mut ws, "GetPlaybackSignalPeak")
+                let play_p = Self::optional_query(&mut ws, "GetPlaybackSignalPeak")
                     .await
-                    .ok()
                     .map(|v| parse_f32_list(&v))
                     .unwrap_or_default();
-                let play_r = Self::send_command(&mut ws, "GetPlaybackSignalRms")
+                let play_r = Self::optional_query(&mut ws, "GetPlaybackSignalRms")
                     .await
-                    .ok()
                     .map(|v| parse_f32_list(&v))
                     .unwrap_or_default();
                 (cap_p, cap_r, play_p, play_r)

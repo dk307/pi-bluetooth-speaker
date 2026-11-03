@@ -278,6 +278,20 @@ mod tests {
     }
 
     #[test]
+    fn deserializes_from_value_and_reader() {
+        let value = serde_json::Value::String("marantz".to_owned());
+        assert_eq!(
+            serde_json::from_value::<ThemePreset>(value).unwrap(),
+            ThemePreset::MarantzAmber
+        );
+        let reader = std::io::Cursor::new(b"\"peppy\"".to_vec());
+        assert_eq!(
+            serde_json::from_reader::<_, ThemePreset>(reader).unwrap(),
+            ThemePreset::Peppy
+        );
+    }
+
+    #[test]
     fn rejects_unknown_slug() {
         let err = serde_json::from_str::<ThemePreset>("\"bogus\"")
             .unwrap_err()

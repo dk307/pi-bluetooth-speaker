@@ -1215,6 +1215,15 @@ fn spawn_properties_changed_listener(
                     std::thread::sleep(RECONNECT_BACKOFF);
                     continue;
                 };
+                // Clone the connection out of the slot so the slot lock is
+                // released while the thread parks inside the iterator.
+                // Otherwise `DbusClient::drop` (which must lock the slot to
+                // take and close the connection) would deadlock against the
+                // parked listener thread.
+                let Some(conn) = conn_slot.lock().unwrap().as_ref().cloned() else {
+                    // Slot emptied by drop: the connection has been closed.
+                    return;
+                };
                 let Ok(iter) = zbus::blocking::MessageIterator::for_match_rule(rule, &conn, None)
                 else {
                     std::thread::sleep(RECONNECT_BACKOFF);
@@ -1254,7 +1263,7 @@ fn spawn_properties_changed_listener(
 /// other holder of the same `Connection` clone).
 #[derive(Debug)]
 pub struct DbusClient {
-    conn: Connection,
+    conn_slot: Arc<Mutex<Option<Connection>>>,
     device_caps_dir: std::path::PathBuf,
     cache_dir: std::path::PathBuf,
     state: Arc<Mutex<DbusClientState>>,
@@ -1298,10 +1307,10 @@ impl DbusClient {
         reason = "constructor takes ownership of the caller's connection; the slot requires an owned value"
     )]
     pub fn new(conn: Connection) -> Self {
+        let conn_slot: Arc<Mutex<Option<Connection>>> = Arc::new(Mutex::new(Some(conn)));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let conn_slot: Arc<Mutex<Option<Connection>>> = Arc::new(Mutex::new(Some(conn.clone())));
         Self {
-            conn: conn.clone(),
+            conn_slot: Arc::clone(&conn_slot),
             device_caps_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             state: Arc::new(Mutex::new(DbusClientState::default())),
@@ -1314,6 +1323,20 @@ impl DbusClient {
         }
     }
 
+    /// Clones the current D-Bus connection out of the slot.
+    ///
+    /// The `Drop` impl drains the slot and closes the connection to release
+    /// the parked listener thread; reaching this method afterwards is a
+    /// use-after-drop bug, so panicking is the correct behavior.
+    fn conn(&self) -> Connection {
+        self.conn_slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .expect("DbusClient connection accessed after drop")
+    }
+
     /// Waits up to `timeout` for a D-Bus property-change notification.
     ///
     /// Returns `true` when a change was signaled, `false` on timeout (keep-alive).
@@ -1322,7 +1345,7 @@ impl DbusClient {
     }
 
     pub(crate) fn check_services(&self) -> Result<BluetoothServices, BtError> {
-        let manager = SystemdManagerProxyBlocking::new(&self.conn)?;
+        let manager = SystemdManagerProxyBlocking::new(&self.conn())?;
         Ok(BluetoothServices {
             bluetoothd: self.check_service(&manager, "bluetooth.service")?,
             bluealsa: self.check_service(&manager, "bluealsa.service")?,
@@ -1338,7 +1361,7 @@ impl DbusClient {
     ) -> Result<ServiceState, BtError> {
         match manager.get_unit(name) {
             Ok(path) => {
-                let unit = match SystemdUnitProxyBlocking::builder(&self.conn)
+                let unit = match SystemdUnitProxyBlocking::builder(&self.conn())
                     .path(path)
                     .and_then(zbus::blocking::proxy::Builder::build)
                 {
@@ -1482,7 +1505,7 @@ impl DbusClient {
         &self,
         target_adapter: Option<&str>,
     ) -> Result<BluezSnapshot, BtError> {
-        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
             .destination("org.bluez")
             .and_then(|b| b.path("/"))
             .and_then(zbus::blocking::proxy::Builder::build)?;
@@ -1509,7 +1532,7 @@ impl DbusClient {
 
     fn is_obex_session_alive(&self, path: &str) -> bool {
         zbus::blocking::Proxy::new(
-            &self.conn,
+            &self.conn(),
             "org.bluez.obex",
             path,
             "org.bluez.obex.Session1",
@@ -1536,7 +1559,7 @@ impl DbusClient {
             session_lock.obex_session = None;
         }
 
-        let client = ObexClientProxyBlocking::new(&self.conn).ok()?;
+        let client = ObexClientProxyBlocking::new(&self.conn()).ok()?;
         let mut args = HashMap::new();
         args.insert("Target", Value::from("bip-avrcp"));
         args.insert("PSM", Value::from(port));
@@ -1727,7 +1750,7 @@ impl DbusClient {
         &'a self,
         session_path: &'a str,
     ) -> Option<ObexImageProxyBlocking<'a>> {
-        ObexImageProxyBlocking::builder(&self.conn)
+        ObexImageProxyBlocking::builder(&self.conn())
             .path(session_path)
             .ok()?
             .build()
@@ -1864,7 +1887,7 @@ impl DbusClient {
     /// Returns `Some(true)` when the transfer reports `complete`, `Some(false)` on error
     /// or D-Bus failure, and `None` when the watchdog expired (after issuing `Cancel`).
     fn wait_for_transfer(&self, transfer_path: &str, timeout_ms: u64) -> Option<bool> {
-        let proxy = ObexTransferProxyBlocking::builder(&self.conn)
+        let proxy = ObexTransferProxyBlocking::builder(&self.conn())
             .path(transfer_path)
             .ok()
             .and_then(|b| b.build().ok())?;
@@ -1933,7 +1956,7 @@ impl DbusClient {
     /// device had to be reconnected (the caller must break out of the high-res loop).
     fn ensure_device_acl_connected(&self, addr: BtAddress) -> bool {
         let dev_path = format!("/org/bluez/hci0/dev_{}", addr.to_string().replace(':', "_"));
-        let proxy = ObexDeviceProxyBlocking::builder(&self.conn)
+        let proxy = ObexDeviceProxyBlocking::builder(&self.conn())
             .path(dev_path.as_str())
             .ok()
             .and_then(|b| b.build().ok());
@@ -2078,7 +2101,7 @@ impl DbusClient {
         let path = if let Some(p) = player_path {
             p.to_string()
         } else {
-            let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+            let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
                 .destination("org.bluez")
                 .and_then(|b| b.path("/"))
                 .and_then(zbus::blocking::proxy::Builder::build)?;
@@ -2091,7 +2114,7 @@ impl DbusClient {
         };
 
         let proxy =
-            zbus::blocking::Proxy::new(&self.conn, "org.bluez", path, "org.bluez.MediaPlayer1")?;
+            zbus::blocking::Proxy::new(&self.conn(), "org.bluez", path, "org.bluez.MediaPlayer1")?;
         proxy.call_method(method, &())?;
         Ok(())
     }
@@ -2108,7 +2131,7 @@ impl DbusClient {
     /// # Errors
     /// Returns [`BtError`] if D-Bus communication fails or no active player exists.
     pub(crate) fn player_seek(&self, position_ms: u32) -> Result<(), BtError> {
-        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
             .destination("org.bluez")
             .and_then(|b| b.path("/"))
             .and_then(zbus::blocking::proxy::Builder::build)?;
@@ -2125,7 +2148,7 @@ impl DbusClient {
         // millisecond target using the freshly observed position.
         let offset_us = (i64::from(position_ms) - i64::from(playback.position_ms)) * 1_000;
         let player =
-            zbus::blocking::Proxy::new(&self.conn, "org.bluez", path, "org.bluez.MediaPlayer1")?;
+            zbus::blocking::Proxy::new(&self.conn(), "org.bluez", path, "org.bluez.MediaPlayer1")?;
         player.call_method("Seek", &(offset_us,))?;
         tracing::debug!(
             position_ms,
@@ -2137,7 +2160,7 @@ impl DbusClient {
     }
 
     pub(crate) fn playback_state(&self) -> Result<Option<BtPlaybackState>, BtError> {
-        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
             .destination("org.bluez")
             .and_then(|b| b.path("/"))
             .and_then(zbus::blocking::proxy::Builder::build)?;
@@ -2148,7 +2171,7 @@ impl DbusClient {
     }
 
     pub(crate) fn player_toggle(&self) -> Result<bool, BtError> {
-        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
             .destination("org.bluez")
             .and_then(|b| b.path("/"))
             .and_then(zbus::blocking::proxy::Builder::build)?;
@@ -2170,7 +2193,7 @@ impl DbusClient {
         &self,
         devices: &[BtDevice],
     ) -> Result<Box<[BlueAlsaPcm]>, BtError> {
-        let proxy = match zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn)
+        let proxy = match zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
             .destination("org.bluealsa")
             .and_then(|b| b.path("/org/bluealsa"))
             .and_then(zbus::blocking::proxy::Builder::build)
@@ -2189,7 +2212,7 @@ impl DbusClient {
         let pcms = Self::parse_bluealsa_objects(&objects, devices)
             .into_iter()
             .map(|mut pcm| {
-                pcm.available_codecs = Self::query_pcm_codecs(&self.conn, &pcm.pcm_path)?;
+                pcm.available_codecs = Self::query_pcm_codecs(&self.conn(), &pcm.pcm_path)?;
                 Ok(pcm)
             })
             .collect::<Result<Vec<_>, BtError>>()?;
@@ -2323,7 +2346,7 @@ impl DbusClient {
     {
         let adapter_id = target_adapter.unwrap_or(DEFAULT_BT_ADAPTER);
         let path = format!("/org/bluez/{adapter_id}");
-        let proxy = match BlueZAdapter1ProxyBlocking::builder(&self.conn)
+        let proxy = match BlueZAdapter1ProxyBlocking::builder(&self.conn())
             .path(path.as_str())
             .and_then(zbus::blocking::proxy::Builder::build)
         {
