@@ -21,7 +21,7 @@ use std::time::Instant;
 
 #[cfg(feature = "ui")]
 use crate::config::CoreConfig;
-use crate::diag::{env_args, next_arg_value, resolve_cli_opts, CliParse, DEFAULT_CONFIG_PATH};
+use crate::diag::{CliParse, DEFAULT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts};
 use crate::hardware::TempSensor;
 #[cfg(feature = "ui")]
 use crate::ui::theme::ThemePreset;
@@ -31,11 +31,11 @@ use crate::ui::{
     FramebufferError, MainWindow, SplashScreen,
 };
 #[cfg(feature = "ui")]
-use slint::platform::software_renderer::MinimalSoftwareWindow;
+use slint::ComponentHandle;
 #[cfg(feature = "ui")]
 use slint::platform::WindowAdapter;
 #[cfg(feature = "ui")]
-use slint::ComponentHandle;
+use slint::platform::software_renderer::MinimalSoftwareWindow;
 
 /// Target screen to render on the framebuffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
