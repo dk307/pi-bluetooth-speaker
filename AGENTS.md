@@ -16,6 +16,7 @@ This document defines the behavioral, architectural, and engineering rules for A
 * **Live Hardware Testing via SSH (`root@192.168.2.120`):**
   * You can test compiled `aarch64` binaries directly on the live Raspberry Pi 3 over SSH at `root@192.168.2.120`.
   * **Strict Non-Destructive Rule:** **Do NOT modify any persistent files, configurations, or running services on the SSH server.** Copy test/utility binaries only to `/tmp/<binary>`, execute them, and remove `/tmp/<binary>` immediately afterward. **Exception:** when the user explicitly asks to deploy/install release binaries, copy them to `/usr/local/bin` (never touch configs or services, and do not restart services unless asked).
+  * **Mandatory Deployment Script:** When asked to deploy/install release binaries to the SSH server, ALWAYS use the provided helper script [`scripts/deploy_binaries.sh`](scripts/deploy_binaries.sh) instead of manually running `scp`/`ssh` commands. It handles copying binaries from the release build output to `/usr/local/bin`, performs sha256 integrity verification on both ends, and sets executable permissions. Usage: `scripts/deploy_binaries.sh` (deploys all known binaries) or `scripts/deploy_binaries.sh <binary-name>...` (deploys selected binaries only).
 
 ---
 
