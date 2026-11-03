@@ -180,11 +180,10 @@ pub fn report_display(level: tracing::Level, context: &str, err: impl std::fmt::
         _ => "Display",
     };
     if level == tracing::Level::ERROR {
-        tracing::error!("{context}: {err}");
+        tracing::error!(target: "display", "{tag}: {context}: {err}");
     } else {
-        tracing::warn!("{context}: {err}");
+        tracing::warn!(target: "display", "{tag}: {context}: {err}");
     }
-    eprintln!("  {tag}: {context}: {err}");
 }
 
 /// Runs the UI display loop on the default `/dev/fb0` device path.
@@ -198,7 +197,6 @@ pub fn run_ui_display(
 ) {
     if headless_requested() {
         tracing::info!("Headless mode requested via SPEAKER_CORE_HEADLESS=1");
-        println!("  Display: Headless mode requested via SPEAKER_CORE_HEADLESS.");
         return;
     }
     run_ui_display_on_path(
@@ -230,12 +228,10 @@ pub fn run_ui_display_on_path(
 ) {
     if !fb_path.exists() {
         tracing::info!("Headless/simulated environment (no /dev/fb0 detected)");
-        println!("  Display: Headless/simulated environment (no /dev/fb0 detected).");
         return;
     }
 
     tracing::info!("Initializing Framebuffer /dev/fb0 (800x480 32bpp BGRX)");
-    println!("  Display: Initializing Framebuffer /dev/fb0 (800x480 32bpp BGRX)...");
     let blank_path = (fb_path == Path::new(Framebuffer::DEFAULT_FB_PATH))
         .then_some(Framebuffer::DEFAULT_BLANK_PATH);
     let mut fb = match Framebuffer::open(fb_path, blank_path) {
@@ -303,11 +299,9 @@ pub fn run_ui_lifecycle<C, F>(
     match fb.render_frame(&window) {
         Ok(true) => {
             tracing::info!("{label} rendered to /dev/fb0 successfully");
-            println!("  Display: {label} rendered to /dev/fb0 successfully!");
         }
         Ok(false) => {
             tracing::debug!("Screen buffer already current");
-            println!("  Display: Screen buffer already current.");
         }
         Err(e) => {
             report_display(tracing::Level::ERROR, "Failed to render frame", &e);
@@ -318,7 +312,6 @@ pub fn run_ui_lifecycle<C, F>(
     let start = Instant::now();
     let duration = preview_secs.map(Duration::from_secs);
     tracing::info!("Running UI render loop");
-    println!("  Display: Running UI render loop...");
 
     while duration.is_none_or(|d| start.elapsed() < d) {
         slint::platform::update_timers_and_animations();
@@ -329,7 +322,6 @@ pub fn run_ui_lifecycle<C, F>(
         std::thread::sleep(Duration::from_millis(16));
     }
     tracing::info!("Render loop finished");
-    println!("  Display: Render loop finished.");
 }
 
 /// Applies one boot-check update to the splash screen's single check line.
@@ -413,7 +405,6 @@ pub fn run_splash_on(
         Ok(handle) => Some(handle),
         Err(err) => {
             tracing::warn!("Failed to spawn boot-checks worker, skipping checks: {err}");
-            println!("  Warning: boot checks skipped (worker spawn failed).");
             None
         }
     };
@@ -423,11 +414,9 @@ pub fn run_splash_on(
         match fb.render_frame(&window) {
             Ok(true) => {
                 tracing::info!("Boot splash screen rendered to /dev/fb0 successfully");
-                println!("  Display: Boot splash screen rendered to /dev/fb0 successfully!");
             }
             Ok(false) => {
                 tracing::debug!("Screen buffer already current");
-                println!("  Display: Screen buffer already current.");
             }
             Err(e) => {
                 report_display(tracing::Level::ERROR, "Failed to render frame", &e);
@@ -440,7 +429,6 @@ pub fn run_splash_on(
         // wait forever on a hung hardware probe (blocking D-Bus/I2C calls).
         let deadline = preview_secs.map_or(MAX_SPLASH_WAIT, Duration::from_secs);
         tracing::info!("Running UI render loop");
-        println!("  Display: Running UI render loop...");
 
         loop {
             loop {
@@ -478,7 +466,6 @@ pub fn run_splash_on(
     }
 
     tracing::info!("Splash render loop finished");
-    println!("  Display: Splash render loop finished.");
 }
 
 /// Fully-initialized shell plus its Bluetooth transport wiring.
@@ -958,7 +945,6 @@ pub fn run_render_loop(
     let start = Instant::now();
     let duration = preview_secs.map(Duration::from_secs);
     tracing::info!("Running UI render loop");
-    println!("  Display: Running UI render loop...");
 
     let bg_running = Arc::new(AtomicBool::new(true));
     let bg_running_worker = Arc::clone(&bg_running);
@@ -1043,7 +1029,6 @@ pub fn run_render_loop(
         }
     }
     tracing::info!("Render loop finished");
-    println!("  Display: Render loop finished.");
 }
 
 /// Applies queued Bluetooth playback/PCM/cover updates from the worker to the shell.
@@ -1176,7 +1161,7 @@ impl FrameLoopTiming {
     fn report(&self) {
         let rendered = self.rendered.max(1);
         let max_dirty_box = format!("{:?}", self.max_dirty_box);
-        println!(
+        tracing::debug!(
             "Frame timing: {frames} loop iterations, {rendered} rendered | avg draw {draw} us, avg compose {compose} us, avg vsync {vsync} us (blocking), avg blit {blit} us, max draw {max_draw} us | avg dirty {dirty} px, max dirty {max_dirty} px at {max_dirty_box}",
             frames = self.frames,
             rendered = self.rendered,
@@ -1250,7 +1235,6 @@ pub fn run_shell_on(
         return;
     }
     tracing::info!("UI Shell rendered to /dev/fb0 successfully");
-    println!("  Display: UI Shell rendered to /dev/fb0 successfully!");
 
     run_render_loop(fb, &window, &shell, bt.as_ref(), &commands, preview_secs);
 }
@@ -1260,10 +1244,14 @@ pub fn run_shell_on(
 pub fn run_app(opts: &CoreCliOptions) -> ExitCode {
     let temp_sensor = TempSensor::new();
 
-    println!("============================================================");
-    println!("  Speaker Core Service is running on Raspberry Pi 3!");
-    println!("  Target: ARM Cortex-A53 (aarch64)");
-    println!("  Thermal Sensor: {}", temp_sensor.gpio_info());
+    tracing::info!(
+        target = "arm-cortex-a53",
+        "Speaker Core Service running on Raspberry Pi 3 (aarch64)"
+    );
+    tracing::info!(
+        thermal_sensor = %temp_sensor.gpio_info(),
+        "Core service started"
+    );
 
     #[cfg(feature = "ui")]
     {
@@ -1285,7 +1273,6 @@ pub fn run_app(opts: &CoreCliOptions) -> ExitCode {
                 tracing::error!(error = %e, "failed to load config {}", path.display());
                 // Operator-facing rejection: keep it backtrace-free even under
                 // RUST_BACKTRACE=1 (full Display would append the stack trace).
-                eprintln!("  Config Error: {}", e.summary());
                 return ExitCode::FAILURE;
             }
         }
@@ -1293,15 +1280,16 @@ pub fn run_app(opts: &CoreCliOptions) -> ExitCode {
 
     #[cfg(not(feature = "ui"))]
     let _ = &opts;
-    #[cfg(not(feature = "ui"))]
-    println!("  Display: UI feature disabled at compile-time.");
-
-    println!("============================================================");
     ExitCode::SUCCESS
 }
 
 /// CLI main entrypoint for the `core` binary.
+///
+/// Installs the global `tracing` subscriber before any other work so startup
+/// events (config load, platform init) are captured; verbosity is controlled
+/// by `RUST_LOG` (default `info`, see [`crate::logging`]).
 pub fn main() -> ExitCode {
+    crate::logging::init_daemon_logging();
     match resolve_cli_opts(parse_cli_args_from(env_args()), "core", print_usage) {
         Ok(opts) => run_app(&opts),
         Err(exit_code) => exit_code,

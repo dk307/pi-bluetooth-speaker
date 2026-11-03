@@ -9,6 +9,7 @@ pub mod cli;
 pub mod config;
 pub mod diag;
 pub mod hardware;
+pub mod logging;
 pub mod runtime;
 #[cfg(feature = "ui")]
 pub mod ui;
