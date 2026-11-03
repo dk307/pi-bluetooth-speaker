@@ -43,9 +43,15 @@ pub fn map_join_result<T, E: FromJoinError>(
     match res {
         Ok(result) => result,
         Err(join_err) if join_err.is_panic() => panic::resume_unwind(join_err.into_panic()),
-        Err(join_err) if join_err.is_cancelled() => Err(E::from_cancelled(format!(
-            "{task_context} task was cancelled"
-        ))),
+        Err(join_err) if join_err.is_cancelled() => {
+            tracing::debug!(
+                task_context,
+                "blocking task was cancelled (expected during graceful shutdown)"
+            );
+            Err(E::from_cancelled(format!(
+                "{task_context} task was cancelled"
+            )))
+        }
         Err(join_err) => {
             // In Tokio, JoinError is guaranteed to be either panic or cancellation.
             unreachable!("Tokio JoinError is guaranteed to be panic or cancelled: {join_err}");
@@ -85,4 +91,60 @@ where
     });
     task.abort();
     map_join_result(task.await, task_context).unwrap_err()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq)]
+    enum TestError {
+        Cancelled(Box<str>),
+    }
+
+    impl FromJoinError for TestError {
+        fn from_cancelled(message: impl Into<Box<str>>) -> Self {
+            Self::Cancelled(message.into())
+        }
+    }
+
+    impl TestError {
+        fn is_cancelled(&self) -> bool {
+            matches!(self, Self::Cancelled(_))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_blocking_returns_inner_result() {
+        let res: Result<u8, TestError> = run_blocking("happy_path", || Ok(7)).await;
+        assert_eq!(res, Ok(7));
+    }
+
+    #[tokio::test]
+    async fn run_blocking_maps_cancellation_with_context() {
+        // Abort a long-running spawned task by mapping its join handle through
+        // the production mapping path (no post-panic code per lint hygiene).
+        let task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok::<u8, TestError>(0)
+        });
+        task.abort();
+        let mapped = map_join_result(task.await, "drive_task");
+        let err = mapped.unwrap_err();
+        assert!(err.is_cancelled());
+        match err {
+            TestError::Cancelled(msg) => {
+                assert!(msg.contains("drive_task"), "context missing: {msg}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn abort_and_map_produces_contextual_cancellation() {
+        let err: TestError = abort_and_map("light_sensor_task").await;
+        assert!(err.is_cancelled());
+        match err {
+            TestError::Cancelled(msg) => assert!(msg.contains("light_sensor_task")),
+        }
+    }
 }

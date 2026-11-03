@@ -21,7 +21,7 @@ use std::time::Instant;
 
 #[cfg(feature = "ui")]
 use crate::config::CoreConfig;
-use crate::diag::{env_args, next_arg_value, resolve_cli_opts, CliParse, DEFAULT_CONFIG_PATH};
+use crate::diag::{CliParse, DEFAULT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts};
 use crate::hardware::TempSensor;
 #[cfg(feature = "ui")]
 use crate::ui::theme::ThemePreset;
@@ -31,11 +31,11 @@ use crate::ui::{
     FramebufferError, MainWindow, SplashScreen,
 };
 #[cfg(feature = "ui")]
-use slint::platform::software_renderer::MinimalSoftwareWindow;
+use slint::ComponentHandle;
 #[cfg(feature = "ui")]
 use slint::platform::WindowAdapter;
 #[cfg(feature = "ui")]
-use slint::ComponentHandle;
+use slint::platform::software_renderer::MinimalSoftwareWindow;
 
 /// Target screen to render on the framebuffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -748,22 +748,17 @@ pub fn publish_playback_state(
                 .is_some_and(|t| t.elapsed() >= COVER_DECODE_RETRY);
             if cover.path != cover_path || retry_due {
                 if let Some(path) = cover_path.as_ref() {
-                    if let Some(path) = cover_path.as_ref() {
-                        if let Some(buffer) = decode_cover_buffer(path) {
-                            update.cover = Some(Some(buffer));
-                            cover.path = cover_path;
-                            cover.failed_since = None;
-                        } else {
-                            tracing::warn!("cover decode failed for {path}");
-                            // Keep the previously published art (never blank it)
-                            // and schedule a retry after the backoff.
-                            cover.path = cover_path;
-                            cover.failed_since = Some(Instant::now());
-                        }
+                    if let Some(buffer) = decode_cover_buffer(path) {
+                        update.cover = Some(Some(buffer));
+                        cover.path = cover_path;
+                        cover.failed_since = None;
+                    } else {
+                        tracing::warn!("cover decode failed for {path}");
+                        // Keep the previously published art (never blank it)
+                        // and schedule a retry after the backoff.
+                        cover.path = cover_path;
+                        cover.failed_since = Some(Instant::now());
                     }
-                    // No cached file (handle-less track or fetch pending) keeps the
-                    // previously published art: a snapshot never blanks the cover;
-                    // only a device disconnect clears it explicitly.
                 }
                 // No cached file (handle-less track or fetch pending) keeps the
                 // previously published art: a snapshot never blanks the cover;
