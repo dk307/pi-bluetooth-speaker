@@ -896,6 +896,7 @@ fn bt_monitor_loop(
         if !commands.is_empty() {
             last_pb = None;
             cover.path = None;
+            last_pcms = None;
             continue;
         }
 
