@@ -48,7 +48,7 @@ pub const BIP_DEFAULT_CAP_PX: u32 = 640_000;
 pub const BIP_MIN_HIGHRES_PX: u32 = 40_000;
 
 /// Poll interval for OBEX `Transfer1` progress watchdogs, in milliseconds.
-pub const BIP_POLL_INTERVAL_MS: u64 = 80;
+pub const BIP_POLL_INTERVAL_MS: u64 = 40;
 
 /// Stall watchdog: abort a transfer only after this many milliseconds with zero byte progress.
 pub const BIP_STALL_TIMEOUT_MS: u64 = 2_500;
@@ -63,7 +63,11 @@ pub const BIP_VARIANT_TIMEOUT_MS: u64 = 4_000;
 pub const BIP_THUMBNAIL_TIMEOUT_MS: u64 = 2_500;
 
 /// Settle wait after `TrackChanged` before any OBEX traffic, in milliseconds.
-pub const BIP_TRACK_SETTLE_MS: u64 = 650;
+///
+/// Keep short: live Pi measurements show OBEX Get requests are accepted ~90 ms
+/// after fetch start, so a long fixed sleep only adds dead latency to every
+/// track change.
+pub const BIP_TRACK_SETTLE_MS: u64 = 80;
 
 /// Default per-device maximum safe native image size in bytes for the zero-descriptor pull.
 pub const BIP_DEFAULT_NATIVE_BYTES_CAP: u64 = 1_500_000;
@@ -293,6 +297,22 @@ pub(super) fn ensure_cover_art_cache_dir_in(dir: &std::path::Path) -> Result<(),
     Ok(())
 }
 
+/// Sanitizes a BIP image handle into a filesystem-safe cache filename component.
+///
+/// Keeps ASCII alphanumerics plus `_` and `-`; returns `None` when nothing remains.
+#[must_use]
+pub fn sanitize_bip_handle(handle: &str) -> Option<String> {
+    let sanitized: String = handle
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
 /// Returns the deterministic cache path and sanitized MAC/handle for an OBEX cover art handle.
 #[must_use]
 pub fn cover_art_path_for(addr: BtAddress, handle: &str) -> Option<(String, String, String)> {
@@ -308,13 +328,7 @@ pub fn cover_art_path_for_in(
     handle: &str,
 ) -> Option<(String, String, String)> {
     let sanitized_mac = addr.to_string().replace([':', '-'], "_");
-    let sanitized_handle: String = handle
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-        .collect();
-    if sanitized_handle.is_empty() {
-        return None;
-    }
+    let sanitized_handle = sanitize_bip_handle(handle)?;
     let cache_path = format!(
         "{}/speaker-cover-{sanitized_mac}-{sanitized_handle}.jpg",
         dir.display()

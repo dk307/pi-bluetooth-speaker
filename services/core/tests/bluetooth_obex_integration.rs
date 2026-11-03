@@ -394,7 +394,7 @@ impl Harness {
 
     fn cover(&self) -> Option<Box<str>> {
         self.device
-            .playback_state()
+            .playback_state_with_cover()
             .unwrap()
             .expect("fake player present")
             .cover_art_path
@@ -571,9 +571,105 @@ fn native_cap_persisted_after_native_pull_refusal() {
 }
 
 #[test]
+fn cover_art_native_pull_skipped_after_consecutive_failures() {
+    let h = Harness::new("11:00:00:00:00:11", |b| b.native_get_ok = false);
+
+    // Three consecutive failing native pulls each attempt the zero-descriptor Get
+    // (the variant loop still resolves the cover, so every fetch succeeds).
+    for attempt in 1..=3 {
+        h.remove_cover_files();
+        let path = h
+            .cover()
+            .expect("variant fallback resolves cover on attempt {attempt}");
+        assert!(std::path::Path::new(&*path).exists());
+        assert_eq!(
+            h.native_get_calls(),
+            attempt,
+            "native pull must be attempted while under the failure threshold"
+        );
+    }
+
+    // Fourth fetch: the consecutive-failure threshold is reached, so Strategy A is
+    // skipped entirely and no further native Get round-trip is wasted.
+    h.remove_cover_files();
+    let path = h
+        .cover()
+        .expect("variant fallback resolves cover after breaker trips");
+    assert!(std::path::Path::new(&*path).exists());
+    assert_eq!(
+        h.native_get_calls(),
+        3,
+        "native pull must not be attempted once the failure threshold is reached"
+    );
+}
+
+#[test]
 fn player_seek_translates_absolute_ms_to_relative_us() {
     let h = Harness::new("11:00:00:00:00:99", |_| {});
     h.device.player_seek(60_000).expect("seek accepted");
     assert_eq!(h.seek_calls(), 1);
     assert_eq!(h.last_seek_offset_us(), 15_000_000);
+}
+
+#[test]
+fn cover_art_resolves_asynchronously_after_cache_miss() {
+    let h = Harness::new("11:00:00:00:00:31", |_| {});
+
+    // The first poll publishes track metadata immediately (no blocking OBEX
+    // fetch): the cover is not there yet, the fetch runs in a worker thread.
+    let started = std::time::Instant::now();
+    let first = h.device.playback_state().unwrap().expect("player present");
+    assert!(
+        first.cover_art_path.is_none(),
+        "cover must not block the poll"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(750),
+        "playback_state must return before the OBEX pipeline completes"
+    );
+
+    // The detached worker lands the cover in the disk cache; a later poll
+    // picks it up from the fast path. Single flight: exactly one session.
+    let deadline = started + std::time::Duration::from_secs(10);
+    let mut resolved = None;
+    while std::time::Instant::now() < deadline {
+        if let Some(path) = h
+            .device
+            .playback_state()
+            .unwrap()
+            .expect("player present")
+            .cover_art_path
+        {
+            resolved = Some(path);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let path = resolved.expect("cover resolves asynchronously via the disk cache");
+    assert!(std::path::Path::new(&*path).exists());
+    assert_eq!(h.create_calls(), 1, "single flight: one CreateSession only");
+}
+
+#[test]
+fn cover_art_fetch_failure_arms_retry_backoff() {
+    let h = Harness::new("11:00:00:00:00:32", |b| b.create_ok = false);
+
+    // The first poll spawns a worker; the fetch fails fast (CreateSession refused).
+    let first = h.device.playback_state().unwrap().expect("player present");
+    assert!(first.cover_art_path.is_none());
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Within the backoff window no new worker is spawned: the poll loop keeps
+    // serving metadata without re-running the OBEX pipeline on every tick.
+    for _ in 0..3 {
+        let pb = h.device.playback_state().unwrap().expect("player present");
+        assert!(pb.cover_art_path.is_none());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert_eq!(
+        h.create_calls(),
+        2,
+        "per-tick session ensure plus one worker attempt hit exactly the \
+         breaker threshold; backoff and breaker then suppress everything else"
+    );
 }
