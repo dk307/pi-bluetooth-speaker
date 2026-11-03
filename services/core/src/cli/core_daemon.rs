@@ -538,27 +538,23 @@ pub fn init_shell(
 /// upscaled here (off the render thread) and published as a pre-rendered image.
 #[cfg(feature = "ui")]
 #[derive(Debug, Default)]
-struct BtSharedUpdate {
+pub struct BtSharedUpdate {
     /// Latest playback snapshot, if it changed since the last publish.
-    playback: Option<crate::hardware::BtPlaybackState>,
+    pub playback: Option<crate::hardware::BtPlaybackState>,
     /// Active PCM stream, if it changed since the last publish.
-    pcm: Option<crate::hardware::BlueAlsaPcm>,
+    pub pcm: Option<crate::hardware::BlueAlsaPcm>,
     /// Cover art delta: outer `Some` = cover state changed; inner `Some` = decoded
     /// pixel buffer to display, inner `None` = clear the displayed cover art.
     /// Carried as a `SharedPixelBuffer` (which is `Send + Sync`) rather than a
     /// `slint::Image` (which is not `Send`): the expensive decode/upscale happens
     /// on the worker, and the render thread only wraps the buffer in an image.
     // The three cover states (unchanged / clear / show buffer) are intentional.
-    #[expect(
-        clippy::option_option,
-        reason = "delta field distinguishes no-change, clear, and show-buffer cover states"
-    )]
-    cover: Option<Option<CoverPixelBuffer>>,
+    pub cover: Option<Option<CoverPixelBuffer>>,
 }
 
 /// Alias for the cross-thread pixel buffer backing cover art.
 #[cfg(feature = "ui")]
-type CoverPixelBuffer = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
+pub type CoverPixelBuffer = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
 
 /// Interval between retries of a failed cover-art decode for the same path.
 ///
@@ -566,29 +562,30 @@ type CoverPixelBuffer = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
 /// be written by OBEX), but re-decoding on every monitor tick would repeatedly
 /// pay a full Lanczos3 resize on the worker for a persistently broken file.
 #[cfg(feature = "ui")]
-const COVER_DECODE_RETRY: Duration = Duration::from_secs(10);
+pub const COVER_DECODE_RETRY: Duration = Duration::from_secs(10);
 /// Target side length (px) for upscaled cover-art cache images.
 #[cfg(feature = "ui")]
-const TARGET_COVER_SIZE: u32 = 480;
+pub const TARGET_COVER_SIZE: u32 = 480;
 
-/// Peer status can lag a local transport command by hundreds of milliseconds, so
-/// a post-command snapshot may still carry the pre-command playing state. This
+/// Peer status can lag a local transport command by hundreds of milliseconds.
+///
+/// A post-command snapshot may still carry the pre-command playing state. This
 /// window bounds how long such an unchanged snapshot is suppressed to keep the
 /// shell's optimistic flip from reverting.
 #[cfg(feature = "ui")]
-const BT_COMMAND_SETTLE: Duration = Duration::from_millis(750);
+pub const BT_COMMAND_SETTLE: Duration = Duration::from_millis(750);
 
 /// Tracks the cover-art dedup key and when the current path last failed to
 /// decode, so the retry backoff in [`COVER_DECODE_RETRY`] can gate re-attempts.
 #[cfg(feature = "ui")]
 #[derive(Debug, Default)]
-struct CoverState {
+pub struct CoverState {
     /// Path whose art is currently reflected in the published state (or the
     /// path of the last failed decode attempt while awaiting its retry).
-    path: Option<Box<str>>,
+    pub path: Option<Box<str>>,
     /// Instant of the most recent failed decode attempt, if the last attempt
     /// for [`CoverState::path`] failed; `None` once a decode succeeded.
-    failed_since: Option<Instant>,
+    pub failed_since: Option<Instant>,
 }
 
 /// Optimistic-UI convergence state for a pending transport command.
@@ -600,7 +597,7 @@ struct CoverState {
 /// can be reverted by a stale pre-command snapshot.
 #[cfg(feature = "ui")]
 #[derive(Debug)]
-enum SettleKind {
+pub enum SettleKind {
     /// Suppress snapshots still reporting the pre-command playing state.
     Toggle {
         /// Playing state observed before the optimistic flip was applied.
@@ -613,25 +610,27 @@ enum SettleKind {
     },
 }
 
-/// A settle window during which snapshots conflicting with the shell's
-/// optimistic state are suppressed. The window expires after
-/// [`BT_COMMAND_SETTLE`] and the expiry force-publishes one authoritative
-/// snapshot, so a failed command always reconciles.
+/// A settle window during which conflicting snapshots are suppressed.
+///
+/// The window expires after [`BT_COMMAND_SETTLE`] and the expiry
+/// force-publishes one authoritative snapshot, so a failed command always
+/// reconciles.
 #[cfg(feature = "ui")]
 #[derive(Debug)]
-struct SettleWindow {
+pub struct SettleWindow {
     /// Which optimistic update this window protects.
-    kind: SettleKind,
+    pub kind: SettleKind,
     /// When the command was issued; the window expires after
     /// [`BT_COMMAND_SETTLE`].
-    started: Instant,
+    pub started: Instant,
 }
 
 #[cfg(feature = "ui")]
 impl SettleWindow {
     /// Reports whether `pb` still conflicts with the optimistic state this
     /// window protects (and is therefore withheld from the shell).
-    fn suppresses(&self, pb: &crate::hardware::BtPlaybackState) -> bool {
+    #[must_use]
+    pub fn suppresses(&self, pb: &crate::hardware::BtPlaybackState) -> bool {
         if self.started.elapsed() >= BT_COMMAND_SETTLE {
             return false;
         }
@@ -659,7 +658,7 @@ const BT_SEEK_STALE_TOLERANCE_MS: u32 = 800;
 /// RGBA, and returned as a [`CoverPixelBuffer`] so the render thread never pays
 /// for the decode or the resample during a frame.
 #[cfg(feature = "ui")]
-fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
+pub fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
     tracing::debug!("COVER_DECODE {:?}", path);
     let src = Path::new(path);
     let file_name = src.file_name()?;
@@ -711,7 +710,7 @@ fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
 /// changes are decoded here (off the render thread); a failed decode keeps the
 /// previous art and is retried after [`COVER_DECODE_RETRY`] elapses.
 #[cfg(feature = "ui")]
-fn publish_playback_state(
+pub fn publish_playback_state(
     bt: &crate::hardware::BluetoothDevice,
     update: &mut BtSharedUpdate,
     last_pb: &mut Option<crate::hardware::BtPlaybackState>,
@@ -1293,197 +1292,5 @@ pub fn main() -> ExitCode {
     match resolve_cli_opts(parse_cli_args_from(env_args()), "core", print_usage) {
         Ok(opts) => run_app(&opts),
         Err(exit_code) => exit_code,
-    }
-}
-
-#[cfg(all(test, feature = "ui"))]
-mod tests {
-    use super::*;
-    use crate::diag::ScopedTempDir;
-    use crate::hardware::BluetoothDevice;
-
-    fn sample_png(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-        let path = dir.join(name);
-        image::DynamicImage::new_rgb8(64, 64)
-            .save_with_format(&path, image::ImageFormat::Png)
-            .expect("sample png write");
-        path
-    }
-
-    fn playback(
-        cover: Option<&std::path::Path>,
-        playing: bool,
-    ) -> crate::hardware::BtPlaybackState {
-        crate::hardware::BtPlaybackState {
-            cover_art_path: cover.map(|p| p.display().to_string().into_boxed_str()),
-            status: if playing {
-                "playing".into()
-            } else {
-                "paused".into()
-            },
-            ..crate::hardware::BtPlaybackState::default()
-        }
-    }
-
-    #[test]
-    fn decode_cover_buffer_upscales_and_caches() {
-        let dir = ScopedTempDir::try_new("cover_decode_up").expect("temp dir");
-        let src = sample_png(dir.path(), "art.png");
-        let buffer = decode_cover_buffer(src.to_str().expect("utf8")).expect("decoded");
-        assert_eq!(buffer.width(), TARGET_COVER_SIZE);
-        let cache = dir.path().join("art.png.480.jpg");
-        assert!(cache.is_file(), "cache file should be written");
-        // Second call serves from the cache and still decodes.
-        assert!(decode_cover_buffer(src.to_str().expect("utf8")).is_some());
-        let _ = buffer;
-    }
-
-    #[test]
-    fn decode_cover_buffer_missing_file_is_none() {
-        assert!(decode_cover_buffer("/nonexistent/cover/art.png").is_none());
-    }
-
-    #[test]
-    fn decode_cover_buffer_regenerates_corrupt_cache() {
-        let dir = ScopedTempDir::try_new("cover_decode_corrupt").expect("temp dir");
-        let src = sample_png(dir.path(), "art.png");
-        let cache = dir.path().join("art.png.480.jpg");
-        std::fs::write(&cache, b"truncated-jpeg-garbage").expect("cache write");
-        assert!(
-            decode_cover_buffer(src.to_str().expect("utf8")).is_some(),
-            "corrupt cache must be regenerated from the source"
-        );
-        assert!(image::open(&cache).is_ok(), "cache must be valid again");
-    }
-
-    #[test]
-    fn settle_window_suppresses_stale_seek_position() {
-        // A snapshot still carrying the pre-seek AVRCP position (far from the
-        // scrub target) is suppressed so the optimistic scrubber is not
-        // snapped back; once the peer reports near the target it publishes.
-        let fresh = Instant::now();
-        let stale = SettleWindow {
-            kind: SettleKind::Seek { target_ms: 120_000 },
-            started: fresh,
-        };
-        let mut far = playback(None, true);
-        far.position_ms = 1_000;
-        assert!(stale.suppresses(&far), "pre-seek position is stale");
-        let mut near = playback(None, true);
-        near.position_ms = 120_400;
-        assert!(!stale.suppresses(&near), "caught-up position publishes");
-    }
-
-    #[test]
-    fn settle_window_releases_on_expiry() {
-        let mut pb = playback(None, true);
-        pb.position_ms = 1_000;
-        let mut w = SettleWindow {
-            kind: SettleKind::Seek { target_ms: 120_000 },
-            started: Instant::now(),
-        };
-        assert!(w.suppresses(&pb));
-        w.started = Instant::now()
-            .checked_sub(BT_COMMAND_SETTLE + Duration::from_secs(1))
-            .expect("monotonic instant before start");
-        assert!(!w.suppresses(&pb), "expired window never suppresses");
-    }
-
-    #[test]
-    fn publish_suppresses_matching_settle_snapshot() {
-        let (bt, mock) = BluetoothDevice::new_mocked();
-        // The mocked snapshot must differ from `last_pb` (advanced position,
-        // exactly what happens while playing) while `is_playing` still matches
-        // `pre_playing`; otherwise the test passes even with suppression deleted.
-        let mut ticking = playback(None, true);
-        ticking.position_ms = 1000;
-        mock.set_playback(Some(ticking));
-        let mut update = BtSharedUpdate::default();
-        let mut last_pb = Some(playback(None, true));
-        let mut cover = CoverState::default();
-        let mut settle = Some(SettleWindow {
-            kind: SettleKind::Toggle { pre_playing: true },
-            started: Instant::now(),
-        });
-        publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
-        assert!(update.playback.is_none(), "settling must suppress publish");
-        assert!(settle.is_some(), "settle window stays armed during window");
-    }
-
-    #[test]
-    fn publish_after_settle_expiry_publishes() {
-        let (bt, mock) = BluetoothDevice::new_mocked();
-        mock.set_playback(Some(playback(None, true)));
-        let started = Instant::now()
-            .checked_sub(BT_COMMAND_SETTLE + Duration::from_secs(1))
-            .expect("monotonic instant before start");
-        let mut settle = Some(SettleWindow {
-            kind: SettleKind::Toggle { pre_playing: true },
-            started,
-        });
-        let mut last_pb: Option<crate::hardware::BtPlaybackState> = None;
-        let mut update = BtSharedUpdate::default();
-        let mut cover = CoverState::default();
-        publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
-        assert!(update.playback.is_some(), "expiry must force a publish");
-        assert!(settle.is_none(), "window must be disarmed after expiry");
-    }
-
-    #[test]
-    fn publish_failed_cover_retry_after_backoff() {
-        let (bt, mock) = BluetoothDevice::new_mocked();
-        let missing = "/nonexistent/cover/missing.png";
-        let pb = crate::hardware::BtPlaybackState {
-            cover_art_path: Some(missing.into()),
-            ..crate::hardware::BtPlaybackState::default()
-        };
-        mock.set_playback(Some(pb.clone()));
-        let mut last_pb: Option<crate::hardware::BtPlaybackState> = None;
-        let mut cover = CoverState::default();
-        let mut settle = None;
-        let mut update = BtSharedUpdate::default();
-        publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
-        assert_eq!(cover.path.as_deref(), Some(missing));
-        assert!(cover.failed_since.is_some());
-        assert!(update.cover.is_none(), "failed decode keeps prior art");
-        // Rewind the failure timestamp past the backoff and confirm the retry
-        // is attempted (and re-fails, since the path does not exist).
-        cover.failed_since = Some(
-            Instant::now()
-                .checked_sub(COVER_DECODE_RETRY + Duration::from_secs(1))
-                .expect("monotonic instant before start"),
-        );
-        update = BtSharedUpdate::default();
-        publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
-        assert!(
-            cover.failed_since.is_some(),
-            "retry must be re-attempted after the backoff"
-        );
-    }
-
-    #[test]
-    fn publish_device_gone_clears_cover() {
-        let (bt, mock) = BluetoothDevice::new_mocked();
-        // The mock initializes with a default playback present; clear it so
-        // `playback_state()` really returns `Ok(None)` and the disconnect
-        // placeholder branch is exercised.
-        mock.set_playback(None);
-        let mut last_pb = Some(playback(None, true));
-        let mut cover = CoverState {
-            path: Some("/gone.png".into()),
-            failed_since: None,
-        };
-        let mut update = BtSharedUpdate::default();
-        let mut settle = None;
-        publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
-        assert!(
-            update.playback.is_some(),
-            "placeholder must publish on Ok(None)"
-        );
-        assert!(
-            update.cover.is_some_and(|c| c.is_none()),
-            "cover must clear on disconnect"
-        );
-        assert!(cover.path.is_none());
     }
 }

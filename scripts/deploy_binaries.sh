@@ -26,6 +26,7 @@ RELEASE_DIR="target/${TARGET_TRIPLE}/release"
 # when new binaries are added to services/core.
 KNOWN_BINARIES=(
   core
+  bt-manager
   temp-read
   light-read
   amp-info

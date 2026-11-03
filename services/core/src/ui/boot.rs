@@ -23,7 +23,7 @@ pub enum BootCheckId {
 
 impl BootCheckId {
     /// All checks in bottom-of-splash row order.
-    const ALL: [Self; 5] = [
+    pub const ALL: [Self; 5] = [
         Self::Display,
         Self::Amp,
         Self::Dsp,
@@ -33,7 +33,7 @@ impl BootCheckId {
 
     /// Human-readable check label shown at the start of the row text.
     #[must_use]
-    const fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Display => "Display",
             Self::Amp => "I2S Amplifier",
@@ -66,7 +66,7 @@ pub struct BootCheckUpdate {
     pub text: Box<str>,
 }
 
-type ProbeFn = Box<dyn FnOnce() -> Result<Box<str>, Box<str>> + Send>;
+pub type ProbeFn = Box<dyn FnOnce() -> Result<Box<str>, Box<str>> + Send>;
 
 /// Ordered set of boot probes executed by the splash screen.
 pub struct BootProbe {
@@ -122,7 +122,7 @@ impl BootProbe {
 }
 
 #[must_use]
-fn probe_display() -> Box<str> {
+pub fn probe_display() -> Box<str> {
     Box::from("Freenove 4.3\" DSI 800x480 (Active)")
 }
 
@@ -186,67 +186,4 @@ fn probe_sensors() -> Result<Box<str>, Box<str>> {
     let light = LightSensor::new().map_err(|e| e.summary().into_boxed_str())?;
     let lux = light.read_lux().map_err(|e| e.summary().into_boxed_str())?;
     Ok(format!("{:.1} °C | {} lux", temperature.celsius(), lux).into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn collect(probes: [ProbeFn; 5]) -> Vec<BootCheckUpdate> {
-        let mut updates = Vec::new();
-        BootProbe::from_probes(probes).run(&mut |update| updates.push(update));
-        updates
-    }
-
-    #[test]
-    fn probe_display_reports_active_dsi_panel() {
-        assert_eq!(&*probe_display(), "Freenove 4.3\" DSI 800x480 (Active)");
-    }
-
-    #[test]
-    fn run_emits_running_then_passed_per_check_in_order() {
-        let probes = BootCheckId::ALL.map(|_| {
-            let probe: ProbeFn = Box::new(|| Ok("ok detail".into()));
-            probe
-        });
-        let updates = collect(probes);
-
-        assert_eq!(updates.len(), 10);
-        for (index, pair) in updates.chunks(2).enumerate() {
-            assert_eq!(pair[0].id as usize, index);
-            assert_eq!(pair[0].status, BootCheckStatus::Running);
-            assert_eq!(
-                pair[0].text,
-                format!("{} …", BootCheckId::ALL[index].label()).into()
-            );
-            assert_eq!(pair[1].id as usize, index);
-            assert_eq!(pair[1].status, BootCheckStatus::Passed);
-            assert_eq!(
-                pair[1].text,
-                format!("{}: ok detail", BootCheckId::ALL[index].label()).into()
-            );
-        }
-    }
-
-    #[test]
-    fn run_maps_probe_errors_to_failed_rows() {
-        let probes: [ProbeFn; 5] =
-            std::array::from_fn(|_| Box::new(|| Err("boom: sensor vanished".into())) as ProbeFn);
-        let updates = collect(probes);
-
-        assert_eq!(updates.len(), 10);
-        for pair in updates.chunks(2) {
-            assert_eq!(pair[1].status, BootCheckStatus::Failed);
-            assert!(pair[1].text.ends_with(": boom: sensor vanished"));
-        }
-    }
-
-    #[test]
-    fn check_ids_map_to_dense_row_indexes() {
-        for (index, id) in BootCheckId::ALL.iter().enumerate() {
-            assert_eq!(*id as usize, index);
-        }
-        assert_eq!(BootCheckId::Display as usize, 0);
-        assert_eq!(BootCheckId::Sensors as usize, 4);
-    }
 }

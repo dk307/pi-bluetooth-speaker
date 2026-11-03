@@ -1,0 +1,181 @@
+//! Bluetooth manager appliance service logic.
+//!
+//! A lightweight service template analogous to the `core` daemon: it installs
+//! `tracing` telemetry, parses a minimal command line (`--help`, `--version`,
+//! `--interval`, `--ticks`), and runs a periodic Bluetooth status monitor loop
+//! that keeps the adapter state observable under systemd/journald.
+
+use std::process::ExitCode;
+use std::time::Duration;
+
+use crate::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts, run_poll_loop};
+use crate::hardware::BluetoothDevice;
+
+/// Default status poll interval (5 seconds).
+pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Bluetooth manager service command-line options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtManagerOptions {
+    /// Status poll interval between monitor ticks.
+    pub interval: Duration,
+    /// Optional tick cap for preview/testing; `None` runs the monitor forever.
+    pub max_ticks: Option<u64>,
+}
+
+impl Default for BtManagerOptions {
+    fn default() -> Self {
+        Self {
+            interval: DEFAULT_POLL_INTERVAL,
+            max_ticks: None,
+        }
+    }
+}
+
+/// Prints usage text for the Bluetooth manager service executable.
+pub fn print_usage(bin_name: &str) {
+    println!("DietPi Bluetooth Manager Service");
+    println!();
+    println!("Usage: {bin_name} [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!(
+        "  -i, --interval <SECS>       Status poll interval in seconds (default: {})",
+        DEFAULT_POLL_INTERVAL.as_secs()
+    );
+    println!("  -n, --ticks <COUNT>         Exit after COUNT monitor ticks (at least 1)");
+    println!("  -V, --version               Print version and exit");
+    println!("  -h, --help                  Print this help text and exit");
+}
+
+/// Parses and validates a `--interval <SECS>` argument value (unsigned seconds).
+///
+/// # Errors
+/// Returns a descriptive user-facing error string if `val` is missing, carries a
+/// sign prefix, or is not a valid unsigned integer.
+pub fn parse_interval_secs(val: &str) -> Result<u64, String> {
+    if val.starts_with('+') || val.starts_with('-') {
+        return Err(format!(
+            "invalid interval seconds '{val}': sign prefixes are not accepted"
+        ));
+    }
+    val.parse::<u64>()
+        .map_err(|e| format!("invalid interval seconds '{val}': {e}"))
+}
+
+/// Parses and validates a `--ticks <COUNT>` argument value (unsigned count).
+///
+/// # Errors
+/// Returns a descriptive user-facing error string if `val` is missing, carries a
+/// sign prefix, or is not a valid unsigned integer.
+pub fn parse_ticks(val: &str) -> Result<u64, String> {
+    if val.starts_with('+') || val.starts_with('-') {
+        return Err(format!(
+            "invalid tick count '{val}': sign prefixes are not accepted"
+        ));
+    }
+    val.parse::<u64>()
+        .map_err(|e| format!("invalid tick count '{val}': {e}"))
+}
+
+/// Parses command-line arguments into structured [`BtManagerOptions`].
+///
+/// # Errors
+/// Returns an error message if an argument or flag value is malformed.
+pub fn parse_cli_args_from<I>(args: I) -> Result<CliParse<BtManagerOptions>, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut iter = args.into_iter();
+    let mut opts = BtManagerOptions::default();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(CliParse::Help),
+            "-V" | "--version" => return Ok(CliParse::Version),
+            "-i" | "--interval" => {
+                let val = next_arg_value(&mut iter, "--interval")?;
+                let secs = parse_interval_secs(&val)?;
+                if secs == 0 {
+                    return Err(
+                        "invalid interval seconds '0': interval must be at least 1 second"
+                            .to_string(),
+                    );
+                }
+                opts.interval = Duration::from_secs(secs);
+            }
+            "-n" | "--ticks" => {
+                let val = next_arg_value(&mut iter, "--ticks")?;
+                let ticks = parse_ticks(&val)?;
+                if ticks == 0 {
+                    return Err("invalid tick count '0': omit --ticks to run forever".to_string());
+                }
+                opts.max_ticks = Some(ticks);
+            }
+            _ => return Err(format!("unknown option '{arg}', use --help for usage")),
+        }
+    }
+    Ok(CliParse::Options(opts))
+}
+
+/// Executes one monitor tick, logging the current Bluetooth status snapshot.
+///
+/// Returns the resulting status so callers can react to transitions; transient
+/// poll errors are logged as warnings and reported to the caller.
+///
+/// # Errors
+/// Propagates [`crate::hardware::BtError`] when the status snapshot fails.
+pub fn run_tick(
+    bt: &BluetoothDevice,
+) -> Result<crate::hardware::BluetoothStatus, crate::hardware::BtError> {
+    let status = bt.status()?;
+    tracing::info!(
+        connected = status.connected_count(),
+        streaming = status.is_streaming(),
+        "Bluetooth status tick"
+    );
+    Ok(status)
+}
+
+/// Runs the Bluetooth manager monitor loop with parsed options.
+///
+/// Polls [`BluetoothDevice::status`] every `opts.interval`, logging each tick.
+/// When `opts.max_ticks` is set, the loop terminates after that many ticks
+/// (used by tests and preview runs); otherwise it runs until the process is
+/// stopped by systemd.
+#[must_use]
+pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
+    tracing::info!(
+        interval_secs = opts.interval.as_secs(),
+        "Bluetooth Manager Service running on Raspberry Pi 3 (aarch64)"
+    );
+    let mut ticks: u64 = 0;
+    run_poll_loop(opts.interval, |_timestamp| {
+        if let Err(e) = run_tick(bt) {
+            tracing::warn!(error = %e, "Bluetooth status poll failed");
+        }
+        ticks = ticks.saturating_add(1);
+        opts.max_ticks.is_some_and(|limit| ticks >= limit)
+    });
+    ExitCode::SUCCESS
+}
+
+/// CLI main entrypoint for the `bt-manager` binary.
+///
+/// Installs the global `tracing` subscriber before any other work so startup
+/// events are captured; verbosity is controlled by `RUST_LOG` (default `info`,
+/// see [`crate::logging`]).
+pub fn main() -> ExitCode {
+    crate::logging::init_daemon_logging();
+    let opts = match resolve_cli_opts(parse_cli_args_from(env_args()), "bt-manager", print_usage) {
+        Ok(opts) => opts,
+        Err(exit_code) => return exit_code,
+    };
+    let bt = match BluetoothDevice::new() {
+        Ok(bt) => bt,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to connect to the system D-Bus");
+            return ExitCode::FAILURE;
+        }
+    };
+    run_app(&bt, &opts)
+}
