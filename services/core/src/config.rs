@@ -8,7 +8,6 @@
 use std::backtrace::Backtrace;
 use std::fmt::{self, Formatter};
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use config::Config as LayeredConfig;
@@ -603,6 +602,7 @@ mod tests {
 #[cfg(test)]
 mod mode_tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn save_installs_world_readable_mode() {

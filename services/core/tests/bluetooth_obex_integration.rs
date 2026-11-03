@@ -630,4 +630,5 @@ fn listener_thread_released_on_client_drop() {
     );
 
     daemon.kill().expect("kill dbus-daemon");
+    daemon.wait().expect("wait dbus-daemon");
 }

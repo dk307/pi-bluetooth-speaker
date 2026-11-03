@@ -1199,14 +1199,6 @@ fn spawn_properties_changed_listener(
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
                     return;
                 }
-                let Some(conn) = conn_slot
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
-                else {
-                    // Slot emptied by drop: the connection has been closed.
-                    return;
-                };
                 let Ok(rule) = zbus::MatchRule::builder()
                     .msg_type(zbus::message::Type::Signal)
                     .interface("org.freedesktop.DBus.Properties")
@@ -1263,15 +1255,14 @@ fn spawn_properties_changed_listener(
 /// other holder of the same `Connection` clone).
 #[derive(Debug)]
 pub struct DbusClient {
+    /// Owned slot for the listener thread: emptied (and the connection closed)
+    /// on drop so the thread's blocked `MessageIterator::next` unblocks.
     conn_slot: Arc<Mutex<Option<Connection>>>,
     device_caps_dir: std::path::PathBuf,
     cache_dir: std::path::PathBuf,
     state: Arc<Mutex<DbusClientState>>,
     change_flag: Arc<ChangeFlag>,
     stop: Arc<std::sync::atomic::AtomicBool>,
-    /// Owned slot for the listener thread: emptied (and the connection closed)
-    /// on drop so the thread's blocked `MessageIterator::next` unblocks.
-    conn_slot: Arc<Mutex<Option<Connection>>>,
 }
 
 /// Snapshot of `BlueZ` adapter, connected/paired devices, and media player state.
@@ -1302,15 +1293,10 @@ impl Drop for DbusClient {
 
 impl DbusClient {
     #[must_use]
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "constructor takes ownership of the caller's connection; the slot requires an owned value"
-    )]
     pub fn new(conn: Connection) -> Self {
         let conn_slot: Arc<Mutex<Option<Connection>>> = Arc::new(Mutex::new(Some(conn)));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         Self {
-            conn_slot: Arc::clone(&conn_slot),
             device_caps_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             state: Arc::new(Mutex::new(DbusClientState::default())),
