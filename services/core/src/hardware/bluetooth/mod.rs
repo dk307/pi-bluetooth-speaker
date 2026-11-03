@@ -5,6 +5,13 @@
 //! [`transport`] (playback state and transport commands), and [`cover_art`]
 //! (BIP cover-art discovery and caching).
 
+/// Not yet wired into the connection driver; consumed via integration in a
+/// follow-up change.
+#[allow(
+    dead_code,
+    reason = "wired into the connection driver in a follow-up change"
+)]
+pub(crate) mod bip_direct;
 pub(crate) mod connection;
 pub(crate) mod cover_art;
 pub(crate) mod transport;

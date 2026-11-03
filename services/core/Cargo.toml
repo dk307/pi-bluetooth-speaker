@@ -96,6 +96,11 @@ tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 async-trait = "=0.1.86"
 memmap2 = { version = "=0.9.12", optional = true }
 
+# Direct OBEX Cover Art over RFCOMM (AVRCP/BIP, obexd replacement)
+bluer = { version = "=0.17.4", default-features = false, features = ["rfcomm", "l2cap"] }
+obex-protocol = { version = "=0.1.0", default-features = false, features = ["tokio"] }
+bluesdp = "=0.1.1"
+
 # Raw `ioctl` syscalls for framebuffer VSync pacing (`FBIO_WAITFORVSYNC`)
 libc = { version = "=0.2.191", optional = true }
 
