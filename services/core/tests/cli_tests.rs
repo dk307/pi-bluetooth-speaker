@@ -159,6 +159,11 @@ const HELP_CASES: &[(&str, &str, &str)] = &[
         "CamillaDSP Pipeline Diagnostic Utility",
         "--repeat",
     ),
+    (
+        env!("CARGO_BIN_EXE_bt-manager"),
+        "DietPi Bluetooth Manager Service",
+        "--interval",
+    ),
 ];
 
 /// Shared `--version` semantic version probe cases for all diagnostic utilities.
@@ -274,6 +279,41 @@ fn temp_read_cli_argument_validation() {
                 &["--device", "invalid-device-id"],
                 "invalid DS18B20 sensor ID",
             ),
+        ],
+    );
+}
+
+#[test]
+fn bt_manager_version_display() {
+    for flag in ["--version", "-V"] {
+        let (status, stdout, _) = run_cli(env!("CARGO_BIN_EXE_bt-manager"), &[flag]);
+        assert!(status.success(), "expected success for 'bt-manager {flag}'");
+        assert!(
+            stdout.contains(&format!("bt-manager {}", env!("CARGO_PKG_VERSION"))),
+            "expected version output, got: '{stdout}'"
+        );
+    }
+}
+
+#[test]
+fn bt_manager_cli_argument_validation() {
+    let bin_path = env!("CARGO_BIN_EXE_bt-manager");
+    assert_cli_rejects(
+        bin_path,
+        &[
+            (&["--invalid-flag"], "unknown option '--invalid-flag'"),
+            (&["--interval"], "missing value for --interval"),
+            (&["--interval", "0"], "interval must be at least 1 second"),
+            (&["--interval", "-1"], "sign prefixes are not accepted"),
+            (&["--interval", "+1"], "sign prefixes are not accepted"),
+            (
+                &["--interval", "invalid"],
+                "invalid interval seconds 'invalid'",
+            ),
+            (&["--ticks"], "missing value for --ticks"),
+            (&["--ticks", "0"], "omit --ticks to run forever"),
+            (&["--ticks", "-2"], "sign prefixes are not accepted"),
+            (&["--ticks", "abc"], "invalid tick count 'abc'"),
         ],
     );
 }
