@@ -17,6 +17,7 @@
 
 use std::backtrace::Backtrace;
 use std::fmt::{self, Formatter};
+use std::time::Instant;
 
 use obex_protocol::Error as ObexError;
 use obex_protocol::header::{Header, HeaderValue};
@@ -299,16 +300,25 @@ impl BipChannel for RfcommBipChannel {
     async fn open(&self, address: &BtAddress) -> Result<BipStream, BipError> {
         let canonical = address.to_string();
         let octets = *address.as_bytes();
-
-        let channel =
+        let started = Instant::now();
+        tracing::debug!(address = %canonical, "SDP: querying BIP Image Pull service record");
+        let channel = resolve_sdp_channel(
+            &canonical,
+            started.elapsed().as_millis() as u64,
             bluesdp::query_rfcomm_channel(&canonical, bluesdp::Uuid16(BIP_IMAGE_PULL_UUID16))
-                .await?
-                .ok_or_else(|| BipError::service_not_found(canonical.as_str()))?;
+                .await?,
+        )?;
 
         let socket_addr = bip_socket_address(octets, channel);
+        tracing::debug!(socket = %socket_addr, "opening RFCOMM connection");
         let stream = bluer::rfcomm::Stream::connect(socket_addr)
             .await
             .map_err(BipError::rfcomm_connect)?;
+        tracing::debug!(
+            socket = %socket_addr,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "RFCOMM connection established"
+        );
 
         Ok(Box::new(stream) as BipStream)
     }
@@ -358,11 +368,22 @@ where
         ));
     }
 
+    let started = Instant::now();
+    tracing::info!(
+        mime = image_type.mime(),
+        handle = img_handle,
+        "BIP image pull starting"
+    );
+
     let mut client = Client::new(stream);
     client
         .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
         .await
         .map_err(|e| map_obex_failure("OBEX CONNECT", e))?;
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "OBEX CONNECT accepted"
+    );
 
     let get = client
         .get([
@@ -374,6 +395,11 @@ where
 
     match get {
         Ok(response) => {
+            tracing::info!(
+                bytes = response.body.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "BIP image received"
+            );
             if let Err(e) = client.disconnect().await {
                 tracing::warn!(
                     body_len = response.body.len(),
@@ -389,17 +415,88 @@ where
     }
 }
 
+/// Validates the direct BIP transport path with a CONNECT/DISCONNECT-only session.
+///
+/// Performs the full OBEX session establishment against the AVRCP cover-art
+/// target (useful as a live transport probe when no image handle is known)
+/// and closes the session again. The remote responder's acceptance of the
+/// target UUID is the pass criterion.
+///
+/// # Errors
+/// Returns [`BipError`] when the OBEX CONNECT is rejected or the transport fails.
+pub async fn probe_session<T>(stream: T) -> Result<(), BipError>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    let started = Instant::now();
+    let mut client = Client::new(stream);
+    client
+        .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
+        .await
+        .map_err(|e| map_obex_failure("OBEX CONNECT", e))?;
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "OBEX CONNECT accepted"
+    );
+    if let Err(e) = client.disconnect().await {
+        tracing::warn!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "BIP probe disconnect failed: {e}"
+        );
+    }
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "BIP OBEX session probe succeeded"
+    );
+    Ok(())
+}
+
 /// Builds the RFCOMM socket address for the resolved BIP channel.
 fn bip_socket_address(octets: [u8; 6], channel: u8) -> bluer::rfcomm::SocketAddr {
     bluer::rfcomm::SocketAddr::new(bluer::Address(octets), channel)
 }
 
+/// Logs the SDP lookup outcome and maps it to a channel number or error.
+///
+/// Pure except for its tracing side effect, so both outcomes (channel found,
+/// service record absent) are unit-testable on any host while the physical
+/// L2CAP/RFCOMM transport stays isolated in [`RfcommBipChannel::open`].
+fn resolve_sdp_channel(
+    address: &str,
+    elapsed_ms: u64,
+    channel: Option<u8>,
+) -> Result<u8, BipError> {
+    if let Some(channel) = channel {
+        tracing::info!(
+            address,
+            channel,
+            elapsed_ms,
+            "SDP resolved BIP Image Pull RFCOMM channel"
+        );
+        Ok(channel)
+    } else {
+        tracing::warn!(
+            address,
+            elapsed_ms,
+            "no BIP Image Pull service record on device"
+        );
+        Err(BipError::service_not_found(address))
+    }
+}
+
 /// Maps an OBEX failure into a [`BipError`], distinguishing explicit
 /// responder rejections from transport and protocol faults.
 fn map_obex_failure(operation: &'static str, error: ObexError) -> BipError {
-    match error.response_code() {
-        Some(code) => BipError::image_rejected(operation, code),
-        None => BipError::obex(error),
+    if let Some(code) = error.response_code() {
+        tracing::warn!(
+            operation,
+            response_code = code as u8,
+            "BIP operation rejected by responder"
+        );
+        BipError::image_rejected(operation, code)
+    } else {
+        tracing::warn!(operation, error = %error, "BIP operation failed");
+        BipError::obex(error)
     }
 }
 

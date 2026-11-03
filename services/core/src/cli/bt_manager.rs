@@ -6,13 +6,26 @@
 //! that keeps the adapter state observable under systemd/journald.
 
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts, run_poll_loop};
-use crate::hardware::BluetoothDevice;
+use crate::hardware::bluetooth::bip_direct::{
+    BipChannel, BipImageType, RfcommBipChannel, fetch_cover_art_via, probe_session,
+};
+use crate::hardware::{BluetoothDevice, BtAddress};
 
 /// Default status poll interval (5 seconds).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Parameters of a one-shot direct BIP cover-art probe run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BipProbeOptions {
+    /// MAC address of the remote device to probe (`AA:BB:CC:DD:EE:FF`).
+    pub address: Box<str>,
+    /// Optional BIP image handle; when present a full GET is performed,
+    /// otherwise only SDP + RFCOMM + OBEX CONNECT/DISCONNECT are exercised.
+    pub handle: Option<Box<str>>,
+}
 
 /// Bluetooth manager service command-line options.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +34,9 @@ pub struct BtManagerOptions {
     pub interval: Duration,
     /// Optional tick cap for preview/testing; `None` runs the monitor forever.
     pub max_ticks: Option<u64>,
+    /// When set, run a one-shot direct BIP cover-art probe instead of the
+    /// monitor loop.
+    pub bip_probe: Option<BipProbeOptions>,
 }
 
 impl Default for BtManagerOptions {
@@ -28,6 +44,7 @@ impl Default for BtManagerOptions {
         Self {
             interval: DEFAULT_POLL_INTERVAL,
             max_ticks: None,
+            bip_probe: None,
         }
     }
 }
@@ -44,6 +61,12 @@ pub fn print_usage(bin_name: &str) {
         DEFAULT_POLL_INTERVAL.as_secs()
     );
     println!("  -n, --ticks <COUNT>         Exit after COUNT monitor ticks (at least 1)");
+    println!(
+        "  --bip-probe <MAC>           Probe the direct BIP cover-art transport for MAC and exit"
+    );
+    println!(
+        "  --bip-handle <HANDLE>       With --bip-probe: also pull image HANDLE via a BIP GET"
+    );
     println!("  -V, --version               Print version and exit");
     println!("  -h, --help                  Print this help text and exit");
 }
@@ -111,6 +134,29 @@ where
                 }
                 opts.max_ticks = Some(ticks);
             }
+            "--bip-probe" => {
+                let val = next_arg_value(&mut iter, "--bip-probe")?;
+                if opts.bip_probe.is_some() {
+                    return Err("--bip-probe given more than once".to_string());
+                }
+                opts.bip_probe = Some(BipProbeOptions {
+                    address: val.into(),
+                    handle: None,
+                });
+            }
+            "--bip-handle" => {
+                let val = next_arg_value(&mut iter, "--bip-handle")?;
+                let Some(probe) = opts.bip_probe.as_mut() else {
+                    return Err("--bip-handle requires --bip-probe <MAC>".to_string());
+                };
+                if probe.handle.is_some() {
+                    return Err("--bip-handle given more than once".to_string());
+                }
+                if val.is_empty() {
+                    return Err("invalid image handle '': the handle must not be empty".to_string());
+                }
+                probe.handle = Some(val.into());
+            }
             _ => return Err(format!("unknown option '{arg}', use --help for usage")),
         }
     }
@@ -159,6 +205,66 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Runs a one-shot direct BIP cover-art probe against `opts.address`.
+///
+/// Resolves the BIP Image Pull service via SDP, opens the RFCOMM transport,
+/// and establishes an OBEX session against the AVRCP cover-art target; with
+/// `opts.handle` a full BIP GET pulls the image bytes as well. Every step is
+/// logged (see `bip_direct`) so live runs on the appliance are diagnosable
+/// from journald alone.
+///
+/// # Errors
+/// Logged and reported via [`ExitCode::FAILURE`] on any failure.
+pub fn run_bip_probe(channel: &dyn BipChannel, opts: &BipProbeOptions) -> ExitCode {
+    tracing::info!(
+        address = opts.address.as_ref(),
+        handle = opts.handle.as_deref(),
+        "BIP probe starting"
+    );
+    let address = match BtAddress::parse_str(opts.address.as_ref()) {
+        Ok(address) => address,
+        Err(e) => {
+            tracing::error!("invalid --bip-probe address: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to start the async runtime for the BIP probe");
+            return ExitCode::FAILURE;
+        }
+    };
+    let started = Instant::now();
+    let result = runtime.block_on(async {
+        if let Some(handle) = opts.handle.as_deref() {
+            fetch_cover_art_via(channel, &address, handle, BipImageType::Native)
+                .await
+                .map(|body| body.len())
+        } else {
+            let stream = channel.open(&address).await?;
+            probe_session(stream).await?;
+            Ok(0)
+        }
+    });
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(bytes) => {
+            tracing::info!(elapsed_ms, bytes, "BIP probe finished");
+            println!("BIP probe OK: {elapsed_ms} ms, {bytes} bytes");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            tracing::error!(error = %e.summary(), elapsed_ms, "BIP probe failed");
+            eprintln!("BIP probe failed: {}", e.summary());
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// CLI main entrypoint for the `bt-manager` binary.
 ///
 /// Installs the global `tracing` subscriber before any other work so startup
@@ -170,6 +276,9 @@ pub fn main() -> ExitCode {
         Ok(opts) => opts,
         Err(exit_code) => return exit_code,
     };
+    if let Some(probe) = opts.bip_probe {
+        return run_bip_probe(&RfcommBipChannel, &probe);
+    }
     let bt = match BluetoothDevice::new() {
         Ok(bt) => bt,
         Err(e) => {
@@ -183,6 +292,52 @@ pub fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hardware::bluetooth::bip_direct::BipError;
+
+    /// Zero-configuration OBEX responder: accepts CONNECT and DISCONNECT with
+    /// the trait's default `Success` responses.
+    struct ProbeResponder;
+
+    impl obex_protocol::tokio::Handler for ProbeResponder {}
+
+    /// Fake [`BipChannel`] whose stream is answered by a live in-process OBEX
+    /// responder, exercising the full probe path without physical hardware.
+    struct ProbeFakeChannel;
+
+    #[async_trait::async_trait]
+    impl BipChannel for ProbeFakeChannel {
+        async fn open(
+            &self,
+            _address: &BtAddress,
+        ) -> Result<crate::hardware::bluetooth::bip_direct::BipStream, BipError> {
+            let (client_half, server_half) = tokio::io::duplex(4_096);
+            tokio::spawn(async move {
+                let mut server = obex_protocol::tokio::Server::new(server_half, ProbeResponder);
+                let _ = server.run().await;
+            });
+            Ok(Box::new(client_half))
+        }
+    }
+
+    /// Fake [`BipChannel`] whose transport open always fails.
+    struct FailingProbeChannel;
+
+    #[async_trait::async_trait]
+    impl BipChannel for FailingProbeChannel {
+        async fn open(
+            &self,
+            _address: &BtAddress,
+        ) -> Result<crate::hardware::bluetooth::bip_direct::BipStream, BipError> {
+            Err(BipError::service_not_found("11:22:33:44:55:66"))
+        }
+    }
+
+    fn probe_opts(address: &str, handle: Option<&str>) -> BipProbeOptions {
+        BipProbeOptions {
+            address: address.into(),
+            handle: handle.map(Box::from),
+        }
+    }
 
     #[test]
     fn defaults_match_documented_values() {
@@ -263,6 +418,7 @@ mod tests {
         let opts = BtManagerOptions {
             interval: Duration::from_millis(1),
             max_ticks: Some(3),
+            bip_probe: None,
         };
         assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
     }
@@ -280,5 +436,73 @@ mod tests {
         let status = run_tick(&bt).expect("mock status");
         // The mock initializes with one default connected peer.
         assert_eq!(status.connected_count(), 1);
+    }
+
+    #[test]
+    fn cli_parses_bip_probe_flags() {
+        let args = [
+            "--bip-probe",
+            "11:22:33:44:55:66",
+            "--bip-handle",
+            "0000001",
+        ];
+        let parsed = parse_cli_args_from(args.iter().map(ToString::to_string)).expect("valid");
+        let opts = match parsed {
+            CliParse::Options(opts) => opts,
+            other => panic!("expected options, got {other:?}"),
+        };
+        assert_eq!(
+            opts.bip_probe,
+            Some(probe_opts("11:22:33:44:55:66", Some("0000001")))
+        );
+    }
+
+    #[test]
+    fn cli_bip_handle_requires_probe() {
+        let args = ["--bip-handle", "0000001"];
+        let err = parse_cli_args_from(args.iter().map(ToString::to_string)).expect_err("reject");
+        assert!(err.contains("requires --bip-probe"), "got: {err}");
+        assert!(!err.contains("Backtrace"), "user-facing error stays clean");
+    }
+
+    #[test]
+    fn cli_rejects_empty_handle_and_duplicate_flags() {
+        let args = ["--bip-probe", "11:22:33:44:55:66", "--bip-handle", ""];
+        let err = parse_cli_args_from(args.iter().map(ToString::to_string)).expect_err("reject");
+        assert!(err.contains("must not be empty"), "got: {err}");
+        let args = [
+            "--bip-probe",
+            "11:22:33:44:55:66",
+            "--bip-handle",
+            "1",
+            "--bip-handle",
+            "2",
+        ];
+        let err = parse_cli_args_from(args.iter().map(ToString::to_string)).expect_err("reject");
+        assert!(err.contains("more than once"), "got: {err}");
+    }
+
+    #[test]
+    fn run_bip_probe_succeeds_against_in_process_responder() {
+        assert_eq!(
+            run_bip_probe(&ProbeFakeChannel, &probe_opts("11:22:33:44:55:66", None)),
+            ExitCode::SUCCESS
+        );
+    }
+
+    #[test]
+    fn run_bip_probe_reports_transport_failure() {
+        assert_eq!(
+            run_bip_probe(&FailingProbeChannel, &probe_opts("11:22:33:44:55:66", None)),
+            ExitCode::FAILURE
+        );
+    }
+
+    #[test]
+    fn run_bip_probe_rejects_invalid_address() {
+        assert_eq!(
+            run_bip_probe(&ProbeFakeChannel, &probe_opts("not-a-mac", None)),
+            ExitCode::FAILURE
+        );
     }
 }

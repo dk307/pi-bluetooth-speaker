@@ -353,6 +353,21 @@ fn bip_socket_address_encodes_address_octets_and_channel() {
     assert_eq!(socket_addr.to_string(), "[01:23:45:67:89:0A]:12");
 }
 
+#[test]
+fn resolve_sdp_channel_returns_channel_when_service_record_exists() {
+    assert_eq!(
+        resolve_sdp_channel("11:22:33:44:55:66", 7, Some(24)).expect("resolved"),
+        24
+    );
+}
+
+#[test]
+fn resolve_sdp_channel_reports_absent_service_record() {
+    let err = resolve_sdp_channel("11:22:33:44:55:66", 7, None).expect_err("no service record");
+    assert!(err.is_service_not_found());
+    assert!(err.to_string().contains("11:22:33:44:55:66"));
+}
+
 #[tokio::test]
 async fn fetch_cover_art_via_uses_injected_channel_and_returns_body() {
     struct FakeChannel {
