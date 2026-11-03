@@ -41,7 +41,7 @@ export component TopStatusBar inherits Rectangle {
     callback volume_clicked();
 
     HorizontalLayout {
-        padding-left: 18px;
+        padding-left: 0px;
         padding-right: 18px;
         alignment: space-between;
 
@@ -56,12 +56,14 @@ export component TopStatusBar inherits Rectangle {
                 HorizontalLayout {
                     spacing: 8px;
 
-                    // Bluetooth Source Logo (icon + wordmark; full bar height)
+                    // Bluetooth Source Logo (icon + wordmark; full bar height,
+                    // width pinned to the SVG's 370:100 aspect at bar scale)
                     Image {
                         source: @image-url("../../../assets/icons/bluetooth-logo-word.svg");
                         colorize: Theme.active.primary_accent;
                         height: root.height;
-                        image-fit: contain;
+                        width: root.height * 3.45;
+                        image-fit: fill;
                     }
                 }
             }

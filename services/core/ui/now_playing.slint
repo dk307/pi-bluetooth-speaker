@@ -270,7 +270,8 @@ export component NowPlayingView inherits Rectangle {
                 if !root.has_cover_art : Image {
                     width: 78%;
                     height: 78%;
-                    source: @image-url("../../../assets/icons/cover-placeholder.svg");
+                    source: @image-url("../../../assets/icons/disk.svg");
+                    colorize: Theme.active.primary_accent;
                     image-fit: contain;
                     horizontal-alignment: center;
                     vertical-alignment: center;
