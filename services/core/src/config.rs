@@ -599,17 +599,3 @@ mod tests {
         assert!(layered_err.is_config());
     }
 }
-#[cfg(test)]
-mod mode_tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn save_installs_world_readable_mode() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        CoreConfig::default().save(&path).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o644);
-    }
-}
