@@ -584,23 +584,41 @@ fn player_seek_translates_absolute_ms_to_relative_us() {
 /// parked on a quiet bus).
 #[test]
 fn listener_thread_released_on_client_drop() {
-    fn thread_count() -> usize {
-        std::fs::read_to_string("/proc/self/status")
-            .expect("read /proc/self/status")
-            .lines()
-            .find_map(|l| l.strip_prefix("Threads:"))
-            .expect("Threads line")
-            .trim()
-            .parse()
-            .expect("thread count")
+    // Count only threads named like the Bluetooth listener (`bt-dbus-signals*`)
+    // instead of the process-global thread count: integration tests in this
+    // binary run in parallel and sibling tests' zbus connections spawn/tear
+    // down their own executor threads, which would race with a global count
+    // (see PR review finding).
+    fn listener_count() -> usize {
+        std::fs::read_dir("/proc/self/task")
+            .expect("read /proc/self/task")
+            .filter_map(std::result::Result::ok)
+            .filter(|e| {
+                std::fs::read_to_string(e.path().join("comm"))
+                    .map(|c| c.trim().starts_with("bt-dbus-signals"))
+                    .unwrap_or(false)
+            })
+            .count()
     }
 
-    let mut daemon = Command::new("dbus-daemon")
-        .args(["--session", "--nofork", "--print-address=1"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("dbus-daemon must be installed to run integration tests");
-    let addr = BufReader::new(daemon.stdout.take().unwrap())
+    /// RAII guard: kills the session dbus-daemon on drop, so an assertion
+    /// failure (panic) cannot leak the spawned child process.
+    struct DaemonGuard(std::process::Child);
+    impl Drop for DaemonGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let mut daemon = DaemonGuard(
+        Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("dbus-daemon must be installed to run integration tests"),
+    );
+    let addr = BufReader::new(daemon.0.stdout.take().unwrap())
         .lines()
         .next()
         .unwrap()
@@ -610,9 +628,9 @@ fn listener_thread_released_on_client_drop() {
         .build()
         .unwrap();
 
-    let before = thread_count();
+    let before = listener_count();
     let device = BluetoothDevice::with_connection(client);
-    let with_listener = thread_count();
+    let with_listener = listener_count();
     assert!(
         with_listener > before,
         "listener thread must be spawned with the client"
@@ -620,15 +638,12 @@ fn listener_thread_released_on_client_drop() {
 
     drop(device);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while thread_count() > before && std::time::Instant::now() < deadline {
+    while listener_count() > before && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    let after = thread_count();
+    let after = listener_count();
     assert!(
         after <= before,
         "listener thread must exit after the client is dropped (before={before}, after={after})"
     );
-
-    daemon.kill().expect("kill dbus-daemon");
-    daemon.wait().expect("wait dbus-daemon");
 }
