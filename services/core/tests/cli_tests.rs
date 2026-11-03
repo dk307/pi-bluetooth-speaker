@@ -83,12 +83,12 @@ fn core_main_binary_executes() {
     // The banner prints static GPIO/hardware pin metadata via `TempSensor::gpio_info()`
     // which does not perform live sysfs I/O, ensuring deterministic execution on host.
     let bin_path = env!("CARGO_BIN_EXE_core");
-    let (status, stdout, _) = run_cli_with_timeout(bin_path, &[], CORE_MAIN_TIMEOUT);
+    let (status, _, stderr) = run_cli_with_timeout(bin_path, &[], CORE_MAIN_TIMEOUT);
 
     assert!(status.success());
-    assert!(stdout.contains("Speaker Core Service is running on Raspberry Pi 3!"));
-    assert!(stdout.contains("ARM Cortex-A53 (aarch64)"));
-    assert!(stdout.contains("Thermal Sensor:"));
+    assert!(stderr.contains("Speaker Core Service running on Raspberry Pi 3 (aarch64)"));
+    assert!(stderr.contains("arm-cortex-a53"));
+    assert!(stderr.contains("Core service started"));
 
     // Test help flags
     for flag in &["-h", "--help"] {
@@ -106,9 +106,9 @@ fn core_main_binary_executes() {
     }
 
     // Test zero duration preview
-    let (status, stdout, _) = run_cli(bin_path, &["-p", "0"]);
+    let (status, _, stderr) = run_cli(bin_path, &["-p", "0"]);
     assert!(status.success());
-    assert!(stdout.contains("Speaker Core Service"));
+    assert!(stderr.contains("Speaker Core Service"));
 
     // Test error cases (clean, backtrace-free user-facing rejections)
     for (args, expected) in [
