@@ -120,3 +120,19 @@ async fn run_blocking_success_and_error() {
         run_blocking("compute", || Err(DummyError("inner failure".into()))).await;
     assert_eq!(err.unwrap_err(), DummyError("inner failure".into()));
 }
+
+#[tokio::test]
+async fn run_blocking_maps_aborted_task_cancellation_with_context() {
+    // Abort a long-running spawned task by mapping its join handle through
+    // the production mapping path (no post-panic code per lint hygiene).
+    let task = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        Ok::<u8, TestDriverError>(0)
+    });
+    task.abort();
+    let err: TestDriverError = map_join_result(task.await, "drive_task").unwrap_err();
+    assert_eq!(
+        err,
+        TestDriverError::Cancelled("drive_task task was cancelled".into())
+    );
+}
