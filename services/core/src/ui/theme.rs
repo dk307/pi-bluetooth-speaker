@@ -240,7 +240,6 @@ impl<'de> serde::Deserialize<'de> for ThemePreset {
         Self::parse_slug(&slug).map_err(serde::de::Error::custom)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

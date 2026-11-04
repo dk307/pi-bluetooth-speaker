@@ -234,7 +234,7 @@ impl ConfigError {
     }
 
     /// Builds an I/O failure for a named config operation.
-    pub(crate) fn io(context: impl Into<Box<str>>, source: io::Error) -> Self {
+    pub fn io(context: impl Into<Box<str>>, source: io::Error) -> Self {
         Self::new(ConfigErrorKind::Io {
             context: context.into(),
             source,
@@ -242,7 +242,7 @@ impl ConfigError {
     }
 
     /// Builds a layered-reader failure for a named config operation.
-    pub(crate) fn config(context: impl Into<Box<str>>, source: config::ConfigError) -> Self {
+    pub fn config(context: impl Into<Box<str>>, source: config::ConfigError) -> Self {
         Self::new(ConfigErrorKind::Config {
             context: context.into(),
             source: Box::new(source),
@@ -250,7 +250,7 @@ impl ConfigError {
     }
 
     /// Builds a domain validation failure for an out-of-range config value.
-    pub(crate) fn invalid(message: impl Into<Box<str>>) -> Self {
+    pub fn invalid(message: impl Into<Box<str>>) -> Self {
         Self::new(ConfigErrorKind::InvalidValue {
             message: message.into(),
         })
@@ -304,7 +304,6 @@ impl std::error::Error for ConfigError {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use std::error::Error as _;

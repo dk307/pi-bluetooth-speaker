@@ -83,7 +83,6 @@ pub fn init_daemon_logging() {
             .init();
     });
 }
-
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_LOG_FILTER, daemon_log_filter, init_daemon_logging};

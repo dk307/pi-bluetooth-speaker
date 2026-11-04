@@ -426,11 +426,11 @@ impl AppShell {
         }
 
         // Cover art is loaded and upscaled by the `bt-monitor` worker (off the render
-        // thread) and pushed through the shared worker update channel; this method only
-        // clears the cover when the playback snapshot carries no path.
-        if playback.cover_art_path.is_none() && w.get_has_cover_art() {
-            w.set_has_cover_art(false);
-        }
+        // thread) and pushed through the shared worker update channel; playback
+        // snapshots never clear it. A snapshot carrying no cached path means a
+        // handle-less track or a fetch pending on the cover-fetch worker — blanking
+        // here would drop working art on every 250 ms position tick. Only an
+        // explicit device-disconnect delta clears the displayed cover.
     }
 
     /// Applies a theme preset to the UI shell.

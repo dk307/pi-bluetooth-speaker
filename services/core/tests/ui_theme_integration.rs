@@ -84,3 +84,57 @@ fn display_and_meter_skin_id_consistency() {
         assert_eq!(palette.font_family.as_str(), preset.font_family());
     }
 }
+
+#[test]
+fn theme_preset_serde_serializes_to_slug() {
+    for preset in [
+        ThemePreset::McIntoshBlue,
+        ThemePreset::MarantzAmber,
+        ThemePreset::CyberpunkNeon,
+        ThemePreset::StudioDark,
+        ThemePreset::Peppy,
+    ] {
+        let json = serde_json::to_string(&preset).unwrap();
+        assert_eq!(json, format!("\"{}\"", preset.slug()));
+    }
+}
+
+#[test]
+fn theme_preset_serde_deserializes_slug_and_aliases() {
+    for (slug, expected) in [
+        ("mcintosh", ThemePreset::McIntoshBlue),
+        ("marantz", ThemePreset::MarantzAmber),
+        ("cyberpunk", ThemePreset::CyberpunkNeon),
+        ("studio-dark", ThemePreset::StudioDark),
+        ("peppy", ThemePreset::Peppy),
+        ("blue", ThemePreset::McIntoshBlue),
+        ("gold", ThemePreset::Peppy),
+    ] {
+        assert_eq!(
+            serde_json::from_str::<ThemePreset>(&format!("\"{slug}\"")).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn theme_preset_serde_deserializes_from_value_and_reader() {
+    let value = serde_json::Value::String("marantz".to_owned());
+    assert_eq!(
+        serde_json::from_value::<ThemePreset>(value).unwrap(),
+        ThemePreset::MarantzAmber
+    );
+    let reader = std::io::Cursor::new(b"\"peppy\"".to_vec());
+    assert_eq!(
+        serde_json::from_reader::<_, ThemePreset>(reader).unwrap(),
+        ThemePreset::Peppy
+    );
+}
+
+#[test]
+fn theme_preset_serde_rejects_unknown_slug() {
+    let err = serde_json::from_str::<ThemePreset>("\"bogus\"")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unknown theme preset 'bogus'"), "{err}");
+}

@@ -5,20 +5,27 @@ use std::fs;
 #[cfg(feature = "ui")]
 use std::sync::Mutex;
 
+#[cfg(feature = "ui")]
 use speaker_core::cli::core_daemon::{
-    CoreCliOptions, ScreenTarget, headless_requested, parse_cli_args_from, parse_preview_secs,
-    parse_tab_arg, print_usage,
+    BT_COMMAND_SETTLE, COVER_DECODE_RETRY, CoverState, SettleKind, SettleWindow, TARGET_COVER_SIZE,
+    decode_cover_buffer, publish_playback_state,
 };
 #[cfg(feature = "ui")]
 use speaker_core::cli::core_daemon::{
-    ShellInit, init_shell, report_display, run_app, run_render_loop, run_shell_on, run_splash_on,
-    run_ui_display, run_ui_display_on_path, run_ui_lifecycle,
+    BtSharedUpdate, ShellInit, init_shell, report_display, run_app, run_render_loop, run_shell_on,
+    run_splash_on, run_ui_display, run_ui_display_on_path, run_ui_lifecycle,
+};
+use speaker_core::cli::core_daemon::{
+    CoreCliOptions, ScreenTarget, headless_requested, parse_cli_args_from, parse_preview_secs,
+    parse_tab_arg, print_usage,
 };
 use speaker_core::diag::CliParse;
 #[cfg(feature = "ui")]
 use speaker_core::diag::ScopedTempDir;
 #[cfg(feature = "ui")]
 use speaker_core::ui::Framebuffer;
+#[cfg(feature = "ui")]
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "ui")]
 static ENV_GUARD: Mutex<()> = Mutex::new(());
@@ -653,4 +660,200 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
     assert!(bt_mock.is_some());
     assert!(shell_mock.is_playing());
     assert_eq!(shell_mock.current_tab(), 2);
+}
+
+#[cfg(feature = "ui")]
+fn sample_png(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    image::DynamicImage::new_rgb8(64, 64)
+        .save_with_format(&path, image::ImageFormat::Png)
+        .expect("sample png write");
+    path
+}
+
+#[cfg(feature = "ui")]
+fn playback(
+    cover: Option<&std::path::Path>,
+    playing: bool,
+) -> speaker_core::hardware::BtPlaybackState {
+    speaker_core::hardware::BtPlaybackState {
+        cover_art_path: cover.map(|p| p.display().to_string().into_boxed_str()),
+        status: if playing {
+            "playing".into()
+        } else {
+            "paused".into()
+        },
+        ..speaker_core::hardware::BtPlaybackState::default()
+    }
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn decode_cover_buffer_upscales_and_caches() {
+    let dir = ScopedTempDir::try_new("cover_decode_up").expect("temp dir");
+    let src = sample_png(dir.path(), "art.png");
+    let buffer = decode_cover_buffer(src.to_str().expect("utf8")).expect("decoded");
+    assert_eq!(buffer.width(), TARGET_COVER_SIZE);
+    let cache = dir.path().join("art.png.480.jpg");
+    assert!(cache.is_file(), "cache file should be written");
+    // Second call serves from the cache and still decodes.
+    assert!(decode_cover_buffer(src.to_str().expect("utf8")).is_some());
+    let _ = buffer;
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn decode_cover_buffer_missing_file_is_none() {
+    assert!(decode_cover_buffer("/nonexistent/cover/art.png").is_none());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn decode_cover_buffer_regenerates_corrupt_cache() {
+    let dir = ScopedTempDir::try_new("cover_decode_corrupt").expect("temp dir");
+    let src = sample_png(dir.path(), "art.png");
+    let cache = dir.path().join("art.png.480.jpg");
+    std::fs::write(&cache, b"truncated-jpeg-garbage").expect("cache write");
+    assert!(
+        decode_cover_buffer(src.to_str().expect("utf8")).is_some(),
+        "corrupt cache must be regenerated from the source"
+    );
+    assert!(image::open(&cache).is_ok(), "cache must be valid again");
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn settle_window_suppresses_stale_seek_position() {
+    // A snapshot still carrying the pre-seek AVRCP position (far from the
+    // scrub target) is suppressed so the optimistic scrubber is not
+    // snapped back; once the peer reports near the target it publishes.
+    let fresh = Instant::now();
+    let stale = SettleWindow {
+        kind: SettleKind::Seek { target_ms: 120_000 },
+        started: fresh,
+    };
+    let mut far = playback(None, true);
+    far.position_ms = 1_000;
+    assert!(stale.suppresses(&far), "pre-seek position is stale");
+    let mut near = playback(None, true);
+    near.position_ms = 120_400;
+    assert!(!stale.suppresses(&near), "caught-up position publishes");
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn settle_window_releases_on_expiry() {
+    let mut pb = playback(None, true);
+    pb.position_ms = 1_000;
+    let mut w = SettleWindow {
+        kind: SettleKind::Seek { target_ms: 120_000 },
+        started: Instant::now(),
+    };
+    assert!(w.suppresses(&pb));
+    w.started = Instant::now()
+        .checked_sub(BT_COMMAND_SETTLE + Duration::from_secs(1))
+        .expect("monotonic instant before start");
+    assert!(!w.suppresses(&pb), "expired window never suppresses");
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn publish_suppresses_matching_settle_snapshot() {
+    let (bt, mock) = speaker_core::hardware::BluetoothDevice::new_mocked();
+    // The mocked snapshot must differ from `last_pb` (advanced position,
+    // exactly what happens while playing) while `is_playing` still matches
+    // `pre_playing`; otherwise the test passes even with suppression deleted.
+    let mut ticking = playback(None, true);
+    ticking.position_ms = 1000;
+    mock.set_playback(Some(ticking));
+    let mut update = BtSharedUpdate::default();
+    let mut last_pb = Some(playback(None, true));
+    let mut cover = CoverState::default();
+    let mut settle = Some(SettleWindow {
+        kind: SettleKind::Toggle { pre_playing: true },
+        started: Instant::now(),
+    });
+    publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
+    assert!(update.playback.is_none(), "settling must suppress publish");
+    assert!(settle.is_some(), "settle window stays armed during window");
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn publish_after_settle_expiry_publishes() {
+    let (bt, mock) = speaker_core::hardware::BluetoothDevice::new_mocked();
+    mock.set_playback(Some(playback(None, true)));
+    let started = Instant::now()
+        .checked_sub(BT_COMMAND_SETTLE + Duration::from_secs(1))
+        .expect("monotonic instant before start");
+    let mut settle = Some(SettleWindow {
+        kind: SettleKind::Toggle { pre_playing: true },
+        started,
+    });
+    let mut last_pb: Option<speaker_core::hardware::BtPlaybackState> = None;
+    let mut update = BtSharedUpdate::default();
+    let mut cover = CoverState::default();
+    publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
+    assert!(update.playback.is_some(), "expiry must force a publish");
+    assert!(settle.is_none(), "window must be disarmed after expiry");
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn publish_failed_cover_retry_after_backoff() {
+    let (bt, mock) = speaker_core::hardware::BluetoothDevice::new_mocked();
+    let missing = "/nonexistent/cover/missing.png";
+    let pb = speaker_core::hardware::BtPlaybackState {
+        cover_art_path: Some(missing.into()),
+        ..speaker_core::hardware::BtPlaybackState::default()
+    };
+    mock.set_playback(Some(pb.clone()));
+    let mut last_pb: Option<speaker_core::hardware::BtPlaybackState> = None;
+    let mut cover = CoverState::default();
+    let mut settle = None;
+    let mut update = BtSharedUpdate::default();
+    publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
+    assert_eq!(cover.path.as_deref(), Some(missing));
+    assert!(cover.failed_since.is_some());
+    assert!(update.cover.is_none(), "failed decode keeps prior art");
+    // Rewind the failure timestamp past the backoff and confirm the retry
+    // is attempted (and re-fails, since the path does not exist).
+    cover.failed_since = Some(
+        Instant::now()
+            .checked_sub(COVER_DECODE_RETRY + Duration::from_secs(1))
+            .expect("monotonic instant before start"),
+    );
+    update = BtSharedUpdate::default();
+    publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
+    assert!(
+        cover.failed_since.is_some(),
+        "retry must be re-attempted after the backoff"
+    );
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn publish_device_gone_clears_cover() {
+    let (bt, mock) = speaker_core::hardware::BluetoothDevice::new_mocked();
+    // The mock initializes with a default playback present; clear it so
+    // `playback_state()` really returns `Ok(None)` and the disconnect
+    // placeholder branch is exercised.
+    mock.set_playback(None);
+    let mut last_pb = Some(playback(None, true));
+    let mut cover = CoverState {
+        path: Some("/gone.png".into()),
+        failed_since: None,
+    };
+    let mut update = BtSharedUpdate::default();
+    let mut settle = None;
+    publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
+    assert!(
+        update.playback.is_some(),
+        "placeholder must publish on Ok(None)"
+    );
+    assert!(
+        update.cover.is_some_and(|c| c.is_none()),
+        "cover must clear on disconnect"
+    );
+    assert!(cover.path.is_none());
 }

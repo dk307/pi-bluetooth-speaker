@@ -538,27 +538,23 @@ pub fn init_shell(
 /// upscaled here (off the render thread) and published as a pre-rendered image.
 #[cfg(feature = "ui")]
 #[derive(Debug, Default)]
-struct BtSharedUpdate {
+pub struct BtSharedUpdate {
     /// Latest playback snapshot, if it changed since the last publish.
-    playback: Option<crate::hardware::BtPlaybackState>,
+    pub playback: Option<crate::hardware::BtPlaybackState>,
     /// Active PCM stream, if it changed since the last publish.
-    pcm: Option<crate::hardware::BlueAlsaPcm>,
+    pub pcm: Option<crate::hardware::BlueAlsaPcm>,
     /// Cover art delta: outer `Some` = cover state changed; inner `Some` = decoded
     /// pixel buffer to display, inner `None` = clear the displayed cover art.
     /// Carried as a `SharedPixelBuffer` (which is `Send + Sync`) rather than a
     /// `slint::Image` (which is not `Send`): the expensive decode/upscale happens
     /// on the worker, and the render thread only wraps the buffer in an image.
     // The three cover states (unchanged / clear / show buffer) are intentional.
-    #[expect(
-        clippy::option_option,
-        reason = "delta field distinguishes no-change, clear, and show-buffer cover states"
-    )]
-    cover: Option<Option<CoverPixelBuffer>>,
+    pub cover: Option<Option<CoverPixelBuffer>>,
 }
 
 /// Alias for the cross-thread pixel buffer backing cover art.
 #[cfg(feature = "ui")]
-type CoverPixelBuffer = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
+pub type CoverPixelBuffer = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
 
 /// Interval between retries of a failed cover-art decode for the same path.
 ///
@@ -566,29 +562,30 @@ type CoverPixelBuffer = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
 /// be written by OBEX), but re-decoding on every monitor tick would repeatedly
 /// pay a full Lanczos3 resize on the worker for a persistently broken file.
 #[cfg(feature = "ui")]
-const COVER_DECODE_RETRY: Duration = Duration::from_secs(10);
+pub const COVER_DECODE_RETRY: Duration = Duration::from_secs(10);
 /// Target side length (px) for upscaled cover-art cache images.
 #[cfg(feature = "ui")]
-const TARGET_COVER_SIZE: u32 = 480;
+pub const TARGET_COVER_SIZE: u32 = 480;
 
-/// Peer status can lag a local transport command by hundreds of milliseconds, so
-/// a post-command snapshot may still carry the pre-command playing state. This
+/// Peer status can lag a local transport command by hundreds of milliseconds.
+///
+/// A post-command snapshot may still carry the pre-command playing state. This
 /// window bounds how long such an unchanged snapshot is suppressed to keep the
 /// shell's optimistic flip from reverting.
 #[cfg(feature = "ui")]
-const BT_COMMAND_SETTLE: Duration = Duration::from_millis(750);
+pub const BT_COMMAND_SETTLE: Duration = Duration::from_millis(750);
 
 /// Tracks the cover-art dedup key and when the current path last failed to
 /// decode, so the retry backoff in [`COVER_DECODE_RETRY`] can gate re-attempts.
 #[cfg(feature = "ui")]
 #[derive(Debug, Default)]
-struct CoverState {
+pub struct CoverState {
     /// Path whose art is currently reflected in the published state (or the
     /// path of the last failed decode attempt while awaiting its retry).
-    path: Option<Box<str>>,
+    pub path: Option<Box<str>>,
     /// Instant of the most recent failed decode attempt, if the last attempt
     /// for [`CoverState::path`] failed; `None` once a decode succeeded.
-    failed_since: Option<Instant>,
+    pub failed_since: Option<Instant>,
 }
 
 /// Optimistic-UI convergence state for a pending transport command.
@@ -600,7 +597,7 @@ struct CoverState {
 /// can be reverted by a stale pre-command snapshot.
 #[cfg(feature = "ui")]
 #[derive(Debug)]
-enum SettleKind {
+pub enum SettleKind {
     /// Suppress snapshots still reporting the pre-command playing state.
     Toggle {
         /// Playing state observed before the optimistic flip was applied.
@@ -613,25 +610,27 @@ enum SettleKind {
     },
 }
 
-/// A settle window during which snapshots conflicting with the shell's
-/// optimistic state are suppressed. The window expires after
-/// [`BT_COMMAND_SETTLE`] and the expiry force-publishes one authoritative
-/// snapshot, so a failed command always reconciles.
+/// A settle window during which conflicting snapshots are suppressed.
+///
+/// The window expires after [`BT_COMMAND_SETTLE`] and the expiry
+/// force-publishes one authoritative snapshot, so a failed command always
+/// reconciles.
 #[cfg(feature = "ui")]
 #[derive(Debug)]
-struct SettleWindow {
+pub struct SettleWindow {
     /// Which optimistic update this window protects.
-    kind: SettleKind,
+    pub kind: SettleKind,
     /// When the command was issued; the window expires after
     /// [`BT_COMMAND_SETTLE`].
-    started: Instant,
+    pub started: Instant,
 }
 
 #[cfg(feature = "ui")]
 impl SettleWindow {
     /// Reports whether `pb` still conflicts with the optimistic state this
     /// window protects (and is therefore withheld from the shell).
-    fn suppresses(&self, pb: &crate::hardware::BtPlaybackState) -> bool {
+    #[must_use]
+    pub fn suppresses(&self, pb: &crate::hardware::BtPlaybackState) -> bool {
         if self.started.elapsed() >= BT_COMMAND_SETTLE {
             return false;
         }
@@ -659,7 +658,7 @@ const BT_SEEK_STALE_TOLERANCE_MS: u32 = 800;
 /// RGBA, and returned as a [`CoverPixelBuffer`] so the render thread never pays
 /// for the decode or the resample during a frame.
 #[cfg(feature = "ui")]
-fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
+pub fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
     tracing::debug!("COVER_DECODE {:?}", path);
     let src = Path::new(path);
     let file_name = src.file_name()?;
@@ -711,7 +710,7 @@ fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
 /// changes are decoded here (off the render thread); a failed decode keeps the
 /// previous art and is retried after [`COVER_DECODE_RETRY`] elapses.
 #[cfg(feature = "ui")]
-fn publish_playback_state(
+pub fn publish_playback_state(
     bt: &crate::hardware::BluetoothDevice,
     update: &mut BtSharedUpdate,
     last_pb: &mut Option<crate::hardware::BtPlaybackState>,
@@ -760,10 +759,10 @@ fn publish_playback_state(
                         cover.path = cover_path;
                         cover.failed_since = Some(Instant::now());
                     }
-                } else {
-                    update.cover = Some(None);
-                    *cover = CoverState::default();
                 }
+                // No cached file (handle-less track or fetch pending) keeps the
+                // previously published art: a snapshot never blanks the cover;
+                // only a device disconnect clears it explicitly.
             }
         }
         Ok(None) => {

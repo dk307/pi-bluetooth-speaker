@@ -1567,19 +1567,19 @@ fn cover_art_path_and_cache_validation() {
     assert!(cover_art_path_for(addr, "!@#$%^&*()").is_none());
 
     // Valid handle generates the production path (pure path computation, no I/O).
-    let (cache_path, mac, handle) = cover_art_path_for(addr, "img-001_A").unwrap();
+    let (cache_path, mac, handle) = cover_art_path_for(addr, "1690001").unwrap();
     assert_eq!(mac, "30_E0_44_67_38_A2");
-    assert_eq!(handle, "img-001_A");
+    assert_eq!(handle, "1690001");
     assert_eq!(
         cache_path,
-        format!("{COVER_ART_CACHE_DIR}/speaker-cover-30_E0_44_67_38_A2-img-001_A.jpg")
+        format!("{COVER_ART_CACHE_DIR}/speaker-cover-30_E0_44_67_38_A2-1690001.jpg")
     );
 
     // Filesystem-backed cache validation runs in a hermetic temporary directory
     // (the production cache directory requires root privileges to create).
     let dir = ScopedTempDir::new("cover-cache-test");
     let (tmp_path, tmp_mac, tmp_handle) =
-        cover_art_path_for_in(dir.path(), addr, "img-001_A").unwrap();
+        cover_art_path_for_in(dir.path(), addr, "1690001").unwrap();
     assert_eq!(tmp_mac, mac);
     assert_eq!(tmp_handle, handle);
     assert!(std::path::Path::new(&tmp_path).starts_with(dir.path()));
@@ -1590,7 +1590,7 @@ fn cover_art_path_and_cache_validation() {
     valid_jpeg[118] = 0xFF;
     valid_jpeg[119] = 0xD9;
     std::fs::write(&tmp_path, &valid_jpeg).unwrap();
-    let res = cover_art_cached_path_in(dir.path(), addr, "img-001_A");
+    let res = cover_art_cached_path_in(dir.path(), addr, "1690001");
     assert_eq!(res.as_deref(), Some(tmp_path.as_str()));
     let _ = std::fs::remove_file(&tmp_path);
 }
@@ -1662,9 +1662,12 @@ fn mock_cover_art_resolution_and_control() {
     mock.set_cover_art_cache_dir(dir.path());
     let addr = BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
-    // Initial mock state has no cover art path
+    // Initial mock state has no cover art path (both the async query and the
+    // blocking diagnostic variant agree on the mock backend).
     let pb = device.playback_state().unwrap().unwrap();
     assert!(pb.cover_art_path.is_none());
+    let pb_blocking = device.playback_state_with_cover().unwrap().unwrap();
+    assert!(pb_blocking.cover_art_path.is_none());
 
     // Explicitly set mock cover art path
     mock.set_player_cover_art(Some("/tmp/custom-cover.jpg".into()));
@@ -1673,12 +1676,12 @@ fn mock_cover_art_resolution_and_control() {
 
     // Reset mock cover art to None and test automatic resolution via cache
     mock.set_player_cover_art(None);
-    mock.set_player_image_handle(Some("test-h1".into()), Some(4097));
+    mock.set_player_image_handle(Some("1690002".into()), Some(4097));
 
     let (cache_path, tmp_mac, tmp_handle) =
-        cover_art_path_for_in(dir.path(), addr, "test-h1").unwrap();
+        cover_art_path_for_in(dir.path(), addr, "1690002").unwrap();
     assert_eq!(tmp_mac, "AA_BB_CC_DD_EE_FF");
-    assert_eq!(tmp_handle, "test-h1");
+    assert_eq!(tmp_handle, "1690002");
     let mut valid_bytes = vec![0u8; 128];
     valid_bytes[0] = 0xFF;
     valid_bytes[1] = 0xD8;
