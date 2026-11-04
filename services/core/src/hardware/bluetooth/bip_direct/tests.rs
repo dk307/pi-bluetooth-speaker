@@ -13,11 +13,16 @@ fn body_bytes(len: usize, fill: u8) -> Vec<u8> {
 /// CONNECT Target and GET headers, then answers GET with either an image body
 /// or an injected failure `Response`.
 struct StubCoverArtServer {
-    get_outcome: Result<Vec<u8>, Response>,
+    /// GET outcomes consumed front-to-back (one per received GET); the last
+    /// entry repeats once the queue is drained.
+    get_outcomes: std::collections::VecDeque<Result<Vec<u8>, Response>>,
     connect_target: Arc<Mutex<Option<Vec<u8>>>>,
     get_handle: Arc<Mutex<Option<String>>>,
     get_type: Arc<Mutex<Option<String>>>,
-    got_descriptor: Arc<Mutex<bool>>,
+    /// Generic OBEX Name header if the client sent one (obexd never does).
+    get_name: Arc<Mutex<Option<String>>>,
+    /// Whether each received GET carried the Img-Descriptor header.
+    descriptor_history: Arc<Mutex<Vec<bool>>>,
 }
 
 impl obex_protocol::tokio::Handler for StubCoverArtServer {
@@ -38,6 +43,13 @@ impl obex_protocol::tokio::Handler for StubCoverArtServer {
         request: &Request,
     ) -> impl Future<Output = std::result::Result<Object, Response>> + Send {
         let handle = request.headers.iter().find_map(|h| match h {
+            Header::Other {
+                id: IMG_HANDLE_HEADER_ID,
+                value: HeaderValue::Unicode(name),
+            } => Some(name),
+            _ => None,
+        });
+        let name = request.headers.iter().find_map(|h| match h {
             Header::Name(name) => Some(name.clone()),
             _ => None,
         });
@@ -46,27 +58,25 @@ impl obex_protocol::tokio::Handler for StubCoverArtServer {
             _ => None,
         });
         let descriptor = request.headers.iter().any(|h| match h {
-            Header::Other { id, value } => {
-                *id == IMG_DESCRIPTOR_HEADER_ID && matches!(value, HeaderValue::Bytes(_))
-            }
+            Header::Other { id, value } => *id == 0x71 && matches!(value, HeaderValue::Bytes(_)),
             _ => false,
         });
-        let (handle_slot, mime_slot, descriptor_slot) = (
+        let outcome = self
+            .get_outcomes
+            .pop_front()
+            .unwrap_or_else(|| self.get_outcomes.back().cloned().expect("non-empty"))
+            .map(|body| Object::new([Header::Type("x-bt/img-img".to_string())], body));
+        let (handle_slot, mime_slot, name_slot, descriptor_slot) = (
             Arc::clone(&self.get_handle),
             Arc::clone(&self.get_type),
-            Arc::clone(&self.got_descriptor),
+            Arc::clone(&self.get_name),
+            Arc::clone(&self.descriptor_history),
         );
-        let outcome = match &self.get_outcome {
-            Ok(body) => Ok(Object::new(
-                [Header::Type("x-bt/img-img".to_string())],
-                body.clone(),
-            )),
-            Err(response) => Err(response.clone()),
-        };
         async move {
-            *handle_slot.lock().await = handle;
+            *handle_slot.lock().await = handle.cloned();
             *mime_slot.lock().await = mime;
-            *descriptor_slot.lock().await = descriptor;
+            *name_slot.lock().await = name;
+            descriptor_slot.lock().await.push(descriptor);
             outcome
         }
     }
@@ -103,12 +113,19 @@ fn spawn_stub_server(
 }
 
 fn new_stub(get_outcome: Result<Vec<u8>, Response>) -> SharedStub {
+    new_retry_stub(vec![get_outcome])
+}
+
+/// Builds a stub serving the given GET outcomes in order, repeating the last
+/// one if additional GETs arrive.
+fn new_retry_stub(get_outcomes: Vec<Result<Vec<u8>, Response>>) -> SharedStub {
     Arc::new(Mutex::new(StubCoverArtServer {
-        get_outcome,
+        get_outcomes: get_outcomes.into(),
         connect_target: Arc::new(Mutex::new(None)),
         get_handle: Arc::new(Mutex::new(None)),
         get_type: Arc::new(Mutex::new(None)),
-        got_descriptor: Arc::new(Mutex::new(false)),
+        get_name: Arc::new(Mutex::new(None)),
+        descriptor_history: Arc::new(Mutex::new(Vec::new())),
     }))
 }
 
@@ -133,7 +150,40 @@ async fn pull_image_returns_full_body_after_connect_get_disconnect() {
         s.get_type.lock().await.as_deref(),
         Some(BipImageType::Native.mime())
     );
-    assert!(*s.got_descriptor.lock().await);
+    assert_eq!(
+        *s.descriptor_history.lock().await,
+        vec![false],
+        "native GET must omit the Img-Descriptor header (AOSP native path)"
+    );
+    assert_eq!(s.get_name.lock().await.as_deref(), None);
+}
+
+/// `pull_image` mirrors `obexd/client/bip.c get_image()`: the handle travels
+/// in the BIP `Img-Handle` (0x30) Unicode header, the generic Name header is
+/// never sent, and the Img-Descriptor is always present — a single GET, no
+/// retry ladder.
+#[tokio::test]
+async fn pull_image_sends_img_handle_header_instead_of_name() {
+    let stub = new_stub(Ok(vec![0xFF, 0xD8, 0xFF, 0xE0]));
+    let (client_half, server_half) = tokio::io::duplex(65_536);
+    let server_task = spawn_stub_server(Arc::clone(&stub), server_half);
+
+    let result = pull_image(client_half, BipImageType::Thumbnail, "7654321").await;
+    let _ = server_task.await;
+
+    let _body = result.unwrap();
+    let s = stub.lock().await;
+    assert_eq!(s.get_handle.lock().await.as_deref(), Some("7654321"));
+    assert_eq!(s.get_name.lock().await.as_deref(), None);
+    assert_eq!(
+        s.get_type.lock().await.as_deref(),
+        Some(BipImageType::Thumbnail.mime())
+    );
+    assert_eq!(
+        *s.descriptor_history.lock().await,
+        vec![false],
+        "native GET must omit the Img-Descriptor header (AOSP native path)"
+    );
 }
 
 #[tokio::test]
@@ -232,24 +282,6 @@ fn bip_image_type_mime_values_match_bip_spec() {
     assert_eq!(BipImageType::Native.mime(), "x-bt/img-img");
     assert_eq!(BipImageType::Thumbnail.mime(), "x-bt/img-thm");
     assert_ne!(BipImageType::Native, BipImageType::Thumbnail);
-}
-
-#[test]
-fn img_descriptor_header_encodes_tlv_with_tag_and_length() {
-    match img_descriptor_header() {
-        Header::Other { id, value } => {
-            assert_eq!(id, 0x71);
-            match value {
-                HeaderValue::Bytes(bytes) => {
-                    assert_eq!(bytes[0], 0x71);
-                    assert_eq!(bytes[1] as usize, IMG_DESCRIPTOR_XML.len());
-                    assert_eq!(&bytes[2..], IMG_DESCRIPTOR_XML.as_bytes());
-                }
-                other => panic!("expected Bytes header value, got {other:?}"),
-            }
-        }
-        other => panic!("expected Other header, got {other:?}"),
-    }
 }
 
 #[test]

@@ -36,25 +36,24 @@ pub const AVRCP_COVER_ART_UUID: [u8; 16] = [
 /// Bluetooth SIG assigned number of the BIP Image Pull service (UUID16 `0x111B`).
 pub const BIP_IMAGE_PULL_UUID16: u16 = 0x111B;
 
-/// OBEX header identifier of the BIP `Img-Descriptor` header.
-const IMG_DESCRIPTOR_HEADER_ID: u8 = 0x71;
+// GETs omit the `Img-Descriptor` header entirely. `BlueZ` obexd always
+// attaches a descriptor with an empty `<image>` element, but AOSP
+// (`BipPixel.determinePixelType`) throws `ParseException` on the empty
+// `pixel=""` attribute, which its responder surfaces as Precondition Failed
+// (0x4C). A missing descriptor selects the responder's native-image path
+// (`AvrcpBipObexServer.handleGetImage`: `descriptor == null`), which is the
+// only universally accepted native pull.
 
-/// Minimal BIP image descriptor requested alongside every GET.
-///
-/// Without an `Img-Descriptor` header, strict BIP responders reject the GET
-/// or answer with their (potentially enormous) original-resolution image.
-const IMG_DESCRIPTOR_XML: &str = concat!(
-    r#"<image-descriptor version="1.0.0" encoding="vlcard">"#,
-    r#"<image encoding="JPEG" pixel="1024-1024"/>"#,
-    r#"</image-descriptor>"#
-);
+/// OBEX header identifier of the BIP `Img-Handle` header (`obexd/client/bip.c`
+/// `IMG_HANDLE_TAG`); the AOSP responder reads the image handle exclusively
+/// from this header, not from the generic OBEX Name header.
+const IMG_HANDLE_HEADER_ID: u8 = 0x30;
 
 /// Largest accepted image-handle string (e.g. `0000001`).
 const IMG_HANDLE_MAX_LEN: usize = 64;
 
 const _: () = {
     assert!(AVRCP_COVER_ART_UUID.len() == 16);
-    assert!(IMG_DESCRIPTOR_XML.len() + 2 <= u8::MAX as usize);
 };
 
 /// The kind of BIP image representation to request from the responder.
@@ -393,6 +392,13 @@ impl L2capBipChannel {
     }
 }
 
+fn l2cap_step_err(step: &'static str) -> impl Fn(std::io::Error) -> BipError {
+    move |e| {
+        tracing::debug!(step, error = %e, "L2CAP socket operation failed");
+        BipError::l2cap_connect(e)
+    }
+}
+
 #[async_trait::async_trait]
 impl BipChannel for L2capBipChannel {
     async fn open(&self, address: &BtAddress) -> Result<BipStream, BipError> {
@@ -401,13 +407,22 @@ impl BipChannel for L2capBipChannel {
         let started = Instant::now();
         tracing::debug!(address = %canonical, psm = self.psm, "opening L2CAP (ERTM) connection");
         let socket = bluer::l2cap::Socket::<bluer::l2cap::Stream>::new_stream()
-            .map_err(BipError::l2cap_connect)?;
-        socket
-            .set_flow_control(bluer::l2cap::FlowControl::Ertm)
-            .map_err(BipError::l2cap_connect)?;
+            .map_err(l2cap_step_err("create socket"))?;
         socket
             .bind(bluer::l2cap::SocketAddr::any_br_edr())
-            .map_err(BipError::l2cap_connect)?;
+            .map_err(l2cap_step_err("bind local address"))?;
+        // SOCK_STREAM L2CAP channels already default to ERTM when the kernel
+        // has ERTM enabled (net/bluetooth/l2cap_sock.c `l2cap_sock_init`), and
+        // in that configuration the BT_MODE sockopt rejects ERTM with EINVAL
+        // (`l2cap_set_mode`). It only accepts ERTM when the module-wide
+        // `disable_ertm=1` fallback left the socket in Basic mode, so treat
+        // EINVAL as "ERTM is already the default" and fail on anything else.
+        if let Err(e) = socket.set_flow_control(bluer::l2cap::FlowControl::Ertm) {
+            if e.kind() != std::io::ErrorKind::InvalidInput {
+                return Err(l2cap_step_err("set ERTM flow control")(e));
+            }
+            tracing::debug!(address = %canonical, "L2CAP stream socket defaults to ERTM (BT_MODE rejected with EINVAL)");
+        }
         let socket_addr = bluer::l2cap::SocketAddr::new(
             bluer::Address(octets),
             bluer::AddressType::BrEdr,
@@ -416,7 +431,7 @@ impl BipChannel for L2capBipChannel {
         let stream = socket
             .connect(socket_addr)
             .await
-            .map_err(BipError::l2cap_connect)?;
+            .map_err(l2cap_step_err("connect"))?;
         tracing::debug!(
             address = %canonical,
             psm = self.psm,
@@ -463,21 +478,9 @@ pub async fn pull_image<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    if img_handle.is_empty()
-        || img_handle.len() > IMG_HANDLE_MAX_LEN
-        || !img_handle.bytes().all(|b| b.is_ascii_graphic())
-    {
-        return Err(BipError::invalid_handle(
-            "expected a non-empty image handle of at most 64 printable ASCII characters",
-        ));
-    }
+    validate_img_handle(img_handle)?;
 
     let started = Instant::now();
-    tracing::info!(
-        mime = image_type.mime(),
-        handle = img_handle,
-        "BIP image pull starting"
-    );
 
     let mut client = Client::new(stream);
     client
@@ -489,11 +492,47 @@ where
         "OBEX CONNECT accepted"
     );
 
+    get_image_on(&mut client, image_type, img_handle).await
+}
+
+/// Runs the BIP GET transaction (Type + Img-Handle headers) on an
+/// already-connected OBEX `client`, then closes the OBEX session with a
+/// best-effort DISCONNECT.
+///
+/// The header set mirrors the AOSP native path: Type, Img-Handle (0x30,
+/// Unicode — AOSP ignores the generic OBEX Name header) and NO
+/// Img-Descriptor, selecting the responder's native-image format.
+///
+/// A failing DISCONNECT after a successful GET never discards the already
+/// reassembled body; a failing GET is always propagated first.
+///
+/// # Errors
+/// Returns [`BipError`] for invalid handles, OBEX transport/protocol failures
+/// and responder rejections (see [`BipError::response_code`]).
+async fn get_image_on<T>(
+    client: &mut Client<T>,
+    image_type: BipImageType,
+    img_handle: &str,
+) -> Result<Vec<u8>, BipError>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    validate_img_handle(img_handle)?;
+
+    let started = Instant::now();
+    tracing::info!(
+        mime = image_type.mime(),
+        handle = img_handle,
+        "BIP image pull starting"
+    );
+
     let get = client
         .get([
             Header::Type(image_type.mime().to_string()),
-            Header::Name(img_handle.to_string()),
-            img_descriptor_header(),
+            Header::Other {
+                id: IMG_HANDLE_HEADER_ID,
+                value: HeaderValue::Unicode(img_handle.to_string()),
+            },
         ])
         .await;
 
@@ -519,40 +558,202 @@ where
     }
 }
 
-/// Validates the direct BIP transport path with a CONNECT/DISCONNECT-only session.
-///
-/// Performs the full OBEX session establishment against the AVRCP cover-art
-/// target (useful as a live transport probe when no image handle is known)
-/// and closes the session again. The remote responder's acceptance of the
-/// target UUID is the pass criterion.
-///
-/// # Errors
-/// Returns [`BipError`] when the OBEX CONNECT is rejected or the transport fails.
-pub async fn probe_session<T>(stream: T) -> Result<(), BipError>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    let started = Instant::now();
-    let mut client = Client::new(stream);
-    client
-        .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
-        .await
-        .map_err(|e| map_obex_failure("OBEX CONNECT", e))?;
-    tracing::debug!(
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "OBEX CONNECT accepted"
-    );
-    if let Err(e) = client.disconnect().await {
-        tracing::warn!(
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "BIP probe disconnect failed: {e}"
-        );
+/// Validates the image handle against the BIP constraints.
+fn validate_img_handle(img_handle: &str) -> Result<(), BipError> {
+    if img_handle.is_empty()
+        || img_handle.len() > IMG_HANDLE_MAX_LEN
+        || !img_handle.bytes().all(|b| b.is_ascii_graphic())
+    {
+        return Err(BipError::invalid_handle(
+            "expected a non-empty image handle of at most 64 printable ASCII characters",
+        ));
     }
-    tracing::info!(
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "BIP OBEX session probe succeeded"
-    );
     Ok(())
+}
+
+/// OBEX transport selected for a direct BIP cover-art fetch.
+///
+/// `BlueZ` publishes the remote player's `MediaPlayer1.ObexPort`: RFCOMM
+/// channel numbers are at most 30, while Android 8+ Pixels advertise an
+/// L2CAP PSM (e.g. 4097). The classification picks the matching transport
+/// and the [`BipChannel`] implementation that can open it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BipTransport {
+    /// Unknown port: resolve the BIP RFCOMM channel via SDP.
+    SdpRfcomm,
+    /// Known RFCOMM channel: skip the SDP lookup and connect directly.
+    RfcommChannel(u8),
+    /// Known L2CAP PSM: connect with ERTM flow control (AVRCP 1.6 Cover Art).
+    L2capPsm(u16),
+}
+
+/// Classifies a remote `MediaPlayer1.ObexPort` value into a [`BipTransport`].
+///
+/// RFCOMM channels are 1..=30, so anything larger must be an L2CAP PSM
+/// (e.g. Pixel phones publish PSM 4097 for AVRCP 1.6 Cover Art).
+#[must_use]
+pub fn classify_obex_port(obex_port: Option<u16>) -> BipTransport {
+    match obex_port {
+        None => BipTransport::SdpRfcomm,
+        Some(p) if p <= 30 => BipTransport::RfcommChannel(p as u8),
+        Some(p) => BipTransport::L2capPsm(p),
+    }
+}
+
+/// Builds the [`BipChannel`] implementation matching a [`BipTransport`].
+#[must_use]
+pub fn bip_channel_for(transport: BipTransport) -> Box<dyn BipChannel> {
+    match transport {
+        BipTransport::SdpRfcomm => Box::new(RfcommBipChannel::default()),
+        BipTransport::RfcommChannel(channel) => {
+            Box::new(RfcommBipChannel::with_known_channel(channel))
+        }
+        BipTransport::L2capPsm(psm) => Box::new(L2capBipChannel::new(psm)),
+    }
+}
+
+/// Keeps the persistent BIP OBEX session for one device alive.
+///
+/// On AOSP the cover-art flow only advertises `ImgHandle` values in
+/// `MediaPlayer1.Track` while a BIP client session exists, so the appliance
+/// must hold the session open even between fetches (the role obexd played).
+#[async_trait::async_trait]
+pub trait BipSessionKeeper: Send {
+    /// Ensures an OBEX session is established to `address` over `transport`.
+    ///
+    /// Calling this repeatedly with the same address is a cheap no-op; a
+    /// different address first releases the previous session.
+    ///
+    /// # Errors
+    /// Returns [`BipError`] when the transport cannot be opened or the OBEX
+    /// CONNECT is rejected. A failed ensure leaves the previous session
+    /// released, so the next call re-establishes from scratch.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async-trait injects #[must_use] on the desugared future while Result is already must_use"
+    )]
+    async fn ensure(
+        &mut self,
+        address: &BtAddress,
+        transport: &BipTransport,
+    ) -> Result<(), BipError>;
+
+    /// Fetches an image over the held session, re-establishing it if needed.
+    ///
+    /// The GET reuses the same transport connection as the session
+    /// keepalive, mirroring obexd, which serves its single BIP session for
+    /// both liveness and transfers. On a fetch failure the held session is
+    /// released so the next call re-establishes from scratch.
+    ///
+    /// # Errors
+    /// Returns [`BipError`] when the session cannot be ensured, the handle is
+    /// invalid, or the responder rejects/fails the GET.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async-trait injects #[must_use] on the desugared future while Result is already must_use"
+    )]
+    async fn fetch_image(
+        &mut self,
+        address: &BtAddress,
+        transport: &BipTransport,
+        image_type: BipImageType,
+        img_handle: &str,
+    ) -> Result<Vec<u8>, BipError>;
+
+    /// Drops the held session (if any), closing the transport connection.
+    fn release(&mut self);
+}
+
+/// Production [`BipSessionKeeper`] holding one live OBEX session.
+///
+/// The held [`Client`] owns the transport stream; dropping it closes the
+/// L2CAP/RFCOMM link and releases the remote cover-art session.
+#[derive(Default)]
+pub struct PersistentBipSession {
+    session: Option<Client<BipStream>>,
+    address: Option<BtAddress>,
+    transport: Option<BipTransport>,
+}
+
+impl fmt::Debug for PersistentBipSession {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PersistentBipSession")
+            .field("address", &self.address)
+            .field("transport", &self.transport)
+            .field("session_held", &self.session.is_some())
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl BipSessionKeeper for PersistentBipSession {
+    async fn ensure(
+        &mut self,
+        address: &BtAddress,
+        transport: &BipTransport,
+    ) -> Result<(), BipError> {
+        if self.address.as_ref() == Some(address) && self.session.is_some() {
+            tracing::trace!(address = %address.to_string(), "BIP session already established");
+            return Ok(());
+        }
+        self.release();
+        let started = Instant::now();
+        let channel = bip_channel_for(*transport);
+        tracing::debug!(
+            address = %address.to_string(),
+            ?transport,
+            "establishing persistent BIP session"
+        );
+        let stream = channel.open(address).await?;
+        let mut client = Client::new(stream);
+        client
+            .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
+            .await
+            .map_err(|e| map_obex_failure("OBEX CONNECT", e))?;
+        tracing::info!(
+            address = %address.to_string(),
+            ?transport,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "persistent BIP session established"
+        );
+        self.session = Some(client);
+        self.address = Some(*address);
+        self.transport = Some(*transport);
+        Ok(())
+    }
+
+    async fn fetch_image(
+        &mut self,
+        address: &BtAddress,
+        transport: &BipTransport,
+        image_type: BipImageType,
+        img_handle: &str,
+    ) -> Result<Vec<u8>, BipError> {
+        self.ensure(address, transport).await?;
+        let Some(client) = self.session.as_mut() else {
+            unreachable!("ensure() guarantees a held session on Ok");
+        };
+        match get_image_on(client, image_type, img_handle).await {
+            Ok(body) => Ok(body),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e.summary(),
+                    handle = img_handle,
+                    "persistent BIP session fetch failed; releasing session for re-establishment"
+                );
+                self.release();
+                Err(e)
+            }
+        }
+    }
+
+    fn release(&mut self) {
+        if let Some(address) = self.address.take() {
+            tracing::debug!(address = %address.to_string(), "releasing persistent BIP session");
+        }
+        self.transport = None;
+        self.session = None;
+    }
 }
 
 /// Builds the RFCOMM socket address for the resolved BIP channel.
@@ -601,24 +802,6 @@ fn map_obex_failure(operation: &'static str, error: ObexError) -> BipError {
     } else {
         tracing::warn!(operation, error = %error, "BIP operation failed");
         BipError::obex(error)
-    }
-}
-
-/// Builds the BIP `Img-Descriptor` (0x71) header: a single TLV triplet
-/// carrying the minimal XML descriptor.
-fn img_descriptor_header() -> Header {
-    let xml = IMG_DESCRIPTOR_XML.as_bytes();
-    let mut value = Vec::with_capacity(xml.len() + 2);
-    value.push(IMG_DESCRIPTOR_HEADER_ID);
-    value.push(
-        xml.len()
-            .try_into()
-            .expect("descriptor length proven <= u8::MAX by const assertion"),
-    );
-    value.extend_from_slice(xml);
-    Header::Other {
-        id: IMG_DESCRIPTOR_HEADER_ID,
-        value: HeaderValue::Bytes(value),
     }
 }
 
