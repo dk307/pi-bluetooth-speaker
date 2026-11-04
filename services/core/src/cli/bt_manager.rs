@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 
 use crate::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts, run_poll_loop};
 use crate::hardware::bluetooth::bip_direct::{
-    BipChannel, BipImageType, RfcommBipChannel, fetch_cover_art_via, probe_session,
+    BipChannel, BipImageType, L2capBipChannel, RfcommBipChannel, fetch_cover_art_via, probe_session,
 };
-use crate::hardware::{BluetoothDevice, BtAddress};
+use crate::hardware::{BluetoothDevice, BluetoothStatus, BtAddress, BtError, BtPlaybackState};
 
 /// Default status poll interval (5 seconds).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -25,6 +25,47 @@ pub struct BipProbeOptions {
     /// Optional BIP image handle; when present a full GET is performed,
     /// otherwise only SDP + RFCOMM + OBEX CONNECT/DISCONNECT are exercised.
     pub handle: Option<Box<str>>,
+}
+
+/// OBEX transport selected for a direct BIP cover-art fetch.
+///
+/// `BlueZ` publishes the remote player's `MediaPlayer1.ObexPort`: RFCOMM
+/// channel numbers are at most 30, while Android 8+ Pixels advertise an
+/// L2CAP PSM (e.g. 4097). The classification picks the matching transport
+/// and the [`BipChannel`] implementation that can open it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BipTransport {
+    /// Unknown port: resolve the BIP RFCOMM channel via SDP.
+    SdpRfcomm,
+    /// Known RFCOMM channel: skip the SDP lookup and connect directly.
+    RfcommChannel(u8),
+    /// Known L2CAP PSM: connect with ERTM flow control (AVRCP 1.6 Cover Art).
+    L2capPsm(u16),
+}
+
+/// Classifies a remote `MediaPlayer1.ObexPort` value into a [`BipTransport`].
+///
+/// RFCOMM channels are 1..=30, so anything larger must be an L2CAP PSM
+/// (e.g. Pixel phones publish PSM 4097 for AVRCP 1.6 Cover Art).
+#[must_use]
+pub fn classify_obex_port(obex_port: Option<u16>) -> BipTransport {
+    match obex_port {
+        None => BipTransport::SdpRfcomm,
+        Some(port) if port <= 30 => BipTransport::RfcommChannel(port as u8),
+        Some(port) => BipTransport::L2capPsm(port),
+    }
+}
+
+/// Instantiates the [`BipChannel`] production backend for a [`BipTransport`].
+#[must_use]
+pub fn bip_channel_for(transport: &BipTransport) -> Box<dyn BipChannel> {
+    match transport {
+        BipTransport::SdpRfcomm => Box::new(RfcommBipChannel::default()),
+        BipTransport::RfcommChannel(channel) => {
+            Box::new(RfcommBipChannel::with_known_channel(*channel))
+        }
+        BipTransport::L2capPsm(psm) => Box::new(L2capBipChannel::new(*psm)),
+    }
 }
 
 /// Bluetooth manager service command-line options.
@@ -205,6 +246,69 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Merges an explicit `--bip-handle` with the track handle reported by
+/// playback state.
+///
+/// An explicitly provided handle always wins; otherwise the handle from the
+/// active player's `Track` (`ImgHandle`) is auto-filled so a plain
+/// `--bip-probe <MAC>` performs a full GET when the phone advertises
+/// cover art.
+#[must_use]
+pub fn merge_probe_handle(
+    opts: &BipProbeOptions,
+    playback: Option<&BtPlaybackState>,
+) -> BipProbeOptions {
+    let effective_handle = opts
+        .handle
+        .clone()
+        .or_else(|| playback.and_then(|p| p.image_handle.clone()));
+    BipProbeOptions {
+        address: opts.address.clone(),
+        handle: effective_handle,
+    }
+}
+
+/// Runs the one-shot BIP probe with transport selection from D-Bus status.
+///
+/// Falls back to the SDP/RFCOMM path when the status snapshot is unavailable
+/// (e.g. the system D-Bus is down) so the probe still exercises the
+/// transport directly.
+///
+/// # Errors
+/// Logged and reported via [`ExitCode::FAILURE`] on any failure.
+pub fn run_bip_probe_with_status(
+    opts: &BipProbeOptions,
+    status: Result<BluetoothStatus, BtError>,
+) -> ExitCode {
+    let address = match BtAddress::parse_str(opts.address.as_ref()) {
+        Ok(address) => address,
+        Err(e) => {
+            tracing::error!("invalid --bip-probe address: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match status {
+        Ok(status) => {
+            let playback = status
+                .playback
+                .filter(|p| p.device_address == Some(address));
+            let effective = merge_probe_handle(opts, playback.as_ref());
+            let transport = classify_obex_port(playback.as_ref().and_then(|p| p.obex_port));
+            tracing::debug!(?transport, "selected BIP transport from ObexPort");
+            let channel = bip_channel_for(&transport);
+            run_bip_probe(channel.as_ref(), &effective)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "status snapshot unavailable; falling back to SDP/RFCOMM transport"
+            );
+            let channel = bip_channel_for(&BipTransport::SdpRfcomm);
+            run_bip_probe(channel.as_ref(), opts)
+        }
+    }
+}
+
 /// Runs a one-shot direct BIP cover-art probe against `opts.address`.
 ///
 /// Resolves the BIP Image Pull service via SDP, opens the RFCOMM transport,
@@ -277,7 +381,14 @@ pub fn main() -> ExitCode {
         Err(exit_code) => return exit_code,
     };
     if let Some(probe) = opts.bip_probe {
-        return run_bip_probe(&RfcommBipChannel, &probe);
+        // The probe selects its transport (SDP/RFCOMM vs. L2CAP PSM) from
+        // `MediaPlayer1.ObexPort`, so it needs a D-Bus status snapshot first;
+        // an unavailable snapshot degrades gracefully to the SDP path.
+        let status = match BluetoothDevice::new() {
+            Ok(bt) => bt.status(),
+            Err(e) => Err(e),
+        };
+        return run_bip_probe_with_status(&probe, status);
     }
     let bt = match BluetoothDevice::new() {
         Ok(bt) => bt,
@@ -502,6 +613,98 @@ mod tests {
     fn run_bip_probe_rejects_invalid_address() {
         assert_eq!(
             run_bip_probe(&ProbeFakeChannel, &probe_opts("not-a-mac", None)),
+            ExitCode::FAILURE
+        );
+    }
+
+    /// Playback state matching the mock peer (`AA:BB:CC:DD:EE:FF`) that
+    /// advertises AVRCP 1.6 Cover Art via `MediaPlayer1.ObexPort`.
+    fn playback_with(obex_port: Option<u16>, image_handle: Option<&str>) -> BtPlaybackState {
+        BtPlaybackState {
+            device_address: Some(BtAddress::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66])),
+            device_name: "Pixel 10 Pro XL".into(),
+            status: "playing".into(),
+            title: "Galliyan (Unplugged)".into(),
+            artist: "Shraddha Kapoor, Ankit Tiwari & Manoj Muntashir".into(),
+            album: "Ek Villain".into(),
+            position_ms: 0,
+            duration_ms: 254_792,
+            player_path: Some("/org/bluez/hci0/dev_11_22_33_44_55_66/player0".into()),
+            obex_port,
+            image_handle: image_handle.map(Box::from),
+            cover_art_path: None,
+        }
+    }
+
+    #[test]
+    fn classify_obex_port_selects_transport() {
+        assert_eq!(classify_obex_port(None), BipTransport::SdpRfcomm);
+        assert_eq!(
+            classify_obex_port(Some(24)),
+            BipTransport::RfcommChannel(24)
+        );
+        assert_eq!(classify_obex_port(Some(4097)), BipTransport::L2capPsm(4097));
+    }
+
+    #[test]
+    fn bip_channel_for_matches_transport() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let address = BtAddress::parse_str("11:22:33:44:55:66").expect("valid");
+        let sdp = bip_channel_for(&BipTransport::SdpRfcomm);
+        assert!(
+            runtime.block_on(sdp.open(&address)).is_err(),
+            "SDP lookup must fail on a host without Bluetooth hardware"
+        );
+    }
+
+    #[test]
+    fn merge_probe_handle_explicit_handle_wins() {
+        let playback = playback_with(Some(4097), Some("1000001"));
+        let merged = merge_probe_handle(
+            &probe_opts("11:22:33:44:55:66", Some("0000009")),
+            Some(&playback),
+        );
+        assert_eq!(merged.handle.as_deref(), Some("0000009"));
+        assert_eq!(merged.address.as_ref(), "11:22:33:44:55:66");
+    }
+
+    #[test]
+    fn merge_probe_handle_autofills_from_playback() {
+        let playback = playback_with(Some(4097), Some("1000001"));
+        let merged = merge_probe_handle(&probe_opts("11:22:33:44:55:66", None), Some(&playback));
+        assert_eq!(merged.handle.as_deref(), Some("1000001"));
+    }
+
+    #[test]
+    fn merge_probe_handle_without_playback_stays_empty() {
+        let merged = merge_probe_handle(&probe_opts("11:22:33:44:55:66", None), None);
+        assert_eq!(merged.handle, None);
+    }
+
+    #[test]
+    fn run_bip_probe_with_status_selects_l2cap_from_mock_playback() {
+        // The mock peer advertises ObexPort 4097 (L2CAP PSM), so the probe
+        // must select the L2CAP transport; on a host without Bluetooth
+        // hardware the socket connect fails fast, surfacing as FAILURE.
+        let (bt, _mock) = BluetoothDevice::new_mocked();
+        let status = bt.status().expect("mock status");
+        assert_eq!(
+            run_bip_probe_with_status(&probe_opts("AA:BB:CC:DD:EE:FF", None), Ok(status)),
+            ExitCode::FAILURE
+        );
+    }
+
+    #[test]
+    fn run_bip_probe_with_status_falls_back_to_sdp_on_status_error() {
+        // A snapshot failure (e.g. D-Bus outage) must degrade gracefully to
+        // the SDP/RFCOMM path; the host has no Bluetooth hardware, so the
+        // fallback still ends in FAILURE rather than a panic or hang.
+        let error = BtError::invalid_address("11:22:33:44:55:66", "simulated D-Bus outage");
+        assert_eq!(
+            run_bip_probe_with_status(&probe_opts("11:22:33:44:55:66", None), Err(error)),
             ExitCode::FAILURE
         );
     }

@@ -80,7 +80,7 @@ impl BipImageType {
 /// Subsystem error type for direct BIP cover-art retrieval.
 ///
 /// The optional `source` field preserves the typed underlying error (e.g. the
-/// original [`bluesdp::SdpError`], [`bluer::Error`] or [`ObexError`]) so the
+/// original [`bluesdp::SdpError`], [`std::io::Error`] or [`ObexError`]) so the
 /// cause chain survives `?` conversions, per the M-ERRORS-STD-SOURCE guideline.
 #[derive(Debug)]
 pub struct BipError {
@@ -98,6 +98,9 @@ enum BipErrorKind {
         address: Box<str>,
     },
     RfcommConnect {
+        details: Box<str>,
+    },
+    L2capConnect {
         details: Box<str>,
     },
     InvalidHandle {
@@ -147,6 +150,13 @@ impl BipError {
         .with_source(source)
     }
 
+    pub(crate) fn l2cap_connect(source: std::io::Error) -> Self {
+        Self::new(BipErrorKind::L2capConnect {
+            details: source.to_string().into(),
+        })
+        .with_source(source)
+    }
+
     pub(crate) fn invalid_handle(details: impl Into<Box<str>>) -> Self {
         Self::new(BipErrorKind::InvalidHandle {
             details: details.into(),
@@ -183,6 +193,12 @@ impl BipError {
     #[must_use]
     pub const fn is_rfcomm_connect(&self) -> bool {
         matches!(self.kind, BipErrorKind::RfcommConnect { .. })
+    }
+
+    /// Returns `true` if the L2CAP connection could not be established.
+    #[must_use]
+    pub const fn is_l2cap_connect(&self) -> bool {
+        matches!(self.kind, BipErrorKind::L2capConnect { .. })
     }
 
     /// Returns `true` if the requested image handle failed validation.
@@ -230,6 +246,9 @@ impl BipError {
             BipErrorKind::RfcommConnect { details } => {
                 write!(f, "RFCOMM connect failed: {details}")
             }
+            BipErrorKind::L2capConnect { details } => {
+                write!(f, "L2CAP connect failed: {details}")
+            }
             BipErrorKind::InvalidHandle { details } => {
                 write!(f, "invalid image handle: {details}")
             }
@@ -266,6 +285,12 @@ impl From<bluesdp::SdpError> for BipError {
     }
 }
 
+impl From<std::io::Error> for BipError {
+    fn from(source: std::io::Error) -> Self {
+        Self::l2cap_connect(source)
+    }
+}
+
 /// An opened raw OBEX transport to a remote BIP Image Pull service.
 pub trait BipIo: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> BipIo for T {}
@@ -292,8 +317,25 @@ pub trait BipChannel: Send + Sync {
 }
 
 /// Production [`BipChannel`]: pure-Rust SDP lookup plus a `BlueZ` RFCOMM socket.
+///
+/// [`RfcommBipChannel::with_known_channel`] skips the SDP lookup when the
+/// caller already knows the channel number (e.g. `BlueZ` published an RFCOMM
+/// channel in `MediaPlayer1.ObexPort`).
 #[derive(Debug, Clone, Copy, Default)]
-pub struct RfcommBipChannel;
+pub struct RfcommBipChannel {
+    known_channel: Option<u8>,
+}
+
+impl RfcommBipChannel {
+    /// Creates a channel that skips the SDP lookup and connects directly to
+    /// the given RFCOMM channel number.
+    #[must_use]
+    pub const fn with_known_channel(channel: u8) -> Self {
+        Self {
+            known_channel: Some(channel),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl BipChannel for RfcommBipChannel {
@@ -301,13 +343,20 @@ impl BipChannel for RfcommBipChannel {
         let canonical = address.to_string();
         let octets = *address.as_bytes();
         let started = Instant::now();
-        tracing::debug!(address = %canonical, "SDP: querying BIP Image Pull service record");
-        let channel = resolve_sdp_channel(
-            &canonical,
-            started.elapsed().as_millis() as u64,
-            bluesdp::query_rfcomm_channel(&canonical, bluesdp::Uuid16(BIP_IMAGE_PULL_UUID16))
-                .await?,
-        )?;
+        let channel = if let Some(channel) = self.known_channel {
+            tracing::debug!(
+                address = %canonical,
+                channel,
+                "using known BIP RFCOMM channel (BlueZ ObexPort)"
+            );
+            channel
+        } else {
+            tracing::debug!(address = %canonical, "SDP: querying BIP Image Pull service record");
+            let sdp_result =
+                bluesdp::query_rfcomm_channel(&canonical, bluesdp::Uuid16(BIP_IMAGE_PULL_UUID16))
+                    .await?;
+            resolve_sdp_channel(&canonical, started.elapsed().as_millis() as u64, sdp_result)?
+        };
 
         let socket_addr = bip_socket_address(octets, channel);
         tracing::debug!(socket = %socket_addr, "opening RFCOMM connection");
@@ -318,6 +367,61 @@ impl BipChannel for RfcommBipChannel {
             socket = %socket_addr,
             elapsed_ms = started.elapsed().as_millis() as u64,
             "RFCOMM connection established"
+        );
+
+        Ok(Box::new(stream) as BipStream)
+    }
+}
+
+/// Production [`BipChannel`] for devices that serve cover art over L2CAP.
+///
+/// Android 8+ Pixels advertise an L2CAP PSM (e.g. 4097) in
+/// `org.bluez.MediaPlayer1.ObexPort` instead of an RFCOMM channel; this
+/// backend connects with Enhanced Retransmission Mode, which the AVRCP
+/// cover-art profile requires for flow-controlled L2CAP transports.
+#[derive(Debug, Clone, Copy)]
+pub struct L2capBipChannel {
+    /// L2CAP Protocol/Service Multiplexor published by the remote device.
+    psm: u16,
+}
+
+impl L2capBipChannel {
+    /// Creates a channel targeting a specific L2CAP PSM.
+    #[must_use]
+    pub const fn new(psm: u16) -> Self {
+        Self { psm }
+    }
+}
+
+#[async_trait::async_trait]
+impl BipChannel for L2capBipChannel {
+    async fn open(&self, address: &BtAddress) -> Result<BipStream, BipError> {
+        let canonical = address.to_string();
+        let octets = *address.as_bytes();
+        let started = Instant::now();
+        tracing::debug!(address = %canonical, psm = self.psm, "opening L2CAP (ERTM) connection");
+        let socket = bluer::l2cap::Socket::<bluer::l2cap::Stream>::new_stream()
+            .map_err(BipError::l2cap_connect)?;
+        socket
+            .set_flow_control(bluer::l2cap::FlowControl::Ertm)
+            .map_err(BipError::l2cap_connect)?;
+        socket
+            .bind(bluer::l2cap::SocketAddr::any_br_edr())
+            .map_err(BipError::l2cap_connect)?;
+        let socket_addr = bluer::l2cap::SocketAddr::new(
+            bluer::Address(octets),
+            bluer::AddressType::BrEdr,
+            self.psm,
+        );
+        let stream = socket
+            .connect(socket_addr)
+            .await
+            .map_err(BipError::l2cap_connect)?;
+        tracing::debug!(
+            address = %canonical,
+            psm = self.psm,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "L2CAP connection established"
         );
 
         Ok(Box::new(stream) as BipStream)
