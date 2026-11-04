@@ -8,7 +8,8 @@ use speaker_core::hardware::bluetooth_test_helpers::{DbusClient, ManagedObjects}
 use speaker_core::hardware::{
     BlueAlsaPcm, BluetoothControllerInfo, BluetoothDevice, BluetoothHardwareInfo,
     BluetoothServices, BtAddress, BtDevice, BtError, BtPlaybackState, ServiceState,
-    bluetooth_test_helpers, decode_pcm_format, format_duration_ms,
+    bluetooth_test_helpers, decode_pcm_format, format_duration_ms, seek_offset_us,
+    validate_bip_handle,
 };
 
 #[test]
@@ -1706,80 +1707,6 @@ fn mock_cover_art_resolution_and_control() {
 }
 
 #[test]
-fn native_image_size_max_extraction() {
-    use speaker_core::hardware::native_image_size;
-    use std::collections::HashMap;
-    use zbus::zvariant::{OwnedValue, Value};
-
-    // Empty descriptor list -> unknown (0)
-    assert_eq!(native_image_size::<std::hash::RandomState>(&[]), 0);
-
-    // Descriptor without a Size key is skipped entirely
-    let mut no_size: HashMap<String, OwnedValue> = HashMap::new();
-    no_size.insert(
-        "pixel".into(),
-        OwnedValue::try_from(Value::from("800*800")).unwrap(),
-    );
-    assert_eq!(native_image_size(std::slice::from_ref(&no_size)), 0);
-
-    // Case-insensitive Size lookup (obexd emits lowercase keys)
-    let mut lower: HashMap<String, OwnedValue> = HashMap::new();
-    lower.insert("size".into(), OwnedValue::from(500_000u64));
-    assert_eq!(native_image_size(std::slice::from_ref(&lower)), 500_000);
-
-    let mut upper: HashMap<String, OwnedValue> = HashMap::new();
-    upper.insert("SIZE".into(), OwnedValue::from(750_000u64));
-    assert_eq!(native_image_size(std::slice::from_ref(&upper)), 750_000);
-
-    // Maximum across descriptors wins
-    let mut small: HashMap<String, OwnedValue> = HashMap::new();
-    small.insert("size".into(), OwnedValue::from(120_000u64));
-    let mut big: HashMap<String, OwnedValue> = HashMap::new();
-    big.insert("Size".into(), OwnedValue::from(1_400_000u64));
-    assert_eq!(native_image_size(&[small, big]), 1_400_000);
-
-    // Non-numeric Size values are ignored rather than poisoning the maximum
-    let mut bad: HashMap<String, OwnedValue> = HashMap::new();
-    bad.insert(
-        "size".into(),
-        OwnedValue::try_from(Value::from("not-a-number")).unwrap(),
-    );
-    let mut good: HashMap<String, OwnedValue> = HashMap::new();
-    good.insert("size".into(), OwnedValue::from(321_000u64));
-    assert_eq!(native_image_size(&[bad, good]), 321_000);
-}
-
-#[test]
-fn native_caps_persistence_roundtrip() {
-    use speaker_core::diag::ScopedTempDir;
-    use speaker_core::hardware::{load_native_caps_in, store_native_cap_in};
-
-    let temp = ScopedTempDir::new("native_caps_test");
-    let dir = temp.path();
-
-    // Missing file loads to an empty map without erroring
-    let caps = load_native_caps_in(dir);
-    assert!(caps.is_empty());
-
-    // Store a ceiling for one device, reload, and verify
-    store_native_cap_in(dir, "AA_BB_CC_DD_EE_FF", 1_499_999).unwrap();
-    let caps = load_native_caps_in(dir);
-    assert_eq!(caps.get("AA_BB_CC_DD_EE_FF"), Some(&1_499_999));
-
-    // A second device's ceiling must not clobber the first (read-modify-write)
-    store_native_cap_in(dir, "11_22_33_44_55_66", 980_000).unwrap();
-    let caps = load_native_caps_in(dir);
-    assert_eq!(caps.get("AA_BB_CC_DD_EE_FF"), Some(&1_499_999));
-    assert_eq!(caps.get("11_22_33_44_55_66"), Some(&980_000));
-
-    // Updating an existing ceiling overwrites only that device's entry
-    store_native_cap_in(dir, "AA_BB_CC_DD_EE_FF", 740_000).unwrap();
-    let caps = load_native_caps_in(dir);
-    assert_eq!(caps.get("AA_BB_CC_DD_EE_FF"), Some(&740_000));
-    assert_eq!(caps.get("11_22_33_44_55_66"), Some(&980_000));
-}
-
-#[test]
 fn parse_bluez_all_deterministic_player_selection() {
     fn with_adapter() -> ManagedObjects {
         let mut objects: ManagedObjects = HashMap::new();
@@ -1851,4 +1778,34 @@ fn bt_error_preserves_dbus_source() {
     let fdo_err = BtError::from(zbus::fdo::Error::Failed("unknown object".into()));
     assert!(fdo_err.is_dbus());
     assert!(fdo_err.source().is_some());
+}
+
+#[test]
+fn bip_handle_validation_matches_aosp_contract() {
+    // Valid: exactly 7 ASCII digits (what AOSP phones advertise in Track.ImgHandle).
+    for (raw, expected) in [
+        ("1669286", Some("1669286")),
+        ("0000000", Some("0000000")),
+        // Invalid: wrong length, non-digits, whitespace, empty.
+        ("166928", None),
+        ("16692861", None),
+        ("h11_00_00_00_00_01", None),
+        ("16692a6", None),
+        ("1669 86", None),
+        ("", None),
+    ] {
+        assert_eq!(
+            validate_bip_handle(raw).as_deref(),
+            expected,
+            "unexpected validation outcome for {raw:?}"
+        );
+    }
+}
+
+#[test]
+fn seek_offset_us_converts_absolute_ms_to_relative_us() {
+    // BlueZ Seek is relative; 60 s target with 45 s elapsed = +15 s.
+    assert_eq!(seek_offset_us(60_000, 45_000), 15_000_000);
+    assert_eq!(seek_offset_us(45_000, 60_000), -15_000_000);
+    assert_eq!(seek_offset_us(30_000, 30_000), 0);
 }

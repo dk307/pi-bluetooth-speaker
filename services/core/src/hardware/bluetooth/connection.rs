@@ -5,7 +5,7 @@
 //! facade with its transport command plumbing.
 
 use std::backtrace::Backtrace;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -20,35 +20,8 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use crate::runtime::FromJoinError;
 
-use super::cover_art::{
-    BIP_DEFAULT_CAP_PX, BIP_DEFAULT_NATIVE_BYTES_CAP, BIP_NATIVE_TIMEOUT_MS, BIP_POLL_INTERVAL_MS,
-    BIP_STALL_TIMEOUT_MS, BIP_THUMBNAIL_TIMEOUT_MS, BIP_TRACK_SETTLE_MS, BIP_VARIANT_TIMEOUT_MS,
-    BT_SOCKET_RMEM_DEFAULT, BT_SOCKET_RMEM_MAX, COVER_ART_CACHE_DIR, HCI_SUPERVISION_TIMEOUT_SLOTS,
-    clean_old_cover_art_in, cover_art_cached_path_in, cover_art_path_for_in,
-    ensure_cover_art_cache_dir_in, is_complete_jpeg, load_device_caps_in, load_native_caps_in,
-    native_image_size, select_bip_candidates, store_device_cap_in, store_native_cap_in,
-};
+use super::cover_art::{COVER_ART_CACHE_DIR, cover_art_cached_path_in};
 use super::transport::{BlueAlsaPcm, BtPlaybackState, decode_pcm_format, format_volume_bytes};
-use super::validate_bip_handle;
-
-/// Number of consecutive OBEX transport failures that trip the circuit breaker.
-const OBEX_BREAKER_FAILURE_THRESHOLD: u32 = 2;
-
-/// Cooldown applied when the breaker first trips; doubles per consecutive trip.
-const OBEX_BREAKER_TTL_INITIAL: Duration = Duration::from_secs(60);
-
-/// Upper bound on the circuit-breaker cooldown.
-const OBEX_BREAKER_TTL_MAX: Duration = Duration::from_secs(300);
-
-/// Consecutive Strategy A (native BIP pull) failures before it is skipped for a device.
-/// Since `native_size == 0` cannot be gated by a byte cap (`0 > cap` is never true), we
-/// track consecutive transfer failures in memory to stop wasting an OBEX round-trip
-/// on every track change for phones that do not support the zero-descriptor pull.
-const NATIVE_PULL_FAILURE_THRESHOLD: u32 = 3;
-
-/// Cooldown before a new cover-art fetch worker is spawned after a failed one,
-/// so a cover-less track does not re-run the OBEX pipeline on every poll tick.
-const COVER_FETCH_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
 /// Number of octets in a standard Bluetooth MAC address.
 pub const BT_ADDRESS_OCTETS: usize = 6;
@@ -830,75 +803,6 @@ pub(crate) trait BlueZAdapter1 {
     fn set_pairable(&self, value: bool) -> zbus::Result<()>;
 }
 
-#[zbus::proxy(
-    default_service = "org.bluez.obex",
-    default_path = "/org/bluez/obex",
-    interface = "org.bluez.obex.Client1",
-    gen_async = false,
-    blocking_name = "ObexClientProxyBlocking"
-)]
-pub(crate) trait ObexClient {
-    fn create_session(
-        &self,
-        destination: &str,
-        args: &HashMap<&str, Value<'_>>,
-    ) -> zbus::Result<OwnedObjectPath>;
-    fn remove_session(&self, session: &OwnedObjectPath) -> zbus::Result<()>;
-}
-
-#[zbus::proxy(
-    default_service = "org.bluez.obex",
-    interface = "org.bluez.obex.Image1",
-    gen_async = false,
-    blocking_name = "ObexImageProxyBlocking"
-)]
-pub(crate) trait ObexImage {
-    fn get(
-        &self,
-        file: &str,
-        handle: &str,
-        properties: &HashMap<&str, Value<'_>>,
-    ) -> zbus::Result<(OwnedObjectPath, HashMap<String, OwnedValue>)>;
-
-    fn get_thumbnail(
-        &self,
-        file: &str,
-        handle: &str,
-    ) -> zbus::Result<(OwnedObjectPath, HashMap<String, OwnedValue>)>;
-
-    fn properties(&self, handle: &str) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
-}
-
-#[zbus::proxy(
-    default_service = "org.bluez.obex",
-    interface = "org.bluez.obex.Transfer1",
-    gen_async = false,
-    blocking_name = "ObexTransferProxyBlocking"
-)]
-pub(crate) trait ObexTransfer {
-    #[zbus(property)]
-    fn status(&self) -> zbus::Result<String>;
-
-    #[zbus(property)]
-    fn transferred(&self) -> zbus::Result<u64>;
-
-    fn cancel(&self) -> zbus::Result<()>;
-}
-
-/// Minimal `org.bluez.Device1` proxy for ACL-link recovery after OBEX failures.
-#[zbus::proxy(
-    default_service = "org.bluez",
-    interface = "org.bluez.Device1",
-    gen_async = false,
-    blocking_name = "ObexDeviceProxyBlocking"
-)]
-pub(crate) trait ObexDevice {
-    #[zbus(property)]
-    fn connected(&self) -> zbus::Result<bool>;
-
-    fn connect(&self) -> zbus::Result<()>;
-}
-
 /// Type alias for D-Bus `ObjectManager` `GetManagedObjects` map.
 pub type ManagedObjects =
     HashMap<OwnedObjectPath, HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>>;
@@ -1114,38 +1018,6 @@ pub fn is_service_absent_fdo_error(err: &zbus::fdo::Error) -> bool {
 /// Consolidated mutable D-Bus client state protected by a single mutex.
 ///
 /// This groups the OBEX session cache, Bluetooth ACL tuning history, and socket
-/// tuning flags together to reduce lock contention and code complexity.
-
-#[derive(Debug, Default)]
-struct DbusClientState {
-    /// Active OBEX file transfer session (target device address, PSM port, path).
-    obex_session: Option<(BtAddress, u16, OwnedObjectPath)>,
-    /// Devices observed with `Device1.Connected == true` (drives reconnect
-    /// edge detection for the AOSP `notifyDeviceConnected` equivalent).
-    connected_devices: HashSet<BtAddress>,
-    /// Addresses seen connected at least once (distinguishes daemon-start
-    /// baseline from a genuine reconnect edge).
-    ever_connected: HashSet<BtAddress>,
-    /// Consecutive OBEX transport failures feeding the circuit breaker.
-    obex_failures: u32,
-    /// Number of times the breaker has tripped (drives exponential cooldown).
-    obex_trips: u32,
-    /// Until this instant, new `CreateSession` calls are suppressed (breaker open).
-    obex_open_until: Option<Instant>,
-    /// MAC addresses whose ACL links have been tuned.
-    acl_tuned: HashSet<BtAddress>,
-    /// Consecutive Strategy A native-pull failures per device (in-memory).
-    native_pull_failures: HashMap<BtAddress, u32>,
-    /// Whether Bluetooth socket buffers have been tuned.
-    socket_tuned: bool,
-    /// Single-flight slot for the detached cover-art fetch worker thread.
-    cover_fetch_pending: Option<(BtAddress, Box<str>)>,
-    /// Until this instant, new cover-art fetch workers are suppressed after a
-    /// failed fetch so a cover-less track cannot re-run the OBEX pipeline on
-    /// every poll tick.
-    cover_fetch_retry_after: Option<Instant>,
-}
-
 /// Shared change-notification flag used by the D-Bus backend and the mock to wake
 /// property monitors when the subsystem state may have changed (event-driven instead
 /// of fixed-interval polling).
@@ -1295,7 +1167,6 @@ pub struct DbusClient {
     conn_slot: Arc<Mutex<Option<Connection>>>,
     device_caps_dir: std::path::PathBuf,
     cache_dir: std::path::PathBuf,
-    state: Arc<Mutex<DbusClientState>>,
     change_flag: Arc<ChangeFlag>,
     stop: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -1306,11 +1177,6 @@ pub type BluezSnapshot = (Option<BtAdapter>, Box<[BtDevice]>, Option<BtPlaybackS
 impl Drop for DbusClient {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        // Tear down any live OBEX session while the D-Bus connection is still
-        // usable so obexd releases the single-client BIP slot on the phone.
-        if let Some((_, _, path)) = self.state().obex_session.take() {
-            self.teardown_obex_session(&path);
-        }
         let taken = self.conn_slot.lock().unwrap().take();
         if let Some(conn) = taken {
             if let Err(e) = conn.close() {
@@ -1329,7 +1195,6 @@ impl DbusClient {
             conn_slot: Arc::clone(&conn_slot),
             device_caps_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
-            state: Arc::new(Mutex::new(DbusClientState::default())),
             change_flag: spawn_properties_changed_listener(conn_slot, Arc::clone(&stop)),
             stop,
         }
@@ -1529,719 +1394,47 @@ impl DbusClient {
     }
 
     fn resolve_cover_art(&self, playback: &mut Option<BtPlaybackState>) {
-        if let Some(pb) = playback {
-            if let Some(addr) = pb.device_address {
-                if let Some(port) = pb.obex_port {
-                    let _ = self.ensure_obex_session(addr, port);
-                    if let Some(ref handle) = pb.image_handle {
-                        pb.cover_art_path = self.fetch_cover_art(addr, handle);
-                    }
-                }
-            }
-        }
-    }
-
-    fn is_obex_session_alive(&self, path: &str) -> bool {
-        zbus::blocking::Proxy::new(
-            &self.conn(),
-            "org.bluez.obex",
-            path,
-            "org.bluez.obex.Session1",
-        )
-        .and_then(|p| p.get_property::<String>("Destination"))
-        .is_ok()
-    }
-
-    /// Recovers the client state from a poisoned mutex so a panicked holder's
-    /// data survives instead of silently dropping OBEX sessions or tuning state.
-    fn state(&self) -> std::sync::MutexGuard<'_, DbusClientState> {
-        self.state.lock().unwrap_or_else(|p| {
-            tracing::warn!("DbusClientState mutex poisoned; recovering inner state");
-            p.into_inner()
-        })
-    }
-
-    /// Begins a single-flight cover-art fetch for `(addr, handle)`.
-    ///
-    /// Returns `false` when a worker is already in flight or the failure
-    /// backoff is still active, in which case the caller must not spawn one.
-    fn try_begin_cover_fetch(&self, addr: BtAddress, handle: &str) -> bool {
-        let mut state = self.state();
-        if state.cover_fetch_pending.is_some()
-            || state
-                .cover_fetch_retry_after
-                .is_some_and(|until| Instant::now() < until)
-        {
-            return false;
-        }
-        state.cover_fetch_pending = Some((addr, Box::from(handle)));
-        true
-    }
-
-    /// Releases the single-flight slot after a fetch worker finishes.
-    ///
-    /// A failed fetch arms the retry backoff; a successful one clears any
-    /// stale backoff so the next cover-less track is served immediately.
-    fn finish_cover_fetch(&self, resolved: bool) {
-        let mut state = self.state();
-        state.cover_fetch_pending = None;
-        if resolved {
-            state.cover_fetch_retry_after = None;
-        } else {
-            state.cover_fetch_retry_after = Some(Instant::now() + COVER_FETCH_RETRY_BACKOFF);
-        }
-    }
-
-    /// Tears down an OBEX session on `obexd`, best-effort. Mirrors the AOSP
-    /// `AvrcpCoverArtManager` teardown so obexd releases the single-client BIP
-    /// slot on the remote device instead of wedging `mClients`.
-    fn teardown_obex_session(&self, path: &OwnedObjectPath) {
-        let client = match ObexClientProxyBlocking::new(&self.conn()) {
-            Ok(client) => client,
-            Err(e) => {
-                tracing::debug!("OBEX Client1 proxy unavailable for RemoveSession: {e}");
-                return;
-            }
+        let Some(pb) = playback else { return };
+        let Some(addr) = pb.device_address else {
+            return;
         };
-        if let Err(e) = client.remove_session(path) {
-            tracing::debug!("Failed to remove OBEX session {path}: {e}");
+        let Some(ref handle) = pb.image_handle else {
+            tracing::debug!(
+                title = pb.title.as_ref(),
+                "cover art unavailable: no ImgHandle in Track"
+            );
+            return;
+        };
+        if let Some(path) = cover_art_cached_path_in(&self.cache_dir, addr, handle) {
+            pb.cover_art_path = Some(path);
+            return;
         }
-    }
-
-    /// Clears and tears down the cached OBEX session, if any. Callers must not
-    /// hold the state mutex; the session is taken under the lock and the D-Bus
-    /// round-trip happens outside it.
-    fn clear_obex_session(&self) {
-        let path = self.state().obex_session.take().map(|(_, _, p)| p);
-        if let Some(path) = path {
-            self.teardown_obex_session(&path);
-        }
-    }
-
-    /// AOSP `notifyDeviceConnected` equivalent: detects a `Device1.Connected`
-    /// false→true edge and, on reconnect, releases any stale BIP session for
-    /// the device and resets the circuit breaker so the first fetch on the
-    /// new link gets a fresh session immediately.
-    ///
-    /// The first observation only establishes the baseline (the daemon may
-    /// have started while the phone was already connected); only a genuinely
-    /// observed drop followed by a reconnect triggers the teardown.
-    fn notify_device_connection(&self, addr: BtAddress) {
-        let dev_path = format!("/org/bluez/hci0/dev_{}", addr.to_string().replace(':', "_"));
-        let Some(connected) = ObexDeviceProxyBlocking::builder(&self.conn())
-            .path(dev_path.as_str())
-            .ok()
-            .and_then(|b| b.build().ok())
-            .and_then(|p| p.connected().ok())
+        // The bt-manager cover-art provider owns the single BIP session to
+        // the phone and publishes each track's image on the system bus; core
+        // must never open its own OBEX connections (the AOSP responder
+        // serves one client at a time).
+        let Some(snapshot) =
+            crate::hardware::bluetooth::cover_service::query_snapshot(&self.conn())
         else {
             return;
         };
-        let mut state = self.state();
-        if !connected {
-            state.connected_devices.remove(&addr);
-            return;
-        }
-        // Steady-state connected: nothing to do.
-        if !state.connected_devices.insert(addr) {
-            return;
-        }
-        // `ever_connected` only misses this address on the very first
-        // observation (the daemon may have started while the phone was
-        // already connected) — baseline only. A device seen connected
-        // before, then dropped, then re-connected is a fresh-link edge.
-        if !state.ever_connected.insert(addr) {
-            // Reconnect edge: any cached session for this device is bound to
-            // a dead transport, and the breaker may have been tripped by that
-            // dying link — release both so the fresh link starts clean.
-            let stale_session = state.obex_session.take();
-            state.obex_failures = 0;
-            state.obex_trips = 0;
-            state.obex_open_until = None;
-            drop(state);
-            if let Some((session_addr, session_port, path)) = stale_session {
-                if session_addr == addr {
-                    tracing::info!("Device {addr} reconnected; releasing stale BIP session {path}");
-                    self.teardown_obex_session(&path);
-                } else {
-                    let mut state = self.state();
-                    state.obex_session = Some((session_addr, session_port, path));
-                }
-            }
-            tracing::info!("OBEX circuit breaker reset after reconnect of {addr}");
-        }
-    }
-
-    fn ensure_obex_session(&self, addr: BtAddress, port: u16) -> Option<OwnedObjectPath> {
-        let mut session_lock = self.state();
-        if let Some((cached_addr, cached_port, ref path)) = session_lock.obex_session {
-            if cached_addr == addr
-                && cached_port == port
-                && self.is_obex_session_alive(path.as_str())
-            {
-                return Some(path.clone());
-            }
-            let stale = path.clone();
-            session_lock.obex_session = None;
-            // A session that vanished on the same mac/PSM is a transport-level
-            // failure: feed the breaker so repeated invalid sessions stop
-            // triggering recreate storms. A mac/PSM *change* is the phone
-            // re-registering BIP (normal operation, AOSP tears down too) and
-            // must not trip the breaker.
-            if cached_addr == addr && cached_port == port {
-                Self::record_obex_failure(&mut session_lock);
-            } else {
-                tracing::info!("OBEX BIP session {stale} superseded (mac/PSM change)");
-            }
-            drop(session_lock);
-            self.teardown_obex_session(&stale);
-            session_lock = self.state();
-        }
-
-        if let Some(open_until) = session_lock.obex_open_until {
-            if Instant::now() < open_until {
-                tracing::debug!(
-                    "OBEX circuit breaker open until {open_until:?}; skipping CreateSession"
-                );
-                return None;
-            }
-        }
-
-        let client = ObexClientProxyBlocking::new(&self.conn()).ok()?;
-        let mut args = HashMap::new();
-        args.insert("Target", Value::from("bip-avrcp"));
-        args.insert("PSM", Value::from(port));
-
-        match client.create_session(&addr.to_string(), &args) {
-            Ok(new_path) => {
-                tracing::info!("Created OBEX BIP session at {new_path} for device {addr}");
-                session_lock.obex_failures = 0;
-                session_lock.obex_trips = 0;
-                session_lock.obex_open_until = None;
-                session_lock.obex_session = Some((addr, port, new_path.clone()));
-                Some(new_path)
-            }
-            Err(e) => {
-                tracing::debug!("Failed to create OBEX BIP session for {addr}: {e}");
-                Self::record_obex_failure(&mut session_lock);
-                None
-            }
-        }
-    }
-
-    /// Feeds one OBEX transport failure into the circuit breaker; trips the
-    /// breaker (opening a doubling cooldown) once the failure threshold is
-    /// reached. The cooldown doubles per consecutive trip up to [`OBEX_BREAKER_TTL_MAX`].
-    fn record_obex_failure(state: &mut DbusClientState) {
-        state.obex_failures = state.obex_failures.saturating_add(1);
-        if state.obex_failures < OBEX_BREAKER_FAILURE_THRESHOLD {
-            return;
-        }
-        let scale = 1u32 << state.obex_trips.min(8);
-        let ttl = OBEX_BREAKER_TTL_INITIAL
-            .checked_mul(scale)
-            .unwrap_or(OBEX_BREAKER_TTL_MAX)
-            .min(OBEX_BREAKER_TTL_MAX);
-        state.obex_open_until = Some(Instant::now() + ttl);
-        state.obex_trips = state.obex_trips.saturating_add(1);
-        state.obex_failures = 0;
-        tracing::warn!("OBEX circuit breaker open for {ttl:?} after repeated failures");
-    }
-
-    /// Raises kernel Bluetooth socket read-buffer limits once per process (`sysctl`).
-    fn tune_bt_socket_buffers(&self) {
-        let mut state = self.state();
-        if state.socket_tuned {
-            return;
-        }
-        let rmem_max_arg = format!("net.core.rmem_max={BT_SOCKET_RMEM_MAX}");
-        let rmem_default_arg = format!("net.core.rmem_default={BT_SOCKET_RMEM_DEFAULT}");
-        let (max_res, default_res) = (
-            run_probe_command("sysctl", &["-w", rmem_max_arg.as_str()]),
-            run_probe_command("sysctl", &["-w", rmem_default_arg.as_str()]),
-        );
-        let ok = max_res.is_ok() && default_res.is_ok();
-        if let Err(e) = max_res {
-            tracing::warn!(error = %e, "sysctl rmem_max update failed");
-        }
-        if let Err(e) = default_res {
-            tracing::warn!(error = %e, "sysctl rmem_default update failed");
-        }
-        if ok {
-            tracing::info!(
-                rmem_max = BT_SOCKET_RMEM_MAX,
-                rmem_default = BT_SOCKET_RMEM_DEFAULT,
-                "Raised kernel Bluetooth socket read buffers"
-            );
-            state.socket_tuned = true;
-        } else {
-            tracing::warn!("sysctl socket buffer tuning failed; will retry on next transfer");
-        }
-    }
-
-    /// Switches the phone to Slave role and raises the supervision timeout once per MAC
-    /// (`hcitool sr` + `hcitool lst`) to avoid L2CAP flow-control starvation (0x08).
-    fn tune_acl_link(&self, addr: BtAddress) {
-        let mac = addr.to_string();
-        let mut state = self.state();
-        if state.acl_tuned.contains(&addr) {
-            return;
-        }
-        let slot_arg = HCI_SUPERVISION_TIMEOUT_SLOTS.to_string();
-        let (sr_res, lst_res) = (
-            run_probe_command("hcitool", &["sr", mac.as_str(), "master"]),
-            run_probe_command("hcitool", &["lst", mac.as_str(), slot_arg.as_str()]),
-        );
-        if let Err(e) = &sr_res {
-            tracing::warn!(error = %e, mac, "hcitool role switch failed");
-        }
-        if let Err(e) = &lst_res {
-            tracing::warn!(error = %e, mac, "hcitool supervision timeout failed");
-        }
-        if sr_res.is_ok() && lst_res.is_ok() {
-            tracing::info!(
-                mac,
-                slots = HCI_SUPERVISION_TIMEOUT_SLOTS,
-                "Tuned ACL link (role switch + supervision timeout)"
-            );
-            state.acl_tuned.insert(addr);
-        } else {
-            tracing::warn!(
-                mac,
-                sr_ok = sr_res.is_ok(),
-                lst_ok = lst_res.is_ok(),
-                "hcitool ACL link tuning failed; will retry on next transfer"
-            );
-        }
-    }
-
-    fn fetch_cover_art(&self, addr: BtAddress, handle: &str) -> Option<Box<str>> {
-        let fetch_started = Instant::now();
-        if let Some(cached) = cover_art_cached_path_in(&self.cache_dir, addr, handle) {
-            tracing::debug!(
-                handle,
-                elapsed_ms = fetch_started.elapsed().as_millis() as u64,
-                "cover art cache hit"
-            );
-            return Some(cached);
-        }
-
-        if let Err(reason) = ensure_cover_art_cache_dir_in(&self.cache_dir) {
-            tracing::warn!("Cover art cache unavailable: {reason}");
-            return None;
-        }
-
-        let prepare_started = Instant::now();
-        let session_path = self.prepare_bip_transfer(addr)?;
-        tracing::debug!(
-            handle,
-            prepare_ms = prepare_started.elapsed().as_millis() as u64,
-            "BIP transfer prepared (incl. settle wait)"
-        );
-        let image_proxy = self.build_image_proxy(session_path.as_str())?;
-
-        let (cache_path, sanitized_mac, sanitized_handle) =
-            cover_art_path_for_in(&self.cache_dir, addr, handle)?;
-        let cache_path_buf = std::path::PathBuf::from(&cache_path);
-        let _ = std::fs::remove_file(&cache_path_buf);
-
-        if let Some(path) = self.try_native_and_variant_pulls(
-            &image_proxy,
-            addr,
-            handle,
-            &sanitized_mac,
-            &cache_path,
-            fetch_started,
-        ) {
-            return Some(path);
-        }
-
-        // Tier 2: baseline 200x200 BIP thumbnail fallback, with a plain-Get last resort
-        // for phones that refuse the thumbnail PDU.
-        let result = self.try_thumbnail_fallback(
-            &image_proxy,
-            handle,
-            &sanitized_mac,
-            &sanitized_handle,
-            &cache_path,
-        );
-        tracing::info!(
-            handle,
-            elapsed_ms = fetch_started.elapsed().as_millis() as u64,
-            resolved = result.is_some(),
-            "cover art fetch finished"
-        );
-        result
-    }
-
-    /// Tier 1: zero-descriptor native pull plus adaptive resolution step-down over the
-    /// advertised BIP variants.
-    ///
-    /// When the native-pull circuit breaker has tripped for this device, the descriptors
-    /// round-trip (~240 ms) and the high-res variant loop are skipped entirely so the
-    /// caller falls straight through to the Tier 2 thumbnail, mirroring the AOSP
-    /// `AvrcpCoverArtManager` preference for the fastest available transfer. Returns
-    /// `None` when the caller should fall through to Tier 2.
-    fn try_native_and_variant_pulls(
-        &self,
-        image_proxy: &ObexImageProxyBlocking<'_>,
-        addr: BtAddress,
-        handle: &str,
-        sanitized_mac: &str,
-        cache_path: &str,
-        fetch_started: Instant,
-    ) -> Option<Box<str>> {
-        let cache_path_buf = std::path::PathBuf::from(cache_path);
-        let sanitized_handle = validate_bip_handle(handle)?;
-
-        let native_breaker_tripped = {
-            let state = self.state();
-            state.native_pull_failures.get(&addr).copied().unwrap_or(0)
-                >= NATIVE_PULL_FAILURE_THRESHOLD
-        };
-
-        let mut cap = load_device_caps_in(&self.device_caps_dir)
-            .get(sanitized_mac)
-            .copied()
-            .unwrap_or(BIP_DEFAULT_CAP_PX);
-        if !native_breaker_tripped && let Ok(descriptors) = image_proxy.properties(handle) {
-            // Strategy A: Zero-descriptor native pull (raw pre-compressed native bytes).
-            if let Some(path) = self.try_native_pull(
-                image_proxy,
-                &descriptors,
-                addr,
-                handle,
-                &sanitized_handle,
-                cache_path,
-            ) {
-                tracing::info!(
-                    handle,
-                    elapsed_ms = fetch_started.elapsed().as_millis() as u64,
-                    "cover art fetch finished (native pull)"
-                );
-                return Some(path);
-            }
-
-            for candidate in select_bip_candidates(&descriptors, cap) {
-                let tmp_path = format!("{cache_path}.tmp.jpg");
-                let tmp_path_buf = std::path::PathBuf::from(&tmp_path);
-                let mut props: HashMap<&str, Value<'_>> = HashMap::new();
-                props.insert("Pixel", Value::from(candidate.pixel.as_str()));
-                props.insert("Encoding", Value::from(candidate.encoding.as_str()));
-                let transfer_res = image_proxy.get(&tmp_path, handle, &props);
-                let Ok((transfer_path, _)) = transfer_res else {
-                    tracing::debug!(
-                        "OBEX Image1 Get({}) failed for handle {handle}",
-                        candidate.pixel
-                    );
-                    self.clear_obex_session();
-                    cap = candidate.area - 1;
-                    let _ = store_device_cap_in(&self.device_caps_dir, sanitized_mac, cap);
-                    if !self.ensure_device_acl_connected(addr) {
-                        return None;
-                    }
-                    break;
-                };
-                let settled =
-                    self.wait_for_transfer(transfer_path.as_str(), BIP_VARIANT_TIMEOUT_MS);
-                let completed = settled == Some(true) && is_complete_jpeg(&tmp_path_buf);
-                if completed && std::fs::rename(&tmp_path_buf, &cache_path_buf).is_ok() {
-                    clean_old_cover_art_in(&self.cache_dir, sanitized_mac, &sanitized_handle);
-                    return Some(Box::<str>::from(cache_path));
-                }
-                let _ = std::fs::remove_file(&tmp_path_buf);
-                tracing::debug!(
-                    "OBEX Image1 Get({}) did not complete for handle {handle}",
-                    candidate.pixel
-                );
-                cap = candidate.area - 1;
-                let _ = store_device_cap_in(&self.device_caps_dir, sanitized_mac, cap);
-                if !self.ensure_device_acl_connected(addr) {
-                    return None;
-                }
-            }
-        }
-        None
-    }
-
-    /// Runs one-time socket/HCI link tuning, waits for the phone's AVRCP `TrackChanged`
-    /// state machine to settle, and returns the cached-or-new BIP OBEX session path.
-    fn prepare_bip_transfer(&self, addr: BtAddress) -> Option<OwnedObjectPath> {
-        self.tune_bt_socket_buffers();
-        self.tune_acl_link(addr);
-
-        // Settle wait: let the phone finish its AVRCP TrackChanged state machine
-        // before we hammer it with OBEX session/transfer requests.
-        thread::sleep(Duration::from_millis(BIP_TRACK_SETTLE_MS));
-
-        let session_lock = self.state();
-        session_lock
-            .obex_session
-            .as_ref()
-            .map(|(_, _, p)| p.clone())
-    }
-
-    /// Builds a blocking `Image1` proxy on top of an existing BIP OBEX session path.
-    fn build_image_proxy<'a>(
-        &'a self,
-        session_path: &'a str,
-    ) -> Option<ObexImageProxyBlocking<'a>> {
-        ObexImageProxyBlocking::builder(&self.conn())
-            .path(session_path)
-            .ok()?
-            .build()
-            .ok()
-    }
-
-    /// Strategy A: zero-descriptor native BIP pull (raw pre-compressed native bytes).
-    ///
-    /// Passes an empty dictionary so obexd omits the `x-bt/img-Description` header and the
-    /// phone streams the raw pre-compressed native bytes without re-encoding. Only attempts
-    /// when the advertised native `Size` is unknown (0) or within the per-device byte cap.
-    /// On success the payload is promoted to `cache_path` and returned; on Get failure the
-    /// per-device byte cap is lowered and persisted. After `NATIVE_PULL_FAILURE_THRESHOLD`
-    /// consecutive failed pulls on the same device, the strategy is skipped entirely.
-    /// Returns `None` when the caller should fall through to the explicit variant loop.
-    fn try_native_pull(
-        &self,
-        image_proxy: &ObexImageProxyBlocking<'_>,
-        descriptors: &[HashMap<String, OwnedValue>],
-        addr: BtAddress,
-        handle: &str,
-        sanitized_handle: &str,
-        cache_path: &str,
-    ) -> Option<Box<str>> {
-        let cache_path_buf = std::path::Path::new(cache_path);
-        let sanitized_mac = addr.to_string().replace([':', '-'], "_");
-        let native_size = native_image_size(descriptors);
-        let native_cap = load_native_caps_in(&self.device_caps_dir)
-            .get(&sanitized_mac)
-            .copied()
-            .unwrap_or(BIP_DEFAULT_NATIVE_BYTES_CAP);
-        if native_size > native_cap {
-            tracing::debug!(
-                handle,
-                native_size,
-                cap = native_cap,
-                "Skipping native BIP pull: advertised size exceeds byte cap"
-            );
-            return None;
-        }
-
-        // Circuit breaker: after NATIVE_PULL_FAILURE_THRESHOLD consecutive failed
-        // native pulls on this device, stop retrying Strategy A entirely (the phone
-        // never completes zero-descriptor native transfers) so per-track round-trips
-        // are not wasted before falling back to the variant loop.
+        if snapshot.device.as_ref() == addr.to_string()
+            && snapshot.handle.as_ref() == handle.as_ref()
         {
-            let state = self.state();
-            if state.native_pull_failures.get(&addr).copied().unwrap_or(0)
-                >= NATIVE_PULL_FAILURE_THRESHOLD
-            {
-                tracing::debug!(
-                    handle,
-                    native_size,
-                    "Skipping native BIP pull: consecutive failure threshold reached"
-                );
-                return None;
-            }
-        }
-
-        let tmp_path = format!("{cache_path}.native.tmp.jpg");
-        let tmp_path_buf = std::path::PathBuf::from(&tmp_path);
-        let empty_props: HashMap<&str, Value<'_>> = HashMap::new();
-        tracing::info!(
-            handle,
-            native_size,
-            "Attempting zero-descriptor native BIP pull"
-        );
-        match image_proxy.get(&tmp_path, handle, &empty_props) {
-            Ok((transfer_path, _)) => {
-                let settled = self.wait_for_transfer(transfer_path.as_str(), BIP_NATIVE_TIMEOUT_MS);
-                let completed = settled == Some(true) && is_complete_jpeg(&tmp_path_buf);
-                if completed && std::fs::rename(&tmp_path_buf, cache_path_buf).is_ok() {
-                    clean_old_cover_art_in(&self.cache_dir, &sanitized_mac, sanitized_handle);
-                    self.state().native_pull_failures.remove(&addr);
-                    tracing::info!(handle, "Native BIP pull succeeded for handle {handle}");
-                    return Some(Box::<str>::from(cache_path));
-                }
-                let _ = std::fs::remove_file(&tmp_path_buf);
-                tracing::debug!(
-                    handle,
-                    "Native BIP pull did not complete for handle {handle}"
-                );
-                self.record_native_pull_failure(addr, &sanitized_mac, native_size);
-                None
-            }
-            Err(err) => {
-                tracing::debug!(
-                    handle,
-                    error = %err,
-                    "Native BIP pull Get failed for handle {handle}"
-                );
-                self.record_native_pull_failure(addr, &sanitized_mac, native_size);
-                None
-            }
+            pb.cover_art_path = Some(snapshot.path);
+        } else {
+            tracing::debug!(
+                published_handle = snapshot.handle.as_ref(),
+                expected_handle = handle.as_ref(),
+                "cover-art service has not published this track's image yet"
+            );
         }
     }
 
-    /// Persists a lowered native byte cap (when the advertised size is known) and
-    /// increments the consecutive Strategy A failure counter for the device.
-    fn record_native_pull_failure(&self, addr: BtAddress, sanitized_mac: &str, native_size: u64) {
-        if native_size > 0 {
-            let new_cap = native_size - 1;
-            match store_native_cap_in(&self.device_caps_dir, sanitized_mac, new_cap) {
-                Ok(()) => tracing::info!(
-                    %addr,
-                    new_cap,
-                    "Persisted native byte cap after native pull failure"
-                ),
-                Err(store_err) => {
-                    tracing::warn!(%addr, error = %store_err, "Failed to persist native byte cap");
-                }
-            }
-        }
-        let mut state = self.state();
-        *state.native_pull_failures.entry(addr).or_insert(0) += 1;
-    }
-
-    /// Tier 2: baseline 200x200 BIP thumbnail fallback, with a plain-Get last resort for
-    /// phones that refuse the thumbnail PDU. Clears the OBEX session on failure so the
-    /// next track starts with a fresh session.
-    fn try_thumbnail_fallback(
-        &self,
-        image_proxy: &ObexImageProxyBlocking<'_>,
-        handle: &str,
-        sanitized_mac: &str,
-        sanitized_handle: &str,
-        cache_path: &str,
-    ) -> Option<Box<str>> {
-        let cache_path_buf = std::path::Path::new(cache_path);
-        let empty_props: HashMap<&str, Value<'_>> = HashMap::new();
-        let transfer_res = image_proxy
-            .get_thumbnail(cache_path, handle)
-            .or_else(|_| image_proxy.get(cache_path, handle, &empty_props));
-        let Ok((transfer_path, _)) = transfer_res else {
-            tracing::debug!("OBEX Image1 GetThumbnail/Get failed for handle {handle}");
-            self.clear_obex_session();
-            return None;
-        };
-        match self.wait_for_transfer(transfer_path.as_str(), BIP_THUMBNAIL_TIMEOUT_MS) {
-            Some(true) if is_complete_jpeg(cache_path_buf) => {
-                clean_old_cover_art_in(&self.cache_dir, sanitized_mac, sanitized_handle);
-                Some(Box::<str>::from(cache_path))
-            }
-            _ => {
-                let _ = std::fs::remove_file(cache_path_buf);
-                self.clear_obex_session();
-                None
-            }
-        }
-    }
-
-    /// Waits for an async OBEX transfer to settle, enforcing a progress-aware watchdog.
-    ///
-    /// Polls `org.bluez.obex.Transfer1` every [`BIP_POLL_INTERVAL_MS`] reading `Status`
-    /// and the `Transferred` byte counter. A transfer is kept alive while its byte
-    /// counter advances; `Cancel` is issued only after [`BIP_STALL_TIMEOUT_MS`] of
-    /// zero byte progress or once the total [`timeout_ms`] budget is exceeded.
-    ///
-    /// Returns `Some(true)` when the transfer reports `complete`, `Some(false)` on error
-    /// or D-Bus failure, and `None` when the watchdog expired (after issuing `Cancel`).
-    fn wait_for_transfer(&self, transfer_path: &str, timeout_ms: u64) -> Option<bool> {
-        let proxy = ObexTransferProxyBlocking::builder(&self.conn())
-            .path(transfer_path)
-            .ok()
-            .and_then(|b| b.build().ok())?;
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        let mut last_bytes: Option<u64> = None;
-        let mut last_progress: Option<Instant> = Some(Instant::now());
-        while Instant::now() < deadline {
-            match proxy.status() {
-                Ok(status) if status == "complete" => {
-                    tracing::info!(
-                        transfer = transfer_path,
-                        bytes = last_bytes.unwrap_or(0),
-                        "obex transfer complete"
-                    );
-                    return Some(true);
-                }
-                Ok(status) if status == "error" => {
-                    tracing::warn!(transfer = transfer_path, "obex transfer reported error");
-                    return Some(false);
-                }
-                Ok(_) => {}
-                Err(err) => {
-                    tracing::warn!(transfer = transfer_path, error = %err, "obex transfer status read failed");
-                    return Some(false);
-                }
-            }
-            match proxy.transferred() {
-                Ok(bytes) => {
-                    if last_bytes.is_none_or(|prev| bytes > prev) {
-                        last_progress = Some(Instant::now());
-                        tracing::trace!(transfer = transfer_path, bytes, "obex transfer progress");
-                    }
-                    last_bytes = Some(bytes);
-                }
-                Err(err) => {
-                    tracing::debug!(transfer = transfer_path, error = %err, "obex transferred read failed");
-                }
-            }
-            if last_progress.is_none_or(|started_at| {
-                started_at.elapsed() >= Duration::from_millis(BIP_STALL_TIMEOUT_MS)
-            }) {
-                tracing::warn!(
-                    transfer = transfer_path,
-                    stall_ms = BIP_STALL_TIMEOUT_MS,
-                    bytes = last_bytes.unwrap_or(0),
-                    "obex transfer stalled; cancelling"
-                );
-                let _ = proxy.cancel();
-                return None;
-            }
-            thread::sleep(Duration::from_millis(BIP_POLL_INTERVAL_MS));
-        }
-        tracing::warn!(
-            transfer = transfer_path,
-            timeout_ms,
-            bytes = last_bytes.unwrap_or(0),
-            "obex transfer watchdog expired; cancelling"
-        );
-        let _ = proxy.cancel();
-        None
-    }
-
-    /// Ensures the phone ACL link is alive; reconnects and waits for A2DP recovery.
-    ///
-    /// Returns `true` when the link is (or was already) connected, `false` when the
-    /// device had to be reconnected (the caller must break out of the high-res loop).
-    fn ensure_device_acl_connected(&self, addr: BtAddress) -> bool {
-        let dev_path = format!("/org/bluez/hci0/dev_{}", addr.to_string().replace(':', "_"));
-        let proxy = ObexDeviceProxyBlocking::builder(&self.conn())
-            .path(dev_path.as_str())
-            .ok()
-            .and_then(|b| b.build().ok());
-        let Some(proxy) = proxy else {
-            return false;
-        };
-        match proxy.connected() {
-            Ok(true) => true,
-            Ok(false) => {
-                if proxy.connect().is_err() {
-                    return false;
-                }
-                thread::sleep(Duration::from_millis(1500));
-                false
-            }
-            Err(_) => false,
-        }
-    }
-}
-
-impl DbusClient {
-    /// Parses `BlueZ` managed objects into adapter and device models.
+    /// Parses adapter and device entries out of a `GetManagedObjects` snapshot.
     ///
     /// # Errors
-    /// Returns [`BtError`] if adapter filtering or object parsing fails.
+    /// Returns [`BtError`] when a device entry cannot be parsed.
     pub fn parse_bluez_objects(
         objects: &ManagedObjects,
         target_adapter: Option<&str>,
@@ -2404,9 +1597,7 @@ impl DbusClient {
             .as_deref()
             .ok_or_else(|| BtError::no_active_player("active MediaPlayer1 has no object path"))?;
 
-        // `Seek` takes a *relative* offset in microseconds; convert the absolute
-        // millisecond target using the freshly observed position.
-        let offset_us = (i64::from(position_ms) - i64::from(playback.position_ms)) * 1_000;
+        let offset_us = super::transport::seek_offset_us(position_ms, playback.position_ms);
         let player =
             zbus::blocking::Proxy::new(&self.conn(), "org.bluez", path, "org.bluez.MediaPlayer1")?;
         player.call_method("Seek", &(offset_us,))?;
@@ -3265,7 +2456,10 @@ impl BluetoothDevice {
             Backend::Mock(mock) => mock.read_status_for_adapter(target_adapter),
             Backend::Dbus(dbus) => {
                 let services = dbus.check_services()?;
-                let (adapter, devices, playback) = dbus.query_bluez(target_adapter)?;
+                let (adapter, devices, mut playback) = dbus.query_bluez(target_adapter)?;
+                // bt-info and other status consumers read cover_art_path from
+                // this snapshot, so resolve it exactly like playback_state().
+                dbus.resolve_cover_art(&mut playback);
                 let pcms = dbus.query_bluealsa(&devices)?;
                 let mut hardware = BluetoothHardwareInfo::rpi3();
                 let probed = adapter
@@ -3374,86 +2568,22 @@ impl BluetoothDevice {
             Backend::Mock(mock) => mock.playback_state(),
             Backend::Dbus(dbus) => {
                 let mut playback = dbus.playback_state()?;
-                self.resolve_cover_art_async(dbus, &mut playback);
+                Self::resolve_cover_art_async(dbus, &mut playback);
                 Ok(playback)
             }
         }
     }
 
-    /// Resolves cover art without blocking the poll loop.
+    /// Resolves cover art for the current playback snapshot.
     ///
-    /// Fast path reads the disk cache; on a miss a detached worker thread runs
-    /// the OBEX pipeline (session ensure + settle + tiered pulls) so track
-    /// metadata publishes immediately and the cover lands on a later poll.
-    fn resolve_cover_art_async(&self, dbus: &DbusClient, playback: &mut Option<BtPlaybackState>) {
-        let Some(pb) = playback else { return };
-        let Some(addr) = pb.device_address else {
-            return;
-        };
-        let Some(port) = pb.obex_port else {
-            tracing::debug!("cover art unavailable: MediaPlayer1 has no ObexPort");
-            return;
-        };
-        // Keep the BIP client session alive even when the current track has no
-        // ImgHandle: on AOSP the cover-art flow only advertises handles while a
-        // client session exists, so skipping the ensure would deadlock future
-        // tracks into permanent "no ImgHandle".
-        dbus.notify_device_connection(addr);
-        let _ = dbus.ensure_obex_session(addr, port);
-        let Some(handle) = pb.image_handle.clone() else {
-            tracing::debug!(
-                title = pb.title.as_ref(),
-                "cover art unavailable: no ImgHandle in Track"
-            );
-            return;
-        };
-
-        if let Some(path) = cover_art_cached_path_in(&dbus.cache_dir, addr, &handle) {
-            pb.cover_art_path = Some(path);
-            return;
-        }
-        if !dbus.try_begin_cover_fetch(addr, &handle) {
-            tracing::debug!(handle = handle.as_ref(), "cover fetch begin denied");
-            return;
-        }
-        tracing::debug!(handle = handle.as_ref(), "cover fetch worker spawning");
-        let worker = self.clone();
-        if let Err(e) = std::thread::Builder::new()
-            .name("cover-fetch".into())
-            .spawn(move || {
-                let resolved = worker
-                    .fetch_cover_art_blocking(addr, port, &handle)
-                    .is_some();
-                worker.finish_cover_fetch(resolved);
-            })
-        {
-            tracing::warn!(error = %e, "cover-fetch worker spawn failed; releasing slot");
-            dbus.finish_cover_fetch(false);
-        }
-    }
-
-    /// Runs the full blocking cover-art pipeline (session ensure + fetch).
-    fn fetch_cover_art_blocking(
-        &self,
-        addr: BtAddress,
-        port: u16,
-        handle: &str,
-    ) -> Option<Box<str>> {
-        match &*self.backend {
-            Backend::Mock(_) => None,
-            Backend::Dbus(dbus) => {
-                let _ = dbus.ensure_obex_session(addr, port);
-                dbus.fetch_cover_art(addr, handle)
-            }
-        }
-    }
-
-    /// Releases the single-flight slot after the worker completes.
-    fn finish_cover_fetch(&self, resolved: bool) {
-        match &*self.backend {
-            Backend::Mock(_) => {}
-            Backend::Dbus(dbus) => dbus.finish_cover_fetch(resolved),
-        }
+    /// Fast path reads the disk cache; on a miss the published snapshot from
+    /// the `bt-manager` cover-art D-Bus service is consulted (see
+    /// [`crate::hardware::bluetooth::cover_service`]). The provider owns the
+    /// only BIP session to the phone; core just consumes what it published,
+    /// so a track change lands on a later poll within the provider's poll
+    /// interval.
+    fn resolve_cover_art_async(dbus: &DbusClient, playback: &mut Option<BtPlaybackState>) {
+        dbus.resolve_cover_art(playback);
     }
 
     /// Blocking playback query with synchronous cover resolution.
