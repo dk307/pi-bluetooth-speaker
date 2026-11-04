@@ -284,7 +284,7 @@ pub const COVER_ART_CACHE_DIR: &str = "/var/cache/speaker-covers";
 ///
 /// # Errors
 /// Returns an error string when the directory cannot be created or locked down.
-pub(super) fn ensure_cover_art_cache_dir_in(dir: &std::path::Path) -> Result<(), Box<str>> {
+pub fn ensure_cover_art_cache_dir_in(dir: &std::path::Path) -> Result<(), Box<str>> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir)
         .map_err(|e| Box::<str>::from(format!("cannot create {}: {e}", dir.display())))?;

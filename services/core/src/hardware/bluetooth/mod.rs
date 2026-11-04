@@ -27,8 +27,8 @@ pub use connection::{
 pub use cover_art::{
     COVER_ART_CACHE_DIR, clean_cover_art_in_dir, clean_old_cover_art, clean_old_cover_art_in,
     cover_art_cached_path, cover_art_cached_path_in, cover_art_path_for, cover_art_path_for_in,
-    is_complete_jpeg, load_native_caps_in, native_image_size, store_native_cap_in,
-    validate_bip_handle,
+    ensure_cover_art_cache_dir_in, is_complete_jpeg, load_native_caps_in, native_image_size,
+    store_native_cap_in, validate_bip_handle,
 };
 #[doc(inline)]
 pub use transport::{
