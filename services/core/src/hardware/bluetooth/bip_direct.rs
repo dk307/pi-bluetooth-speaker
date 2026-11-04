@@ -660,6 +660,24 @@ pub trait BipSessionKeeper: Send {
         img_handle: &str,
     ) -> Result<Vec<u8>, BipError>;
 
+    /// Pings the held session with a minimal OBEX operation.
+    ///
+    /// AOSP idles out the BIP session quickly when no traffic flows, after
+    /// which the phone stops advertising `ImgHandle` in `MediaPlayer1.Track`
+    /// entirely (the publisher-restart deadlock). The keepalive keeps the
+    /// OBEX connection warm between fetches. Any complete response counts as
+    /// liveness; only a transport failure is an error, which releases the
+    /// held session so the next ensure re-establishes it.
+    ///
+    /// # Errors
+    /// Returns [`BipError`] when the transport write/read fails; the session
+    /// is released so the next ensure re-establishes from scratch.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async-trait injects #[must_use] on the desugared future while Result is already must_use"
+    )]
+    async fn keepalive(&mut self) -> Result<(), BipError>;
+
     /// Drops the held session (if any), closing the transport connection.
     fn release(&mut self);
 }
@@ -743,6 +761,24 @@ impl BipSessionKeeper for PersistentBipSession {
                 );
                 self.release();
                 Err(e)
+            }
+        }
+    }
+
+    async fn keepalive(&mut self) -> Result<(), BipError> {
+        let Some(client) = self.session.as_mut() else {
+            tracing::trace!("BIP keepalive skipped: no session held");
+            return Ok(());
+        };
+        match client.set_path_root().await {
+            Ok(_) => {
+                tracing::debug!("BIP keepalive OK");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!("BIP keepalive failed; releasing session for re-establishment: {e}");
+                self.release();
+                Err(map_obex_failure("OBEX SETPATH", e))
             }
         }
     }
