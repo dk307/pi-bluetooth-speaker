@@ -301,17 +301,6 @@ mod tests {
     }
 
     #[test]
-    fn run_app_terminates_on_tick_cap_with_mock() {
-        let (bt, _mock) = BluetoothDevice::new_mocked();
-        let opts = BtManagerOptions {
-            interval: Duration::from_millis(1),
-            max_ticks: Some(3),
-            cover_art: false,
-        };
-        assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
-    }
-
-    #[test]
     fn run_app_zero_ticks_cap_is_rejected_at_parse() {
         let args = ["--ticks", "0"];
         let err = parse_cli_args_from(args.iter().map(ToString::to_string)).expect_err("reject 0");

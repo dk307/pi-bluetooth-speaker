@@ -2534,22 +2534,10 @@ impl BluetoothDevice {
             Backend::Mock(mock) => mock.playback_state(),
             Backend::Dbus(dbus) => {
                 let mut playback = dbus.playback_state()?;
-                Self::resolve_cover_art_async(dbus, &mut playback);
+                dbus.resolve_cover_art(&mut playback);
                 Ok(playback)
             }
         }
-    }
-
-    /// Resolves cover art for the current playback snapshot.
-    ///
-    /// Fast path reads the disk cache; on a miss the published snapshot from
-    /// the `bt-manager` cover-art D-Bus service is consulted (see
-    /// [`crate::hardware::bluetooth::cover_service`]). The provider owns the
-    /// only BIP session to the phone; core just consumes what it published,
-    /// so a track change lands on a later poll within the provider's poll
-    /// interval.
-    fn resolve_cover_art_async(dbus: &DbusClient, playback: &mut Option<BtPlaybackState>) {
-        dbus.resolve_cover_art(playback);
     }
 
     /// Blocking playback query with synchronous cover resolution.

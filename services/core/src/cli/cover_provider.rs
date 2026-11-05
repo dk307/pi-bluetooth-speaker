@@ -201,7 +201,7 @@ impl CoverArtIface {
 
 /// Source of playback snapshots for the worker (mockable).
 #[async_trait::async_trait]
-#[allow(
+#[expect(
     clippy::double_must_use,
     reason = "async-trait injects #[must_use] on the desugared boxed-future signature"
 )]
@@ -475,26 +475,18 @@ impl CoverArtWorker {
             .await;
         match result {
             Ok(bytes) => {
+                let byte_count = bytes.len();
+                let bytes = Arc::new(bytes);
                 let store_started = Instant::now();
-                match self.store_image(*address, handle, &bytes) {
+                match self.publish_image(address, handle, &bytes).await {
                     Ok(path) => {
                         let store_ms = store_started.elapsed().as_millis() as u64;
-                        let device = address.to_string().into_boxed_str();
-                        self.state
-                            .publish(device.clone(), handle.into(), path.clone().into());
-                        if let Some(emitter) = &self.emitter {
-                            if let Err(e) =
-                                CoverArtIface::image_updated(emitter, &device, handle, &path).await
-                            {
-                                tracing::warn!(error = %e, "failed to emit ImageUpdated");
-                            }
-                        }
                         let track_to_cover_ms = self
                             .track_change_at
                             .take()
                             .map(|at| at.elapsed().as_millis() as u64);
                         tracing::info!(
-                            bytes = bytes.len(),
+                            bytes = byte_count,
                             elapsed_ms = started.elapsed().as_millis() as u64,
                             store_ms,
                             track_to_cover_ms = track_to_cover_ms.unwrap_or(0),
@@ -502,7 +494,7 @@ impl CoverArtWorker {
                             path = %path,
                             "cover art published on D-Bus"
                         );
-                        self.session_cache.insert(handle, Arc::new(bytes.clone()));
+                        self.session_cache.insert(handle, Arc::clone(&bytes));
                         // A successful fetch is OBEX traffic; restart the
                         // idle keepalive timer.
                         self.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
@@ -510,7 +502,7 @@ impl CoverArtWorker {
                     Err(reason) => {
                         self.track_change_at = None;
                         tracing::warn!(
-                            bytes = bytes.len(),
+                            bytes = byte_count,
                             %handle,
                             "discarding fetched cover art: {reason}"
                         );
@@ -541,7 +533,10 @@ impl CoverArtWorker {
         handle: &str,
         bytes: &[u8],
     ) -> Result<String, String> {
-        let path = self.store_image(*address, handle, bytes)?;
+        // The rename lands the file first, the D-Bus state is published
+        // second, and obsolete files for this MAC are cleaned only afterwards
+        // — the published path can never point at a just-deleted file.
+        let (path, sanitized_mac, _) = self.store_image(*address, handle, bytes)?;
         let device: Box<str> = address.to_string().into_boxed_str();
         self.state
             .publish(device.clone(), handle.into(), path.clone().into());
@@ -550,6 +545,7 @@ impl CoverArtWorker {
                 tracing::warn!(error = %e, "failed to emit ImageUpdated");
             }
         }
+        clean_old_cover_art_in(&self.cache_dir, &sanitized_mac, handle);
         Ok(path)
     }
 
@@ -560,7 +556,7 @@ impl CoverArtWorker {
         address: BtAddress,
         handle: &str,
         bytes: &[u8],
-    ) -> Result<String, String> {
+    ) -> Result<(String, String, String), String> {
         let Some((cache_path, sanitized_mac, sanitized_handle)) =
             cover_art_path_for_in(&self.cache_dir, address, handle)
         else {
@@ -578,8 +574,7 @@ impl CoverArtWorker {
             let _ = std::fs::remove_file(Path::new(&tmp_path));
             return Err(format!("cannot publish {cache_path}: {e}"));
         }
-        clean_old_cover_art_in(&self.cache_dir, &sanitized_mac, &sanitized_handle);
-        Ok(cache_path)
+        Ok((cache_path, sanitized_mac, sanitized_handle))
     }
 
     /// Tears the session down and clears the published state (emitting

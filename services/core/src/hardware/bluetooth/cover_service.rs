@@ -39,11 +39,17 @@ pub struct CoverArtSnapshot {
 /// diagnosable from journald alone.
 #[must_use]
 pub fn query_snapshot(conn: &zbus::blocking::Connection) -> Option<CoverArtSnapshot> {
+    use std::collections::HashMap;
+    use zbus::zvariant::OwnedValue;
+
+    // One `Properties.GetAll` round-trip: the provider publishes all three
+    // fields under one lock, so a single reply can never straddle a
+    // concurrent publish/clear (three `Get` calls could).
     let proxy = match zbus::blocking::Proxy::new(
         conn,
         COVER_ART_DBUS_NAME,
         COVER_ART_OBJECT_PATH,
-        COVER_ART_INTERFACE,
+        "org.freedesktop.DBus.Properties",
     ) {
         Ok(proxy) => proxy,
         Err(e) => {
@@ -51,13 +57,9 @@ pub fn query_snapshot(conn: &zbus::blocking::Connection) -> Option<CoverArtSnaps
             return None;
         }
     };
-    let (device, handle, path) = match (
-        proxy.get_property::<String>("Device"),
-        proxy.get_property::<String>("Handle"),
-        proxy.get_property::<String>("Path"),
-    ) {
-        (Ok(device), Ok(handle), Ok(path)) => (device, handle, path),
-        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+    let reply = match proxy.call_method("GetAll", &(COVER_ART_INTERFACE,)) {
+        Ok(reply) => reply,
+        Err(e) => {
             if is_absent_service_error(&e) {
                 tracing::debug!(
                     error = %e,
@@ -68,6 +70,21 @@ pub fn query_snapshot(conn: &zbus::blocking::Connection) -> Option<CoverArtSnaps
             }
             return None;
         }
+    };
+    let Ok(properties) = reply.body().deserialize::<HashMap<String, OwnedValue>>() else {
+        tracing::warn!(context = "cover-art GetAll returned an unexpected body");
+        return None;
+    };
+    let property = |name: &str| {
+        properties
+            .get(name)
+            .and_then(|v| String::try_from(v.clone()).ok())
+    };
+    let (Some(device), Some(handle), Some(path)) =
+        (property("Device"), property("Handle"), property("Path"))
+    else {
+        tracing::warn!(context = "cover-art snapshot misses properties");
+        return None;
     };
     if handle.is_empty() {
         tracing::trace!("cover-art service has no published image");
