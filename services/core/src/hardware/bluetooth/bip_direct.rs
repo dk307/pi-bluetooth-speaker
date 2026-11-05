@@ -781,6 +781,15 @@ pub trait BipSessionKeeper: Send {
 
     /// Drops the held session (if any), closing the transport connection.
     fn release(&mut self);
+
+    /// Monotonic generation of the held session.
+    ///
+    /// Changes whenever the session is dropped or re-established. Consumers
+    /// holding session-scoped state (e.g. BIP image-handle caches — handles
+    /// are only unique for the duration of one OBEX session) purge that
+    /// state whenever this value differs from the one they cached.
+    #[must_use]
+    fn epoch(&self) -> u64;
 }
 
 /// Production [`BipSessionKeeper`] holding one live OBEX session.
@@ -792,6 +801,9 @@ pub struct PersistentBipSession {
     session: Option<Client<BipStream>>,
     address: Option<BtAddress>,
     transport: Option<BipTransport>,
+    /// Session generation, bumped on every release/re-establish; see
+    /// [`BipSessionKeeper::epoch`].
+    epoch: u64,
 }
 
 impl fmt::Debug for PersistentBipSession {
@@ -800,6 +812,7 @@ impl fmt::Debug for PersistentBipSession {
             .field("address", &self.address)
             .field("transport", &self.transport)
             .field("session_held", &self.session.is_some())
+            .field("epoch", &self.epoch)
             .finish()
     }
 }
@@ -829,6 +842,7 @@ impl BipSessionKeeper for PersistentBipSession {
             .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
             .await
             .map_err(|e| map_obex_failure("OBEX CONNECT", e))?;
+        self.epoch = self.epoch.wrapping_add(1);
         tracing::info!(
             address = %address.to_string(),
             ?transport,
@@ -896,8 +910,14 @@ impl BipSessionKeeper for PersistentBipSession {
         if let Some(address) = self.address.take() {
             tracing::debug!(address = %address.to_string(), "releasing persistent BIP session");
         }
+        if self.session.take().is_some() {
+            self.epoch = self.epoch.wrapping_add(1);
+        }
         self.transport = None;
-        self.session = None;
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch
     }
 }
 

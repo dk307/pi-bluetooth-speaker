@@ -216,6 +216,55 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// CPU on tight polling.
 const COVER_FALLBACK_POLL: Duration = Duration::from_secs(15);
 
+/// Mirrors AOSP's `COVER_ART_STORAGE_MAX_ITEMS`: the phone keeps at most 32
+/// artworks (identified by MD5) per session, so at most 32 distinct handles
+/// can recur within one session.
+const SESSION_CACHE_CAPACITY: usize = 32;
+
+/// Cover-art cache scoped to the lifetime of the active BIP session.
+///
+/// AOSP's `AvrcpCoverArtStorage` deduplicates artwork by MD5 and re-advertises
+/// the same 7-digit handle whenever the same image recurs (same album,
+/// replayed tracks) — handles are only unique for the duration of one OBEX
+/// session. Caching `(handle -> bytes)` therefore turns repeated handles into
+/// instant re-publications with zero OBEX traffic. Entries are purged
+/// whenever the session generation ([`BipSessionKeeper::epoch`]) changes.
+#[derive(Debug, Default)]
+struct SessionCoverCache {
+    /// Session generation the entries belong to.
+    epoch: u64,
+    entries: HashMap<Box<str>, Arc<Vec<u8>>>,
+}
+
+impl SessionCoverCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Drops all entries after a session change.
+    fn purge(&mut self, epoch: u64) {
+        self.epoch = epoch;
+        self.entries.clear();
+    }
+
+    /// Returns the cached bytes for `handle`, if this session produced them.
+    fn lookup(&self, handle: &str) -> Option<Arc<Vec<u8>>> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        self.entries.get(handle).cloned()
+    }
+
+    /// Caches the validated image for `handle`; evicts everything when the
+    /// AOSP-sized capacity is reached (handles then restart unpredictably).
+    fn insert(&mut self, handle: &str, bytes: Arc<Vec<u8>>) {
+        if self.entries.len() >= SESSION_CACHE_CAPACITY {
+            self.entries.clear();
+        }
+        self.entries.insert(handle.into(), bytes);
+    }
+}
+
 /// The cover-art worker: event-driven fetch loop with a slow fallback poll.
 struct CoverArtWorker {
     source: Box<dyn PlaybackSource>,
@@ -233,6 +282,8 @@ struct CoverArtWorker {
     /// Instant when the active track's `ImgHandle` was first observed, used to
     /// report the track-change → published latency on the publish log line.
     track_change_at: Option<Instant>,
+    /// Session-scoped handle cache; purged on every session generation change.
+    session_cache: SessionCoverCache,
 }
 
 impl CoverArtWorker {
@@ -253,6 +304,7 @@ impl CoverArtWorker {
             emitter,
             keepalive_deadline: None,
             track_change_at: None,
+            session_cache: SessionCoverCache::new(),
         }
     }
 
@@ -306,6 +358,13 @@ impl CoverArtWorker {
             );
             return;
         }
+        // A session change invalidates every cached handle (handles are only
+        // unique within one OBEX session, per AVRCP ESR10).
+        let epoch = self.keeper.epoch();
+        if epoch != self.session_cache.epoch {
+            self.session_cache.purge(epoch);
+            tracing::debug!(epoch, "cover-art session cache purged after session change");
+        }
         if self.keepalive_deadline.is_none() {
             // The establish itself is OBEX traffic; start the idle timer.
             self.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
@@ -320,6 +379,42 @@ impl CoverArtWorker {
         if self.state.get().handle.as_ref() == Some(&handle) {
             tracing::trace!(%handle, "cover art already published for this handle");
             return;
+        }
+        // Same image re-advertised within this session (same album, replay):
+        // republish the cached bytes with zero OBEX traffic. The disk store
+        // rewrites the one-file-per-MAC cache; no keepalive rearm, this is
+        // not OBEX activity.
+        if let Some(bytes) = self.session_cache.lookup(&handle) {
+            let started = Instant::now();
+            match self.store_image(address, &handle, &bytes) {
+                Ok(path) => {
+                    let device = address.to_string().into_boxed_str();
+                    self.state
+                        .publish(device.clone(), handle.clone(), path.clone().into());
+                    if let Some(emitter) = &self.emitter {
+                        if let Err(e) =
+                            CoverArtIface::image_updated(emitter, &device, &handle, &path).await
+                        {
+                            tracing::warn!(error = %e, "failed to emit ImageUpdated");
+                        }
+                    }
+                    let track_to_cover_ms = self
+                        .track_change_at
+                        .take()
+                        .map(|at| at.elapsed().as_millis() as u64);
+                    tracing::info!(
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        track_to_cover_ms = track_to_cover_ms.unwrap_or(0),
+                        %handle,
+                        path = %path,
+                        "cover art restored from session cache"
+                    );
+                    return;
+                }
+                Err(reason) => {
+                    tracing::warn!(%handle, "session-cache restore failed: {reason}; fetching fresh");
+                }
+            }
         }
         // First observation of this track's handle starts the latency
         // measurement; retries keep the original detection instant so the
@@ -375,6 +470,7 @@ impl CoverArtWorker {
                             path = %path,
                             "cover art published on D-Bus"
                         );
+                        self.session_cache.insert(handle, Arc::new(bytes.clone()));
                         // A successful fetch is OBEX traffic; restart the
                         // idle keepalive timer.
                         self.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
@@ -433,6 +529,7 @@ impl CoverArtWorker {
     /// `ImageCleared` exactly once when an image was published).
     async fn deactivate(&mut self, reason: &str) {
         self.keeper.release();
+        self.session_cache.purge(self.keeper.epoch());
         self.keepalive_deadline = None;
         let previous = self.state.clear();
         if previous.is_active() {
@@ -727,6 +824,7 @@ mod tests {
         body: &'static [u8],
         counters: Arc<Counters>,
         last_transport: Arc<Mutex<Option<BipTransport>>>,
+        generation: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
@@ -759,8 +857,13 @@ mod tests {
             Ok(self.body.to_vec())
         }
 
+        fn epoch(&self) -> u64 {
+            self.generation.load(Ordering::SeqCst) as u64
+        }
+
         fn release(&mut self) {
             self.counters.releases.fetch_add(1, Ordering::SeqCst);
+            self.generation.fetch_add(1, Ordering::SeqCst);
         }
 
         async fn keepalive(&mut self) -> Result<(), BipError> {
@@ -796,6 +899,7 @@ mod tests {
         state: SharedCoverState,
         counters: Arc<Counters>,
         last_transport: Arc<Mutex<Option<BipTransport>>>,
+        epoch: Arc<AtomicUsize>,
         body: &'static [u8],
         source_results: VecDeque<Result<Option<BtPlaybackState>, BtError>>,
     }
@@ -807,6 +911,7 @@ mod tests {
                 state: SharedCoverState::new(),
                 counters: Arc::new(Counters::default()),
                 last_transport: Arc::new(Mutex::new(None)),
+                epoch: Arc::new(AtomicUsize::new(0)),
                 body,
                 source_results: VecDeque::new(),
             }
@@ -825,6 +930,7 @@ mod tests {
                     body: self.body,
                     counters: Arc::clone(&self.counters),
                     last_transport: Arc::clone(&self.last_transport),
+                    generation: Arc::clone(&self.epoch),
                 }),
                 self.state.clone(),
                 self.dir.path().to_path_buf(),
@@ -1078,5 +1184,67 @@ mod tests {
         let cleared = state.clear();
         assert!(cleared.is_active());
         assert!(!state.get().is_active());
+    }
+
+    #[tokio::test]
+    async fn repeated_handle_is_restored_from_session_cache() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        harness.script(scripted_playback(Some("5630702")));
+        harness.script(scripted_playback(Some("5630701")));
+        let mut worker = harness.worker(None);
+        worker.poll_once().await;
+        worker.poll_once().await;
+        assert_eq!(harness.counters.fetches(), 2);
+        let deadline_before = worker.keepalive_deadline;
+        worker.poll_once().await;
+        assert_eq!(
+            harness.counters.fetches(),
+            2,
+            "re-advertised handle must not re-fetch over OBEX"
+        );
+        assert_eq!(harness.counters.keepalives(), 0);
+        let state = harness.state.get();
+        assert_eq!(state.handle.as_deref(), Some("5630701"));
+        let published = state.path.expect("cache-hit path");
+        assert!(Path::new(&*published).exists(), "cache-hit file re-stored");
+        assert_eq!(
+            worker.keepalive_deadline, deadline_before,
+            "cache hit is not OBEX traffic; idle timer untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_change_purges_cached_handles() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        harness.script(scripted_playback(Some("5630702")));
+        harness.script(scripted_playback(Some("5630701")));
+        let mut worker = harness.worker(None);
+        worker.poll_once().await;
+        worker.poll_once().await;
+        harness.epoch.fetch_add(1, Ordering::SeqCst);
+        worker.poll_once().await;
+        assert_eq!(
+            harness.counters.fetches(),
+            3,
+            "purged cache forces a fresh OBEX GET for the recurring handle"
+        );
+    }
+
+    #[test]
+    fn session_cache_evicts_at_aosp_capacity() {
+        let mut cache = SessionCoverCache::new();
+        for i in 0..=SESSION_CACHE_CAPACITY {
+            cache.insert(&format!("{i:07}"), Arc::new(vec![0u8]));
+        }
+        assert_eq!(
+            cache.entries.len(),
+            1,
+            "capacity 32: insert 33 clears and keeps only the newest"
+        );
+        cache.purge(7);
+        assert_eq!(cache.epoch, 7);
+        assert!(cache.lookup("0000000").is_none(), "purge clears entries");
     }
 }

@@ -550,6 +550,18 @@ async fn pull_image_puts_srm_on_the_wire_and_transfers_large_body() {
     );
 }
 
+#[test]
+fn persistent_session_epoch_starts_at_zero_and_survives_empty_release() {
+    let mut session = PersistentBipSession::default();
+    assert_eq!(session.epoch(), 0);
+    session.release();
+    assert_eq!(
+        session.epoch(),
+        0,
+        "releasing with no held session must not bump the generation"
+    );
+}
+
 // Compile-time proof that the OBEX packet budget and the configured
 // L2CAP receive MTU agree and stay inside AOSP's safe 16-bit range.
 const _: () = {
