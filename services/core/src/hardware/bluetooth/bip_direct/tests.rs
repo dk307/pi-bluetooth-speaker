@@ -424,54 +424,6 @@ fn resolve_sdp_channel_reports_absent_service_record() {
     assert!(err.to_string().contains("11:22:33:44:55:66"));
 }
 
-#[tokio::test]
-async fn fetch_cover_art_via_uses_injected_channel_and_returns_body() {
-    struct FakeChannel {
-        payload: Vec<u8>,
-        requested_address: Arc<Mutex<Option<String>>>,
-    }
-    #[async_trait::async_trait]
-    impl BipChannel for FakeChannel {
-        async fn open(&self, address: &BtAddress) -> Result<BipStream, BipError> {
-            *self.requested_address.lock().await = Some(address.to_string());
-            let stub = new_stub(Ok(self.payload.clone()));
-            let (client_half, server_half) = tokio::io::duplex(65_536);
-            drop(spawn_stub_server(stub, server_half));
-            Ok(Box::new(client_half) as BipStream)
-        }
-    }
-
-    let requested_address = Arc::new(Mutex::new(None));
-    let channel = FakeChannel {
-        payload: body_bytes(512, 0xCD),
-        requested_address: Arc::clone(&requested_address),
-    };
-    let address = BtAddress::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
-    let result = fetch_cover_art_via(&channel, &address, "0000003", BipImageType::Thumbnail).await;
-
-    assert_eq!(result.unwrap(), body_bytes(512, 0xCD));
-    assert_eq!(
-        requested_address.lock().await.as_deref(),
-        Some("11:22:33:44:55:66")
-    );
-}
-
-#[tokio::test]
-async fn fetch_cover_art_via_propagates_channel_failures() {
-    struct FailingChannel;
-    #[async_trait::async_trait]
-    impl BipChannel for FailingChannel {
-        async fn open(&self, _address: &BtAddress) -> Result<BipStream, BipError> {
-            Err(BipError::service_not_found("AA:BB:CC:DD:EE:FF"))
-        }
-    }
-    let address = BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-    let result = fetch_cover_art_via(&FailingChannel, &address, "0000001", BipImageType::Native)
-        .await
-        .expect_err("failing channel should propagate");
-    assert!(result.is_service_not_found());
-}
-
 /// Passthrough wrapper that records whether any inbound bytes carried the
 /// OBEX SRM-enable pair (0x97 0x01), proving the client actually put
 /// Single Response Mode on the wire.

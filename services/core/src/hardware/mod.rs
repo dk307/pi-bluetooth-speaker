@@ -17,7 +17,7 @@ use std::backtrace::{Backtrace, BacktraceStatus};
 use std::fmt::{self, Display, Formatter};
 
 pub(crate) mod amp;
-pub(crate) mod bluetooth;
+pub mod bluetooth;
 pub(crate) mod dsp;
 pub(crate) mod encoder;
 pub(crate) mod light;

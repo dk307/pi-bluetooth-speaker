@@ -549,21 +549,6 @@ impl BipChannel for L2capBipChannel {
     }
 }
 
-/// Fetches cover-art bytes from a remote device through `channel`.
-///
-/// # Errors
-/// Returns [`BipError`] when the transport cannot be opened or the OBEX
-/// exchange fails.
-pub async fn fetch_cover_art_via(
-    channel: &dyn BipChannel,
-    address: &BtAddress,
-    img_handle: &str,
-    image_type: BipImageType,
-) -> Result<Vec<u8>, BipError> {
-    let stream = channel.open(address).await?;
-    pull_image(stream, image_type, img_handle).await
-}
-
 /// Runs a complete BIP GET transaction over an already connected `stream`.
 ///
 /// Sends an OBEX CONNECT targeting the AVRCP 1.6 cover-art service, then pulls

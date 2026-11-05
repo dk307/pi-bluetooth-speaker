@@ -844,6 +844,10 @@ mod tests {
         last_transport: Arc<Mutex<Option<BipTransport>>>,
         generation: Arc<AtomicUsize>,
         address: Mutex<Option<BtAddress>>,
+        /// Injected ensure failure (error-path coverage).
+        ensure_error: bool,
+        /// Injected fetch failure (error-path coverage).
+        fetch_error: bool,
     }
 
     #[async_trait::async_trait]
@@ -854,6 +858,9 @@ mod tests {
             transport: &BipTransport,
         ) -> Result<(), BipError> {
             self.counters.ensures.fetch_add(1, Ordering::SeqCst);
+            if self.ensure_error {
+                return Err(BipError::service_not_found("AA:BB:CC:DD:EE:FF"));
+            }
             // Mirror `PersistentBipSession`: a device switch releases and
             // re-establishes, bumping the session generation.
             let switched = self
@@ -884,6 +891,9 @@ mod tests {
             _handle: &str,
         ) -> Result<Vec<u8>, BipError> {
             self.counters.fetches.fetch_add(1, Ordering::SeqCst);
+            if self.fetch_error {
+                return Err(BipError::service_not_found("AA:BB:CC:DD:EE:FF"));
+            }
             *self
                 .last_transport
                 .lock()
@@ -934,6 +944,8 @@ mod tests {
         counters: Arc<Counters>,
         last_transport: Arc<Mutex<Option<BipTransport>>>,
         epoch: Arc<AtomicUsize>,
+        ensure_error: bool,
+        fetch_error: bool,
         body: &'static [u8],
         source_results: VecDeque<Result<Option<BtPlaybackState>, BtError>>,
     }
@@ -946,6 +958,8 @@ mod tests {
                 counters: Arc::new(Counters::default()),
                 last_transport: Arc::new(Mutex::new(None)),
                 epoch: Arc::new(AtomicUsize::new(0)),
+                ensure_error: false,
+                fetch_error: false,
                 body,
                 source_results: VecDeque::new(),
             }
@@ -966,6 +980,8 @@ mod tests {
                     last_transport: Arc::clone(&self.last_transport),
                     generation: Arc::clone(&self.epoch),
                     address: Mutex::new(None),
+                    ensure_error: self.ensure_error,
+                    fetch_error: self.fetch_error,
                 }),
                 self.state.clone(),
                 self.dir.path().to_path_buf(),
@@ -1186,6 +1202,57 @@ mod tests {
         assert_eq!(harness.counters.fetches(), 1);
         assert_eq!(harness.counters.releases(), 0);
         assert_eq!(harness.state.get().handle.as_deref(), Some("5630701"));
+    }
+
+    #[tokio::test]
+    async fn ensure_failure_skips_fetch_and_keeps_state() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        harness.ensure_error = true;
+        let mut worker = harness.worker(None);
+        worker.poll_once().await;
+        assert!(
+            harness.counters.fetches() == 0,
+            "no fetch without a session"
+        );
+        assert_eq!(harness.state.get().handle, None);
+        assert_eq!(harness.counters.releases(), 0, "nothing to release");
+    }
+
+    #[tokio::test]
+    async fn fetch_failure_keeps_previous_artwork() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        harness.script(scripted_playback(Some("5630702")));
+        harness.fetch_error = true;
+        let mut worker = harness.worker(None);
+        worker.poll_once().await;
+        let previous = harness.state.get();
+        worker.poll_once().await;
+        assert_eq!(harness.counters.fetches(), 2, "retry happened");
+        assert_eq!(
+            harness.state.get(),
+            previous,
+            "transient fetch failure must keep the last known good state"
+        );
+    }
+
+    #[tokio::test]
+    async fn store_failure_discards_fetched_image() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        let mut worker = harness.worker(None);
+        // Point the cache at a plain file: every write fails.
+        let blocker = harness.dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").expect("blocker file");
+        worker.cache_dir = blocker;
+        worker.poll_once().await;
+        assert_eq!(harness.counters.fetches(), 1, "fetch was attempted");
+        assert_eq!(
+            harness.state.get().handle,
+            None,
+            "failed store must not publish anything"
+        );
     }
 
     #[tokio::test]

@@ -9,6 +9,8 @@
 
 use speaker_core::cli::cover_provider::{CoverArtIface, SharedCoverState};
 use speaker_core::diag::ScopedTempDir;
+use speaker_core::hardware::BtPlaybackState;
+use speaker_core::hardware::bluetooth::{BtAddress, resolve_cover_art_with};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use zbus::blocking::Proxy;
@@ -27,7 +29,7 @@ fn jpeg_fixture() -> Vec<u8> {
 /// Private bus daemon serving `CoverArtIface`; killed on drop.
 struct Harness {
     daemon: Child,
-    _server: zbus::blocking::Connection,
+    server: zbus::blocking::Connection,
     state: SharedCoverState,
     proxy: Proxy<'static>,
     dir: ScopedTempDir,
@@ -71,7 +73,7 @@ impl Harness {
 
         Self {
             daemon,
-            _server: server,
+            server,
             state,
             proxy,
             dir: ScopedTempDir::new("cover_provider_dbus"),
@@ -257,6 +259,17 @@ async fn track_signal_listener_wakes_only_on_track_changes() {
     let quiet = tokio::time::timeout(Duration::from_millis(300), wake.notified()).await;
     assert!(quiet.is_err(), "non-Track change must not wake the worker");
 
+    // A malformed PropertiesChanged body must not kill the stream: the
+    // listener logs and keeps working.
+    emitter
+        .emit(
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+            &"not a properties-changed tuple",
+        )
+        .await
+        .unwrap();
+
     // A Track change must wake the worker.
     let mut track = HashMap::new();
     track.insert("Track".to_string(), Value::Value(Box::new(Value::U32(0))));
@@ -275,4 +288,125 @@ async fn track_signal_listener_wakes_only_on_track_changes() {
     tokio::time::timeout(Duration::from_secs(2), wake.notified())
         .await
         .expect("Track change must wake the worker");
+}
+
+/// `query_snapshot` (the `core` consumer path) reads the published snapshot
+/// through a real D-Bus round-trip on the private bus.
+#[test]
+fn query_snapshot_reads_published_snapshot() {
+    let h = Harness::new();
+    h.publish_fixture("AA:BB:CC:DD:EE:F1", "5630701");
+
+    let snapshot = speaker_core::hardware::bluetooth::cover_service::query_snapshot(&h.server)
+        .expect("published snapshot must be readable");
+    assert_eq!(snapshot.device.as_ref(), "AA:BB:CC:DD:EE:F1");
+    assert_eq!(snapshot.handle.as_ref(), "5630701");
+    assert!(
+        snapshot
+            .path
+            .as_ref()
+            .contains("AA_BB_CC_DD_EE_F1-5630701.jpg")
+    );
+}
+
+/// With an inactive published state (empty handle), the consumer gets `None`.
+#[test]
+fn query_snapshot_returns_none_for_inactive_state() {
+    let h = Harness::new();
+    let snapshot = speaker_core::hardware::bluetooth::cover_service::query_snapshot(&h.server);
+    assert!(
+        snapshot.is_none(),
+        "empty published state must read as None"
+    );
+}
+
+/// With the cover-art service absent entirely (fresh bus without the
+/// provider), the consumer degrades to `None` instead of erroring.
+#[test]
+fn query_snapshot_returns_none_when_service_absent() {
+    let mut daemon = Command::new("dbus-daemon")
+        .args(["--session", "--nofork", "--print-address=1"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("dbus-daemon must be installed");
+    let mut address = String::new();
+    BufReader::new(daemon.stdout.take().unwrap())
+        .read_line(&mut address)
+        .unwrap();
+    let address = address.trim().to_string();
+    assert!(!address.is_empty(), "dbus-daemon printed no bus address");
+    let _kill = KillOnDrop(daemon);
+
+    let conn = zbus::blocking::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .unwrap();
+    let snapshot = speaker_core::hardware::bluetooth::cover_service::query_snapshot(&conn);
+    assert!(
+        snapshot.is_none(),
+        "absent service must degrade to None (ServiceUnknown path)"
+    );
+}
+
+/// The consumer fast path (disk cache) and slow path (D-Bus snapshot) both
+/// resolve `cover_art_path` for the active track.
+#[test]
+fn resolve_cover_art_resolves_from_cache_and_service() {
+    let h = Harness::new();
+    let addr = BtAddress::parse_str("AA:BB:CC:DD:EE:F1").expect("valid MAC");
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630701".into()),
+        ..BtPlaybackState::default()
+    });
+
+    // Slow path: no cache file; the service publishes handle 5630701.
+    h.publish_fixture("AA:BB:CC:DD:EE:F1", "5630701");
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback
+            .as_ref()
+            .expect("playback")
+            .cover_art_path
+            .as_deref(),
+        Some(h.property("path").as_str()),
+        "service snapshot must resolve cover_art_path"
+    );
+
+    // Fast path: the cache file for the (MAC, handle) pair exists now.
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630701".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback
+            .as_ref()
+            .expect("playback")
+            .cover_art_path
+            .as_deref(),
+        Some(h.property("path").as_str()),
+        "disk-cache fast path must resolve cover_art_path"
+    );
+}
+
+/// Handle mismatch between the track and the published snapshot must NOT
+/// resolve (the consumer waits for the provider to catch up).
+#[test]
+fn resolve_cover_art_ignores_mismatched_snapshot() {
+    let h = Harness::new();
+    h.publish_fixture("AA:BB:CC:DD:EE:F1", "5630701");
+    let addr = BtAddress::parse_str("AA:BB:CC:DD:EE:F1").expect("valid MAC");
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630702".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        None,
+        "mismatched published handle must not resolve"
+    );
 }

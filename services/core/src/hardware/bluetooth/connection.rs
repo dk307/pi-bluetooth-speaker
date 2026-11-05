@@ -1394,41 +1394,7 @@ impl DbusClient {
     }
 
     fn resolve_cover_art(&self, playback: &mut Option<BtPlaybackState>) {
-        let Some(pb) = playback else { return };
-        let Some(addr) = pb.device_address else {
-            return;
-        };
-        let Some(ref handle) = pb.image_handle else {
-            tracing::debug!(
-                title = pb.title.as_ref(),
-                "cover art unavailable: no ImgHandle in Track"
-            );
-            return;
-        };
-        if let Some(path) = cover_art_cached_path_in(&self.cache_dir, addr, handle) {
-            pb.cover_art_path = Some(path);
-            return;
-        }
-        // The bt-manager cover-art provider owns the single BIP session to
-        // the phone and publishes each track's image on the system bus; core
-        // must never open its own OBEX connections (the AOSP responder
-        // serves one client at a time).
-        let Some(snapshot) =
-            crate::hardware::bluetooth::cover_service::query_snapshot(&self.conn())
-        else {
-            return;
-        };
-        if snapshot.device.as_ref() == addr.to_string()
-            && snapshot.handle.as_ref() == handle.as_ref()
-        {
-            pb.cover_art_path = Some(snapshot.path);
-        } else {
-            tracing::debug!(
-                published_handle = snapshot.handle.as_ref(),
-                expected_handle = handle.as_ref(),
-                "cover-art service has not published this track's image yet"
-            );
-        }
+        resolve_cover_art_with(&self.conn(), &self.cache_dir, playback);
     }
 
     /// Parses adapter and device entries out of a `GetManagedObjects` snapshot.
@@ -2824,5 +2790,46 @@ pub mod test_helpers {
     #[must_use]
     pub fn make_mock_fault_error(detail: &str) -> BtError {
         BtError::mock_fault(detail)
+    }
+}
+
+/// Resolves `cover_art_path` for the active playback snapshot.
+///
+/// Fast path: the deterministic disk cache for `(MAC, handle)`. Slow path:
+/// the `org.speaker.CoverArt` D-Bus service published by the `bt-manager`
+/// provider — the provider owns the single BIP session to the phone and core
+/// must never open its own OBEX connections (the AOSP responder serves one
+/// client at a time). Exposed `pub` for the private-bus integration tests.
+pub fn resolve_cover_art_with(
+    conn: &zbus::blocking::Connection,
+    cache_dir: &std::path::Path,
+    playback: &mut Option<BtPlaybackState>,
+) {
+    let Some(pb) = playback else { return };
+    let Some(addr) = pb.device_address else {
+        return;
+    };
+    let Some(ref handle) = pb.image_handle else {
+        tracing::debug!(
+            title = pb.title.as_ref(),
+            "cover art unavailable: no ImgHandle in Track"
+        );
+        return;
+    };
+    if let Some(path) = cover_art_cached_path_in(cache_dir, addr, handle) {
+        pb.cover_art_path = Some(path);
+        return;
+    }
+    let Some(snapshot) = crate::hardware::bluetooth::cover_service::query_snapshot(conn) else {
+        return;
+    };
+    if snapshot.device.as_ref() == addr.to_string() && snapshot.handle.as_ref() == handle.as_ref() {
+        pb.cover_art_path = Some(snapshot.path);
+    } else {
+        tracing::debug!(
+            published_handle = snapshot.handle.as_ref(),
+            expected_handle = handle.as_ref(),
+            "cover-art service has not published this track's image yet"
+        );
     }
 }
