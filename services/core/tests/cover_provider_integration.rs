@@ -393,3 +393,27 @@ fn resolve_cover_art_ignores_mismatched_snapshot() {
         "mismatched published handle must not resolve"
     );
 }
+
+/// The disk cache must not bypass a mismatched published snapshot: after a
+/// BIP re-registration a colliding handle's stale file must not be served
+/// while the provider is still catching up.
+#[test]
+fn resolve_cover_art_does_not_trust_cache_over_stale_snapshot() {
+    let h = Harness::new();
+    let addr = BtAddress::parse_str("AA:BB:CC:DD:EE:F1").expect("valid MAC");
+    // A stale cache file exists for the CURRENT track's handle (colliding
+    // value from the previous BIP session), but the provider's published
+    // snapshot still names the OLD handle.
+    h.publish_fixture("AA:BB:CC:DD:EE:F1", "5630701");
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630702".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        None,
+        "a colliding disk-cache file must not be served over a mismatched snapshot"
+    );
+}

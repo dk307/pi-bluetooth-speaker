@@ -2801,20 +2801,36 @@ pub fn resolve_cover_art_with(
         );
         return;
     };
-    if let Some(path) = cover_art_cached_path_in(cache_dir, addr, handle) {
-        pb.cover_art_path = Some(path);
-        return;
-    }
-    let Some(snapshot) = crate::hardware::bluetooth::cover_service::query_snapshot(conn) else {
-        return;
-    };
-    if snapshot.device.as_ref() == addr.to_string() && snapshot.handle.as_ref() == handle.as_ref() {
-        pb.cover_art_path = Some(snapshot.path);
-    } else {
-        tracing::debug!(
-            published_handle = snapshot.handle.as_ref(),
-            expected_handle = handle.as_ref(),
-            "cover-art service has not published this track's image yet"
-        );
+    // Consult the provider's published snapshot FIRST: its path is the
+    // provider-blessed file for the currently published (device, handle).
+    // A bare disk-cache hit is NOT sufficient on its own — BIP handles are
+    // only unique within one OBEX session, so after a phone-side BIP
+    // re-registration a new track's handle can collide with a file from the
+    // previous session; the provider re-fetches in that case and the
+    // snapshot mismatch below keeps the consumer from serving the stale
+    // bytes in the interim (self-correcting on the next poll once the
+    // provider republishes).
+    match crate::hardware::bluetooth::cover_service::query_snapshot(conn) {
+        Some(snapshot) => {
+            if snapshot.device.as_ref() == addr.to_string()
+                && snapshot.handle.as_ref() == handle.as_ref()
+                && std::path::Path::new(snapshot.path.as_ref()).is_file()
+            {
+                pb.cover_art_path = Some(snapshot.path);
+            } else {
+                tracing::debug!(
+                    published_handle = snapshot.handle.as_ref(),
+                    expected_handle = handle.as_ref(),
+                    "cover-art service has not published this track's image yet"
+                );
+            }
+        }
+        // Provider absent (bt-manager not running): the disk cache is the
+        // only information available; serve it best-effort.
+        None => {
+            if let Some(path) = cover_art_cached_path_in(cache_dir, addr, handle) {
+                pb.cover_art_path = Some(path);
+            }
+        }
     }
 }
