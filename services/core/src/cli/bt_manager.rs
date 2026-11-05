@@ -162,7 +162,6 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
     if opts.cover_art {
         if let Err(e) = crate::cli::cover_provider::spawn_production(
             crate::hardware::bluetooth::COVER_ART_CACHE_DIR.into(),
-            opts.interval,
         ) {
             tracing::error!(error = %e, "cover-art provider failed to start; continuing without it");
         }

@@ -16,12 +16,16 @@
 //! Future `core` builds then pick the image up from D-Bus instead of making
 //! their own cover-art connections.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use futures_util::StreamExt;
+use tokio::sync::Notify;
 use zbus::object_server::SignalEmitter;
+use zbus::zvariant::OwnedValue;
 
 use crate::hardware::bluetooth::bip_direct::{
     BipImageType, BipSessionKeeper, BipTransport, PersistentBipSession, classify_obex_port,
@@ -194,19 +198,30 @@ impl PlaybackSource for DevicePlaybackSource {
     }
 }
 
-/// The cover-art polling worker.
 /// Sends a BIP keepalive at most this often. AOSP idles out the OBEX
 /// session after roughly two idle minutes, after which the phone stops
 /// advertising `ImgHandle` in `MediaPlayer1.Track` until the publisher
 /// restarts, so idle stretches must see traffic to stay alive.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Fallback poll cadence for the worker loop.
+///
+/// Track changes are pushed by the `BlueZ` signal listener (see
+/// [`spawn_track_signal_listener`]); the timer only recovers from a lost
+/// signal stream and drives the keepalive cadence, so it can stay slow —
+/// the event path is what keeps track-change latency low without burning
+/// CPU on tight polling.
+const COVER_FALLBACK_POLL: Duration = Duration::from_secs(15);
+
+/// The cover-art worker: event-driven fetch loop with a slow fallback poll.
 struct CoverArtWorker {
     source: Box<dyn PlaybackSource>,
     keeper: Box<dyn BipSessionKeeper>,
     state: SharedCoverState,
     cache_dir: PathBuf,
-    poll_interval: Duration,
+    /// Woken by the `BlueZ` `Track` signal listener; each permit coalesces the
+    /// track changes that arrived since the last poll into one fetch cycle.
+    wake: Arc<Notify>,
     emitter: Option<SignalEmitter<'static>>,
     last_keepalive: Option<Instant>,
     /// Instant when the active track's `ImgHandle` was first observed, used to
@@ -220,7 +235,7 @@ impl CoverArtWorker {
         keeper: Box<dyn BipSessionKeeper>,
         state: SharedCoverState,
         cache_dir: PathBuf,
-        poll_interval: Duration,
+        wake: Arc<Notify>,
         emitter: Option<SignalEmitter<'static>>,
     ) -> Self {
         Self {
@@ -228,7 +243,7 @@ impl CoverArtWorker {
             keeper,
             state,
             cache_dir,
-            poll_interval,
+            wake,
             emitter,
             last_keepalive: None,
             track_change_at: None,
@@ -424,19 +439,26 @@ impl CoverArtWorker {
         }
     }
 
-    /// Runs the polling loop until the runtime is torn down.
+    /// Runs the event-driven fetch loop until the runtime is torn down.
+    ///
+    /// Each `BlueZ` `Track` signal (or the fallback timer) triggers one poll
+    /// cycle; `poll_once` deduplicates unchanged tracks, so a burst of
+    /// signals coalesces into a single fetch.
     ///
     /// Takes `&mut self` (not `self`) so the caller can keep ownership and
     /// avoid dropping the worker — which owns the blocking D-Bus connection —
     /// inside a tokio runtime context.
     async fn run(&mut self) {
         tracing::info!(
-            interval_secs = self.poll_interval.as_secs(),
-            "cover-art provider polling started"
+            fallback_poll_secs = COVER_FALLBACK_POLL.as_secs(),
+            "cover-art provider started (signal-driven, periodic fallback poll)"
         );
         loop {
+            tokio::select! {
+                () = tokio::time::sleep(COVER_FALLBACK_POLL) => {}
+                () = self.wake.notified() => {}
+            }
             self.poll_once().await;
-            tokio::time::sleep(self.poll_interval).await;
         }
     }
 }
@@ -460,6 +482,72 @@ async fn build_cover_art_server(
     Ok((connection, emitter))
 }
 
+/// Subscribes to `BlueZ` `MediaPlayer1` `Track` changes on an existing async
+/// connection and wakes the worker for each one.
+///
+/// Split from [`spawn_track_signal_listener`] so integration tests can
+/// inject a private-bus connection; the spawned task lives for the lifetime
+/// of `connection` and keeps running while the provider thread's runtime
+/// exists. A dead stream (transport error or close) logs and ends the task —
+/// the worker's fallback poll keeps the provider functional either way.
+///
+/// # Errors
+/// Propagates `zbus::Error` when the match-rule subscription fails.
+pub async fn track_signal_listener(
+    connection: zbus::Connection,
+    wake: Arc<Notify>,
+) -> Result<(), zbus::Error> {
+    let rule = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender("org.bluez")?
+        .interface("org.freedesktop.DBus.Properties")?
+        .member("PropertiesChanged")?
+        .arg0ns("org.bluez.MediaPlayer1")?
+        .build();
+    let mut stream = zbus::MessageStream::for_match_rule(rule, &connection, None).await?;
+    tokio::spawn(async move {
+        loop {
+            match stream.next().await {
+                Some(Ok(message)) => {
+                    // PropertiesChanged body: (interface, changed, invalidated)
+                    match message
+                        .body()
+                        .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+                    {
+                        Ok((_, changed, _)) if changed.contains_key("Track") => wake.notify_one(),
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::debug!(error = %e, "ignoring malformed `BlueZ` PropertiesChanged");
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    tracing::warn!(error = %e, "`BlueZ` track signal stream failed; falling back to periodic polling");
+                    break;
+                }
+                None => {
+                    tracing::warn!(
+                        "BlueZ track signal stream closed; falling back to periodic polling"
+                    );
+                    break;
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Subscribes to `BlueZ` `MediaPlayer1` `Track` changes on the system bus.
+///
+/// # Errors
+/// Propagates `zbus::Error` when the system bus connection or the match-rule
+/// subscription cannot be established; callers log and continue on the
+/// periodic fallback poll.
+async fn spawn_track_signal_listener(wake: Arc<Notify>) -> Result<(), zbus::Error> {
+    let connection = zbus::Connection::system().await?;
+    track_signal_listener(connection, wake).await
+}
+
 /// Spawns the production cover-art provider on a dedicated thread.
 ///
 /// The thread owns its own D-Bus connection and tokio runtime so a stall in
@@ -469,7 +557,7 @@ async fn build_cover_art_server(
 /// Returns an error string when the D-Bus connection or the worker thread
 /// cannot be created. The monitor loop keeps running either way (see
 /// [`crate::cli::bt_manager::run_app`]).
-pub fn spawn_production(cache_dir: PathBuf, poll_interval: Duration) -> Result<(), String> {
+pub fn spawn_production(cache_dir: PathBuf) -> Result<(), String> {
     let bt =
         BluetoothDevice::new().map_err(|e| format!("cannot connect to the system D-Bus: {e}"))?;
     let source = DevicePlaybackSource { bt };
@@ -509,12 +597,19 @@ pub fn spawn_production(cache_dir: PathBuf, poll_interval: Duration) -> Result<(
                     object = COVER_ART_OBJECT_PATH,
                     "cover-art D-Bus service published"
                 );
+                let wake = Arc::new(Notify::new());
+                if let Err(e) = spawn_track_signal_listener(Arc::clone(&wake)).await {
+                    tracing::warn!(
+                        error = %e,
+                        "BlueZ track signal listener failed to start; relying on periodic polling only"
+                    );
+                }
                 let mut worker = CoverArtWorker::new(
                     Box::new(source),
                     Box::new(PersistentBipSession::default()),
                     state,
                     cache_dir,
-                    poll_interval,
+                    wake,
                     Some(emitter),
                 );
                 worker.run().await;
@@ -718,7 +813,7 @@ mod tests {
                 }),
                 self.state.clone(),
                 self.dir.path().to_path_buf(),
-                Duration::from_secs(5),
+                Arc::new(Notify::new()),
                 emitter,
             )
         }
@@ -926,6 +1021,29 @@ mod tests {
         worker.poll_once().await;
         assert_eq!(harness.counters.releases(), 1);
         assert_eq!(harness.state.get().handle, None);
+    }
+
+    #[tokio::test]
+    async fn run_loop_wakes_on_notify_and_publishes() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        let wake = Arc::new(Notify::new());
+        let state = harness.state.clone();
+        let mut worker = harness.worker(None);
+        worker.wake = Arc::clone(&wake);
+        let task = tokio::spawn(async move { worker.run().await });
+        wake.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.get().path.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("notify must wake the worker into publishing the cover");
+        task.abort();
     }
 
     #[test]

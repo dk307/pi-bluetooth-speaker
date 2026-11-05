@@ -174,3 +174,105 @@ fn cleared_state_rejects_get_image_again() {
         "cleared state must reject GetImage"
     );
 }
+
+/// Kills the private `dbus-daemon` when the test ends.
+struct KillOnDrop(Child);
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A `Track` `PropertiesChanged` on `org.bluez.MediaPlayer1` must wake the
+/// worker; other property changes must not. Exercises the real match-rule
+/// subscription on a private `dbus-daemon` (the emitter owns `org.bluez` so
+/// the sender filter matches, exactly like the real phone stack).
+#[tokio::test]
+async fn track_signal_listener_wakes_only_on_track_changes() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::Notify;
+    use zbus::zvariant::Value;
+
+    let mut daemon = Command::new("dbus-daemon")
+        .args(["--session", "--nofork", "--print-address=1"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("dbus-daemon must be installed to run cover-provider integration tests");
+    let mut address = String::new();
+    BufReader::new(daemon.stdout.take().unwrap())
+        .read_line(&mut address)
+        .unwrap();
+    let address = address.trim().to_string();
+    assert!(!address.is_empty(), "dbus-daemon printed no bus address");
+    let _kill = KillOnDrop(daemon);
+
+    // The listener's match rule filters `sender=org.bluez`; owning that name
+    // on the fake server makes the filter pass, like the real BlueZ daemon.
+    let server = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .name("org.bluez")
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let listener_conn = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let wake = Arc::new(Notify::new());
+    speaker_core::cli::cover_provider::track_signal_listener(listener_conn, Arc::clone(&wake))
+        .await
+        .expect("listener subscribes on the private bus");
+
+    let emitter = zbus::object_server::SignalEmitter::new(
+        &server,
+        "/org/bluez/hci0/dev_30_E0_44_67_38_A2/player0",
+    )
+    .unwrap()
+    .to_owned();
+
+    // A non-Track property change must NOT wake the worker.
+    let mut status = HashMap::new();
+    status.insert(
+        "Status".to_string(),
+        Value::Value(Box::new(Value::Str("playing".into()))),
+    );
+    emitter
+        .emit(
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+            &(
+                "org.bluez.MediaPlayer1".to_string(),
+                status,
+                Vec::<String>::new(),
+            ),
+        )
+        .await
+        .unwrap();
+    let quiet = tokio::time::timeout(Duration::from_millis(300), wake.notified()).await;
+    assert!(quiet.is_err(), "non-Track change must not wake the worker");
+
+    // A Track change must wake the worker.
+    let mut track = HashMap::new();
+    track.insert("Track".to_string(), Value::Value(Box::new(Value::U32(0))));
+    emitter
+        .emit(
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+            &(
+                "org.bluez.MediaPlayer1".to_string(),
+                track,
+                Vec::<String>::new(),
+            ),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), wake.notified())
+        .await
+        .expect("Track change must wake the worker");
+}
