@@ -460,12 +460,11 @@ pub async fn fetch_cover_art_via(
 
 /// Runs a complete BIP GET transaction over an already connected `stream`.
 ///
-/// Sends an OBEX CONNECT targeting the AVRCP 1.6 cover-art service, pulls the
-/// requested image with a GET carrying `Type`, `Name` and `Img-Descriptor`
-/// headers, then closes the OBEX session with a best-effort DISCONNECT.
+/// Sends an OBEX CONNECT targeting the AVRCP 1.6 cover-art service, then pulls
+/// the requested image with a GET carrying `Type` and `Img-Handle` headers
+/// (no OBEX DISCONNECT — see [`get_image_on`]).
 ///
-/// A failing DISCONNECT after a successful GET never discards the already
-/// reassembled body; a failing GET is always propagated first.
+/// Dropping the `Client` at the end of the call closes the transport.
 ///
 /// # Errors
 /// Returns [`BipError`] for invalid handles, OBEX transport/protocol failures
@@ -496,8 +495,13 @@ where
 }
 
 /// Runs the BIP GET transaction (Type + Img-Handle headers) on an
-/// already-connected OBEX `client`, then closes the OBEX session with a
-/// best-effort DISCONNECT.
+/// already-connected OBEX `client`.
+///
+/// No OBEX DISCONNECT is sent afterwards: the persistent cover-art session
+/// must stay connected, because AOSP stops advertising `ImgHandle` in
+/// `MediaPlayer1.Track` once the client disconnects (verified live), while
+/// `obexd` likewise keeps its BIP session open across transfers. Dropping the
+/// `Client` (closing the transport) is the caller's shutdown path.
 ///
 /// The header set mirrors the AOSP native path: Type, Img-Handle (0x30,
 /// Unicode — AOSP ignores the generic OBEX Name header) and NO
@@ -543,18 +547,9 @@ where
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "BIP image received"
             );
-            if let Err(e) = client.disconnect().await {
-                tracing::warn!(
-                    body_len = response.body.len(),
-                    "BIP cover-art disconnect failed after successful GET: {e}"
-                );
-            }
             Ok(response.body)
         }
-        Err(e) => {
-            let _ = client.disconnect().await;
-            Err(map_obex_failure("OBEX GET", e))
-        }
+        Err(e) => Err(map_obex_failure("OBEX GET", e)),
     }
 }
 
@@ -773,6 +768,14 @@ impl BipSessionKeeper for PersistentBipSession {
         match client.set_path_root().await {
             Ok(_) => {
                 tracing::debug!("BIP keepalive OK");
+                Ok(())
+            }
+            // AOSP answers SETPATH with a complete OBEX response (Not
+            // Implemented), which is itself proof of transport liveness: the
+            // phone-side BIP server session is still connected. Only a
+            // transport failure (reset/timeout) releases the session.
+            Err(e) if e.response_code().is_some() => {
+                tracing::debug!("BIP keepalive answered (responder ignores SETPATH): {e}");
                 Ok(())
             }
             Err(e) => {

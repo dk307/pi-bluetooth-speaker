@@ -130,7 +130,7 @@ fn new_retry_stub(get_outcomes: Vec<Result<Vec<u8>, Response>>) -> SharedStub {
 }
 
 #[tokio::test]
-async fn pull_image_returns_full_body_after_connect_get_disconnect() {
+async fn pull_image_returns_full_body_over_connect_and_get() {
     let body = body_bytes(2048, 0xAB);
     let stub = new_stub(Ok(body.clone()));
     let (client_half, server_half) = tokio::io::duplex(65_536);
