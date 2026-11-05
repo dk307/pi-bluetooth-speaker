@@ -846,10 +846,11 @@ async fn spawn_track_signal_listener(wake: Arc<Notify>) {
 /// Returns an error string when the D-Bus connection or the worker thread
 /// cannot be created. The monitor loop keeps running either way (see
 /// [`crate::cli::bt_manager::run_app`]).
-pub fn spawn_production(cache_dir: PathBuf) -> Result<(), String> {
-    let bt =
-        BluetoothDevice::new().map_err(|e| format!("cannot connect to the system D-Bus: {e}"))?;
-    let source = DevicePlaybackSource { bt };
+pub fn spawn_production(cache_dir: PathBuf, bt: &BluetoothDevice) -> Result<(), String> {
+    // A cheap `Arc`-backed clone of the caller's device: shares its system
+    // D-Bus connection instead of opening a second one (and its listener
+    // thread / second startup failure point).
+    let source = DevicePlaybackSource { bt: bt.clone() };
     std::thread::Builder::new()
         .name("cover-art-provider".into())
         .spawn(move || {
