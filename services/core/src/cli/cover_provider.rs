@@ -198,10 +198,13 @@ impl PlaybackSource for DevicePlaybackSource {
     }
 }
 
-/// Sends a BIP keepalive at most this often. AOSP idles out the OBEX
-/// session after roughly two idle minutes, after which the phone stops
+/// Fires the BIP keepalive after this much idle time. AOSP idles out the
+/// OBEX session after roughly two idle minutes, after which the phone stops
 /// advertising `ImgHandle` in `MediaPlayer1.Track` until the publisher
-/// restarts, so idle stretches must see traffic to stay alive.
+/// restarts, so idle stretches must see traffic to stay alive. The timer
+/// resets after every real OBEX transaction (fetch, keepalive), so a
+/// track-change GET always preempts a pending keepalive instead of
+/// colliding with it.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Fallback poll cadence for the worker loop.
@@ -223,7 +226,10 @@ struct CoverArtWorker {
     /// track changes that arrived since the last poll into one fetch cycle.
     wake: Arc<Notify>,
     emitter: Option<SignalEmitter<'static>>,
-    last_keepalive: Option<Instant>,
+    /// When the next idle keepalive fires. Rearmed after every real OBEX
+    /// activity (fetch, keepalive) and disarmed when the session is released,
+    /// so a track-change signal arriving first preempts the keepalive.
+    keepalive_deadline: Option<Instant>,
     /// Instant when the active track's `ImgHandle` was first observed, used to
     /// report the track-change → published latency on the publish log line.
     track_change_at: Option<Instant>,
@@ -245,7 +251,7 @@ impl CoverArtWorker {
             cache_dir,
             wake,
             emitter,
-            last_keepalive: None,
+            keepalive_deadline: None,
             track_change_at: None,
         }
     }
@@ -264,27 +270,22 @@ impl CoverArtWorker {
         }
     }
 
-    /// Sends the periodic OBEX keepalive when the held session has been idle
-    /// past [`KEEPALIVE_INTERVAL`].
+    /// Sends the idle keepalive when the deadline expires and rearms the
+    /// idle timer.
     ///
-    /// Runs on the early-return paths (`no ImgHandle`, `already published`)
-    /// so the session stays warm and the phone keeps advertising handles even
-    /// when no fetch traffic flows.
-    async fn maybe_keepalive(&mut self) {
-        let due = match self.last_keepalive {
-            Some(last) => last.elapsed() >= KEEPALIVE_INTERVAL,
-            None => true,
-        };
-        if !due {
-            return;
-        }
-        self.last_keepalive = Some(Instant::now());
+    /// The deadline resets after every real OBEX activity (establish, fetch,
+    /// keepalive), never on no-op polls, so `SetPath` only goes on the wire
+    /// when the session has been genuinely idle for [`KEEPALIVE_INTERVAL`] —
+    /// a track-change signal arriving first preempts the pending keepalive
+    /// instead of colliding with the next GET.
+    async fn keepalive(&mut self) {
         if let Err(e) = self.keeper.keepalive().await {
             tracing::warn!(
                 error = e.summary(),
                 "BIP keepalive failed; session will be re-established on the next ensure"
             );
         }
+        self.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
     }
 
     async fn process_playback(&mut self, playback: BtPlaybackState) {
@@ -305,17 +306,19 @@ impl CoverArtWorker {
             );
             return;
         }
+        if self.keepalive_deadline.is_none() {
+            // The establish itself is OBEX traffic; start the idle timer.
+            self.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
+        }
         let Some(handle) = playback.image_handle else {
             tracing::debug!(
                 device = %playback.device_name,
                 "cover art unavailable: no ImgHandle in Track"
             );
-            self.maybe_keepalive().await;
             return;
         };
         if self.state.get().handle.as_ref() == Some(&handle) {
             tracing::trace!(%handle, "cover art already published for this handle");
-            self.maybe_keepalive().await;
             return;
         }
         // First observation of this track's handle starts the latency
@@ -372,9 +375,9 @@ impl CoverArtWorker {
                             path = %path,
                             "cover art published on D-Bus"
                         );
-                        // A successful fetch is OBEX traffic; the session is
-                        // warm again, so restart the keepalive cadence.
-                        self.last_keepalive = Some(Instant::now());
+                        // A successful fetch is OBEX traffic; restart the
+                        // idle keepalive timer.
+                        self.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
                     }
                     Err(reason) => {
                         self.track_change_at = None;
@@ -430,7 +433,7 @@ impl CoverArtWorker {
     /// `ImageCleared` exactly once when an image was published).
     async fn deactivate(&mut self, reason: &str) {
         self.keeper.release();
-        self.last_keepalive = None;
+        self.keepalive_deadline = None;
         let previous = self.state.clear();
         if previous.is_active() {
             tracing::info!(reason, "cover art deactivated");
@@ -460,10 +463,17 @@ impl CoverArtWorker {
         );
         loop {
             tokio::select! {
-                () = tokio::time::sleep(COVER_FALLBACK_POLL) => {}
-                () = self.wake.notified() => {}
+                () = tokio::time::sleep(COVER_FALLBACK_POLL) => self.poll_once().await,
+                () = self.wake.notified() => self.poll_once().await,
+                // Idle keepalive: fires only when no signal or fallback poll
+                // beat it to the loop, and its deadline is rearm-armed after
+                // every real OBEX transaction.
+                () = tokio::time::sleep_until(
+                    self.keepalive_deadline
+                        .unwrap_or_else(|| Instant::now() + KEEPALIVE_INTERVAL)
+                        .into(),
+                ), if self.keepalive_deadline.is_some() => self.keepalive().await,
             }
-            self.poll_once().await;
         }
     }
 }
@@ -942,75 +952,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_handle_poll_sends_keepalive_after_interval() {
+    async fn no_handle_poll_arms_idle_deadline_without_sending_keepalive() {
         let mut harness = TestHarness::new(JPEG_BYTES);
-        harness.script(scripted_playback(None));
-        harness.script(scripted_playback(None));
         harness.script(scripted_playback(None));
         let mut worker = harness.worker(None);
         worker.poll_once().await;
         assert_eq!(
             harness.counters.keepalives(),
-            1,
-            "first idle poll sends a keepalive"
+            0,
+            "polls never send keepalive directly; the idle timer owns it"
         );
-        worker.poll_once().await;
-        assert_eq!(
-            harness.counters.keepalives(),
-            1,
-            "keepalive is throttled within the interval"
-        );
-        worker.last_keepalive = Some(
-            Instant::now()
-                .checked_sub(KEEPALIVE_INTERVAL + Duration::from_secs(1))
-                .expect("backdate fits in Instant range"),
-        );
-        worker.poll_once().await;
-        assert_eq!(
-            harness.counters.keepalives(),
-            2,
-            "keepalive fires again past the interval"
+        assert!(
+            worker.keepalive_deadline.is_some(),
+            "successful ensure arms the idle keepalive timer"
         );
         assert_eq!(harness.counters.fetches(), 0, "no handle means no fetch");
-        assert_eq!(
-            harness.counters.ensures(),
-            3,
-            "session ensured on every poll"
-        );
+        assert_eq!(harness.counters.ensures(), 1);
     }
 
     #[tokio::test]
-    async fn dedup_poll_sends_keepalive_only_when_interval_elapsed() {
+    async fn dedup_poll_leaves_pending_idle_deadline_untouched() {
         let mut harness = TestHarness::new(JPEG_BYTES);
-        harness.script(scripted_playback(Some("5630701")));
-        harness.script(scripted_playback(Some("5630701")));
         harness.script(scripted_playback(Some("5630701")));
         harness.script(scripted_playback(Some("5630701")));
         let mut worker = harness.worker(None);
         worker.poll_once().await;
         assert_eq!(harness.counters.fetches(), 1);
-        worker.poll_once().await;
+        let armed = worker.keepalive_deadline.expect("armed by first poll");
         worker.poll_once().await;
         assert_eq!(
             harness.counters.keepalives(),
             0,
-            "fresh fetch traffic keeps the session warm; no keepalive due"
+            "dedup poll is not OBEX traffic; keepalive stays pending"
         );
-        worker.last_keepalive = Some(
+        assert_eq!(
+            worker.keepalive_deadline,
+            Some(armed),
+            "no-op polls must not postpone the pending idle keepalive"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_loop_fires_idle_keepalive_when_deadline_expires() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        let wake = Arc::new(Notify::new());
+        let counters = Arc::clone(&harness.counters);
+        let mut worker = harness.worker(None);
+        worker.wake = Arc::clone(&wake);
+        worker.keepalive_deadline = Some(
             Instant::now()
-                .checked_sub(KEEPALIVE_INTERVAL + Duration::from_secs(1))
+                .checked_sub(Duration::from_secs(1))
                 .expect("backdate fits in Instant range"),
         );
+        let task = tokio::spawn(async move { worker.run().await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while counters.keepalives() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("expired idle deadline must fire the keepalive");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn deactivate_disarms_idle_keepalive() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(Ok(None));
+        let mut worker = harness.worker(None);
+        worker.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
         worker.poll_once().await;
-        assert_eq!(
-            harness.counters.keepalives(),
-            1,
-            "stale interval triggers keepalive on the dedup path"
-        );
-        assert_eq!(
-            harness.counters.fetches(),
-            1,
-            "same handle still not refetched"
+        assert_eq!(harness.counters.releases(), 1, "session released");
+        assert!(
+            worker.keepalive_deadline.is_none(),
+            "released session must disarm the idle keepalive"
         );
     }
 
