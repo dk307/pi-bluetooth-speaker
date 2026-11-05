@@ -33,6 +33,7 @@ use crate::hardware::bluetooth::bip_direct::{
 use crate::hardware::bluetooth::cover_service::{COVER_ART_DBUS_NAME, COVER_ART_OBJECT_PATH};
 use crate::hardware::bluetooth::{
     clean_old_cover_art_in, cover_art_path_for_in, ensure_cover_art_cache_dir_in, is_complete_jpeg,
+    validate_bip_handle,
 };
 use crate::hardware::{BluetoothDevice, BtAddress, BtError, BtPlaybackState};
 
@@ -345,11 +346,9 @@ impl CoverArtWorker {
             self.deactivate("playback has no device address").await;
             return;
         };
-        let Some(obex_port) = playback.obex_port else {
-            self.deactivate("MediaPlayer1 has no ObexPort").await;
-            return;
-        };
-        let transport = classify_obex_port(Some(obex_port));
+        // No ObexPort: fall back to SDP discovery of the BIP RFCOMM channel,
+        // mirroring obexd, which queries SDP when the phone publishes no PSM.
+        let transport = classify_obex_port(playback.obex_port);
         if let Err(e) = self.keeper.ensure(&address, &transport).await {
             tracing::warn!(
                 error = e.summary(),
@@ -376,10 +375,29 @@ impl CoverArtWorker {
             );
             return;
         };
-        if self.state.get().handle.as_ref() == Some(&handle) {
+        // Defense in depth: AOSP handles are exactly 7 digits; anything else
+        // is peer garbage and must never reach an OBEX GET (the disk write is
+        // already guarded by `validate_bip_handle` inside
+        // `cover_art_path_for_in`).
+        if validate_bip_handle(&handle).is_none() {
+            tracing::warn!(
+                device = %playback.device_name,
+                "rejecting malformed ImgHandle from peer"
+            );
+            return;
+        }
+        let device = address.to_string();
+        // Dedup on BOTH device and handle: two phones can advertise the same
+        // session-scoped handle, and the published state must never keep
+        // pointing at the previous device's file.
+        let state = self.state.get();
+        if state.device.as_deref() == Some(device.as_str())
+            && state.handle.as_ref() == Some(&handle)
+        {
             tracing::trace!(%handle, "cover art already published for this handle");
             return;
         }
+        drop(state);
         // Same image re-advertised within this session (same album, replay):
         // republish the cached bytes with zero OBEX traffic. The disk store
         // rewrites the one-file-per-MAC cache; no keepalive rearm, this is
@@ -388,7 +406,7 @@ impl CoverArtWorker {
             let started = Instant::now();
             match self.store_image(address, &handle, &bytes) {
                 Ok(path) => {
-                    let device = address.to_string().into_boxed_str();
+                    let device: Box<str> = device.clone().into_boxed_str();
                     self.state
                         .publish(device.clone(), handle.clone(), path.clone().into());
                     if let Some(emitter) = &self.emitter {
@@ -825,16 +843,32 @@ mod tests {
         counters: Arc<Counters>,
         last_transport: Arc<Mutex<Option<BipTransport>>>,
         generation: Arc<AtomicUsize>,
+        address: Mutex<Option<BtAddress>>,
     }
 
     #[async_trait::async_trait]
     impl BipSessionKeeper for FakeKeeper {
         async fn ensure(
             &mut self,
-            _address: &BtAddress,
+            address: &BtAddress,
             transport: &BipTransport,
         ) -> Result<(), BipError> {
             self.counters.ensures.fetch_add(1, Ordering::SeqCst);
+            // Mirror `PersistentBipSession`: a device switch releases and
+            // re-establishes, bumping the session generation.
+            let switched = self
+                .address
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                != Some(&*address);
+            if switched {
+                self.generation.fetch_add(1, Ordering::SeqCst);
+                *self
+                    .address
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(*address);
+            }
             *self
                 .last_transport
                 .lock()
@@ -931,6 +965,7 @@ mod tests {
                     counters: Arc::clone(&self.counters),
                     last_transport: Arc::clone(&self.last_transport),
                     generation: Arc::clone(&self.epoch),
+                    address: Mutex::new(None),
                 }),
                 self.state.clone(),
                 self.dir.path().to_path_buf(),
@@ -1136,16 +1171,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_obex_port_deactivates() {
+    async fn missing_obex_port_falls_back_to_sdp_discovery() {
         let mut harness = TestHarness::new(JPEG_BYTES);
-        harness.script(scripted_playback(Some("5630701")));
         let mut playback = test_playback(Some("5630701"));
         playback.obex_port = None;
         harness.script(Ok(Some(playback)));
         let mut worker = harness.worker(None);
         worker.poll_once().await;
+        assert_eq!(
+            harness.last_transport(),
+            Some(BipTransport::SdpRfcomm),
+            "no ObexPort: fall back to SDP discovery like obexd"
+        );
+        assert_eq!(harness.counters.fetches(), 1);
+        assert_eq!(harness.counters.releases(), 0);
+        assert_eq!(harness.state.get().handle.as_deref(), Some("5630701"));
+    }
+
+    #[tokio::test]
+    async fn device_switch_republishes_even_with_same_handle() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        let mut other_phone = test_playback(Some("5630701"));
+        other_phone.device_address =
+            Some(BtAddress::parse_str("22:22:33:44:55:66").expect("valid MAC"));
+        other_phone.device_name = "Other Phone".into();
+        harness.script(Ok(Some(other_phone)));
+        let mut worker = harness.worker(None);
         worker.poll_once().await;
-        assert_eq!(harness.counters.releases(), 1);
+        worker.poll_once().await;
+        assert_eq!(
+            harness.counters.fetches(),
+            2,
+            "device switch changes the session generation: the per-session handle cache must be purged and the artwork re-fetched"
+        );
+        let state = harness.state.get();
+        assert_eq!(state.device.as_deref(), Some("22:22:33:44:55:66"));
+        assert!(
+            state
+                .path
+                .expect("republished")
+                .contains("22_22_33_44_55_66")
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_handle_is_rejected_before_any_fetch() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        let mut evil = test_playback(Some("../../etc/passwd"));
+        evil.image_handle = Some("../../x".into());
+        harness.script(Ok(Some(evil)));
+        let mut worker = harness.worker(None);
+        worker.poll_once().await;
+        assert_eq!(
+            harness.counters.fetches(),
+            0,
+            "peer garbage handle must never reach OBEX or disk"
+        );
         assert_eq!(harness.state.get().handle, None);
     }
 
