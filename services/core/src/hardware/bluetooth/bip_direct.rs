@@ -593,9 +593,6 @@ where
 /// Unicode — AOSP ignores the generic OBEX Name header) and NO
 /// Img-Descriptor, selecting the responder's native-image format.
 ///
-/// No OBEX DISCONNECT is sent (see [`get_image_on`]): the persistent
-/// session must stay connected; a failing GET is always propagated first.
-///
 /// # Errors
 /// Returns [`BipError`] for invalid handles, OBEX transport/protocol failures
 /// and responder rejections (see [`BipError::response_code`]).

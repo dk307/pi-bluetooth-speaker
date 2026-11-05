@@ -1015,12 +1015,9 @@ pub fn is_service_absent_fdo_error(err: &zbus::fdo::Error) -> bool {
     }
 }
 
-/// Consolidated mutable D-Bus client state protected by a single mutex.
-///
-/// This groups the OBEX session cache, Bluetooth ACL tuning history, and socket
-/// Shared change-notification flag used by the D-Bus backend and the mock to wake
-/// property monitors when the subsystem state may have changed (event-driven instead
-/// of fixed-interval polling).
+/// Shared change-notification flag used by the D-Bus backend and the mock
+/// to wake property monitors when the subsystem state may have changed
+/// (event-driven instead of fixed-interval polling).
 #[derive(Debug, Default)]
 pub(crate) struct ChangeFlag {
     ready: Mutex<bool>,
