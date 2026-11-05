@@ -227,9 +227,10 @@ async fn track_signal_listener_wakes_only_on_track_changes() {
         .await
         .unwrap();
     let wake = Arc::new(Notify::new());
-    speaker_core::cli::cover_provider::track_signal_listener(listener_conn, Arc::clone(&wake))
-        .await
-        .expect("listener subscribes on the private bus");
+    speaker_core::cli::cover_provider::track_signal_listener(listener_conn, Arc::clone(&wake));
+    // The subscription now happens inside the spawned task; give it time to
+    // register the match rule before the test emits any signals.
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     let emitter = zbus::object_server::SignalEmitter::new(
         &server,

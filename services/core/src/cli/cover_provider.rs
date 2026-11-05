@@ -246,6 +246,14 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// CPU on tight polling.
 const COVER_FALLBACK_POLL: Duration = Duration::from_secs(15);
 
+/// Backoff applied after a failed cover fetch/publish for a handle.
+///
+/// A failing attempt (unwritable or full cache dir, peer returning truncated
+/// JPEGs) would otherwise re-issue a full OBEX image GET every
+/// [`COVER_FALLBACK_POLL`]; the backoff bounds that loop while still
+/// converging — a later poll past the deadline retries once.
+const RETRY_BACKOFF: Duration = Duration::from_secs(60);
+
 /// Mirrors AOSP's `COVER_ART_STORAGE_MAX_ITEMS`: the phone keeps at most 32
 /// artworks (identified by MD5) per session, so at most 32 distinct handles
 /// can recur within one session.
@@ -309,6 +317,10 @@ struct CoverArtWorker {
     /// Instant when the active track's `ImgHandle` was first observed, used to
     /// report the track-change → published latency on the publish log line.
     track_change_at: Option<Instant>,
+    /// Handle and retry deadline after a failed fetch/publish, so a broken
+    /// cache dir or a peer returning truncated JPEGs cannot degenerate into
+    /// a permanent full-image OBEX GET every [`COVER_FALLBACK_POLL`].
+    suppress_retry: Option<(Box<str>, Instant)>,
     /// Session-scoped handle cache; purged on every session generation change.
     session_cache: SessionCoverCache,
 }
@@ -331,6 +343,7 @@ impl CoverArtWorker {
             emitter,
             keepalive_deadline: None,
             track_change_at: None,
+            suppress_retry: None,
             session_cache: SessionCoverCache::new(),
         }
     }
@@ -441,11 +454,25 @@ impl CoverArtWorker {
                         path = %path,
                         "cover art restored from session cache"
                     );
+                    self.suppress_retry = None;
                     return;
                 }
                 Err(reason) => {
                     tracing::warn!(%handle, "session-cache restore failed: {reason}; fetching fresh");
                 }
+            }
+        }
+        // A fresh OBEX GET for a handle whose last attempt just failed is
+        // deferred past the backoff deadline; the session-cache restore path
+        // above stays active so recovery is instant once bytes exist.
+        if let Some((failed, until)) = &self.suppress_retry {
+            if *failed == handle && Instant::now() < *until {
+                tracing::debug!(
+                    %handle,
+                    retry_in_ms = until.saturating_duration_since(Instant::now()).as_millis() as u64,
+                    "previous fetch attempt failed; backing off before retrying"
+                );
+                return;
             }
         }
         // First observation of this track's handle starts the latency
@@ -495,12 +522,14 @@ impl CoverArtWorker {
                             "cover art published on D-Bus"
                         );
                         self.session_cache.insert(handle, Arc::clone(&bytes));
+                        self.suppress_retry = None;
                         // A successful fetch is OBEX traffic; restart the
                         // idle keepalive timer.
                         self.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
                     }
                     Err(reason) => {
                         self.track_change_at = None;
+                        self.suppress_retry = Some((handle.into(), Instant::now() + RETRY_BACKOFF));
                         tracing::warn!(
                             bytes = byte_count,
                             %handle,
@@ -510,6 +539,7 @@ impl CoverArtWorker {
                 }
             }
             Err(e) => {
+                self.suppress_retry = Some((handle.into(), Instant::now() + RETRY_BACKOFF));
                 tracing::warn!(
                     error = e.summary(),
                     elapsed_ms = started.elapsed().as_millis() as u64,
@@ -646,59 +676,90 @@ async fn build_cover_art_server(
     Ok((connection, emitter))
 }
 
+/// Backoff before re-subscribing a dead `BlueZ` track signal stream.
+const SIGNAL_RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
+
 /// Subscribes to `BlueZ` `MediaPlayer1` `Track` changes on an existing async
 /// connection and wakes the worker for each one.
 ///
 /// Split from [`spawn_track_signal_listener`] so integration tests can
 /// inject a private-bus connection; the spawned task lives for the lifetime
 /// of `connection` and keeps running while the provider thread's runtime
-/// exists. A dead stream (transport error or close) logs and ends the task —
-/// the worker's fallback poll keeps the provider functional either way.
+/// exists. A dead stream (transport error or close, e.g. a `BlueZ` restart)
+/// never ends the task: after a short backoff the match rule is rebuilt from
+/// the same connection, so signal-driven track-change latency recovers by
+/// itself instead of degrading permanently to the fallback poll.
 ///
-/// # Errors
-/// Propagates `zbus::Error` when the match-rule subscription fails.
-pub async fn track_signal_listener(
-    connection: zbus::Connection,
-    wake: Arc<Notify>,
-) -> Result<(), zbus::Error> {
-    let rule = zbus::MatchRule::builder()
-        .msg_type(zbus::message::Type::Signal)
-        .sender("org.bluez")?
-        .interface("org.freedesktop.DBus.Properties")?
-        .member("PropertiesChanged")?
-        .arg0ns("org.bluez.MediaPlayer1")?
-        .build();
-    let mut stream = zbus::MessageStream::for_match_rule(rule, &connection, None).await?;
+/// Subscribes and listens until the connection dies or the process exits.
+pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
     tokio::spawn(async move {
         loop {
-            match stream.next().await {
-                Some(Ok(message)) => {
-                    // PropertiesChanged body: (interface, changed, invalidated)
-                    match message
-                        .body()
-                        .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
-                    {
-                        Ok((_, changed, _)) if changed.contains_key("Track") => wake.notify_one(),
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::debug!(error = %e, "ignoring malformed `BlueZ` PropertiesChanged");
+            // All rule-builder setters are fallible; the closure gives them
+            // a `?` context inside the reconnect loop (no task-local `?`).
+            let build_rule = || -> Result<_, zbus::Error> {
+                Ok(zbus::MatchRule::builder()
+                    .msg_type(zbus::message::Type::Signal)
+                    .sender("org.bluez")?
+                    .interface("org.freedesktop.DBus.Properties")?
+                    .member("PropertiesChanged")?
+                    .arg0ns("org.bluez.MediaPlayer1")?
+                    .build())
+            };
+            let rule = match build_rule() {
+                Ok(rule) => rule,
+                Err(e) => {
+                    tracing::error!(error = %e, "track signal match rule failed to build");
+                    return;
+                }
+            };
+            let mut stream =
+                match zbus::MessageStream::for_match_rule(rule, &connection, None).await {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "track signal subscription failed; reconnecting after backoff"
+                        );
+                        tokio::time::sleep(SIGNAL_RECONNECT_BACKOFF).await;
+                        continue;
+                    }
+                };
+            loop {
+                match stream.next().await {
+                    Some(Ok(message)) => {
+                        // PropertiesChanged body: (interface, changed, invalidated)
+                        match message
+                            .body()
+                            .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+                        {
+                            Ok((_, changed, _)) if changed.contains_key("Track") => {
+                                wake.notify_one();
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::debug!(
+                                    error = %e,
+                                    "ignoring malformed `BlueZ` PropertiesChanged"
+                                );
+                            }
                         }
                     }
-                }
-                Some(Err(e)) => {
-                    tracing::warn!(error = %e, "`BlueZ` track signal stream failed; falling back to periodic polling");
-                    break;
-                }
-                None => {
-                    tracing::warn!(
-                        "BlueZ track signal stream closed; falling back to periodic polling"
-                    );
-                    break;
+                    Some(Err(e)) => {
+                        tracing::warn!(
+                            error = %e,
+                            "track signal stream failed; reconnecting after backoff"
+                        );
+                        break;
+                    }
+                    None => {
+                        tracing::warn!("track signal stream closed; reconnecting after backoff");
+                        break;
+                    }
                 }
             }
+            tokio::time::sleep(SIGNAL_RECONNECT_BACKOFF).await;
         }
     });
-    Ok(())
 }
 
 /// Subscribes to `BlueZ` `MediaPlayer1` `Track` changes on the system bus.
@@ -707,9 +768,14 @@ pub async fn track_signal_listener(
 /// Propagates `zbus::Error` when the system bus connection or the match-rule
 /// subscription cannot be established; callers log and continue on the
 /// periodic fallback poll.
-async fn spawn_track_signal_listener(wake: Arc<Notify>) -> Result<(), zbus::Error> {
-    let connection = zbus::Connection::system().await?;
-    track_signal_listener(connection, wake).await
+async fn spawn_track_signal_listener(wake: Arc<Notify>) {
+    match zbus::Connection::system().await {
+        Ok(connection) => track_signal_listener(connection, wake),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "system bus connection failed; relying on periodic polling only"
+        ),
+    }
 }
 
 /// Spawns the production cover-art provider on a dedicated thread.
@@ -762,12 +828,7 @@ pub fn spawn_production(cache_dir: PathBuf) -> Result<(), String> {
                     "cover-art D-Bus service published"
                 );
                 let wake = Arc::new(Notify::new());
-                if let Err(e) = spawn_track_signal_listener(Arc::clone(&wake)).await {
-                    tracing::warn!(
-                        error = %e,
-                        "BlueZ track signal listener failed to start; relying on periodic polling only"
-                    );
-                }
+                spawn_track_signal_listener(Arc::clone(&wake)).await;
                 let mut worker = CoverArtWorker::new(
                     Box::new(source),
                     Box::new(PersistentBipSession::default()),
@@ -1133,6 +1194,57 @@ mod tests {
         let state = harness.state.get();
         assert_eq!(state.handle(), None, "incomplete image not published");
         assert_eq!(harness.counters.fetches(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_fetch_is_backed_off_until_deadline_expires() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        harness.script(scripted_playback(Some("5630701")));
+        harness.script(scripted_playback(Some("5630701")));
+        harness.fetch_error = true;
+        let mut worker = harness.worker(None);
+        worker.poll_once().await;
+        assert_eq!(harness.counters.fetches(), 1, "first attempt goes out");
+        worker.poll_once().await;
+        assert_eq!(
+            harness.counters.fetches(),
+            1,
+            "a failed fetch must not repeat within the backoff window"
+        );
+        // Simulate the backoff deadline expiring: a later poll retries once.
+        let handle: Box<str> = "5630701".into();
+        worker.suppress_retry = Some((handle, Instant::now()));
+        worker.poll_once().await;
+        assert_eq!(
+            harness.counters.fetches(),
+            2,
+            "past the deadline the fetch is retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn store_failure_is_backed_off_until_deadline_expires() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        harness.script(scripted_playback(Some("5630701")));
+        let mut worker = harness.worker(None);
+        // Point the cache at a plain file: every write fails.
+        let blocker = harness.dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").expect("blocker file");
+        worker.cache_dir = blocker;
+        worker.poll_once().await;
+        assert_eq!(harness.counters.fetches(), 1, "fetch was attempted");
+        worker.poll_once().await;
+        assert_eq!(
+            harness.counters.fetches(),
+            1,
+            "a failed store must not re-issue the OBEX GET within the backoff"
+        );
+        assert!(
+            worker.suppress_retry.is_some(),
+            "store failure arms the retry backoff"
+        );
     }
 
     #[tokio::test]
