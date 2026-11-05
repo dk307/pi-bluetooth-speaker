@@ -54,6 +54,11 @@ pub struct ActiveCover {
     pub handle: Box<str>,
     /// Cache file path of the published JPEG.
     pub path: Box<str>,
+    /// BIP session generation (`BipSessionKeeper::epoch`) the image was
+    /// published under. Handles are only unique within one OBEX session, so
+    /// the worker must re-fetch even when a new session re-advertises the
+    /// same handle value.
+    pub epoch: u64,
 }
 
 impl CoverState {
@@ -78,6 +83,12 @@ impl CoverState {
     #[must_use]
     pub fn path(&self) -> Option<&str> {
         self.image.as_ref().map(|c| c.path.as_ref())
+    }
+
+    /// BIP session generation the image was published under, if any.
+    #[must_use]
+    pub fn epoch(&self) -> Option<u64> {
+        self.image.as_ref().map(|c| c.epoch)
     }
 }
 
@@ -106,13 +117,14 @@ impl SharedCoverState {
         self.lock().clone()
     }
 
-    /// Publishes an active cover-art image.
-    pub fn publish(&self, device: Box<str>, handle: Box<str>, path: Box<str>) {
+    /// Publishes an active cover-art image for the BIP session `epoch`.
+    pub fn publish(&self, device: Box<str>, handle: Box<str>, path: Box<str>, epoch: u64) {
         *self.lock() = CoverState {
             image: Some(ActiveCover {
                 device,
                 handle,
                 path,
+                epoch,
             }),
         };
     }
@@ -430,7 +442,10 @@ impl CoverArtWorker {
         // session-scoped handle, and the published state must never keep
         // pointing at the previous device's file.
         let state = self.state.get();
-        if state.device() == Some(device.as_str()) && state.handle() == Some(&*handle) {
+        if state.device() == Some(device.as_str())
+            && state.handle() == Some(&*handle)
+            && state.epoch() == Some(epoch)
+        {
             tracing::trace!(%handle, "cover art already published for this handle");
             return;
         }
@@ -441,7 +456,7 @@ impl CoverArtWorker {
         // not OBEX activity.
         if let Some(bytes) = self.session_cache.lookup(&handle) {
             let started = Instant::now();
-            match self.publish_image(&address, &handle, &bytes).await {
+            match self.publish_image(&address, &handle, &bytes, epoch).await {
                 Ok(path) => {
                     let track_to_cover_ms = self
                         .track_change_at
@@ -486,7 +501,8 @@ impl CoverArtWorker {
             %handle,
             "fetching cover art for new track"
         );
-        self.fetch_and_publish(&address, &transport, &handle).await;
+        self.fetch_and_publish(&address, &transport, &handle, epoch)
+            .await;
     }
 
     async fn fetch_and_publish(
@@ -494,6 +510,7 @@ impl CoverArtWorker {
         address: &BtAddress,
         transport: &BipTransport,
         handle: &str,
+        epoch: u64,
     ) {
         let started = Instant::now();
         let result = self
@@ -505,7 +522,7 @@ impl CoverArtWorker {
                 let byte_count = bytes.len();
                 let bytes = Arc::new(bytes);
                 let store_started = Instant::now();
-                match self.publish_image(address, handle, &bytes).await {
+                match self.publish_image(address, handle, &bytes, epoch).await {
                     Ok(path) => {
                         let store_ms = store_started.elapsed().as_millis() as u64;
                         let track_to_cover_ms = self
@@ -562,6 +579,7 @@ impl CoverArtWorker {
         address: &BtAddress,
         handle: &str,
         bytes: &[u8],
+        epoch: u64,
     ) -> Result<String, String> {
         // The rename lands the file first, the D-Bus state is published
         // second, and obsolete files for this MAC are cleaned only afterwards
@@ -572,6 +590,7 @@ impl CoverArtWorker {
             device.clone(),
             sanitized_handle.clone().into(),
             path.clone().into(),
+            epoch,
         );
         if let Some(emitter) = &self.emitter {
             if let Err(e) =
@@ -1493,6 +1512,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_change_with_colliding_handle_refetches_instead_of_dedup() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        harness.script(scripted_playback(Some("5630701")));
+        // The phone re-registers BIP on a different PSM while the SAME track
+        // keeps playing: the peer re-advertises the same handle value, but
+        // handles are only unique within one BIP session.
+        let mut moved = test_playback(Some("5630701"));
+        moved.obex_port = Some(4099);
+        harness.script(Ok(Some(moved)));
+        let mut worker = harness.worker(None);
+        worker.poll_once().await;
+        worker.poll_once().await;
+        assert_eq!(
+            harness.counters.fetches(),
+            1,
+            "same-session repeat of the published handle is deduplicated"
+        );
+        worker.poll_once().await;
+        assert_eq!(
+            harness.counters.fetches(),
+            2,
+            "after a session change a colliding handle must be re-fetched, not deduplicated against the stale published state"
+        );
+        assert_eq!(
+            harness.state.get().epoch(),
+            Some(2),
+            "the republished artwork carries the new session generation"
+        );
+    }
+
+    #[tokio::test]
     async fn malformed_handle_is_rejected_before_any_fetch() {
         let mut harness = TestHarness::new(JPEG_BYTES);
         let mut evil = test_playback(Some("../../etc/passwd"));
@@ -1535,7 +1586,7 @@ mod tests {
     fn shared_state_publish_and_clear_roundtrip() {
         let state = SharedCoverState::new();
         assert!(!state.get().is_active());
-        state.publish(TEST_DEVICE.into(), "1000001".into(), "/tmp/x.jpg".into());
+        state.publish(TEST_DEVICE.into(), "1000001".into(), "/tmp/x.jpg".into(), 0);
         let snapshot = state.get();
         assert_eq!(snapshot.device(), Some(TEST_DEVICE));
         assert_eq!(snapshot.handle(), Some("1000001"));

@@ -86,6 +86,7 @@ impl Harness {
             mac.into(),
             handle.into(),
             path.to_string_lossy().into_owned().into(),
+            0,
         );
         bytes
     }
