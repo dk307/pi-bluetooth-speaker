@@ -7,8 +7,9 @@
 //!    resolved through a pure-Rust SDP query over L2CAP ([`bluesdp`]),
 //! 2. a BlueZ RFCOMM stream is opened ([`bluer`]),
 //! 3. an OBEX CONNECT is issued with the AVRCP cover-art Target UUID,
-//! 4. the image is pulled with an OBEX GET carrying the `Type`, `Name`
-//!    (image handle) and `Img-Descriptor` (0x71) headers,
+//! 4. the image is pulled with an OBEX GET carrying the `Type` and BIP
+//!    `Img-Handle` (0x30) headers and NO `Img-Descriptor` (the AOSP native
+//!    path — obexd-style empty descriptors are rejected with 0x4C),
 //! 5. the OBEX session is closed with a best-effort DISCONNECT.
 //!
 //! The profile-independent OBEX core ([`pull_image`]) is generic over the
@@ -282,12 +283,6 @@ impl std::error::Error for BipError {
 impl From<bluesdp::SdpError> for BipError {
     fn from(source: bluesdp::SdpError) -> Self {
         Self::sdp_lookup(source)
-    }
-}
-
-impl From<std::io::Error> for BipError {
-    fn from(source: std::io::Error) -> Self {
-        Self::l2cap_connect(source)
     }
 }
 
@@ -598,8 +593,8 @@ where
 /// Unicode — AOSP ignores the generic OBEX Name header) and NO
 /// Img-Descriptor, selecting the responder's native-image format.
 ///
-/// A failing DISCONNECT after a successful GET never discards the already
-/// reassembled body; a failing GET is always propagated first.
+/// No OBEX DISCONNECT is sent (see [`get_image_on`]): the persistent
+/// session must stay connected; a failing GET is always propagated first.
 ///
 /// # Errors
 /// Returns [`BipError`] for invalid handles, OBEX transport/protocol failures
@@ -714,7 +709,7 @@ pub trait BipSessionKeeper: Send {
     /// Returns [`BipError`] when the transport cannot be opened or the OBEX
     /// CONNECT is rejected. A failed ensure leaves the previous session
     /// released, so the next call re-establishes from scratch.
-    #[allow(
+    #[expect(
         clippy::double_must_use,
         reason = "async-trait injects #[must_use] on the desugared future while Result is already must_use"
     )]
@@ -734,7 +729,7 @@ pub trait BipSessionKeeper: Send {
     /// # Errors
     /// Returns [`BipError`] when the session cannot be ensured, the handle is
     /// invalid, or the responder rejects/fails the GET.
-    #[allow(
+    #[expect(
         clippy::double_must_use,
         reason = "async-trait injects #[must_use] on the desugared future while Result is already must_use"
     )]
@@ -758,7 +753,7 @@ pub trait BipSessionKeeper: Send {
     /// # Errors
     /// Returns [`BipError`] when the transport write/read fails; the session
     /// is released so the next ensure re-establishes from scratch.
-    #[allow(
+    #[expect(
         clippy::double_must_use,
         reason = "async-trait injects #[must_use] on the desugared future while Result is already must_use"
     )]
@@ -809,10 +804,17 @@ impl BipSessionKeeper for PersistentBipSession {
         address: &BtAddress,
         transport: &BipTransport,
     ) -> Result<(), BipError> {
-        if self.address.as_ref() == Some(address) && self.session.is_some() {
+        if self.address.as_ref() == Some(address)
+            && self.transport.as_ref() == Some(transport)
+            && self.session.is_some()
+        {
             tracing::trace!(address = %address.to_string(), "BIP session already established");
             return Ok(());
         }
+        // Address AND transport must match: a phone that re-registers BIP on
+        // a different PSM/channel (profile re-registration) invalidates the
+        // old link, and the session generation bump below purges every
+        // session-scoped cached handle with it.
         self.release();
         let started = Instant::now();
         let channel = bip_channel_for(*transport);

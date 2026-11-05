@@ -6,11 +6,14 @@
 //! (BIP cover-art discovery and caching), and [`cover_service`] (the read
 //! side of the D-Bus cover-art publisher hosted by `bt-manager`).
 
-/// Not yet wired into the connection driver; consumed via integration in a
-/// follow-up change.
+/// Direct BIP client (see [`crate::cli::cover_provider`], its production
+/// consumer). `pull_image`, [`BipImageType::Thumbnail`] and some error
+/// predicates are exercised only by the host test suite, which is why the
+/// dead-code lint is intentionally allowed: the production path runs through
+/// [`PersistentBipSession::fetch_image`] over a live transport.
 #[allow(
     dead_code,
-    reason = "wired into the connection driver in a follow-up change"
+    reason = "pull_image/Thumbnail/error predicates are host-test-suite-only; production uses PersistentBipSession::fetch_image"
 )]
 pub(crate) mod bip_direct;
 pub(crate) mod connection;

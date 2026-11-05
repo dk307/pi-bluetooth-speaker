@@ -40,18 +40,44 @@ use crate::hardware::{BluetoothDevice, BtAddress, BtError, BtPlaybackState};
 /// Published cover-art state mirrored on D-Bus.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CoverState {
+    /// The published image; `None` when nothing is published. All three
+    /// fields always change together, so they live in one sum type.
+    image: Option<ActiveCover>,
+}
+
+/// One published cover-art image (all fields set together).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveCover {
     /// Canonical MAC address of the device the artwork belongs to.
-    device: Option<Box<str>>,
+    pub device: Box<str>,
     /// AOSP BIP image handle of the published image.
-    handle: Option<Box<str>>,
+    pub handle: Box<str>,
     /// Cache file path of the published JPEG.
-    path: Option<Box<str>>,
+    pub path: Box<str>,
 }
 
 impl CoverState {
     /// Whether any image is currently published.
     fn is_active(&self) -> bool {
-        self.handle.is_some() && self.path.is_some()
+        self.image.is_some()
+    }
+
+    /// Canonical MAC of the published device, if any.
+    #[must_use]
+    pub fn device(&self) -> Option<&str> {
+        self.image.as_ref().map(|c| c.device.as_ref())
+    }
+
+    /// Published BIP image handle, if any.
+    #[must_use]
+    pub fn handle(&self) -> Option<&str> {
+        self.image.as_ref().map(|c| c.handle.as_ref())
+    }
+
+    /// Published cache-file path, if any.
+    #[must_use]
+    pub fn path(&self) -> Option<&str> {
+        self.image.as_ref().map(|c| c.path.as_ref())
     }
 }
 
@@ -83,9 +109,11 @@ impl SharedCoverState {
     /// Publishes an active cover-art image.
     pub fn publish(&self, device: Box<str>, handle: Box<str>, path: Box<str>) {
         *self.lock() = CoverState {
-            device: Some(device),
-            handle: Some(handle),
-            path: Some(path),
+            image: Some(ActiveCover {
+                device,
+                handle,
+                path,
+            }),
         };
     }
 
@@ -117,8 +145,8 @@ impl CoverArtIface {
     fn device(&self) -> String {
         self.state
             .get()
-            .device
-            .map_or_else(String::new, |d| d.to_string())
+            .device()
+            .map_or_else(String::new, str::to_string)
     }
 
     /// AOSP BIP image handle of the published artwork (empty when inactive).
@@ -126,8 +154,8 @@ impl CoverArtIface {
     fn handle(&self) -> String {
         self.state
             .get()
-            .handle
-            .map_or_else(String::new, |h| h.to_string())
+            .handle()
+            .map_or_else(String::new, str::to_string)
     }
 
     /// Cache file path of the published JPEG (empty when inactive).
@@ -135,8 +163,8 @@ impl CoverArtIface {
     fn path(&self) -> String {
         self.state
             .get()
-            .path
-            .map_or_else(String::new, |p| p.to_string())
+            .path()
+            .map_or_else(String::new, str::to_string)
     }
 
     /// Returns the raw JPEG bytes of the published artwork.
@@ -148,8 +176,9 @@ impl CoverArtIface {
         let path = self
             .state
             .get()
-            .path
-            .ok_or_else(|| zbus::fdo::Error::Failed("no cover art published".into()))?;
+            .path()
+            .ok_or_else(|| zbus::fdo::Error::Failed("no cover art published".into()))?
+            .to_owned();
         std::fs::read(Path::new(&*path))
             .map_err(|e| zbus::fdo::Error::Failed(format!("cannot read {path}: {e}")))
     }
@@ -250,9 +279,6 @@ impl SessionCoverCache {
 
     /// Returns the cached bytes for `handle`, if this session produced them.
     fn lookup(&self, handle: &str) -> Option<Arc<Vec<u8>>> {
-        if self.entries.is_empty() {
-            return None;
-        }
         self.entries.get(handle).cloned()
     }
 
@@ -391,9 +417,7 @@ impl CoverArtWorker {
         // session-scoped handle, and the published state must never keep
         // pointing at the previous device's file.
         let state = self.state.get();
-        if state.device.as_deref() == Some(device.as_str())
-            && state.handle.as_ref() == Some(&handle)
-        {
+        if state.device() == Some(device.as_str()) && state.handle() == Some(&*handle) {
             tracing::trace!(%handle, "cover art already published for this handle");
             return;
         }
@@ -404,18 +428,8 @@ impl CoverArtWorker {
         // not OBEX activity.
         if let Some(bytes) = self.session_cache.lookup(&handle) {
             let started = Instant::now();
-            match self.store_image(address, &handle, &bytes) {
+            match self.publish_image(&address, &handle, &bytes).await {
                 Ok(path) => {
-                    let device: Box<str> = device.clone().into_boxed_str();
-                    self.state
-                        .publish(device.clone(), handle.clone(), path.clone().into());
-                    if let Some(emitter) = &self.emitter {
-                        if let Err(e) =
-                            CoverArtIface::image_updated(emitter, &device, &handle, &path).await
-                        {
-                            tracing::warn!(error = %e, "failed to emit ImageUpdated");
-                        }
-                    }
                     let track_to_cover_ms = self
                         .track_change_at
                         .take()
@@ -512,6 +526,31 @@ impl CoverArtWorker {
                 );
             }
         }
+    }
+
+    /// Stores the image, publishes it on D-Bus and emits `ImageUpdated`.
+    ///
+    /// Shared by the fetch path and the session-cache restore path so the
+    /// store → publish → signal sequence cannot drift.
+    ///
+    /// # Errors
+    /// Returns the store failure reason; nothing is published on error.
+    async fn publish_image(
+        &mut self,
+        address: &BtAddress,
+        handle: &str,
+        bytes: &[u8],
+    ) -> Result<String, String> {
+        let path = self.store_image(*address, handle, bytes)?;
+        let device: Box<str> = address.to_string().into_boxed_str();
+        self.state
+            .publish(device.clone(), handle.into(), path.clone().into());
+        if let Some(emitter) = &self.emitter {
+            if let Err(e) = CoverArtIface::image_updated(emitter, &device, handle, &path).await {
+                tracing::warn!(error = %e, "failed to emit ImageUpdated");
+            }
+        }
+        Ok(path)
     }
 
     /// Writes the fetched bytes to the cache (tmp file + atomic rename) and
@@ -861,20 +900,21 @@ mod tests {
             if self.ensure_error {
                 return Err(BipError::service_not_found("AA:BB:CC:DD:EE:FF"));
             }
-            // Mirror `PersistentBipSession`: a device switch releases and
-            // re-establishes, bumping the session generation.
-            let switched = self
-                .address
+            // Mirror `PersistentBipSession`: a device OR transport switch
+            // releases and re-establishes, bumping the session generation.
+            let transport_changed = *self
+                .last_transport
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-                != Some(&*address);
+                != Some(*transport);
+            let held = self
+                .address
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let switched = held.as_ref() != Some(address) || transport_changed;
             if switched {
                 self.generation.fetch_add(1, Ordering::SeqCst);
-                *self
-                    .address
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(*address);
+                *held = Some(*address);
             }
             *self
                 .last_transport
@@ -1005,13 +1045,13 @@ mod tests {
         let mut worker = harness.worker(None);
         worker.poll_once().await;
         let state = harness.state.get();
-        assert_eq!(state.device.as_deref(), Some(TEST_DEVICE));
-        assert_eq!(state.handle.as_deref(), Some("5630701"));
+        assert_eq!(state.device(), Some(TEST_DEVICE));
+        assert_eq!(state.handle(), Some("5630701"));
         assert!(
             worker.track_change_at.is_none(),
             "successful publish consumes the track-change latency measurement"
         );
-        let published = state.path.expect("published path");
+        let published = state.path().map_or_else(String::new, str::to_string);
         assert!(Path::new(&*published).exists(), "cache file exists");
         assert_eq!(
             std::fs::read(Path::new(&*published)).expect("readable"),
@@ -1047,10 +1087,14 @@ mod tests {
         harness.script(scripted_playback(Some("5630702")));
         let mut worker = harness.worker(None);
         worker.poll_once().await;
-        let first_path = harness.state.get().path.expect("first path");
+        let first_path = harness
+            .state
+            .get()
+            .path()
+            .map_or_else(String::new, str::to_string);
         worker.poll_once().await;
         let state = harness.state.get();
-        assert_eq!(state.handle.as_deref(), Some("5630702"));
+        assert_eq!(state.handle(), Some("5630702"));
         assert_eq!(harness.counters.fetches(), 2);
         assert!(!Path::new(&*first_path).exists(), "old file cleaned");
     }
@@ -1065,8 +1109,8 @@ mod tests {
         worker.poll_once().await;
         assert_eq!(harness.counters.releases(), 1);
         let state = harness.state.get();
-        assert_eq!(state.handle, None);
-        assert_eq!(state.path, None);
+        assert_eq!(state.handle(), None);
+        assert_eq!(state.path(), None);
     }
 
     #[tokio::test]
@@ -1081,7 +1125,7 @@ mod tests {
         worker.poll_once().await;
         worker.poll_once().await;
         let state = harness.state.get();
-        assert_eq!(state.handle.as_deref(), Some("5630701"), "state kept");
+        assert_eq!(state.handle(), Some("5630701"), "state kept");
         assert_eq!(harness.counters.releases(), 0, "no release on hiccup");
     }
 
@@ -1092,7 +1136,7 @@ mod tests {
         let mut worker = harness.worker(None);
         worker.poll_once().await;
         let state = harness.state.get();
-        assert_eq!(state.handle, None, "incomplete image not published");
+        assert_eq!(state.handle(), None, "incomplete image not published");
         assert_eq!(harness.counters.fetches(), 1);
     }
 
@@ -1104,7 +1148,7 @@ mod tests {
         worker.poll_once().await;
         assert_eq!(harness.counters.ensures(), 1, "session still ensured");
         assert_eq!(harness.counters.fetches(), 0);
-        assert_eq!(harness.state.get().handle, None);
+        assert_eq!(harness.state.get().handle(), None);
         assert_eq!(harness.counters.releases(), 0);
     }
 
@@ -1201,7 +1245,7 @@ mod tests {
         );
         assert_eq!(harness.counters.fetches(), 1);
         assert_eq!(harness.counters.releases(), 0);
-        assert_eq!(harness.state.get().handle.as_deref(), Some("5630701"));
+        assert_eq!(harness.state.get().handle(), Some("5630701"));
     }
 
     #[tokio::test]
@@ -1215,7 +1259,7 @@ mod tests {
             harness.counters.fetches() == 0,
             "no fetch without a session"
         );
-        assert_eq!(harness.state.get().handle, None);
+        assert_eq!(harness.state.get().handle(), None);
         assert_eq!(harness.counters.releases(), 0, "nothing to release");
     }
 
@@ -1249,7 +1293,7 @@ mod tests {
         worker.poll_once().await;
         assert_eq!(harness.counters.fetches(), 1, "fetch was attempted");
         assert_eq!(
-            harness.state.get().handle,
+            harness.state.get().handle(),
             None,
             "failed store must not publish anything"
         );
@@ -1273,12 +1317,42 @@ mod tests {
             "device switch changes the session generation: the per-session handle cache must be purged and the artwork re-fetched"
         );
         let state = harness.state.get();
-        assert_eq!(state.device.as_deref(), Some("22:22:33:44:55:66"));
+        assert_eq!(state.device(), Some("22:22:33:44:55:66"));
         assert!(
             state
-                .path
+                .path()
                 .expect("republished")
                 .contains("22_22_33_44_55_66")
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_change_purges_session_cache_and_refetches() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        harness.script(scripted_playback(Some("5630702")));
+        // Same phone re-registers BIP on a different PSM; the first track's
+        // handle recurs across the re-registration.
+        let mut moved = test_playback(Some("5630701"));
+        moved.obex_port = Some(4099);
+        harness.script(Ok(Some(moved)));
+        let mut worker = harness.worker(None);
+        worker.poll_once().await;
+        worker.poll_once().await;
+        worker.poll_once().await;
+        assert_eq!(
+            harness.counters.fetches(),
+            3,
+            "a recurring handle after a transport change must be re-fetched: per-session handles are not comparable across BIP sessions"
+        );
+        assert_eq!(
+            harness.last_transport(),
+            Some(BipTransport::L2capPsm(4099)),
+            "worker must follow the re-registered transport"
+        );
+        assert_eq!(
+            worker.session_cache.epoch, 2,
+            "two session generations (two ensures) must be visible to the cache"
         );
     }
 
@@ -1295,7 +1369,7 @@ mod tests {
             0,
             "peer garbage handle must never reach OBEX or disk"
         );
-        assert_eq!(harness.state.get().handle, None);
+        assert_eq!(harness.state.get().handle(), None);
     }
 
     #[tokio::test]
@@ -1310,7 +1384,7 @@ mod tests {
         wake.notify_one();
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if state.get().path.is_some() {
+                if state.get().path().is_some() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1327,9 +1401,9 @@ mod tests {
         assert!(!state.get().is_active());
         state.publish(TEST_DEVICE.into(), "1000001".into(), "/tmp/x.jpg".into());
         let snapshot = state.get();
-        assert_eq!(snapshot.device.as_deref(), Some(TEST_DEVICE));
-        assert_eq!(snapshot.handle.as_deref(), Some("1000001"));
-        assert_eq!(snapshot.path.as_deref(), Some("/tmp/x.jpg"));
+        assert_eq!(snapshot.device(), Some(TEST_DEVICE));
+        assert_eq!(snapshot.handle(), Some("1000001"));
+        assert_eq!(snapshot.path(), Some("/tmp/x.jpg"));
         let cleared = state.clear();
         assert!(cleared.is_active());
         assert!(!state.get().is_active());
@@ -1354,8 +1428,8 @@ mod tests {
         );
         assert_eq!(harness.counters.keepalives(), 0);
         let state = harness.state.get();
-        assert_eq!(state.handle.as_deref(), Some("5630701"));
-        let published = state.path.expect("cache-hit path");
+        assert_eq!(state.handle(), Some("5630701"));
+        let published = state.path().map_or_else(String::new, str::to_string);
         assert!(Path::new(&*published).exists(), "cache-hit file re-stored");
         assert_eq!(
             worker.keepalive_deadline, deadline_before,
