@@ -420,10 +420,11 @@ impl CoverArtWorker {
             self.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
         }
         let Some(handle) = playback.image_handle else {
-            tracing::debug!(
-                device = %playback.device_name,
-                "cover art unavailable: no ImgHandle in Track"
-            );
+            // The track lost its artwork (or never had any): the published
+            // state must not keep serving the previous track's JPEG. The
+            // BIP session stays alive so the next track's handle advertises
+            // without a full re-establishment.
+            self.clear_published("track has no ImgHandle").await;
             return;
         };
         // Defense in depth: AOSP handles are exactly 7 digits; anything else
@@ -637,9 +638,19 @@ impl CoverArtWorker {
         self.keeper.release();
         self.session_cache.purge(self.keeper.epoch());
         self.keepalive_deadline = None;
+        self.clear_published(reason).await;
+    }
+
+    /// Clears the published state and emits `ImageCleared`, keeping the BIP
+    /// session and its keepalive timer alive. Used when the track lost its
+    /// artwork: dropping the session would make the phone stop advertising
+    /// `ImgHandle` for the next track, which costs a full re-establishment.
+    async fn clear_published(&mut self, reason: &str) {
+        self.track_change_at = None;
+        self.suppress_retry = None;
         let previous = self.state.clear();
         if previous.is_active() {
-            tracing::info!(reason, "cover art deactivated");
+            tracing::info!(reason, "cover art cleared");
             if let Some(emitter) = &self.emitter {
                 if let Err(e) = CoverArtIface::image_cleared(emitter).await {
                     tracing::warn!(error = %e, "failed to emit ImageCleared");
@@ -1296,15 +1307,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_img_handle_keeps_session_and_state() {
+    async fn missing_img_handle_clears_art_but_keeps_session() {
         let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
         harness.script(scripted_playback(None));
         let mut worker = harness.worker(None);
         worker.poll_once().await;
-        assert_eq!(harness.counters.ensures(), 1, "session still ensured");
-        assert_eq!(harness.counters.fetches(), 0);
-        assert_eq!(harness.state.get().handle(), None);
-        assert_eq!(harness.counters.releases(), 0);
+        assert_eq!(harness.state.get().handle(), Some("5630701"));
+        worker.poll_once().await;
+        assert_eq!(
+            harness.state.get().handle(),
+            None,
+            "a track without ImgHandle must not keep serving the previous track's JPEG"
+        );
+        assert_eq!(harness.counters.ensures(), 2, "session still ensured");
+        assert_eq!(
+            harness.counters.releases(),
+            0,
+            "clearing art must not drop the BIP session"
+        );
+        assert_eq!(harness.counters.fetches(), 1);
     }
 
     #[tokio::test]
