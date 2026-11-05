@@ -122,10 +122,12 @@ where
     Ok(CliParse::Options(opts))
 }
 
-/// Executes one monitor tick, logging the current Bluetooth status snapshot.
+/// Executes one monitor tick.
 ///
 /// Returns the resulting status so callers can react to transitions; transient
-/// poll errors are logged as warnings and reported to the caller.
+/// poll errors are logged as warnings and reported to the caller. Unchanged
+/// snapshots log at `debug` only — steady-state ticks would otherwise flood
+/// the journal on a long-lived daemon; callers log at `info` on transitions.
 ///
 /// # Errors
 /// Propagates [`crate::hardware::BtError`] when the status snapshot fails.
@@ -133,7 +135,7 @@ pub fn run_tick(
     bt: &BluetoothDevice,
 ) -> Result<crate::hardware::BluetoothStatus, crate::hardware::BtError> {
     let status = bt.status()?;
-    tracing::info!(
+    tracing::debug!(
         connected = status.connected_count(),
         streaming = status.is_streaming(),
         "Bluetooth status tick"
@@ -166,9 +168,21 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
         }
     }
     let mut ticks: u64 = 0;
+    let mut last_status: Option<(usize, bool)> = None;
     run_poll_loop(opts.interval, |_timestamp| {
-        if let Err(e) = run_tick(bt) {
-            tracing::warn!(error = %e, "Bluetooth status poll failed");
+        match run_tick(bt) {
+            Ok(status) => {
+                let signature = (status.connected_count(), status.is_streaming());
+                if last_status != Some(signature) {
+                    tracing::info!(
+                        connected = signature.0,
+                        streaming = signature.1,
+                        "Bluetooth status changed"
+                    );
+                    last_status = Some(signature);
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "Bluetooth status poll failed"),
         }
         ticks = ticks.saturating_add(1);
         opts.max_ticks.is_some_and(|limit| ticks >= limit)

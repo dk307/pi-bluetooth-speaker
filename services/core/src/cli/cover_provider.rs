@@ -209,6 +209,9 @@ struct CoverArtWorker {
     poll_interval: Duration,
     emitter: Option<SignalEmitter<'static>>,
     last_keepalive: Option<Instant>,
+    /// Instant when the active track's `ImgHandle` was first observed, used to
+    /// report the track-change → published latency on the publish log line.
+    track_change_at: Option<Instant>,
 }
 
 impl CoverArtWorker {
@@ -228,6 +231,7 @@ impl CoverArtWorker {
             poll_interval,
             emitter,
             last_keepalive: None,
+            track_change_at: None,
         }
     }
 
@@ -299,6 +303,12 @@ impl CoverArtWorker {
             self.maybe_keepalive().await;
             return;
         }
+        // First observation of this track's handle starts the latency
+        // measurement; retries keep the original detection instant so the
+        // reported latency always spans detection → published.
+        if self.track_change_at.is_none() {
+            self.track_change_at = Some(Instant::now());
+        }
         tracing::info!(
             device = %playback.device_name,
             %handle,
@@ -331,9 +341,14 @@ impl CoverArtWorker {
                             tracing::warn!(error = %e, "failed to emit ImageUpdated");
                         }
                     }
+                    let track_to_cover_ms = self
+                        .track_change_at
+                        .take()
+                        .map(|at| at.elapsed().as_millis() as u64);
                     tracing::info!(
                         bytes = bytes.len(),
                         elapsed_ms = started.elapsed().as_millis() as u64,
+                        track_to_cover_ms = track_to_cover_ms.unwrap_or(0),
                         %handle,
                         path = %path,
                         "cover art published on D-Bus"
@@ -343,6 +358,7 @@ impl CoverArtWorker {
                     self.last_keepalive = Some(Instant::now());
                 }
                 Err(reason) => {
+                    self.track_change_at = None;
                     tracing::warn!(
                         bytes = bytes.len(),
                         %handle,
@@ -724,6 +740,10 @@ mod tests {
         let state = harness.state.get();
         assert_eq!(state.device.as_deref(), Some(TEST_DEVICE));
         assert_eq!(state.handle.as_deref(), Some("5630701"));
+        assert!(
+            worker.track_change_at.is_none(),
+            "successful publish consumes the track-change latency measurement"
+        );
         let published = state.path.expect("published path");
         assert!(Path::new(&*published).exists(), "cache file exists");
         assert_eq!(
