@@ -943,7 +943,7 @@ mod tests {
         }
     }
 
-    #[allow(
+    #[expect(
         clippy::unnecessary_wraps,
         reason = "scripted results must carry the Result shape the worker consumes"
     )]

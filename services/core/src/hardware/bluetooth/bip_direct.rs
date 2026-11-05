@@ -304,7 +304,7 @@ pub trait BipChannel: Send + Sync {
     /// # Errors
     /// Returns [`BipError`] when SDP lookup, channel resolution or the
     /// transport connection fails.
-    #[allow(
+    #[expect(
         clippy::double_must_use,
         reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
     )]

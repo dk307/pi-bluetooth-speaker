@@ -244,7 +244,7 @@ async fn pull_image_maps_not_found_response_to_image_rejected() {
 async fn pull_image_maps_connect_rejection_to_image_rejected() {
     struct RejectingServer;
     impl obex_protocol::tokio::Handler for RejectingServer {
-        #[allow(
+        #[expect(
             clippy::manual_async_fn,
             reason = "the trait declares RPITIT futures with a Send bound that plain async fn impls cannot satisfy"
         )]

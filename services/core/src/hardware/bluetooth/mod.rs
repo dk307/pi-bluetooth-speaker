@@ -11,7 +11,7 @@
 /// predicates are exercised only by the host test suite, which is why the
 /// dead-code lint is intentionally allowed: the production path runs through
 /// [`PersistentBipSession::fetch_image`] over a live transport.
-#[allow(
+#[expect(
     dead_code,
     reason = "pull_image/Thumbnail/error predicates are host-test-suite-only; production uses PersistentBipSession::fetch_image"
 )]
