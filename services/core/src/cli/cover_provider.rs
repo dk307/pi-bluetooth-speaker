@@ -344,43 +344,48 @@ impl CoverArtWorker {
             .fetch_image(address, transport, BipImageType::Native, handle)
             .await;
         match result {
-            Ok(bytes) => match self.store_image(*address, handle, &bytes) {
-                Ok(path) => {
-                    let device = address.to_string().into_boxed_str();
-                    self.state
-                        .publish(device.clone(), handle.into(), path.clone().into());
-                    if let Some(emitter) = &self.emitter {
-                        if let Err(e) =
-                            CoverArtIface::image_updated(emitter, &device, handle, &path).await
-                        {
-                            tracing::warn!(error = %e, "failed to emit ImageUpdated");
+            Ok(bytes) => {
+                let store_started = Instant::now();
+                match self.store_image(*address, handle, &bytes) {
+                    Ok(path) => {
+                        let store_ms = store_started.elapsed().as_millis() as u64;
+                        let device = address.to_string().into_boxed_str();
+                        self.state
+                            .publish(device.clone(), handle.into(), path.clone().into());
+                        if let Some(emitter) = &self.emitter {
+                            if let Err(e) =
+                                CoverArtIface::image_updated(emitter, &device, handle, &path).await
+                            {
+                                tracing::warn!(error = %e, "failed to emit ImageUpdated");
+                            }
                         }
+                        let track_to_cover_ms = self
+                            .track_change_at
+                            .take()
+                            .map(|at| at.elapsed().as_millis() as u64);
+                        tracing::info!(
+                            bytes = bytes.len(),
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            store_ms,
+                            track_to_cover_ms = track_to_cover_ms.unwrap_or(0),
+                            %handle,
+                            path = %path,
+                            "cover art published on D-Bus"
+                        );
+                        // A successful fetch is OBEX traffic; the session is
+                        // warm again, so restart the keepalive cadence.
+                        self.last_keepalive = Some(Instant::now());
                     }
-                    let track_to_cover_ms = self
-                        .track_change_at
-                        .take()
-                        .map(|at| at.elapsed().as_millis() as u64);
-                    tracing::info!(
-                        bytes = bytes.len(),
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        track_to_cover_ms = track_to_cover_ms.unwrap_or(0),
-                        %handle,
-                        path = %path,
-                        "cover art published on D-Bus"
-                    );
-                    // A successful fetch is OBEX traffic; the session is
-                    // warm again, so restart the keepalive cadence.
-                    self.last_keepalive = Some(Instant::now());
+                    Err(reason) => {
+                        self.track_change_at = None;
+                        tracing::warn!(
+                            bytes = bytes.len(),
+                            %handle,
+                            "discarding fetched cover art: {reason}"
+                        );
+                    }
                 }
-                Err(reason) => {
-                    self.track_change_at = None;
-                    tracing::warn!(
-                        bytes = bytes.len(),
-                        %handle,
-                        "discarding fetched cover art: {reason}"
-                    );
-                }
-            },
+            }
             Err(e) => {
                 tracing::warn!(
                     error = e.summary(),
