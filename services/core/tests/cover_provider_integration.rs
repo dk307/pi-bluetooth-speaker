@@ -3,9 +3,9 @@
 //! daemon will consume: empty-state properties, `GetImage` rejection, and a
 //! full publish/query/clear lifecycle.
 //!
-//! Follows the repository pattern from `bluetooth_obex_integration.rs`:
-//! private session bus, distinct MAC per test, daemon killed on drop, loud
-//! failure when `dbus-daemon` is missing.
+//! Follows the repository integration-test pattern: private session bus,
+//! distinct MAC per test, daemon killed on drop, loud failure when
+//! `dbus-daemon` is missing.
 
 use speaker_core::cli::cover_provider::{CoverArtIface, SharedCoverState};
 use speaker_core::diag::ScopedTempDir;
@@ -28,7 +28,8 @@ fn jpeg_fixture() -> Vec<u8> {
 
 /// Private bus daemon serving `CoverArtIface`; killed on drop.
 struct Harness {
-    daemon: Child,
+    // Kept alive for the harness lifetime; `KillOnDrop` reaps the daemon.
+    _daemon: KillOnDrop,
     server: zbus::blocking::Connection,
     state: SharedCoverState,
     proxy: Proxy<'static>,
@@ -37,17 +38,7 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        let mut daemon = Command::new("dbus-daemon")
-            .args(["--session", "--nofork", "--print-address=1"])
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("dbus-daemon must be installed to run cover-provider integration tests");
-        let mut address = String::new();
-        BufReader::new(daemon.stdout.take().unwrap())
-            .read_line(&mut address)
-            .unwrap();
-        let address = address.trim().to_string();
-        assert!(!address.is_empty(), "dbus-daemon printed no bus address");
+        let (kill, address) = spawn_private_bus();
 
         let state = SharedCoverState::new();
         let server = zbus::blocking::connection::Builder::address(address.as_str())
@@ -72,7 +63,7 @@ impl Harness {
         .unwrap();
 
         Self {
-            daemon,
+            _daemon: kill,
             server,
             state,
             proxy,
@@ -122,12 +113,7 @@ impl Harness {
     }
 }
 
-impl Drop for Harness {
-    fn drop(&mut self) {
-        let _ = self.daemon.kill();
-        let _ = self.daemon.wait();
-    }
-}
+// `KillOnDrop` inside `Harness` reaps the daemon; no manual `Drop` needed.
 
 #[test]
 fn empty_state_exposes_no_image() {
@@ -186,6 +172,23 @@ impl Drop for KillOnDrop {
     }
 }
 
+/// Spawns a private session bus and returns its `KillOnDrop` guard plus the
+/// bus address. Fails loudly when `dbus-daemon` is missing.
+fn spawn_private_bus() -> (KillOnDrop, String) {
+    let mut daemon = Command::new("dbus-daemon")
+        .args(["--session", "--nofork", "--print-address=1"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("dbus-daemon must be installed to run cover-provider integration tests");
+    let mut address = String::new();
+    BufReader::new(daemon.stdout.take().unwrap())
+        .read_line(&mut address)
+        .unwrap();
+    let address = address.trim().to_string();
+    assert!(!address.is_empty(), "dbus-daemon printed no bus address");
+    (KillOnDrop(daemon), address)
+}
+
 /// A `Track` `PropertiesChanged` on `org.bluez.MediaPlayer1` must wake the
 /// worker; other property changes must not. Exercises the real match-rule
 /// subscription on a private `dbus-daemon` (the emitter owns `org.bluez` so
@@ -199,18 +202,7 @@ async fn track_signal_listener_wakes_only_on_track_changes() {
     use tokio::sync::Notify;
     use zbus::zvariant::Value;
 
-    let mut daemon = Command::new("dbus-daemon")
-        .args(["--session", "--nofork", "--print-address=1"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("dbus-daemon must be installed to run cover-provider integration tests");
-    let mut address = String::new();
-    BufReader::new(daemon.stdout.take().unwrap())
-        .read_line(&mut address)
-        .unwrap();
-    let address = address.trim().to_string();
-    assert!(!address.is_empty(), "dbus-daemon printed no bus address");
-    let _kill = KillOnDrop(daemon);
+    let (_kill, address) = spawn_private_bus();
 
     // The listener's match rule filters `sender=org.bluez`; owning that name
     // on the fake server makes the filter pass, like the real BlueZ daemon.
@@ -325,18 +317,7 @@ fn query_snapshot_returns_none_for_inactive_state() {
 /// provider), the consumer degrades to `None` instead of erroring.
 #[test]
 fn query_snapshot_returns_none_when_service_absent() {
-    let mut daemon = Command::new("dbus-daemon")
-        .args(["--session", "--nofork", "--print-address=1"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("dbus-daemon must be installed");
-    let mut address = String::new();
-    BufReader::new(daemon.stdout.take().unwrap())
-        .read_line(&mut address)
-        .unwrap();
-    let address = address.trim().to_string();
-    assert!(!address.is_empty(), "dbus-daemon printed no bus address");
-    let _kill = KillOnDrop(daemon);
+    let (_kill, address) = spawn_private_bus();
 
     let conn = zbus::blocking::connection::Builder::address(address.as_str())
         .unwrap()

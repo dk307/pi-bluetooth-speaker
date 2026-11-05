@@ -566,16 +566,21 @@ impl CoverArtWorker {
         // The rename lands the file first, the D-Bus state is published
         // second, and obsolete files for this MAC are cleaned only afterwards
         // — the published path can never point at a just-deleted file.
-        let (path, sanitized_mac, _) = self.store_image(*address, handle, bytes)?;
+        let (path, sanitized_mac, sanitized_handle) = self.store_image(*address, handle, bytes)?;
         let device: Box<str> = address.to_string().into_boxed_str();
-        self.state
-            .publish(device.clone(), handle.into(), path.clone().into());
+        self.state.publish(
+            device.clone(),
+            sanitized_handle.clone().into(),
+            path.clone().into(),
+        );
         if let Some(emitter) = &self.emitter {
-            if let Err(e) = CoverArtIface::image_updated(emitter, &device, handle, &path).await {
+            if let Err(e) =
+                CoverArtIface::image_updated(emitter, &device, &sanitized_handle, &path).await
+            {
                 tracing::warn!(error = %e, "failed to emit ImageUpdated");
             }
         }
-        clean_old_cover_art_in(&self.cache_dir, &sanitized_mac, handle);
+        clean_old_cover_art_in(&self.cache_dir, &sanitized_mac, &sanitized_handle);
         Ok(path)
     }
 
@@ -676,8 +681,14 @@ async fn build_cover_art_server(
     Ok((connection, emitter))
 }
 
-/// Backoff before re-subscribing a dead `BlueZ` track signal stream.
+/// Initial backoff before re-subscribing a dead `BlueZ` track signal stream.
 const SIGNAL_RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
+
+/// Backoff ceiling for the reconnect loop. A permanently dead bus (e.g.
+/// `dbus-daemon` restarted underneath a long-lived service) would otherwise
+/// emit a `warn!` every [`SIGNAL_RECONNECT_BACKOFF`] for the process
+/// lifetime; the retry period doubles per failure up to this cap.
+const SIGNAL_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Subscribes to `BlueZ` `MediaPlayer1` `Track` changes on an existing async
 /// connection and wakes the worker for each one.
@@ -686,13 +697,23 @@ const SIGNAL_RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
 /// inject a private-bus connection; the spawned task lives for the lifetime
 /// of `connection` and keeps running while the provider thread's runtime
 /// exists. A dead stream (transport error or close, e.g. a `BlueZ` restart)
-/// never ends the task: after a short backoff the match rule is rebuilt from
-/// the same connection, so signal-driven track-change latency recovers by
-/// itself instead of degrading permanently to the fallback poll.
+/// never ends the task: after a backoff the match rule is rebuilt from the
+/// same connection, so signal-driven track-change latency recovers by itself
+/// instead of degrading permanently to the fallback poll. The retry period
+/// doubles per failure up to [`SIGNAL_RECONNECT_MAX_BACKOFF`] and resets on
+/// the first received message, so a permanently dead bus cannot degenerate
+/// into a warn-every-500 ms log-spam loop.
 ///
 /// Subscribes and listens until the connection dies or the process exits.
 pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
     tokio::spawn(async move {
+        let mut failures: u32 = 0;
+        let delay = |failures: u32| {
+            // 500 ms, 1 s, 2 s, ... capped at the 30 s ceiling.
+            SIGNAL_RECONNECT_BACKOFF
+                .saturating_mul(1u32.checked_shl(failures.min(7)).unwrap_or(u32::MAX))
+                .min(SIGNAL_RECONNECT_MAX_BACKOFF)
+        };
         loop {
             // All rule-builder setters are fallible; the closure gives them
             // a `?` context inside the reconnect loop (no task-local `?`).
@@ -718,15 +739,18 @@ pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
+                            retry_in_ms = delay(failures).as_millis() as u64,
                             "track signal subscription failed; reconnecting after backoff"
                         );
-                        tokio::time::sleep(SIGNAL_RECONNECT_BACKOFF).await;
+                        tokio::time::sleep(delay(failures)).await;
+                        failures = failures.saturating_add(1);
                         continue;
                     }
                 };
             loop {
                 match stream.next().await {
                     Some(Ok(message)) => {
+                        failures = 0;
                         // PropertiesChanged body: (interface, changed, invalidated)
                         match message
                             .body()
@@ -747,17 +771,22 @@ pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
                     Some(Err(e)) => {
                         tracing::warn!(
                             error = %e,
+                            retry_in_ms = delay(failures).as_millis() as u64,
                             "track signal stream failed; reconnecting after backoff"
                         );
                         break;
                     }
                     None => {
-                        tracing::warn!("track signal stream closed; reconnecting after backoff");
+                        tracing::warn!(
+                            retry_in_ms = delay(failures).as_millis() as u64,
+                            "track signal stream closed; reconnecting after backoff"
+                        );
                         break;
                     }
                 }
             }
-            tokio::time::sleep(SIGNAL_RECONNECT_BACKOFF).await;
+            tokio::time::sleep(delay(failures)).await;
+            failures = failures.saturating_add(1);
         }
     });
 }
