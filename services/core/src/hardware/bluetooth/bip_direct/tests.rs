@@ -1,5 +1,6 @@
 use super::*;
 use obex_protocol::packet::{Request, Response};
+use obex_protocol::srm::SingleResponseMode;
 use obex_protocol::tokio::{Object, Server};
 use std::error::Error as _;
 use std::sync::Arc;
@@ -23,6 +24,8 @@ struct StubCoverArtServer {
     get_name: Arc<Mutex<Option<String>>>,
     /// Whether each received GET carried the Img-Descriptor header.
     descriptor_history: Arc<Mutex<Vec<bool>>>,
+    /// Whether each received GET requested Single Response Mode (0x97).
+    get_srm: Arc<Mutex<bool>>,
 }
 
 impl obex_protocol::tokio::Handler for StubCoverArtServer {
@@ -57,6 +60,10 @@ impl obex_protocol::tokio::Handler for StubCoverArtServer {
             Header::Type(m) => Some(m.clone()),
             _ => None,
         });
+        let srm = request
+            .headers
+            .iter()
+            .any(|h| matches!(h, Header::SingleResponseMode(SingleResponseMode::Enable)));
         let descriptor = request.headers.iter().any(|h| match h {
             Header::Other { id, value } => *id == 0x71 && matches!(value, HeaderValue::Bytes(_)),
             _ => false,
@@ -66,17 +73,19 @@ impl obex_protocol::tokio::Handler for StubCoverArtServer {
             .pop_front()
             .unwrap_or_else(|| self.get_outcomes.back().cloned().expect("non-empty"))
             .map(|body| Object::new([Header::Type("x-bt/img-img".to_string())], body));
-        let (handle_slot, mime_slot, name_slot, descriptor_slot) = (
+        let (handle_slot, mime_slot, name_slot, descriptor_slot, srm_slot) = (
             Arc::clone(&self.get_handle),
             Arc::clone(&self.get_type),
             Arc::clone(&self.get_name),
             Arc::clone(&self.descriptor_history),
+            Arc::clone(&self.get_srm),
         );
         async move {
             *handle_slot.lock().await = handle.cloned();
             *mime_slot.lock().await = mime;
             *name_slot.lock().await = name;
             descriptor_slot.lock().await.push(descriptor);
+            *srm_slot.lock().await = srm;
             outcome
         }
     }
@@ -112,6 +121,20 @@ fn spawn_stub_server(
     })
 }
 
+/// Spawns the stub with Single Response Mode enabled on the server engine,
+/// mirroring AOSP's OBEX-over-L2CAP transport.
+fn spawn_stub_server_srm(
+    stub: SharedStub,
+    server_half: tokio::io::DuplexStream,
+) -> tokio::task::JoinHandle<obex_protocol::Result<()>> {
+    tokio::spawn(async move {
+        let mut inner = stub.lock().await;
+        let mut s =
+            Server::new(server_half, HandlerProxy(&mut inner)).with_single_response_mode(true);
+        s.run().await
+    })
+}
+
 fn new_stub(get_outcome: Result<Vec<u8>, Response>) -> SharedStub {
     new_retry_stub(vec![get_outcome])
 }
@@ -126,6 +149,7 @@ fn new_retry_stub(get_outcomes: Vec<Result<Vec<u8>, Response>>) -> SharedStub {
         get_type: Arc::new(Mutex::new(None)),
         get_name: Arc::new(Mutex::new(None)),
         descriptor_history: Arc::new(Mutex::new(Vec::new())),
+        get_srm: Arc::new(Mutex::new(false)),
     }))
 }
 
@@ -447,3 +471,89 @@ async fn fetch_cover_art_via_propagates_channel_failures() {
         .expect_err("failing channel should propagate");
     assert!(result.is_service_not_found());
 }
+
+/// Passthrough wrapper that records whether any inbound bytes carried the
+/// OBEX SRM-enable pair (0x97 0x01), proving the client actually put
+/// Single Response Mode on the wire.
+struct SrmProbe<T> {
+    inner: T,
+    seen: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for SrmProbe<T> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match std::pin::Pin::new(&mut self.inner).poll_read(cx, buf) {
+            std::task::Poll::Ready(Ok(())) => {
+                if buf.filled().windows(2).any(|w| w == [0x97, 0x01]) {
+                    self.seen.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                std::task::Poll::Ready(Ok(()))
+            }
+            other => other,
+        }
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for SrmProbe<T> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[tokio::test]
+async fn pull_image_puts_srm_on_the_wire_and_transfers_large_body() {
+    let body = body_bytes(65_536, 0xCD);
+    let stub = new_stub(Ok(body.clone()));
+    let (client_half, server_half) = tokio::io::duplex(1024);
+    let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen_for_task = Arc::clone(&seen);
+    let server = tokio::spawn(async move {
+        let mut inner = stub.lock().await;
+        let probed = SrmProbe {
+            inner: server_half,
+            seen: seen_for_task,
+        };
+        let mut s = Server::new(probed, HandlerProxy(&mut inner)).with_single_response_mode(true);
+        s.run().await
+    });
+    let received = pull_image(client_half, BipImageType::Native, "0000001")
+        .await
+        .expect("SRM transfer succeeds");
+    server
+        .await
+        .expect("server run succeeds")
+        .expect("server ok");
+    assert_eq!(received, body, "full body reassembled under SRM");
+    assert!(
+        seen.load(std::sync::atomic::Ordering::Relaxed),
+        "client must put the SRM-enable header (0x97 0x01) on the wire"
+    );
+}
+
+// Compile-time proof that the OBEX packet budget and the configured
+// L2CAP receive MTU agree and stay inside AOSP's safe 16-bit range.
+const _: () = {
+    assert!(OBEX_AOSP_MAX_PACKET_LENGTH == L2CAP_AOSP_RECEIVE_MTU);
+    assert!(OBEX_AOSP_MAX_PACKET_LENGTH < u16::MAX);
+    assert!(OBEX_AOSP_MAX_PACKET_LENGTH >= obex_protocol::packet::MINIMUM_PACKET_LENGTH);
+};

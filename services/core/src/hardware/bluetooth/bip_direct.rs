@@ -17,6 +17,7 @@
 
 use std::backtrace::Backtrace;
 use std::fmt::{self, Formatter};
+use std::os::unix::io::AsRawFd;
 use std::time::Instant;
 
 use obex_protocol::Error as ObexError;
@@ -399,6 +400,115 @@ fn l2cap_step_err(step: &'static str) -> impl Fn(std::io::Error) -> BipError {
     }
 }
 
+/// Kernel `SOL_L2CAP` socket level (include/net/bluetooth/l2cap.h).
+const SOL_L2CAP: libc::c_int = 6;
+/// Kernel `L2CAP_OPTIONS` socket option number.
+const L2CAP_OPTIONS_OPT: libc::c_int = 0x01;
+/// Kernel `L2CAP_MODE_ERTM`.
+const L2CAP_MODE_ERTM: u8 = 0x03;
+/// Classic BR/EDR receive MTU advertised to the phone (0x7FFF).
+///
+/// AOSP clamps its outbound OBEX packet size to the peer's advertised L2CAP
+/// receive MTU; without configuration the kernel negotiates the 672-byte
+/// default (`L2CAP_DEFAULT_MTU`) and fragments every image into dozens of
+/// stop-and-wait OBEX packets. 32767 (not 65535) also stays clear of signed
+/// 16-bit length handling in Android's javax.obex stack.
+const L2CAP_AOSP_RECEIVE_MTU: u16 = 32767;
+
+/// Kernel `struct l2cap_options` layout (include/net/bluetooth/l2cap.h):
+/// three `u16` fields, three `u8` fields, then a `u16` with one byte of
+/// trailing padding.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+struct L2capOptions {
+    omtu: u16,
+    imtu: u16,
+    flush_to: u16,
+    mode: u8,
+    fcs: u8,
+    max_tx: u8,
+    txwin_size: u16,
+}
+const _: () = {
+    assert!(std::mem::size_of::<L2capOptions>() == 12);
+    // 48 is the kernel `L2CAP_DEFAULT_MIN_MTU` floor for `L2CAP_OPTIONS`.
+    assert!(L2CAP_AOSP_RECEIVE_MTU >= 48);
+};
+
+/// Advertises a 32767-byte receive MTU on a Classic BR/EDR L2CAP socket.
+///
+/// Must run after `bind()` and before `connect()`: the kernel rejects
+/// `L2CAP_OPTIONS` once the channel is connected (`l2cap_sock.c`). All other
+/// fields are preserved from the kernel defaults (ERTM mode and a 63-frame
+/// transmit window are already the defaults for `SOCK_STREAM` channels), so
+/// only the receive MTU is modified.
+///
+/// # Errors
+/// Propagates the raw `getsockopt`/`setsockopt` failures as `io::Error`.
+fn request_l2cap_receive_mtu<F: AsRawFd>(socket: &F) -> std::io::Result<()> {
+    let fd = socket.as_raw_fd();
+    let mut opts = L2capOptions::default();
+    let mut optlen = std::mem::size_of::<L2capOptions>() as libc::socklen_t;
+    // SAFETY: `opts` is a valid `struct l2cap_options` out-parameter with
+    // `optlen` reporting its length, per the getsockopt(2) contract.
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            SOL_L2CAP,
+            L2CAP_OPTIONS_OPT,
+            std::ptr::from_mut(&mut opts).cast(),
+            std::ptr::from_mut(&mut optlen),
+        )
+    } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    opts.imtu = L2CAP_AOSP_RECEIVE_MTU;
+    opts.mode = L2CAP_MODE_ERTM;
+    // SAFETY: `opts` is a valid `struct l2cap_options` in-parameter of the
+    // exact size the kernel expects for `L2CAP_OPTIONS`.
+    if unsafe {
+        libc::setsockopt(
+            fd,
+            SOL_L2CAP,
+            L2CAP_OPTIONS_OPT,
+            std::ptr::from_ref(&opts).cast(),
+            std::mem::size_of::<L2capOptions>() as libc::socklen_t,
+        )
+    } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    tracing::debug!(
+        imtu = u32::from(L2CAP_AOSP_RECEIVE_MTU),
+        mode_ertm = true,
+        "L2CAP receive MTU configured"
+    );
+    Ok(())
+}
+
+/// OBEX `MaxPacketLength` advertised in CONNECT (0x7FFF).
+///
+/// Matches the configured L2CAP receive MTU and stays clear of signed 16-bit
+/// length handling in Android's javax.obex stack.
+const OBEX_AOSP_MAX_PACKET_LENGTH: u16 = 32767;
+const _: () = {
+    assert!(OBEX_AOSP_MAX_PACKET_LENGTH >= obex_protocol::packet::MINIMUM_PACKET_LENGTH);
+};
+
+/// Builds an OBEX client tuned for the phone's AVRCP cover-art server.
+///
+/// Enables Single Response Mode (GOEP 2.0) so multi-packet GET responses
+/// stream back-to-back instead of stopping after every 0x90 Continue frame
+/// to wait for a client continuation round-trip; the obex-protocol engine
+/// falls back automatically when the responder does not latch SRM.
+#[must_use]
+fn cover_art_client<T: AsyncRead + AsyncWrite + Unpin>(stream: T) -> Client<T> {
+    Client::new(stream)
+        .with_max_packet_length(OBEX_AOSP_MAX_PACKET_LENGTH)
+        .with_single_response_mode(true)
+}
+
 #[async_trait::async_trait]
 impl BipChannel for L2capBipChannel {
     async fn open(&self, address: &BtAddress) -> Result<BipStream, BipError> {
@@ -411,18 +521,14 @@ impl BipChannel for L2capBipChannel {
         socket
             .bind(bluer::l2cap::SocketAddr::any_br_edr())
             .map_err(l2cap_step_err("bind local address"))?;
-        // SOCK_STREAM L2CAP channels already default to ERTM when the kernel
-        // has ERTM enabled (net/bluetooth/l2cap_sock.c `l2cap_sock_init`), and
-        // in that configuration the BT_MODE sockopt rejects ERTM with EINVAL
-        // (`l2cap_set_mode`). It only accepts ERTM when the module-wide
-        // `disable_ertm=1` fallback left the socket in Basic mode, so treat
-        // EINVAL as "ERTM is already the default" and fail on anything else.
-        if let Err(e) = socket.set_flow_control(bluer::l2cap::FlowControl::Ertm) {
-            if e.kind() != std::io::ErrorKind::InvalidInput {
-                return Err(l2cap_step_err("set ERTM flow control")(e));
-            }
-            tracing::debug!(address = %canonical, "L2CAP stream socket defaults to ERTM (BT_MODE rejected with EINVAL)");
-        }
+        // SOCK_STREAM Classic channels default to ERTM (l2cap_sock.c
+        // `l2cap_sock_init`); `L2CAP_OPTIONS` is the correct knob for Classic
+        // BR/EDR channels and must be set before `connect()` rejects it. It
+        // advertises the large receive MTU the phone needs for few-packet
+        // image transfers; the BT_MODE sockopt (`set_flow_control`) rejects
+        // ERTM with EINVAL and cannot set an MTU at all.
+        request_l2cap_receive_mtu(&socket)
+            .map_err(l2cap_step_err("configure L2CAP receive MTU"))?;
         let socket_addr = bluer::l2cap::SocketAddr::new(
             bluer::Address(octets),
             bluer::AddressType::BrEdr,
@@ -481,7 +587,7 @@ where
 
     let started = Instant::now();
 
-    let mut client = Client::new(stream);
+    let mut client = cover_art_client(stream);
     client
         .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
         .await
@@ -718,7 +824,7 @@ impl BipSessionKeeper for PersistentBipSession {
             "establishing persistent BIP session"
         );
         let stream = channel.open(address).await?;
-        let mut client = Client::new(stream);
+        let mut client = cover_art_client(stream);
         client
             .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
             .await
