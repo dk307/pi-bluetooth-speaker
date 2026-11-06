@@ -133,56 +133,70 @@ jobs:
         with:
           name: core-lcov-info
 
+      - name: Install cargo-crap (v0.9.0, SHA-256 pinned)
+        id: install-crap
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/cargo-crap-bin"
+          mkdir -p "$dir"
+          archive="$dir/cargo-crap-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://github.com/minikin/cargo-crap/releases/download/v0.9.0/cargo-crap-x86_64-unknown-linux-gnu.tar.gz"
+          echo "5355bfa78ba5bf57e52e125f9dfe3573155796267d3b54660ae1c0225916d603  $archive" | sha256sum -c -
+          tar xzf "$archive" -C "$dir"
+          chmod +x "$dir/cargo-crap"
+          echo "$dir" >> "$GITHUB_PATH"
+          echo "binary=$dir/cargo-crap" >> "$GITHUB_OUTPUT"
+
       - name: Prepare CRAP Baseline (Pull Request)
         id: baseline
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CARGO_CRAP_BIN: ${{ steps.install-crap.outputs.binary }}
         run: |
           set -euo pipefail
           baseline="crap-baseline.json"
+          rm -f "$baseline"
 
           # 1. Reuse the `crap-baseline` artifact from the latest successful `main` push run if available.
-          run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/core-ci.yml/runs?branch=main&event=push&status=success&per_page=5" \
-            --jq '.workflow_runs[0].id // empty' 2>/dev/null || true)"
-          if [ -n "$run_id" ]; then
-            gh run download "$run_id" --name crap-baseline --dir . 2>/dev/null || true
-          fi
+          run_ids="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/core-ci.yml/runs?branch=main&event=push&status=success&per_page=5" \
+            --jq '.workflow_runs[].id' 2>/dev/null || true)"
+          for run_id in $run_ids; do
+            if gh run download "$run_id" --name crap-baseline --dir . 2>/dev/null && [ -s "$baseline" ]; then
+              break
+            fi
+            rm -f "$baseline"
+          done
 
-          # 2. Fallback when no `main` baseline artifact exists yet: score the PR base commit
-          #    against `lcov.info` in an isolated worktree without re-running the test suite.
-          if [ ! -f "$baseline" ]; then
+          # 2. Bootstrap fallback before the first `main` baseline artifact is published:
+          #    score the PR base commit AST in an isolated worktree without re-running tests.
+          if [ ! -s "$baseline" ]; then
             dir="$RUNNER_TEMP/cargo-crap-bootstrap"
             mkdir -p "$dir"
-            base_url="https://github.com/minikin/cargo-crap/releases/download/v0.9.0"
-            curl -fsSL --retry 3 -o "$dir/SHA256SUMS" "$base_url/SHA256SUMS"
-            curl -fsSL --retry 3 -o "$dir/cargo-crap-x86_64-unknown-linux-gnu.tar.gz" "$base_url/cargo-crap-x86_64-unknown-linux-gnu.tar.gz"
-            (cd "$dir" && grep "cargo-crap-x86_64-unknown-linux-gnu.tar.gz" SHA256SUMS | sha256sum -c -)
-            tar xzf "$dir/cargo-crap-x86_64-unknown-linux-gnu.tar.gz" -C "$dir"
-            echo "binary=$dir/cargo-crap" >> "$GITHUB_OUTPUT"
-
             base_sha="$BASE_SHA"
             if ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
               git fetch -q --no-tags --depth=1 origin "$base_sha"
               base_sha="$(git rev-parse --verify "FETCH_HEAD^{commit}")"
             fi
             git worktree add -q --detach "$dir/base-tree" "$base_sha"
+            trap 'git worktree remove --force "$dir/base-tree" 2>/dev/null || true' EXIT
             cp .cargo-crap.toml "$dir/base-tree/.cargo-crap.toml"
             ws_root="$(pwd -P)"
-            sed "s|$ws_root|$dir/base-tree|g" lcov.info > "$dir/base.lcov"
+            sed "s|^SF:${ws_root}/|SF:${dir}/base-tree/|" lcov.info > "$dir/base.lcov"
             baseline_abs="$ws_root/$baseline"
-            (cd "$dir/base-tree" && "$dir/cargo-crap" --workspace --lcov "$dir/base.lcov" --format json --sort file --output "$baseline_abs")
-            git worktree remove --force "$dir/base-tree"
+            (cd "$dir/base-tree" && "$CARGO_CRAP_BIN" --workspace --lcov "$dir/base.lcov" --format json --sort file --output "$baseline_abs")
           fi
 
+          test -s "$baseline"
           echo "path=$baseline" >> "$GITHUB_OUTPUT"
 
       - name: Run cargo-crap
         uses: minikin/cargo-crap@49f67037505997092f3df41d7a88e4fbfa09daee # v0.9.0
         with:
           version: "0.9.0"
-          binary: ${{ steps.baseline.outputs.binary || '' }}
+          binary: ${{ steps.install-crap.outputs.binary }}
           args: --workspace
           lcov: lcov.info
           baseline: ${{ steps.baseline.outputs.path || '' }}
@@ -192,7 +206,12 @@ jobs:
 
       - name: Save CRAP Baseline (main)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cargo-crap --workspace --lcov lcov.info --format json --sort file --output crap-baseline.json
+        env:
+          CARGO_CRAP_BIN: ${{ steps.install-crap.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CARGO_CRAP_BIN" --workspace --lcov lcov.info --format json --sort file --output crap-baseline.json
+          test -s crap-baseline.json
 
       - name: Upload CRAP Baseline Artifact (main)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
