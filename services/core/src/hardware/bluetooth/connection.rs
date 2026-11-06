@@ -2845,3 +2845,57 @@ pub fn resolve_cover_art_with(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a `MethodError` the way zbus surfaces remote method failures.
+    fn method_error(name: &str) -> zbus::Error {
+        let message = zbus::message::Message::method_call("/org/example", "Call")
+            .expect("valid method call")
+            .build(&())
+            .expect("buildable message");
+        zbus::Error::MethodError(name.try_into().expect("valid error name"), None, message)
+    }
+
+    #[test]
+    fn is_unknown_method_error_matches_error_names() {
+        assert!(is_unknown_method_error(&method_error(
+            "org.freedesktop.DBus.Error.UnknownMethod"
+        )));
+        assert!(is_unknown_method_error(&method_error(
+            "org.freedesktop.DBus.Error.UnknownObject"
+        )));
+    }
+
+    #[test]
+    fn is_unknown_method_error_rejects_other_names() {
+        assert!(!is_unknown_method_error(&method_error(
+            "org.freedesktop.DBus.Error.AccessDenied"
+        )));
+        assert!(!is_unknown_method_error(&method_error(
+            "org.freedesktop.DBus.Error.ServiceUnknown"
+        )));
+    }
+
+    #[test]
+    fn is_unknown_method_error_matches_fdo_typed_variants() {
+        assert!(is_unknown_method_error(&zbus::Error::FDO(Box::new(
+            zbus::fdo::Error::UnknownMethod("method".into())
+        ))));
+        assert!(is_unknown_method_error(&zbus::Error::FDO(Box::new(
+            zbus::fdo::Error::UnknownObject("object".into())
+        ))));
+        assert!(!is_unknown_method_error(&zbus::Error::FDO(Box::new(
+            zbus::fdo::Error::AccessDenied("denied".into())
+        ))));
+    }
+
+    #[test]
+    fn is_unknown_method_error_rejects_transport_faults() {
+        assert!(!is_unknown_method_error(&zbus::Error::InputOutput(
+            std::sync::Arc::new(std::io::Error::other("broken pipe"))
+        )));
+    }
+}
