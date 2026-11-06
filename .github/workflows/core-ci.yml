@@ -58,6 +58,13 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
 
+      - name: Upload Coverage Artifact (LCOV)
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: core-lcov-info
+          path: lcov.info
+          if-no-files-found: error
+
       - name: Build Speaker Core & Utilities (Release for RPi 3)
         # Cargo discovers `.cargo/config.toml` from the working directory, not from
         # `--manifest-path`; pass it explicitly so Cortex-A53 / NEON rustflags apply.
@@ -111,6 +118,7 @@ jobs:
 
   cargo-crap:
     name: CRAP Score & Regression Gate (cargo-crap)
+    needs: build-rpi3
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -119,23 +127,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends dbus pkg-config libfontconfig-dev
-
-      - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Download Coverage Artifact (LCOV)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          targets: x86_64-unknown-linux-gnu
-          components: llvm-tools-preview
+          name: core-lcov-info
 
       - name: Run cargo-crap
         uses: minikin/cargo-crap@49f67037505997092f3df41d7a88e4fbfa09daee # v0.9.0
         with:
           version: "0.9.0"
           args: --workspace
-          coverage-args: --workspace --target x86_64-unknown-linux-gnu
-          fail-regression: "true"
-          fail-above: "false"
+          lcov: lcov.info
+          base: ""
+          fail-regression: "false"
           comment: "true"

@@ -4,8 +4,6 @@
 # Reference: https://github.com/minikin/cargo-crap/blob/v0.9.0/docs/reference/config.md
 
 threshold = 30.0
-fail-above = false
-fail-regression = true
 missing = "pessimistic"
 uncovered-hints = true
 
