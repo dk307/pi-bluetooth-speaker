@@ -845,3 +845,61 @@ async fn persistent_session_maps_connect_rejection_to_image_rejected() {
     assert!(error.is_image_rejected());
     assert_eq!(error.response_code(), Some(0x43));
 }
+
+// ---------------------------------------------------------------------------
+// OBEX operation deadlines: a peer that accepts the transport and then stops
+// responding must not wedge the session forever.
+// ---------------------------------------------------------------------------
+
+/// A client over a duplex whose server half (kept alive by the caller)
+/// never answers.
+fn silent_client() -> (Client<BipStream>, tokio::io::DuplexStream) {
+    let (client, server) = duplex_pair();
+    (cover_art_client(Box::new(client) as BipStream), server)
+}
+
+#[tokio::test]
+async fn get_times_out_when_peer_stops_responding() {
+    let (mut client, _server) = silent_client();
+    let error = get_image_on(&mut client, BipImageType::Native, "5630701")
+        .await
+        .expect_err("the unresponsive peer must time out");
+    assert!(
+        error.is_obex(),
+        "the GET deadline maps to an OBEX transport fault: {error}"
+    );
+    assert!(
+        error.to_string().contains("timed out"),
+        "the error must identify the deadline expiry: {error}"
+    );
+}
+
+#[tokio::test]
+async fn connect_times_out_when_peer_stops_responding() {
+    let (mut client, _server) = silent_client();
+    let error = with_obex_timeout("OBEX CONNECT", OBEX_CONNECT_TIMEOUT, async {
+        client
+            .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
+            .await
+    })
+    .await
+    .expect_err("the unresponsive peer must time out");
+    assert!(
+        matches!(error, ObexError::Io(ref e) if e.kind() == std::io::ErrorKind::TimedOut),
+        "the CONNECT deadline surfaces as a timed-out transport fault: {error}"
+    );
+}
+
+#[tokio::test]
+async fn keepalive_times_out_when_peer_stops_responding() {
+    let (mut client, _server) = silent_client();
+    let error = with_obex_timeout("OBEX SETPATH", OBEX_KEEPALIVE_TIMEOUT, async {
+        client.set_path_root().await
+    })
+    .await
+    .expect_err("the unresponsive peer must time out");
+    assert!(
+        matches!(error, ObexError::Io(ref e) if e.kind() == std::io::ErrorKind::TimedOut),
+        "the SETPATH deadline surfaces as a timed-out transport fault: {error}"
+    );
+}

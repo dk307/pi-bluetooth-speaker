@@ -436,6 +436,8 @@ impl CoverArtWorker {
                 device = %playback.device_name,
                 "rejecting malformed ImgHandle from peer"
             );
+            self.clear_published("track has a malformed ImgHandle")
+                .await;
             return;
         }
         let device = address.to_string();
@@ -1848,5 +1850,24 @@ mod tests {
             "failed rename must not publish anything"
         );
         assert_eq!(harness.counters.fetches(), 1, "fetch was attempted");
+    }
+    #[tokio::test]
+    async fn malformed_handle_clears_published_state() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        let mut evil = test_playback(Some("5630701"));
+        evil.image_handle = Some("../etc/passwd".into());
+        harness.script(Ok(Some(evil)));
+        let mut worker = harness.worker(None);
+        worker.poll_once().await;
+        assert_eq!(harness.state.get().handle(), Some("5630701"));
+        worker.poll_once().await;
+        assert_eq!(
+            harness.state.get().handle(),
+            None,
+            "peer garbage handle must not keep the previous track's artwork published"
+        );
+        assert_eq!(harness.counters.releases(), 0, "BIP session stays held");
+        assert_eq!(harness.counters.fetches(), 1, "no fetch for peer garbage");
     }
 }

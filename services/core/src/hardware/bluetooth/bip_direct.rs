@@ -632,6 +632,60 @@ const _: () = {
 /// stream back-to-back instead of stopping after every 0x90 Continue frame
 /// to wait for a client continuation round-trip; the obex-protocol engine
 /// falls back automatically when the responder does not latch SRM.
+/// Deadline for the OBEX CONNECT handshake. obexd's pipeline used an
+/// explicit watchdog; without one a phone that accepts the socket and then
+/// stops responding would wedge the provider worker forever (the ACL link
+/// stays alive while the A2DP stream plays, so the link layer never fires).
+#[cfg(test)]
+const OBEX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+#[cfg(not(test))]
+const OBEX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Deadline for a complete OBEX GET (CONNECT-for-GET through final body).
+#[cfg(test)]
+const OBEX_GET_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+#[cfg(not(test))]
+const OBEX_GET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Deadline for the keepalive SETPATH round-trip.
+#[cfg(test)]
+const OBEX_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+#[cfg(not(test))]
+const OBEX_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Bounds an OBEX request/response cycle with an application-level deadline.
+///
+/// On expiry the peer is treated as a transport fault: the mapped
+/// [`ObexError::Io`] with `ErrorKind::TimedOut` releases the held session so
+/// the next `ensure` re-establishes from scratch.
+///
+/// Maps a deadline expiry into an OBEX transport fault.
+fn obex_timeout(operation: &'static str, deadline: std::time::Duration) -> ObexError {
+    tracing::warn!(
+        operation,
+        timeout_ms = deadline.as_millis() as u64,
+        "OBEX operation timed out"
+    );
+    ObexError::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("{operation} timed out after {deadline:?}"),
+    ))
+}
+
+async fn with_obex_timeout<F, T>(
+    operation: &'static str,
+    deadline: std::time::Duration,
+    fut: F,
+) -> Result<T, ObexError>
+where
+    F: std::future::Future<Output = Result<T, ObexError>>,
+{
+    match tokio::time::timeout(deadline, fut).await {
+        Ok(result) => result,
+        Err(_) => Err(obex_timeout(operation, deadline)),
+    }
+}
+
 #[must_use]
 fn cover_art_client<T: AsyncRead + AsyncWrite + Unpin>(stream: T) -> Client<T> {
     Client::new(stream)
@@ -715,15 +769,18 @@ where
         "BIP image pull starting"
     );
 
-    let get = client
-        .get([
+    let get = with_obex_timeout(
+        "OBEX GET",
+        OBEX_GET_TIMEOUT,
+        client.get([
             Header::Type(image_type.mime().to_string()),
             Header::Other {
                 id: IMG_HANDLE_HEADER_ID,
                 value: HeaderValue::Unicode(img_handle.to_string()),
             },
-        ])
-        .await;
+        ]),
+    )
+    .await;
 
     match get {
         Ok(response) => {
@@ -960,10 +1017,13 @@ impl BipSessionKeeper for PersistentBipSession {
         );
         let stream = channel.open(address).await?;
         let mut client = cover_art_client(stream);
-        client
-            .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
-            .await
-            .map_err(|e| map_obex_failure("OBEX CONNECT", e))?;
+        with_obex_timeout("OBEX CONNECT", OBEX_CONNECT_TIMEOUT, async {
+            client
+                .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
+                .await
+        })
+        .await
+        .map_err(|e| map_obex_failure("OBEX CONNECT", e))?;
         self.epoch = self.epoch.wrapping_add(1);
         tracing::info!(
             address = %address.to_string(),
@@ -1007,7 +1067,11 @@ impl BipSessionKeeper for PersistentBipSession {
             tracing::trace!("BIP keepalive skipped: no session held");
             return Ok(());
         };
-        match client.set_path_root().await {
+        match with_obex_timeout("OBEX SETPATH", OBEX_KEEPALIVE_TIMEOUT, async {
+            client.set_path_root().await
+        })
+        .await
+        {
             Ok(_) => {
                 tracing::debug!("BIP keepalive OK");
                 Ok(())
