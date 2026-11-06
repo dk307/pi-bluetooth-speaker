@@ -148,11 +148,11 @@ jobs:
           echo "$dir" >> "$GITHUB_PATH"
           echo "binary=$dir/cargo-crap" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare CRAP Baseline (Pull Request)
+      - name: Prepare CRAP Baseline
         id: baseline
-        if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CARGO_CRAP_BIN: ${{ steps.install-crap.outputs.binary }}
         run: |
@@ -160,33 +160,38 @@ jobs:
           baseline="crap-baseline.json"
           rm -f "$baseline"
 
-          # 1. Reuse the `crap-baseline` artifact from the latest successful `main` push run if available.
-          run_ids="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/core-ci.yml/runs?branch=main&event=push&status=success&per_page=5" \
-            --jq '.workflow_runs[].id' 2>/dev/null || true)"
-          for run_id in $run_ids; do
-            if gh run download "$run_id" --name crap-baseline --dir . 2>/dev/null && [ -s "$baseline" ]; then
-              break
-            fi
-            rm -f "$baseline"
-          done
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # 1. Reuse the `crap-baseline` artifact from the latest successful `main` push run if available.
+            run_ids="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/core-ci.yml/runs?branch=main&event=push&status=success&per_page=5" \
+              --jq '.workflow_runs[].id' 2>/dev/null || true)"
+            for run_id in $run_ids; do
+              if gh run download "$run_id" --name crap-baseline --dir . 2>/dev/null && [ -s "$baseline" ]; then
+                break
+              fi
+              rm -f "$baseline"
+            done
 
-          # 2. Bootstrap fallback before the first `main` baseline artifact is published:
-          #    score the PR base commit AST in an isolated worktree without re-running tests.
-          if [ ! -s "$baseline" ]; then
-            dir="$RUNNER_TEMP/cargo-crap-bootstrap"
-            mkdir -p "$dir"
-            base_sha="$BASE_SHA"
-            if ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
-              git fetch -q --no-tags --depth=1 origin "$base_sha"
-              base_sha="$(git rev-parse --verify "FETCH_HEAD^{commit}")"
+            # 2. Bootstrap fallback before the first `main` baseline artifact is published:
+            #    score the PR base commit AST in an isolated worktree without re-running tests.
+            if [ ! -s "$baseline" ]; then
+              dir="$RUNNER_TEMP/cargo-crap-bootstrap"
+              mkdir -p "$dir"
+              base_sha="$BASE_SHA"
+              if ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+                git fetch -q --no-tags --depth=1 origin "$base_sha"
+                base_sha="$(git rev-parse --verify "FETCH_HEAD^{commit}")"
+              fi
+              git worktree add -q --detach "$dir/base-tree" "$base_sha"
+              trap 'git worktree remove --force "$dir/base-tree" 2>/dev/null || true' EXIT
+              cp .cargo-crap.toml "$dir/base-tree/.cargo-crap.toml"
+              ws_root="$(pwd -P)"
+              sed "s|^SF:${ws_root}/|SF:${dir}/base-tree/|" lcov.info > "$dir/base.lcov"
+              baseline_abs="$ws_root/$baseline"
+              (cd "$dir/base-tree" && "$CARGO_CRAP_BIN" --workspace --lcov "$dir/base.lcov" --format json --sort file --output "$baseline_abs")
             fi
-            git worktree add -q --detach "$dir/base-tree" "$base_sha"
-            trap 'git worktree remove --force "$dir/base-tree" 2>/dev/null || true' EXIT
-            cp .cargo-crap.toml "$dir/base-tree/.cargo-crap.toml"
-            ws_root="$(pwd -P)"
-            sed "s|^SF:${ws_root}/|SF:${dir}/base-tree/|" lcov.info > "$dir/base.lcov"
-            baseline_abs="$ws_root/$baseline"
-            (cd "$dir/base-tree" && "$CARGO_CRAP_BIN" --workspace --lcov "$dir/base.lcov" --format json --sort file --output "$baseline_abs")
+          else
+            # On `push` runs (e.g. `main`), generate the baseline JSON for this commit.
+            "$CARGO_CRAP_BIN" --workspace --lcov lcov.info --format json --sort file --output "$baseline"
           fi
 
           test -s "$baseline"
@@ -199,19 +204,10 @@ jobs:
           binary: ${{ steps.install-crap.outputs.binary }}
           args: --workspace
           lcov: lcov.info
-          baseline: ${{ steps.baseline.outputs.path || '' }}
+          baseline: ${{ steps.baseline.outputs.path }}
           fail-regression: "true"
           fail-above: "false"
           comment: "true"
-
-      - name: Save CRAP Baseline (main)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          CARGO_CRAP_BIN: ${{ steps.install-crap.outputs.binary }}
-        run: |
-          set -euo pipefail
-          "$CARGO_CRAP_BIN" --workspace --lcov lcov.info --format json --sort file --output crap-baseline.json
-          test -s crap-baseline.json
 
       - name: Upload CRAP Baseline Artifact (main)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -219,4 +215,5 @@ jobs:
         with:
           name: crap-baseline
           path: crap-baseline.json
+          overwrite: true
           if-no-files-found: error
