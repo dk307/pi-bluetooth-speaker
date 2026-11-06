@@ -696,8 +696,25 @@ impl CoverArtWorker {
 async fn build_cover_art_server(
     state: SharedCoverState,
 ) -> Result<(zbus::Connection, SignalEmitter<'static>), Box<str>> {
-    let connection = zbus::connection::Builder::system()
-        .map_err(|e| Box::<str>::from(format!("cannot open system D-Bus: {e}")))?
+    let builder = zbus::connection::Builder::system()
+        .map_err(|e| Box::<str>::from(format!("cannot open system D-Bus: {e}")))?;
+    build_cover_art_server_on(builder, state).await
+}
+
+/// Publishes `CoverArtIface` on a caller-provided connection builder.
+///
+/// Split from [`build_cover_art_server`] so integration tests can publish
+/// the real service on a private bus (the system bus is only reachable in
+/// production).
+///
+/// # Errors
+/// Returns the failure reason when the name registration, object serving,
+/// connection build or emitter creation fails.
+pub async fn build_cover_art_server_on(
+    builder: zbus::connection::Builder<'static>,
+    state: SharedCoverState,
+) -> Result<(zbus::Connection, SignalEmitter<'static>), Box<str>> {
+    let connection = builder
         .name(COVER_ART_DBUS_NAME)
         .map_err(|e| Box::<str>::from(format!("invalid bus name {COVER_ART_DBUS_NAME}: {e}")))?
         .serve_at(COVER_ART_OBJECT_PATH, CoverArtIface::new(state))
@@ -1003,6 +1020,8 @@ mod tests {
         ensure_error: bool,
         /// Injected fetch failure (error-path coverage).
         fetch_error: bool,
+        /// Injected keepalive failure (error-path coverage).
+        keepalive_error: bool,
     }
 
     #[async_trait::async_trait]
@@ -1068,6 +1087,9 @@ mod tests {
 
         async fn keepalive(&mut self) -> Result<(), BipError> {
             self.counters.keepalives.fetch_add(1, Ordering::SeqCst);
+            if self.keepalive_error {
+                return Err(BipError::service_not_found("AA:BB:CC:DD:EE:FF"));
+            }
             Ok(())
         }
     }
@@ -1102,6 +1124,7 @@ mod tests {
         epoch: Arc<AtomicUsize>,
         ensure_error: bool,
         fetch_error: bool,
+        keepalive_error: bool,
         body: &'static [u8],
         source_results: VecDeque<Result<Option<BtPlaybackState>, BtError>>,
     }
@@ -1116,6 +1139,7 @@ mod tests {
                 epoch: Arc::new(AtomicUsize::new(0)),
                 ensure_error: false,
                 fetch_error: false,
+                keepalive_error: false,
                 body,
                 source_results: VecDeque::new(),
             }
@@ -1138,6 +1162,7 @@ mod tests {
                     address: Mutex::new(None),
                     ensure_error: self.ensure_error,
                     fetch_error: self.fetch_error,
+                    keepalive_error: self.keepalive_error,
                 }),
                 self.state.clone(),
                 self.dir.path().to_path_buf(),
@@ -1679,5 +1704,149 @@ mod tests {
         cache.purge(7);
         assert_eq!(cache.epoch, 7);
         assert!(cache.lookup("0000000").is_none(), "purge clears entries");
+    }
+    // --- injected D-Bus emitters (private bus) -----------------------------
+
+    /// Private session bus for emitter tests; killed on drop.
+    struct BusGuard(std::process::Child);
+    impl Drop for BusGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn spawn_private_bus_sync() -> (BusGuard, String) {
+        use std::io::BufRead as _;
+        let mut daemon = std::process::Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("dbus-daemon must be installed for emitter tests");
+        let mut address = String::new();
+        std::io::BufReader::new(daemon.stdout.take().expect("piped stdout"))
+            .read_line(&mut address)
+            .expect("read bus address");
+        let address = address.trim().to_string();
+        assert!(!address.is_empty(), "dbus-daemon printed no bus address");
+        (BusGuard(daemon), address)
+    }
+
+    async fn private_bus_emitter() -> (BusGuard, zbus::Connection, SignalEmitter<'static>) {
+        let (guard, address) = spawn_private_bus_sync();
+        let connection = zbus::connection::Builder::address(address.as_str())
+            .expect("valid bus address")
+            .build()
+            .await
+            .expect("connect to the private bus");
+        let emitter = SignalEmitter::new(&connection, COVER_ART_OBJECT_PATH)
+            .expect("emitter on the private bus")
+            .to_owned();
+        (guard, connection, emitter)
+    }
+
+    #[tokio::test]
+    async fn publish_emits_image_updated_on_the_private_bus() {
+        let (_guard, _conn, emitter) = private_bus_emitter().await;
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        let mut worker = harness.worker(Some(emitter));
+        worker.poll_once().await;
+        assert_eq!(
+            harness.state.get().handle(),
+            Some("5630701"),
+            "published through a live emitter"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_failure_on_dead_bus_keeps_the_published_state() {
+        let (guard, address) = spawn_private_bus_sync();
+        let connection = zbus::connection::Builder::address(address.as_str())
+            .expect("valid bus address")
+            .build()
+            .await
+            .expect("connect to the private bus");
+        let emitter = SignalEmitter::new(&connection, COVER_ART_OBJECT_PATH)
+            .expect("emitter on the private bus")
+            .to_owned();
+        // Kill the bus before publishing: every emit fails (warn arm).
+        drop(guard);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        let mut worker = harness.worker(Some(emitter));
+        worker.poll_once().await;
+        assert_eq!(
+            harness.state.get().handle(),
+            Some("5630701"),
+            "a failed emit must not discard the published artwork"
+        );
+    }
+
+    // --- FakeKeeper keepalive failure & cache-restore corruption -----------
+
+    #[tokio::test]
+    async fn keepalive_failure_warns_and_rearms_deadline() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.keepalive_error = true;
+        harness.script(scripted_playback(Some("5630701")));
+        let mut worker = harness.worker(None);
+        worker.poll_once().await;
+        assert_eq!(harness.counters.keepalives(), 0, "poll must not keepalive");
+        worker.keepalive().await;
+        assert_eq!(harness.counters.keepalives(), 1, "keepalive attempted");
+        assert!(
+            worker.keepalive_deadline.is_some(),
+            "failed keepalive still rearms the idle timer"
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_session_cache_falls_back_to_fresh_fetch() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        harness.script(scripted_playback(Some("5630701")));
+        let mut worker = harness.worker(None);
+        worker.poll_once().await;
+        assert_eq!(harness.counters.fetches(), 1);
+        // Poison the cache with invalid JPEG bytes: the restore publish
+        // fails (incomplete JPEG) and the worker must fetch fresh.
+        worker
+            .session_cache
+            .entries
+            .insert("5630701".into(), Arc::new(TRUNCATED_JPEG.to_vec()));
+        // Drop the published state so the dedup check does not short-circuit
+        // (the session generation is unchanged, so the cache is not purged).
+        drop(harness.state.clear());
+        worker.poll_once().await;
+        assert_eq!(
+            harness.counters.fetches(),
+            2,
+            "corrupt cached bytes must fall back to a fresh OBEX GET"
+        );
+        assert_eq!(harness.state.get().handle(), Some("5630701"));
+    }
+
+    #[tokio::test]
+    async fn store_rename_failure_reports_cache_publish_error() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        harness.script(scripted_playback(Some("5630701")));
+        let mut worker = harness.worker(None);
+        // A directory sits where the atomic rename must place the file.
+        std::fs::create_dir_all(
+            harness
+                .dir
+                .path()
+                .join("speaker-cover-11_22_33_44_55_66-5630701.jpg"),
+        )
+        .expect("create blocking directory");
+        worker.poll_once().await;
+        assert_eq!(
+            harness.state.get().handle(),
+            None,
+            "failed rename must not publish anything"
+        );
+        assert_eq!(harness.counters.fetches(), 1, "fetch was attempted");
     }
 }

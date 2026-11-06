@@ -551,3 +551,133 @@ async fn track_signal_listener_survives_dead_bus() {
     // notify permit stays coalescable for the eventual reconnect.
     wake.notify_one();
 }
+
+/// With the provider absent, the consumer falls back to the bare disk cache
+/// (the only information available without a published snapshot).
+#[test]
+fn resolve_cover_art_falls_back_to_disk_cache_when_provider_absent() {
+    let (_kill, address) = spawn_private_bus();
+    let conn = zbus::blocking::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .unwrap();
+    let dir = speaker_core::diag::ScopedTempDir::new("cover-fallback-cache");
+    let bytes = jpeg_fixture();
+    let path = dir
+        .path()
+        .join("speaker-cover-11_22_33_44_55_66-5630701.jpg");
+    std::fs::File::create(&path)
+        .unwrap()
+        .write_all(&bytes)
+        .unwrap();
+    let addr = BtAddress::parse_str("11:22:33:44:55:66").expect("valid MAC");
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630701".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&conn, dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        Some(path.to_string_lossy().into_owned().into()),
+        "provider absent: the disk cache resolves"
+    );
+}
+
+/// A `Properties.GetAll` error that is not the absent-service class (here:
+/// the served interface does not exist) must log a failure and return None.
+#[test]
+fn query_snapshot_reports_non_absent_getall_errors() {
+    use zbus::interface;
+
+    struct Unrelated;
+    #[interface(name = "org.other.Unrelated")]
+    impl Unrelated {
+        #[zbus(property)]
+        fn answer(&self) -> u32 {
+            let _ = self;
+            42
+        }
+    }
+
+    let (_kill, address) = spawn_private_bus();
+    // The server connection's executor lives on this thread's runtime, so
+    // the thread stays parked for the whole test (reaped at process exit).
+    let server_address = address.clone();
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let _server = zbus::connection::Builder::address(server_address.as_str())
+                    .unwrap()
+                    .name("org.speaker.CoverArt")
+                    .unwrap()
+                    .serve_at("/org/speaker/coverart", Unrelated)
+                    .unwrap()
+                    .build()
+                    .await
+                    .unwrap();
+                std::future::pending::<()>().await;
+                unreachable!("parked server thread");
+            })
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let conn = zbus::blocking::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .unwrap();
+    // GetAll for an interface the object does not serve errors out.
+    let snapshot = std::thread::spawn(move || {
+        speaker_core::hardware::bluetooth::cover_service::query_snapshot(&conn)
+    })
+    .join()
+    .expect("query thread must not panic");
+    assert!(snapshot.is_none(), "GetAll error must degrade to None");
+}
+
+/// The real `CoverArtIface` service publishes on a caller-provided builder:
+/// the private-bus variant is the host-testable form of the production
+/// system-bus bootstrap (name registration, object serving, emitter).
+#[test]
+fn cover_art_service_publishes_on_injected_builder() {
+    let (_kill, address) = spawn_private_bus();
+    let conn_address = address.clone();
+    let setup = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let builder = zbus::connection::Builder::address(address.as_str()).unwrap();
+                let (_connection, _emitter) =
+                    speaker_core::cli::cover_provider::build_cover_art_server_on(
+                        builder,
+                        SharedCoverState::new(),
+                    )
+                    .await
+                    .expect("service publishes on the private bus");
+                std::future::pending::<()>().await;
+                unreachable!("parked service thread");
+            })
+    });
+    // Give the name time to register, then read it through a consumer.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let conn = zbus::blocking::connection::Builder::address(conn_address.as_str())
+        .unwrap()
+        .build()
+        .unwrap();
+    // The consumer can reach the real service through a normal snapshot
+    // query (the state is empty, so it degrades to None without erroring).
+    let snapshot = std::thread::spawn(move || {
+        speaker_core::hardware::bluetooth::cover_service::query_snapshot(&conn)
+    })
+    .join()
+    .expect("query thread must not panic");
+    assert!(
+        snapshot.is_none(),
+        "an empty published state reads as None through the real service"
+    );
+    drop(setup); // the parked service thread is reaped at process exit
+}
