@@ -681,3 +681,62 @@ fn cover_art_service_publishes_on_injected_builder() {
     );
     drop(setup); // the parked service thread is reaped at process exit
 }
+
+/// The provider's cleared state must never be substituted with a cache file:
+/// the previous track's artwork is deliberately gone.
+#[test]
+fn resolve_cover_art_never_serves_cache_over_cleared_state() {
+    let h = Harness::new();
+    let addr = BtAddress::parse_str("AA:BB:CC:DD:EE:F1").expect("valid MAC");
+    // A stale cache file exists for the current handle, but the provider is
+    // running with an actively cleared (inactive) state.
+    let bytes = jpeg_fixture();
+    let path = h
+        .dir
+        .path()
+        .join("speaker-cover-AA_BB_CC_DD_EE_F1-5630701.jpg");
+    std::fs::File::create(&path)
+        .unwrap()
+        .write_all(&bytes)
+        .unwrap();
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630701".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        None,
+        "cleared published state must not fall back to the bare cache"
+    );
+}
+
+/// The provider actively clearing must not overwrite the consumer's last
+/// known state (the cleared artwork is deliberate; cache files stay off).
+#[test]
+fn resolve_cover_art_keeps_state_on_snapshot_fault() {
+    let h = Harness::new();
+    let addr = BtAddress::parse_str("AA:BB:CC:DD:EE:F1").expect("valid MAC");
+    let bytes = jpeg_fixture();
+    let path = h
+        .dir
+        .path()
+        .join("speaker-cover-AA_BB_CC_DD_EE_F1-5630702.jpg");
+    std::fs::File::create(&path)
+        .unwrap()
+        .write_all(&bytes)
+        .unwrap();
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630702".into()),
+        cover_art_path: Some("/last/known-good.jpg".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        Some("/last/known-good.jpg".into()),
+        "a cleared state must keep the last known state, not serve the cache"
+    );
+}

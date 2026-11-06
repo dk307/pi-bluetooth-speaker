@@ -30,15 +30,52 @@ pub struct CoverArtSnapshot {
     pub path: Box<str>,
 }
 
+/// What a `Properties.GetAll` against the cover-art service revealed.
+///
+/// The distinction matters for consumers: a genuine [`CoverSnapshot::Absent`]
+/// service is the only state where stale-independent fallbacks (e.g. the bare
+/// disk cache) are defensible; a [`CoverSnapshot::Fault`] means the truth is
+/// unknown and must not be substituted with a healthy-looking default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoverSnapshot {
+    /// The provider published an active image for this (device, handle).
+    Published(CoverArtSnapshot),
+    /// The provider is running and reported an empty (cleared) state.
+    Cleared,
+    /// The service is absent (bt-manager provider not running).
+    Absent,
+    /// The query failed (transport, permission, malformed reply): the
+    /// published truth is unknown.
+    Fault(Box<str>),
+}
+
+/// Reads the currently published cover-art snapshot state.
+///
+/// Distinguishes absence ([`CoverSnapshot::Absent`]) from transport faults
+/// ([`CoverSnapshot::Fault`]) and from an actively cleared state
+/// ([`CoverSnapshot::Cleared`]), per the "Distinguish D-Bus Absence from
+/// Transport Faults" rule; a fault is never masked as a healthy default.
+#[must_use]
+pub fn query_snapshot_state(conn: &zbus::blocking::Connection) -> CoverSnapshot {
+    query_snapshot_impl(conn)
+}
+
 /// Reads the currently published cover-art snapshot.
 ///
-/// Returns `None` when the service is absent (provider not running) or the
-/// published state is empty; transient transport faults also yield `None`
-/// (the caller simply retries on its next poll). Absence and transport
-/// faults are logged at different levels so a misconfigured appliance is
-/// diagnosable from journald alone.
+/// Convenience over [`query_snapshot_state`]: returns the snapshot when the
+/// provider published an active image, `None` otherwise (service absent,
+/// cleared state, or fault — the fault is logged there). Use
+/// [`query_snapshot_state`] when the distinction matters, e.g. before
+/// falling back to disk-cache lookups.
 #[must_use]
 pub fn query_snapshot(conn: &zbus::blocking::Connection) -> Option<CoverArtSnapshot> {
+    match query_snapshot_state(conn) {
+        CoverSnapshot::Published(snapshot) => Some(snapshot),
+        CoverSnapshot::Cleared | CoverSnapshot::Absent | CoverSnapshot::Fault(_) => None,
+    }
+}
+
+fn query_snapshot_impl(conn: &zbus::blocking::Connection) -> CoverSnapshot {
     use std::collections::HashMap;
     use zbus::zvariant::OwnedValue;
 
@@ -54,7 +91,7 @@ pub fn query_snapshot(conn: &zbus::blocking::Connection) -> Option<CoverArtSnaps
         Ok(proxy) => proxy,
         Err(e) => {
             log_query_failure("cannot build cover-art proxy", &e);
-            return None;
+            return CoverSnapshot::Fault(e.to_string().into());
         }
     };
     let reply = match proxy.call_method("GetAll", &(COVER_ART_INTERFACE,)) {
@@ -65,15 +102,15 @@ pub fn query_snapshot(conn: &zbus::blocking::Connection) -> Option<CoverArtSnaps
                     error = %e,
                     "cover-art service not available (bt-manager provider not running?)"
                 );
-            } else {
-                log_query_failure("cover-art property query failed", &e);
+                return CoverSnapshot::Absent;
             }
-            return None;
+            log_query_failure("cover-art property query failed", &e);
+            return CoverSnapshot::Fault(e.to_string().into());
         }
     };
     let Ok(properties) = reply.body().deserialize::<HashMap<String, OwnedValue>>() else {
         tracing::warn!(context = "cover-art GetAll returned an unexpected body");
-        return None;
+        return CoverSnapshot::Fault("unexpected GetAll body shape".into());
     };
     let property = |name: &str| {
         properties
@@ -84,13 +121,13 @@ pub fn query_snapshot(conn: &zbus::blocking::Connection) -> Option<CoverArtSnaps
         (property("Device"), property("Handle"), property("Path"))
     else {
         tracing::warn!(context = "cover-art snapshot misses properties");
-        return None;
+        return CoverSnapshot::Fault("published properties missing or non-string".into());
     };
     if handle.is_empty() {
         tracing::trace!("cover-art service has no published image");
-        return None;
+        return CoverSnapshot::Cleared;
     }
-    Some(CoverArtSnapshot {
+    CoverSnapshot::Published(CoverArtSnapshot {
         device: device.into(),
         handle: handle.into(),
         path: path.into(),

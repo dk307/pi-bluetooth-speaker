@@ -18,6 +18,7 @@ use zbus::blocking::Connection;
 use zbus::names::OwnedInterfaceName;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
+use crate::hardware::bluetooth::cover_service::CoverSnapshot;
 use crate::runtime::FromJoinError;
 
 use super::cover_art::{COVER_ART_CACHE_DIR, cover_art_cached_path_in};
@@ -2810,8 +2811,8 @@ pub fn resolve_cover_art_with(
     // snapshot mismatch below keeps the consumer from serving the stale
     // bytes in the interim (self-correcting on the next poll once the
     // provider republishes).
-    match crate::hardware::bluetooth::cover_service::query_snapshot(conn) {
-        Some(snapshot) => {
+    match crate::hardware::bluetooth::cover_service::query_snapshot_state(conn) {
+        CoverSnapshot::Published(snapshot) => {
             if snapshot.device.as_ref() == addr.to_string()
                 && snapshot.handle.as_ref() == handle.as_ref()
                 && std::path::Path::new(snapshot.path.as_ref()).is_file()
@@ -2825,9 +2826,19 @@ pub fn resolve_cover_art_with(
                 );
             }
         }
+        // The provider actively cleared (the track lost its artwork): never
+        // substitute the previous track's cache file.
+        CoverSnapshot::Cleared => {
+            tracing::debug!("cover-art service reported a cleared state");
+        }
+        // The truth is unknown (transport fault, malformed reply): keep the
+        // last known state instead of serving a possibly stale cache file.
+        CoverSnapshot::Fault(fault) => {
+            tracing::warn!(%fault, "cover-art snapshot query failed; keeping last known state");
+        }
         // Provider absent (bt-manager not running): the disk cache is the
         // only information available; serve it best-effort.
-        None => {
+        CoverSnapshot::Absent => {
             if let Some(path) = cover_art_cached_path_in(cache_dir, addr, handle) {
                 pb.cover_art_path = Some(path);
             }
