@@ -4,6 +4,8 @@
 # Reference: https://github.com/minikin/cargo-crap/blob/v0.9.0/docs/reference/config.md
 
 threshold = 30.0
+fail-above = false
+fail-regression = true
 missing = "pessimistic"
 uncovered-hints = true
 
@@ -13,6 +15,8 @@ exclude = [
     "**/build.rs",
 ]
 
+# Structural AST duplicate scan (advisory report table in PR comments/summary;
+# cargo-crap 0.9.0 gates on CRAP score regressions via `fail-regression`).
 [duplicates]
 enabled = true
 threshold = 0.82
