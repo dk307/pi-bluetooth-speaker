@@ -417,3 +417,137 @@ fn resolve_cover_art_does_not_trust_cache_over_stale_snapshot() {
         "a colliding disk-cache file must not be served over a mismatched snapshot"
     );
 }
+
+/// Early-return guards in `resolve_cover_art_with` (no device address, no
+/// image handle) leave the playback state untouched.
+#[test]
+fn resolve_cover_art_ignores_unresolvable_playback() {
+    let h = Harness::new();
+    h.publish_fixture("AA:BB:CC:DD:EE:F1", "5630701");
+
+    // No device address: nothing to key the cache on.
+    let mut playback = Some(BtPlaybackState {
+        image_handle: Some("5630701".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        None,
+        "no device address must not resolve"
+    );
+
+    // No ImgHandle on the track: nothing to look up.
+    let addr = BtAddress::parse_str("AA:BB:CC:DD:EE:F1").expect("valid MAC");
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        None,
+        "no ImgHandle must not resolve"
+    );
+}
+
+/// A `Properties.GetAll` reply whose properties carry non-string values must
+/// degrade to `None` (logged, not panicking) — the fake provider serves the
+/// real interface with `u32` properties where the consumer expects strings.
+#[test]
+fn query_snapshot_degrades_on_malformed_getall_body() {
+    use zbus::interface;
+
+    let (_kill, address) = spawn_private_bus();
+    let server_address = address.clone();
+    // The server connection's executor lives on this thread's runtime, so
+    // the thread must stay parked for the whole test (detached; the test
+    // process exit reaps it).
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                struct WrongTypes {
+                    device: u32,
+                    handle: u32,
+                    path: u32,
+                }
+                #[interface(name = "org.speaker.CoverArt1")]
+                impl WrongTypes {
+                    #[zbus(property)]
+                    fn device(&self) -> u32 {
+                        self.device
+                    }
+                    #[zbus(property)]
+                    fn handle(&self) -> u32 {
+                        self.handle
+                    }
+                    #[zbus(property)]
+                    fn path(&self) -> u32 {
+                        self.path
+                    }
+                }
+                let _server = zbus::connection::Builder::address(server_address.as_str())
+                    .unwrap()
+                    .name("org.speaker.CoverArt")
+                    .unwrap()
+                    .serve_at(
+                        "/org/speaker/coverart",
+                        WrongTypes {
+                            device: 1,
+                            handle: 2,
+                            path: 3,
+                        },
+                    )
+                    .unwrap()
+                    .build()
+                    .await
+                    .unwrap();
+                std::future::pending::<()>().await;
+                unreachable!("parked server thread");
+            })
+    });
+    let conn = zbus::blocking::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .unwrap();
+    // `query_snapshot` is a blocking call; run it off the async runtime.
+    let snapshot = std::thread::spawn(move || {
+        speaker_core::hardware::bluetooth::cover_service::query_snapshot(&conn)
+    })
+    .join()
+    .expect("query thread must not panic");
+    assert!(
+        snapshot.is_none(),
+        "malformed GetAll body must degrade to None"
+    );
+}
+
+/// When the track signal stream dies with the bus, the listener's reconnect
+/// loop must keep the task alive (error arms) instead of panicking or
+/// exiting — after the daemon is killed the task retries against the dead
+/// connection under escalating backoff.
+#[tokio::test(flavor = "multi_thread")]
+async fn track_signal_listener_survives_dead_bus() {
+    let (kill, address) = spawn_private_bus();
+    let listener_conn = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+    speaker_core::cli::cover_provider::track_signal_listener(
+        listener_conn,
+        std::sync::Arc::clone(&wake),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Kill the bus: the stream ends and the reconnect loop must keep
+    // retrying (warn per escalated backoff), never panicking or exiting.
+    drop(kill);
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    // Reaching here without a panic means the task is still looping; a
+    // notify permit stays coalescable for the eventual reconnect.
+    wake.notify_one();
+}

@@ -316,18 +316,141 @@ pub trait BipChannel: Send + Sync {
 /// [`RfcommBipChannel::with_known_channel`] skips the SDP lookup when the
 /// caller already knows the channel number (e.g. `BlueZ` published an RFCOMM
 /// channel in `MediaPlayer1.ObexPort`).
-#[derive(Debug, Clone, Copy, Default)]
+/// Physical-transport seam behind the [`BipChannel`] implementations.
+///
+/// Production always uses [`BluerSocketCore`] (real bluer sockets and real
+/// SDP); host tests inject a scripted core so the channel assembly logic —
+/// SDP-vs-known-channel selection, address construction, error mapping — is
+/// exercised without any Bluetooth hardware.
+#[async_trait::async_trait]
+pub(crate) trait BipSocketCore: Send + Sync {
+    /// SDP lookup of the BIP Image Pull RFCOMM channel (`None` when the
+    /// device publishes no such service record).
+    #[expect(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
+    )]
+    async fn sdp_bip_rfcomm_channel(&self, address: &str) -> Result<Option<u8>, BipError>;
+
+    /// Connects an RFCOMM stream to the given server channel.
+    #[expect(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
+    )]
+    async fn connect_rfcomm(&self, address: &BtAddress, channel: u8)
+    -> Result<BipStream, BipError>;
+
+    /// Connects an L2CAP (ERTM) stream to the given PSM.
+    #[expect(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
+    )]
+    async fn connect_l2cap(&self, address: &BtAddress, psm: u16) -> Result<BipStream, BipError>;
+}
+
+/// Production [`BipSocketCore`]: real bluer sockets and real SDP queries.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct BluerSocketCore;
+
+#[async_trait::async_trait]
+impl BipSocketCore for BluerSocketCore {
+    async fn sdp_bip_rfcomm_channel(&self, address: &str) -> Result<Option<u8>, BipError> {
+        bluesdp::query_rfcomm_channel(address, bluesdp::Uuid16(BIP_IMAGE_PULL_UUID16))
+            .await
+            .map_err(BipError::sdp_lookup)
+    }
+
+    async fn connect_rfcomm(
+        &self,
+        address: &BtAddress,
+        channel: u8,
+    ) -> Result<BipStream, BipError> {
+        let octets = *address.as_bytes();
+        let socket_addr = bip_socket_address(octets, channel);
+        tracing::debug!(socket = %socket_addr, "opening RFCOMM connection");
+        let stream = bluer::rfcomm::Stream::connect(socket_addr)
+            .await
+            .map_err(BipError::rfcomm_connect)?;
+        tracing::debug!(socket = %socket_addr, "RFCOMM connection established");
+        Ok(Box::new(stream) as BipStream)
+    }
+
+    async fn connect_l2cap(&self, address: &BtAddress, psm: u16) -> Result<BipStream, BipError> {
+        let canonical = address.to_string();
+        let octets = *address.as_bytes();
+        let started = Instant::now();
+        tracing::debug!(address = %canonical, psm, "opening L2CAP (ERTM) connection");
+        let socket = bluer::l2cap::Socket::<bluer::l2cap::Stream>::new_stream()
+            .map_err(l2cap_step_err("create socket"))?;
+        socket
+            .bind(bluer::l2cap::SocketAddr::any_br_edr())
+            .map_err(l2cap_step_err("bind local address"))?;
+        // SOCK_STREAM Classic channels default to ERTM (l2cap_sock.c
+        // `l2cap_sock_init`); `L2CAP_OPTIONS` is the correct knob for Classic
+        // BR/EDR channels and must be set before `connect()` rejects it. It
+        // advertises the large receive MTU the phone needs for few-packet
+        // image transfers; the BT_MODE sockopt (`set_flow_control`) rejects
+        // ERTM with EINVAL and cannot set an MTU at all.
+        request_l2cap_receive_mtu(&socket)
+            .map_err(l2cap_step_err("configure L2CAP receive MTU"))?;
+        let socket_addr =
+            bluer::l2cap::SocketAddr::new(bluer::Address(octets), bluer::AddressType::BrEdr, psm);
+        let stream = socket
+            .connect(socket_addr)
+            .await
+            .map_err(l2cap_step_err("connect"))?;
+        tracing::debug!(
+            address = %canonical,
+            psm,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "L2CAP connection established"
+        );
+        Ok(Box::new(stream) as BipStream)
+    }
+}
+
 pub struct RfcommBipChannel {
     known_channel: Option<u8>,
+    /// Physical-transport core (real bluer sockets in production).
+    core: std::sync::Arc<dyn BipSocketCore>,
+}
+
+impl Default for RfcommBipChannel {
+    fn default() -> Self {
+        Self {
+            known_channel: None,
+            core: std::sync::Arc::new(BluerSocketCore),
+        }
+    }
+}
+
+impl std::fmt::Debug for RfcommBipChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RfcommBipChannel")
+            .field("known_channel", &self.known_channel)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RfcommBipChannel {
     /// Creates a channel that skips the SDP lookup and connects directly to
     /// the given RFCOMM channel number.
+    ///
+    /// Not `const`: the default transport core is a heap-allocated `Arc`.
     #[must_use]
-    pub const fn with_known_channel(channel: u8) -> Self {
+    pub fn with_known_channel(channel: u8) -> Self {
         Self {
             known_channel: Some(channel),
+            core: std::sync::Arc::new(BluerSocketCore),
+        }
+    }
+
+    /// Creates a channel over an injected transport core (host tests).
+    #[must_use]
+    pub fn with_core(known_channel: Option<u8>, core: std::sync::Arc<dyn BipSocketCore>) -> Self {
+        Self {
+            known_channel,
+            core,
         }
     }
 }
@@ -336,7 +459,6 @@ impl RfcommBipChannel {
 impl BipChannel for RfcommBipChannel {
     async fn open(&self, address: &BtAddress) -> Result<BipStream, BipError> {
         let canonical = address.to_string();
-        let octets = *address.as_bytes();
         let started = Instant::now();
         let channel = if let Some(channel) = self.known_channel {
             tracing::debug!(
@@ -347,24 +469,10 @@ impl BipChannel for RfcommBipChannel {
             channel
         } else {
             tracing::debug!(address = %canonical, "SDP: querying BIP Image Pull service record");
-            let sdp_result =
-                bluesdp::query_rfcomm_channel(&canonical, bluesdp::Uuid16(BIP_IMAGE_PULL_UUID16))
-                    .await?;
+            let sdp_result = self.core.sdp_bip_rfcomm_channel(&canonical).await?;
             resolve_sdp_channel(&canonical, started.elapsed().as_millis() as u64, sdp_result)?
         };
-
-        let socket_addr = bip_socket_address(octets, channel);
-        tracing::debug!(socket = %socket_addr, "opening RFCOMM connection");
-        let stream = bluer::rfcomm::Stream::connect(socket_addr)
-            .await
-            .map_err(BipError::rfcomm_connect)?;
-        tracing::debug!(
-            socket = %socket_addr,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "RFCOMM connection established"
-        );
-
-        Ok(Box::new(stream) as BipStream)
+        self.core.connect_rfcomm(address, channel).await
     }
 }
 
@@ -374,17 +482,44 @@ impl BipChannel for RfcommBipChannel {
 /// `org.bluez.MediaPlayer1.ObexPort` instead of an RFCOMM channel; this
 /// backend connects with Enhanced Retransmission Mode, which the AVRCP
 /// cover-art profile requires for flow-controlled L2CAP transports.
-#[derive(Debug, Clone, Copy)]
 pub struct L2capBipChannel {
     /// L2CAP Protocol/Service Multiplexor published by the remote device.
     psm: u16,
+    /// Physical-transport core (real bluer sockets in production).
+    core: std::sync::Arc<dyn BipSocketCore>,
+}
+
+impl Default for L2capBipChannel {
+    fn default() -> Self {
+        Self {
+            psm: 0,
+            core: std::sync::Arc::new(BluerSocketCore),
+        }
+    }
+}
+
+impl std::fmt::Debug for L2capBipChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("L2capBipChannel")
+            .field("psm", &self.psm)
+            .finish_non_exhaustive()
+    }
 }
 
 impl L2capBipChannel {
     /// Creates a channel targeting a specific L2CAP PSM.
     #[must_use]
-    pub const fn new(psm: u16) -> Self {
-        Self { psm }
+    pub fn new(psm: u16) -> Self {
+        Self {
+            psm,
+            core: std::sync::Arc::new(BluerSocketCore),
+        }
+    }
+
+    /// Creates a channel over an injected transport core (host tests).
+    #[must_use]
+    pub fn with_core(psm: u16, core: std::sync::Arc<dyn BipSocketCore>) -> Self {
+        Self { psm, core }
     }
 }
 
@@ -507,40 +642,7 @@ fn cover_art_client<T: AsyncRead + AsyncWrite + Unpin>(stream: T) -> Client<T> {
 #[async_trait::async_trait]
 impl BipChannel for L2capBipChannel {
     async fn open(&self, address: &BtAddress) -> Result<BipStream, BipError> {
-        let canonical = address.to_string();
-        let octets = *address.as_bytes();
-        let started = Instant::now();
-        tracing::debug!(address = %canonical, psm = self.psm, "opening L2CAP (ERTM) connection");
-        let socket = bluer::l2cap::Socket::<bluer::l2cap::Stream>::new_stream()
-            .map_err(l2cap_step_err("create socket"))?;
-        socket
-            .bind(bluer::l2cap::SocketAddr::any_br_edr())
-            .map_err(l2cap_step_err("bind local address"))?;
-        // SOCK_STREAM Classic channels default to ERTM (l2cap_sock.c
-        // `l2cap_sock_init`); `L2CAP_OPTIONS` is the correct knob for Classic
-        // BR/EDR channels and must be set before `connect()` rejects it. It
-        // advertises the large receive MTU the phone needs for few-packet
-        // image transfers; the BT_MODE sockopt (`set_flow_control`) rejects
-        // ERTM with EINVAL and cannot set an MTU at all.
-        request_l2cap_receive_mtu(&socket)
-            .map_err(l2cap_step_err("configure L2CAP receive MTU"))?;
-        let socket_addr = bluer::l2cap::SocketAddr::new(
-            bluer::Address(octets),
-            bluer::AddressType::BrEdr,
-            self.psm,
-        );
-        let stream = socket
-            .connect(socket_addr)
-            .await
-            .map_err(l2cap_step_err("connect"))?;
-        tracing::debug!(
-            address = %canonical,
-            psm = self.psm,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "L2CAP connection established"
-        );
-
-        Ok(Box::new(stream) as BipStream)
+        self.core.connect_l2cap(address, self.psm).await
     }
 }
 
@@ -773,7 +875,6 @@ pub trait BipSessionKeeper: Send {
 ///
 /// The held [`Client`] owns the transport stream; dropping it closes the
 /// L2CAP/RFCOMM link and releases the remote cover-art session.
-#[derive(Default)]
 pub struct PersistentBipSession {
     session: Option<Client<BipStream>>,
     address: Option<BtAddress>,
@@ -781,7 +882,15 @@ pub struct PersistentBipSession {
     /// Session generation, bumped on every release/re-establish; see
     /// [`BipSessionKeeper::epoch`].
     epoch: u64,
+    /// Builds the physical channel for a transport. Production uses
+    /// [`bip_channel_for`] (real bluer sockets); host tests inject a factory
+    /// serving duplex OBEX streams.
+    channel_factory: ChannelFactory,
 }
+
+/// Builds a [`BipChannel`] for a transport (dependency-injection seam for
+/// [`PersistentBipSession`]).
+type ChannelFactory = Box<dyn Fn(&BipTransport) -> Box<dyn BipChannel> + Send>;
 
 impl fmt::Debug for PersistentBipSession {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -790,7 +899,36 @@ impl fmt::Debug for PersistentBipSession {
             .field("transport", &self.transport)
             .field("session_held", &self.session.is_some())
             .field("epoch", &self.epoch)
-            .finish()
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for PersistentBipSession {
+    fn default() -> Self {
+        Self {
+            session: None,
+            address: None,
+            transport: None,
+            epoch: 0,
+            channel_factory: Box::new(|transport| bip_channel_for(*transport)),
+        }
+    }
+}
+
+impl PersistentBipSession {
+    /// Creates a session over an injected channel factory (host tests); each
+    /// `ensure` call builds its channel through the factory.
+    #[must_use]
+    pub fn with_channel_factory(
+        factory: impl Fn(&BipTransport) -> Box<dyn BipChannel> + Send + 'static,
+    ) -> Self {
+        Self {
+            session: None,
+            address: None,
+            transport: None,
+            epoch: 0,
+            channel_factory: Box::new(factory),
+        }
     }
 }
 
@@ -814,7 +952,7 @@ impl BipSessionKeeper for PersistentBipSession {
         // session-scoped cached handle with it.
         self.release();
         let started = Instant::now();
-        let channel = bip_channel_for(*transport);
+        let channel = (self.channel_factory)(transport);
         tracing::debug!(
             address = %address.to_string(),
             ?transport,

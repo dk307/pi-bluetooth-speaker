@@ -521,3 +521,327 @@ const _: () = {
     assert!(OBEX_AOSP_MAX_PACKET_LENGTH < u16::MAX);
     assert!(OBEX_AOSP_MAX_PACKET_LENGTH >= obex_protocol::packet::MINIMUM_PACKET_LENGTH);
 };
+
+// ---------------------------------------------------------------------------
+// BipSocketCore dependency-injection tests: the channel assembly logic runs
+// against a scripted transport core, no Bluetooth hardware required.
+// ---------------------------------------------------------------------------
+
+/// Scripted [`BipSocketCore`] outcomes consumed front-to-back.
+#[derive(Debug, Clone, Copy)]
+enum CoreOutcome {
+    /// SDP resolves the given channel number.
+    SdpChannel(u8),
+    /// SDP finds no BIP service record.
+    SdpAbsent,
+    /// SDP transport lookup fails.
+    SdpError,
+    /// The connect succeeds with a duplex stream (paired with a server half).
+    ConnectOk,
+    /// The connect fails like a hardware connect would.
+    ConnectError,
+}
+
+struct ScriptedCore {
+    outcomes: std::sync::Mutex<std::collections::VecDeque<CoreOutcome>>,
+    requested_channels: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    requested_psms: std::sync::Arc<std::sync::Mutex<Vec<u16>>>,
+}
+
+/// Channels/PSMs requested against a [`ScriptedCore`], for assertions.
+#[derive(Clone)]
+struct ChannelCounters {
+    channels: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    psms: std::sync::Arc<std::sync::Mutex<Vec<u16>>>,
+}
+
+impl ChannelCounters {
+    fn channels(&self) -> Vec<u8> {
+        self.channels.lock().unwrap().clone()
+    }
+
+    fn psms(&self) -> Vec<u16> {
+        self.psms.lock().unwrap().clone()
+    }
+}
+
+impl ScriptedCore {
+    fn new(outcomes: &[CoreOutcome]) -> (Self, ChannelCounters) {
+        let channels = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let psms = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            Self {
+                outcomes: std::sync::Mutex::new(std::collections::VecDeque::from_iter(
+                    outcomes.iter().copied(),
+                )),
+                requested_channels: Arc::clone(&channels),
+                requested_psms: Arc::clone(&psms),
+            },
+            ChannelCounters { channels, psms },
+        )
+    }
+
+    fn next(&self, step: &'static str) -> CoreOutcome {
+        self.outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("no scripted outcome left for {step}"))
+    }
+}
+
+fn duplex_pair() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
+    tokio::io::duplex(16_384)
+}
+
+#[async_trait::async_trait]
+impl BipSocketCore for ScriptedCore {
+    async fn sdp_bip_rfcomm_channel(&self, _address: &str) -> Result<Option<u8>, BipError> {
+        match self.next("sdp") {
+            CoreOutcome::SdpChannel(channel) => Ok(Some(channel)),
+            CoreOutcome::SdpAbsent => Ok(None),
+            CoreOutcome::SdpError => Err(BipError::sdp_lookup(bluesdp::SdpError::Decode(
+                String::from("sdp down"),
+            ))),
+            CoreOutcome::ConnectOk | CoreOutcome::ConnectError => {
+                panic!("unexpected SDP outcome")
+            }
+        }
+    }
+
+    async fn connect_rfcomm(
+        &self,
+        _address: &BtAddress,
+        channel: u8,
+    ) -> Result<BipStream, BipError> {
+        self.requested_channels.lock().unwrap().push(channel);
+        match self.next("rfcomm connect") {
+            CoreOutcome::ConnectOk => {
+                let (client, _server) = duplex_pair();
+                Ok(Box::new(client) as BipStream)
+            }
+            CoreOutcome::ConnectError => Err(BipError::rfcomm_connect(std::io::Error::other(
+                "rfcomm down",
+            ))),
+            _ => panic!("unexpected connect outcome"),
+        }
+    }
+
+    async fn connect_l2cap(&self, _address: &BtAddress, psm: u16) -> Result<BipStream, BipError> {
+        self.requested_psms.lock().unwrap().push(psm);
+        match self.next("l2cap connect") {
+            CoreOutcome::ConnectOk => {
+                let (client, _server) = duplex_pair();
+                Ok(Box::new(client) as BipStream)
+            }
+            CoreOutcome::ConnectError => {
+                Err(BipError::l2cap_connect(std::io::Error::other("l2cap down")))
+            }
+            _ => panic!("unexpected connect outcome"),
+        }
+    }
+}
+
+fn test_address() -> BtAddress {
+    BtAddress::parse_str("AA:BB:CC:DD:EE:FF").expect("valid MAC")
+}
+
+#[tokio::test]
+async fn rfcomm_channel_with_known_channel_skips_sdp() {
+    let (core, counters) = ScriptedCore::new(&[CoreOutcome::ConnectOk]);
+    let channel = RfcommBipChannel::with_core(Some(27), Arc::new(core));
+    let address = test_address();
+    let _stream = channel.open(&address).await.expect("open succeeds");
+    assert_eq!(
+        counters.channels(),
+        vec![27],
+        "connects on the known channel"
+    );
+}
+
+#[tokio::test]
+async fn rfcomm_channel_resolves_sdp_then_connects_on_resolved_channel() {
+    let (core, counters) = ScriptedCore::new(&[CoreOutcome::SdpChannel(4), CoreOutcome::ConnectOk]);
+    let channel = RfcommBipChannel::with_core(None, Arc::new(core));
+    let _stream = channel.open(&test_address()).await.expect("open succeeds");
+    assert_eq!(
+        counters.channels(),
+        vec![4],
+        "connects on the SDP-resolved channel"
+    );
+}
+
+#[tokio::test]
+async fn rfcomm_channel_reports_absent_sdp_service_record() {
+    let (core, counters) = ScriptedCore::new(&[CoreOutcome::SdpAbsent]);
+    let channel = RfcommBipChannel::with_core(None, Arc::new(core));
+    let error = channel
+        .open(&test_address())
+        .await
+        .err()
+        .expect("no service record error");
+    assert!(error.is_service_not_found());
+    assert!(counters.channels().is_empty(), "never reaches a connect");
+}
+
+#[tokio::test]
+async fn rfcomm_channel_maps_sdp_transport_failure() {
+    let (core, _counters) = ScriptedCore::new(&[CoreOutcome::SdpError]);
+    let channel = RfcommBipChannel::with_core(None, Arc::new(core));
+    let error = channel
+        .open(&test_address())
+        .await
+        .err()
+        .expect("SDP error");
+    assert!(error.is_sdp_lookup());
+}
+
+#[tokio::test]
+async fn rfcomm_channel_maps_connect_failure() {
+    let (core, _counters) =
+        ScriptedCore::new(&[CoreOutcome::SdpChannel(4), CoreOutcome::ConnectError]);
+    let channel = RfcommBipChannel::with_core(None, Arc::new(core));
+    let error = channel
+        .open(&test_address())
+        .await
+        .err()
+        .expect("connect error");
+    assert!(error.is_rfcomm_connect());
+}
+
+#[tokio::test]
+async fn l2cap_channel_connects_to_advertised_psm() {
+    let (core, counters) = ScriptedCore::new(&[CoreOutcome::ConnectOk]);
+    let channel = L2capBipChannel::with_core(4097, Arc::new(core));
+    let _stream = channel.open(&test_address()).await.expect("open succeeds");
+    assert_eq!(counters.psms(), vec![4097]);
+}
+
+#[tokio::test]
+async fn l2cap_channel_maps_connect_failure() {
+    let (core, _counters) = ScriptedCore::new(&[CoreOutcome::ConnectError]);
+    let channel = L2capBipChannel::with_core(4097, Arc::new(core));
+    let error = channel
+        .open(&test_address())
+        .await
+        .err()
+        .expect("connect error");
+    assert!(error.is_l2cap_connect());
+}
+
+// ---------------------------------------------------------------------------
+// PersistentBipSession production logic over injected duplex OBEX streams.
+// ---------------------------------------------------------------------------
+
+/// Channel mock whose `open` pairs the client half of a fresh duplex with a
+/// spawned stub OBEX server.
+struct ServingChannel;
+
+#[async_trait::async_trait]
+impl BipChannel for ServingChannel {
+    async fn open(&self, _address: &BtAddress) -> Result<BipStream, BipError> {
+        let (client, server) = duplex_pair();
+        let stub = new_stub(Ok(body_bytes(140, 0xAB)));
+        tokio::spawn(async move {
+            let mut inner = stub.lock().await;
+            let mut s =
+                Server::new(server, HandlerProxy(&mut inner)).with_single_response_mode(true);
+            let _ = s.run().await;
+        });
+        Ok(Box::new(client) as BipStream)
+    }
+}
+
+/// Channel mock answering every open with a scripted error.
+struct FailingChannel(std::sync::Arc<dyn Fn() -> BipError + Send + Sync>);
+
+#[async_trait::async_trait]
+impl BipChannel for FailingChannel {
+    async fn open(&self, _address: &BtAddress) -> Result<BipStream, BipError> {
+        Err((self.0)())
+    }
+}
+
+#[tokio::test]
+async fn persistent_session_establishes_and_fetches_over_one_channel() {
+    let session = PersistentBipSession::with_channel_factory(|_| Box::new(ServingChannel));
+    let mut session = session;
+    let address = test_address();
+    session
+        .ensure(&address, &BipTransport::L2capPsm(4097))
+        .await
+        .expect("session establishes");
+    assert_eq!(session.epoch(), 1, "first establish bumps the generation");
+    let body = session
+        .fetch_image(
+            &address,
+            &BipTransport::L2capPsm(4097),
+            BipImageType::Native,
+            "5630701",
+        )
+        .await
+        .expect("GET succeeds over the established session");
+    assert_eq!(body, body_bytes(140, 0xAB));
+    session
+        .keepalive()
+        .await
+        .expect("keepalive over the live session");
+    session.release();
+    assert_eq!(session.epoch(), 2, "release bumps the generation");
+    assert!(
+        session
+            .ensure(&address, &BipTransport::L2capPsm(4097))
+            .await
+            .is_ok(),
+        "re-establishment after release works"
+    );
+}
+
+#[tokio::test]
+async fn persistent_session_reestablishes_on_transport_change() {
+    let session = PersistentBipSession::with_channel_factory(|_| Box::new(ServingChannel));
+    let mut session = session;
+    let address = test_address();
+    session
+        .ensure(&address, &BipTransport::L2capPsm(4097))
+        .await
+        .expect("first session");
+    session
+        .ensure(&address, &BipTransport::L2capPsm(4099))
+        .await
+        .expect("re-established on the new PSM");
+    assert_eq!(
+        session.epoch(),
+        3,
+        "transport change bumps the generation (release of the held session + re-establish)"
+    );
+    let body = session
+        .fetch_image(
+            &address,
+            &BipTransport::L2capPsm(4099),
+            BipImageType::Native,
+            "5630701",
+        )
+        .await
+        .expect("fetch over the re-established session");
+    assert_eq!(body, body_bytes(140, 0xAB));
+}
+
+#[tokio::test]
+async fn persistent_session_maps_connect_rejection_to_image_rejected() {
+    let session = PersistentBipSession::with_channel_factory(|_| {
+        Box::new(FailingChannel(std::sync::Arc::new(|| {
+            BipError::new(BipErrorKind::ImageRejected {
+                operation: "OBEX CONNECT",
+                response_code: 0x43,
+            })
+        }))) as Box<dyn BipChannel>
+    });
+    let mut session = session;
+    let error = session
+        .ensure(&test_address(), &BipTransport::L2capPsm(4097))
+        .await
+        .expect_err("connect rejected");
+    assert!(error.is_image_rejected());
+    assert_eq!(error.response_code(), Some(0x43));
+}
