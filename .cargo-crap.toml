@@ -1,0 +1,21 @@
+# ==============================================================================
+# cargo-crap Configuration — Change Risk Anti-Patterns (CRAP) & Duplicate Scan
+# ==============================================================================
+# Reference: https://github.com/minikin/cargo-crap/blob/v0.9.0/docs/reference/config.md
+
+threshold = 30.0
+fail-above = false
+fail-regression = true
+missing = "pessimistic"
+uncovered-hints = true
+
+# Exclude Cargo build scripts (not instrumented in runtime test LCOV reports).
+exclude = [
+    "build.rs",
+    "**/build.rs",
+]
+
+[duplicates]
+enabled = true
+threshold = 0.82
+min-nodes = 20
