@@ -610,18 +610,28 @@ pub fn init_shell_with_config(
 
 #[cfg(feature = "ui")]
 fn apply_initial_bt_state(shell: &AppShell, bt: &speaker_bluetooth::BluetoothDevice) {
-    let preferred = bt
-        .playback_state()
-        .ok()
-        .flatten()
-        .inspect(|pb| shell.apply_bluetooth_playback(pb))
-        .and_then(|pb| pb.device_address);
-    if let Ok(ref snapshot) = bt.link_snapshot() {
-        let details = crate::ui::BtLinkDetails::select(snapshot, preferred);
-        if let Some(ref pcm) = details.pcm {
-            shell.apply_pcm_stream(pcm);
+    let preferred = match bt.playback_state() {
+        Ok(Some(pb)) => {
+            shell.apply_bluetooth_playback(&pb);
+            pb.device_address
         }
-        shell.apply_bt_link_details(&details);
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to query initial Bluetooth playback state");
+            None
+        }
+    };
+    match bt.link_snapshot() {
+        Ok(ref snapshot) => {
+            let details = crate::ui::BtLinkDetails::select(snapshot, preferred);
+            if let Some(ref pcm) = details.pcm {
+                shell.apply_pcm_stream(pcm);
+            }
+            shell.apply_bt_link_details(&details);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to query initial Bluetooth link snapshot");
+        }
     }
 }
 
@@ -1030,8 +1040,12 @@ impl BtMonitorState {
             self.pcm_settle = None;
             self.last_pcms = None;
         }
-        let Ok(snapshot) = bt.link_snapshot() else {
-            return;
+        let snapshot = match bt.link_snapshot() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to query Bluetooth link snapshot");
+                return;
+            }
         };
         if self.last_pcms.as_ref() != Some(&snapshot.pcms) {
             if let Some(active) = speaker_bluetooth::select_active_pcm(&snapshot.pcms) {

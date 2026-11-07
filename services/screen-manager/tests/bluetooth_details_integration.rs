@@ -167,6 +167,7 @@ fn link_details_apply_and_clear() {
     shell.apply_bt_link_details(&details);
 
     let w = shell.window();
+    assert!(w.get_bt_connected());
     assert_eq!(w.get_bt_device_address().as_str(), "AA:BB:CC:DD:EE:FF");
     assert_eq!(
         w.get_bt_link_text().as_str(),
@@ -187,6 +188,7 @@ fn link_details_apply_and_clear() {
     mock.set_adapter(None);
     let cleared = BtLinkDetails::select(&bt.link_snapshot().expect("snapshot"), None);
     shell.apply_bt_link_details(&cleared);
+    assert!(!w.get_bt_connected());
     assert_eq!(w.get_bt_device_address().as_str(), "—");
     assert_eq!(w.get_bt_link_text().as_str(), "Waiting for connection");
     assert_eq!(w.get_bt_rssi_text().as_str(), "");

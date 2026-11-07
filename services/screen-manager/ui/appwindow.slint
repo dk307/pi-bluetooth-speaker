@@ -78,6 +78,7 @@ export component MainWindow inherits Window {
     }
 
     // Bluetooth details (Tab 2) text, pushed from the bt-monitor worker snapshot.
+    in-out property <bool> bt_connected: false;
     in-out property <string> bt_device_address: "—";
     in-out property <string> bt_link_text: "Waiting for connection";
     in-out property <string> bt_rssi_text: "";
@@ -169,6 +170,7 @@ export component MainWindow inherits Window {
             right_peak_ratio: root.right_peak_ratio;
             track_or_device: root.track_or_device;
             stream_codec: root.stream_codec;
+            bt_connected: root.bt_connected;
             bt_device_address: root.bt_device_address;
             bt_link_text: root.bt_link_text;
             bt_rssi_text: root.bt_rssi_text;

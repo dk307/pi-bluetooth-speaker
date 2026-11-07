@@ -792,6 +792,10 @@ impl AppShell {
     /// Applies Bluetooth connection details to the details screen (change-guarded).
     pub fn apply_bt_link_details(&self, details: &BtLinkDetails) {
         let w = &self.window;
+        let connected = details.device.is_some();
+        if w.get_bt_connected() != connected {
+            w.set_bt_connected(connected);
+        }
         macro_rules! guarded {
             ($get:ident, $set:ident, $text:expr) => {
                 let text = $text;
