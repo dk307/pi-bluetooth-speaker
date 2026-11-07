@@ -1809,3 +1809,152 @@ fn seek_offset_us_converts_absolute_ms_to_relative_us() {
     assert_eq!(seek_offset_us(45_000, 60_000), -15_000_000);
     assert_eq!(seek_offset_us(30_000, 30_000), 0);
 }
+
+#[test]
+fn dbus_unknown_method_and_bluealsa_helpers_coverage() {
+    use speaker_core::hardware::bluetooth_test_helpers::is_unknown_method_error;
+    use zbus::names::OwnedErrorName;
+
+    let method_unk = zbus::Error::MethodError(
+        OwnedErrorName::try_from("org.freedesktop.DBus.Error.UnknownMethod").unwrap(),
+        Some("unknown".into()),
+        zbus::Message::method_call("/org/bluealsa", "GetCodecs")
+            .unwrap()
+            .build(&())
+            .unwrap(),
+    );
+    assert!(is_unknown_method_error(&method_unk));
+
+    let method_obj = zbus::Error::MethodError(
+        OwnedErrorName::try_from("org.freedesktop.DBus.Error.UnknownObject").unwrap(),
+        None,
+        zbus::Message::method_call("/org/bluealsa", "GetCodecs")
+            .unwrap()
+            .build(&())
+            .unwrap(),
+    );
+    assert!(is_unknown_method_error(&method_obj));
+
+    let method_other = zbus::Error::MethodError(
+        OwnedErrorName::try_from("org.freedesktop.DBus.Error.AccessDenied").unwrap(),
+        None,
+        zbus::Message::method_call("/org/bluealsa", "GetCodecs")
+            .unwrap()
+            .build(&())
+            .unwrap(),
+    );
+    assert!(!is_unknown_method_error(&method_other));
+
+    let fdo_unk = zbus::Error::FDO(Box::new(zbus::fdo::Error::UnknownMethod("m".into())));
+    assert!(is_unknown_method_error(&fdo_unk));
+    let fdo_obj = zbus::Error::FDO(Box::new(zbus::fdo::Error::UnknownObject("o".into())));
+    assert!(is_unknown_method_error(&fdo_obj));
+    let fdo_other = zbus::Error::FDO(Box::new(zbus::fdo::Error::Failed("f".into())));
+    assert!(!is_unknown_method_error(&fdo_other));
+    assert!(!is_unknown_method_error(&zbus::Error::Address(
+        "addr".into()
+    )));
+
+    assert!(
+        DbusClient::map_bluealsa_objects_result(Ok(ManagedObjects::new()))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        DbusClient::map_bluealsa_objects_result(Err(zbus::fdo::Error::ServiceUnknown(
+            "org.bluealsa".into()
+        )))
+        .unwrap()
+        .is_empty()
+    );
+    assert!(
+        DbusClient::map_bluealsa_objects_result(Err(zbus::fdo::Error::Failed("boom".into())))
+            .unwrap_err()
+            .is_dbus()
+    );
+
+    assert!(
+        DbusClient::map_get_codecs_error("/pcm0", fdo_unk)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        DbusClient::map_get_codecs_error("/pcm0", fdo_other)
+            .unwrap_err()
+            .is_dbus()
+    );
+
+    let mut codec_map: HashMap<String, HashMap<String, OwnedValue>> = HashMap::new();
+    codec_map.insert("ldac".into(), HashMap::new());
+    codec_map.insert("SBC".into(), HashMap::new());
+    codec_map.insert("aptX".into(), HashMap::new());
+    let sorted = DbusClient::decode_pcm_codecs_map("/pcm0", Ok(codec_map)).unwrap();
+    assert_eq!(
+        sorted.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+        vec!["SBC", "aptX", "ldac"]
+    );
+    assert!(
+        DbusClient::decode_pcm_codecs_map("/pcm0", Err(zbus::Error::Address("bad".into())))
+            .unwrap_err()
+            .is_dbus()
+    );
+}
+
+#[test]
+fn dbus_player_path_toggle_and_seek_helpers_coverage() {
+    assert!(
+        DbusClient::extract_player_path(None)
+            .unwrap_err()
+            .is_no_active_player()
+    );
+    let mut pb = BtPlaybackState::default();
+    assert!(
+        DbusClient::extract_player_path(Some(pb.clone()))
+            .unwrap_err()
+            .is_no_active_player()
+    );
+    assert!(
+        DbusClient::resolve_toggle_target(None)
+            .unwrap_err()
+            .is_no_active_player()
+    );
+    assert!(
+        DbusClient::resolve_toggle_target(Some(pb.clone()))
+            .unwrap_err()
+            .is_no_active_player()
+    );
+    assert!(
+        DbusClient::resolve_seek_target(None, 5_000)
+            .unwrap_err()
+            .is_no_active_player()
+    );
+    assert!(
+        DbusClient::resolve_seek_target(Some(pb.clone()), 5_000)
+            .unwrap_err()
+            .is_no_active_player()
+    );
+
+    pb.player_path = Some("/org/bluez/hci0/dev_AA/player0".into());
+    pb.status = "playing".into();
+    pb.position_ms = 2_000;
+    assert_eq!(
+        DbusClient::extract_player_path(Some(pb.clone()))
+            .unwrap()
+            .as_ref(),
+        "/org/bluez/hci0/dev_AA/player0"
+    );
+    let (path, method, next_playing) = DbusClient::resolve_toggle_target(Some(pb.clone())).unwrap();
+    assert_eq!(path.as_ref(), "/org/bluez/hci0/dev_AA/player0");
+    assert_eq!(method, "Pause");
+    assert!(!next_playing);
+
+    pb.status = "paused".into();
+    let (_, method, next_playing) = DbusClient::resolve_toggle_target(Some(pb.clone())).unwrap();
+    assert_eq!(method, "Play");
+    assert!(next_playing);
+
+    let (seek_path, cur_ms, offset_us) = DbusClient::resolve_seek_target(Some(pb), 5_500).unwrap();
+    assert_eq!(seek_path.as_ref(), "/org/bluez/hci0/dev_AA/player0");
+    assert_eq!(cur_ms, 2_000);
+    assert_eq!(offset_us, 3_500_000);
+}

@@ -978,7 +978,8 @@ pub fn is_no_such_unit_error(err: &zbus::Error) -> bool {
 }
 
 /// Detects `UnknownMethod`/`UnknownObject` D-Bus error replies.
-fn is_unknown_method_error(err: &zbus::Error) -> bool {
+#[must_use]
+pub fn is_unknown_method_error(err: &zbus::Error) -> bool {
     match err {
         zbus::Error::MethodError(name, _, _) => {
             let s = name.as_str();
@@ -1521,30 +1522,70 @@ impl DbusClient {
         Ok((adapter, devices, playback))
     }
 
-    pub(crate) fn call_player_method(
-        &self,
-        player_path: Option<&str>,
-        method: &str,
-    ) -> Result<(), BtError> {
-        let path = if let Some(p) = player_path {
-            p.to_string()
-        } else {
-            let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
-                .destination("org.bluez")
-                .and_then(|b| b.path("/"))
-                .and_then(zbus::blocking::proxy::Builder::build)?;
-            let objects = proxy.get_managed_objects()?;
-            let (_, _, playback) = Self::parse_bluez_all(&objects, None)?;
-            playback
-                .and_then(|p| p.player_path)
-                .map(|p| p.to_string())
-                .ok_or_else(|| BtError::no_active_player("no active MediaPlayer1 found on D-Bus"))?
-        };
+    /// Extracts the active `MediaPlayer1` object path from a parsed playback state.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if `playback` is `None` or has no object path.
+    pub fn extract_player_path(playback: Option<BtPlaybackState>) -> Result<Box<str>, BtError> {
+        playback
+            .and_then(|p| p.player_path)
+            .ok_or_else(|| BtError::no_active_player("no active MediaPlayer1 found on D-Bus"))
+    }
 
+    /// Resolves the target D-Bus object path, method name (`"Play"` / `"Pause"`),
+    /// and resulting playing state for a toggle operation.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if no active player or player path is present.
+    pub fn resolve_toggle_target(
+        playback: Option<BtPlaybackState>,
+    ) -> Result<(Box<str>, &'static str, bool), BtError> {
+        let playback = playback
+            .ok_or_else(|| BtError::no_active_player("no active MediaPlayer1 found on D-Bus"))?;
+        let next_playing = !playback.is_playing();
+        let method = if playback.is_playing() {
+            "Pause"
+        } else {
+            "Play"
+        };
+        let path = playback
+            .player_path
+            .ok_or_else(|| BtError::no_active_player("active MediaPlayer1 has no object path"))?;
+        Ok((path, method, next_playing))
+    }
+
+    /// Resolves the target D-Bus object path, current position (ms), and relative
+    /// microsecond offset for a `MediaPlayer1.Seek(i64)` operation.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if no active player or player path is present.
+    pub fn resolve_seek_target(
+        playback: Option<BtPlaybackState>,
+        position_ms: u32,
+    ) -> Result<(Box<str>, u32, i64), BtError> {
+        let playback = playback
+            .ok_or_else(|| BtError::no_active_player("no active MediaPlayer1 found on D-Bus"))?;
+        let current_ms = playback.position_ms;
+        let path = playback
+            .player_path
+            .ok_or_else(|| BtError::no_active_player("active MediaPlayer1 has no object path"))?;
+        let offset_us = super::transport::seek_offset_us(position_ms, current_ms);
+        Ok((path, current_ms, offset_us))
+    }
+
+    fn call_player_on_path<B>(&self, path: &str, method: &str, body: &B) -> Result<(), BtError>
+    where
+        B: serde::Serialize + zbus::zvariant::DynamicType,
+    {
         let proxy =
             zbus::blocking::Proxy::new(&self.conn(), "org.bluez", path, "org.bluez.MediaPlayer1")?;
-        proxy.call_method(method, &())?;
+        proxy.call_method(method, body)?;
         Ok(())
+    }
+
+    pub(crate) fn call_player_method(&self, method: &str) -> Result<(), BtError> {
+        let path = Self::extract_player_path(self.playback_state()?)?;
+        self.call_player_on_path(&path, method, &())
     }
 
     /// Seeks to an absolute position by translating the target into the relative
@@ -1552,33 +1593,19 @@ impl DbusClient {
     /// microseconds; a positive offset moves forward, a negative offset moves
     /// backward).
     ///
-    /// The current position is read from a fresh managed-objects snapshot (not
-    /// via [`DbusClient::playback_state`]) so that seeking never triggers an
-    /// OBEX cover-art fetch.
+    /// The current position is read from a fresh managed-objects snapshot via
+    /// [`DbusClient::playback_state`] so that seeking never triggers an OBEX
+    /// cover-art fetch.
     ///
     /// # Errors
     /// Returns [`BtError`] if D-Bus communication fails or no active player exists.
     pub(crate) fn player_seek(&self, position_ms: u32) -> Result<(), BtError> {
-        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
-            .destination("org.bluez")
-            .and_then(|b| b.path("/"))
-            .and_then(zbus::blocking::proxy::Builder::build)?;
-        let objects = proxy.get_managed_objects()?;
-        let (_, _, playback) = Self::parse_bluez_all(&objects, None)?;
-        let playback = playback
-            .ok_or_else(|| BtError::no_active_player("no active MediaPlayer1 found on D-Bus"))?;
-        let path = playback
-            .player_path
-            .as_deref()
-            .ok_or_else(|| BtError::no_active_player("active MediaPlayer1 has no object path"))?;
-
-        let offset_us = super::transport::seek_offset_us(position_ms, playback.position_ms);
-        let player =
-            zbus::blocking::Proxy::new(&self.conn(), "org.bluez", path, "org.bluez.MediaPlayer1")?;
-        player.call_method("Seek", &(offset_us,))?;
+        let (path, current_ms, offset_us) =
+            Self::resolve_seek_target(self.playback_state()?, position_ms)?;
+        self.call_player_on_path(&path, "Seek", &(offset_us,))?;
         tracing::debug!(
             position_ms,
-            current_ms = playback.position_ms,
+            current_ms,
             offset_us,
             "seek issued via BlueZ MediaPlayer1.Seek"
         );
@@ -1601,52 +1628,82 @@ impl DbusClient {
     }
 
     pub(crate) fn player_toggle(&self) -> Result<bool, BtError> {
-        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
-            .destination("org.bluez")
-            .and_then(|b| b.path("/"))
-            .and_then(zbus::blocking::proxy::Builder::build)?;
-        let objects = proxy.get_managed_objects()?;
-        let (_, _, playback) = Self::parse_bluez_all(&objects, None)?;
-        let playback = playback
-            .ok_or_else(|| BtError::no_active_player("no active MediaPlayer1 found on D-Bus"))?;
-        let next_playing = !playback.is_playing();
-        let method = if playback.is_playing() {
-            "Pause"
-        } else {
-            "Play"
-        };
-        self.call_player_method(playback.player_path.as_deref(), method)?;
+        let (path, method, next_playing) = Self::resolve_toggle_target(self.playback_state()?)?;
+        self.call_player_on_path(&path, method, &())?;
         Ok(next_playing)
+    }
+
+    /// Maps the result of `org.bluealsa` `GetManagedObjects` into a [`ManagedObjects`]
+    /// snapshot, treating service absence as an empty object map.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] on transport or permission errors unrelated to service absence.
+    pub fn map_bluealsa_objects_result(
+        res: Result<ManagedObjects, zbus::fdo::Error>,
+    ) -> Result<ManagedObjects, BtError> {
+        match res {
+            Ok(objs) => Ok(objs),
+            Err(e) if is_service_absent_fdo_error(&e) => Ok(ManagedObjects::new()),
+            Err(e) => Err(BtError::from(e)),
+        }
+    }
+
+    fn fetch_bluealsa_objects(&self) -> Result<ManagedObjects, BtError> {
+        let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
+            .destination("org.bluealsa")
+            .and_then(|b| b.path("/org/bluealsa"))
+            .and_then(zbus::blocking::proxy::Builder::build);
+        match proxy {
+            Ok(p) => Self::map_bluealsa_objects_result(p.get_managed_objects()),
+            Err(e) if is_service_absent_error(&e) => Ok(ManagedObjects::new()),
+            Err(e) => Err(BtError::from(e)),
+        }
     }
 
     pub(crate) fn query_bluealsa(
         &self,
         devices: &[BtDevice],
     ) -> Result<Box<[BlueAlsaPcm]>, BtError> {
-        let proxy = match zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
-            .destination("org.bluealsa")
-            .and_then(|b| b.path("/org/bluealsa"))
-            .and_then(zbus::blocking::proxy::Builder::build)
-        {
-            Ok(p) => p,
-            Err(e) if is_service_absent_error(&e) => return Ok(Box::default()),
-            Err(e) => return Err(BtError::from(e)),
-        };
+        let objects = self.fetch_bluealsa_objects()?;
+        let mut pcms = Self::parse_bluealsa_objects(&objects, devices);
+        for pcm in &mut pcms {
+            pcm.available_codecs = Self::query_pcm_codecs(&self.conn(), &pcm.pcm_path)?;
+        }
+        Ok(pcms)
+    }
 
-        let objects = match proxy.get_managed_objects() {
-            Ok(objs) => objs,
-            Err(e) if is_service_absent_fdo_error(&e) => return Ok(Box::default()),
-            Err(e) => return Err(BtError::from(e)),
-        };
+    /// Maps a `GetCodecs` D-Bus method error, treating `UnknownMethod` / `UnknownObject`
+    /// (older `BlueALSA` versions) as an empty codec list.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] for non-`UnknownMethod` D-Bus transport or permission faults.
+    pub fn map_get_codecs_error(
+        pcm_path: &str,
+        err: zbus::Error,
+    ) -> Result<Box<[Box<str>]>, BtError> {
+        if is_unknown_method_error(&err) {
+            Ok(Box::default())
+        } else {
+            Err(BtError::dbus_with_source(
+                format!("GetCodecs call for {pcm_path}"),
+                err,
+            ))
+        }
+    }
 
-        let pcms = Self::parse_bluealsa_objects(&objects, devices)
-            .into_iter()
-            .map(|mut pcm| {
-                pcm.available_codecs = Self::query_pcm_codecs(&self.conn(), &pcm.pcm_path)?;
-                Ok(pcm)
-            })
-            .collect::<Result<Vec<_>, BtError>>()?;
-        Ok(pcms.into_boxed_slice())
+    /// Extracts and sorts codec names from a deserialized `GetCodecs` D-Bus reply map.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if reply body deserialization failed.
+    pub fn decode_pcm_codecs_map(
+        pcm_path: &str,
+        codecs: Result<HashMap<String, HashMap<String, OwnedValue>>, zbus::Error>,
+    ) -> Result<Box<[Box<str>]>, BtError> {
+        let codecs = codecs
+            .map_err(|e| BtError::dbus_with_source(format!("GetCodecs reply for {pcm_path}"), e))?;
+        let mut names: Vec<Box<str>> = codecs.into_keys().map(Into::into).collect();
+        names.sort();
+        Ok(names.into_boxed_slice())
     }
 
     /// Queries available codecs for a PCM via the `GetCodecs()` D-Bus method.
@@ -1658,25 +1715,10 @@ impl DbusClient {
     fn query_pcm_codecs(conn: &Connection, pcm_path: &str) -> Result<Box<[Box<str>]>, BtError> {
         let proxy = zbus::blocking::Proxy::new(conn, "org.bluealsa", pcm_path, "org.bluealsa.PCM1")
             .map_err(|e| BtError::dbus_with_source(format!("codec proxy for {pcm_path}"), e))?;
-
-        let reply = match proxy.call_method("GetCodecs", &()) {
-            Ok(reply) => reply,
-            Err(e) if is_unknown_method_error(&e) => return Ok(Box::default()),
-            Err(e) => {
-                return Err(BtError::dbus_with_source(
-                    format!("GetCodecs call for {pcm_path}"),
-                    e,
-                ));
-            }
-        };
-        let codecs = reply
-            .body()
-            .deserialize::<HashMap<String, HashMap<String, OwnedValue>>>()
-            .map_err(|e| BtError::dbus_with_source(format!("GetCodecs reply for {pcm_path}"), e))?;
-
-        let mut names: Vec<Box<str>> = codecs.into_keys().map(Into::into).collect();
-        names.sort();
-        Ok(names.into_boxed_slice())
+        match proxy.call_method("GetCodecs", &()) {
+            Ok(reply) => Self::decode_pcm_codecs_map(pcm_path, reply.body().deserialize()),
+            Err(e) => Self::map_get_codecs_error(pcm_path, e),
+        }
     }
 
     pub fn parse_bluealsa_objects(
@@ -2583,7 +2625,7 @@ impl BluetoothDevice {
     pub fn player_play(&self) -> Result<(), BtError> {
         match &*self.backend {
             Backend::Mock(mock) => mock.player_play(),
-            Backend::Dbus(dbus) => dbus.call_player_method(None, "Play"),
+            Backend::Dbus(dbus) => dbus.call_player_method("Play"),
         }
     }
 
@@ -2594,7 +2636,7 @@ impl BluetoothDevice {
     pub fn player_pause(&self) -> Result<(), BtError> {
         match &*self.backend {
             Backend::Mock(mock) => mock.player_pause(),
-            Backend::Dbus(dbus) => dbus.call_player_method(None, "Pause"),
+            Backend::Dbus(dbus) => dbus.call_player_method("Pause"),
         }
     }
 
@@ -2618,7 +2660,7 @@ impl BluetoothDevice {
     pub fn player_next(&self) -> Result<(), BtError> {
         match &*self.backend {
             Backend::Mock(mock) => mock.player_next(),
-            Backend::Dbus(dbus) => dbus.call_player_method(None, "Next"),
+            Backend::Dbus(dbus) => dbus.call_player_method("Next"),
         }
     }
 
@@ -2629,7 +2671,7 @@ impl BluetoothDevice {
     pub fn player_previous(&self) -> Result<(), BtError> {
         match &*self.backend {
             Backend::Mock(mock) => mock.player_previous(),
-            Backend::Dbus(dbus) => dbus.call_player_method(None, "Previous"),
+            Backend::Dbus(dbus) => dbus.call_player_method("Previous"),
         }
     }
 
@@ -2742,7 +2784,7 @@ pub mod test_helpers {
     use super::{BlueAlsaPcm, BtDevice, BtError};
     pub use super::{
         DbusClient, ManagedObjects, is_no_such_unit_error, is_service_absent_error,
-        is_service_absent_fdo_error, parse_hciconfig_version,
+        is_service_absent_fdo_error, is_unknown_method_error, parse_hciconfig_version,
     };
     pub use crate::hardware::bluetooth::transport::format_volume_bytes;
     use crate::runtime::FromJoinError;

@@ -380,19 +380,7 @@ impl BipSocketCore for BluerSocketCore {
         let octets = *address.as_bytes();
         let started = Instant::now();
         tracing::debug!(address = %canonical, psm, "opening L2CAP (ERTM) connection");
-        let socket = bluer::l2cap::Socket::<bluer::l2cap::Stream>::new_stream()
-            .map_err(l2cap_step_err("create socket"))?;
-        socket
-            .bind(bluer::l2cap::SocketAddr::any_br_edr())
-            .map_err(l2cap_step_err("bind local address"))?;
-        // SOCK_STREAM Classic channels default to ERTM (l2cap_sock.c
-        // `l2cap_sock_init`); `L2CAP_OPTIONS` is the correct knob for Classic
-        // BR/EDR channels and must be set before `connect()` rejects it. It
-        // advertises the large receive MTU the phone needs for few-packet
-        // image transfers; the BT_MODE sockopt (`set_flow_control`) rejects
-        // ERTM with EINVAL and cannot set an MTU at all.
-        request_l2cap_receive_mtu(&socket)
-            .map_err(l2cap_step_err("configure L2CAP receive MTU"))?;
+        let socket = open_configured_l2cap_socket()?;
         let socket_addr =
             bluer::l2cap::SocketAddr::new(bluer::Address(octets), bluer::AddressType::BrEdr, psm);
         let stream = socket
@@ -407,6 +395,22 @@ impl BipSocketCore for BluerSocketCore {
         );
         Ok(Box::new(stream) as BipStream)
     }
+}
+
+fn open_configured_l2cap_socket() -> Result<bluer::l2cap::Socket<bluer::l2cap::Stream>, BipError> {
+    let socket = bluer::l2cap::Socket::<bluer::l2cap::Stream>::new_stream()
+        .map_err(l2cap_step_err("create socket"))?;
+    socket
+        .bind(bluer::l2cap::SocketAddr::any_br_edr())
+        .map_err(l2cap_step_err("bind local address"))?;
+    // SOCK_STREAM Classic channels default to ERTM (l2cap_sock.c
+    // `l2cap_sock_init`); `L2CAP_OPTIONS` is the correct knob for Classic
+    // BR/EDR channels and must be set before `connect()` rejects it. It
+    // advertises the large receive MTU the phone needs for few-packet
+    // image transfers; the BT_MODE sockopt (`set_flow_control`) rejects
+    // ERTM with EINVAL and cannot set an MTU at all.
+    request_l2cap_receive_mtu(&socket).map_err(l2cap_step_err("configure L2CAP receive MTU"))?;
+    Ok(socket)
 }
 
 pub struct RfcommBipChannel {

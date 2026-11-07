@@ -464,6 +464,16 @@ fn amp_device_live_and_latched_error_methods() {
     assert!(device.read_live_errors().unwrap().is_clear());
     assert!(device.read_latched_errors().unwrap().is_clear());
     device.clear_latched_errors().unwrap();
+
+    let decoded = AmpStatus::from_raw_registers([0x02, 0x08, 0x02, 0x05, 0x05, 0x08]);
+    assert_eq!(decoded.power_mode, PowerModeProfile::Pmp2);
+    assert!(decoded.live_errors.overcurrent_protect());
+    assert!(decoded.latched_errors.undervoltage_pvdd());
+    assert_eq!(decoded.audio_in.format, AudioInputFormat::StandardI2s);
+    assert_eq!(decoded.dcu_monitor.ch0, DcuChannelStatus::Standby);
+
+    assert_eq!(AmpStatus::eh_clear_pulse_sequence(0xFF), [0xFB, 0xFF, 0xFB]);
+    assert_eq!(AmpStatus::eh_clear_pulse_sequence(0x00), [0x00, 0x04, 0x00]);
 }
 
 #[tokio::test]
