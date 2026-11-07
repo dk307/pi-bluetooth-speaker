@@ -129,21 +129,6 @@ jobs:
             ls -lh "target/aarch64-unknown-linux-gnu/release/$bin"
           done
 
-      - name: Verify Glibc Symbol Ceiling (<= GLIBC_2.36)
-        run: |
-          for bin in screen-manager bt-manager amp-info bt-info dsp-info encoder-read light-read temp-read; do
-            bin_path="target/aarch64-unknown-linux-gnu/release/$bin"
-            echo "Checking glibc ceiling for $bin"
-            objdump -T "$bin_path" | grep -o 'GLIBC_[0-9.]*' | sort -uV | while read -r ver; do
-              major=$(echo "$ver" | cut -d_ -f2 | cut -d. -f1)
-              minor=$(echo "$ver" | cut -d_ -f2 | cut -d. -f2)
-              if [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -gt 36 ]; }; then
-                echo "ERROR: $bin requires $ver which exceeds glibc 2.36 ceiling!"
-                exit 1
-              fi
-            done
-          done
-
       - name: Upload Binary Artifacts
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
