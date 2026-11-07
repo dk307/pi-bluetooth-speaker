@@ -171,13 +171,7 @@ export component NowPlayingView inherits Rectangle {
     in property <bool> has_cover_art: false;
     in property <image> cover_image;
     in property <bool> transport_available: root.duration_ms > 0 || root.is_playing || (root.track_title != "" && root.track_title != "Waiting for Bluetooth Connection...");
-    in-out property <bool> scrubbing: false;
-    property <float> scrub_ratio: 0.0;
     property <float> last_toggle_t: -1000.0;
-
-    pure function format_scrub_time(secs: int) -> string {
-        return (secs / 60 < 10 ? "0" : "") + Math.floor(secs / 60) + ":" + (Math.mod(secs, 60) < 10 ? "0" : "") + Math.mod(secs, 60);
-    }
     // Marquee scroll rate in ticks per second (30 or 60; default 60). One shared
     // 16.65 ms timer advances `marquee_clock` by one scroll step every
     // `step_frames` triggers, so both marquees scroll in lockstep and the render
@@ -230,7 +224,6 @@ export component NowPlayingView inherits Rectangle {
     callback toggle_play_pause();
     callback next_track();
     callback previous_track();
-    callback seek(float);
 
     HorizontalLayout {
         padding: 16px;
@@ -329,12 +322,12 @@ export component NowPlayingView inherits Rectangle {
                 }
             }
 
-            // Playback progress scrubber (Thick bar + large draggable knob, 48px touch target)
+            // Playback progress bar (Read-only, sleek audiophile pill)
             HorizontalLayout {
                 spacing: 16px;
 
                 Text {
-                    text: root.scrubbing ? root.format_scrub_time(Math.round(root.duration_ms * root.scrub_ratio / 1000)) : root.position_text;
+                    text: root.position_text;
                     font-size: 18px;
                     font-weight: 800;
                     color: Theme.active.text_primary;
@@ -345,62 +338,26 @@ export component NowPlayingView inherits Rectangle {
 
                 Rectangle {
                     horizontal-stretch: 1;
-                    height: 48px;
+                    height: 24px;
                     background: transparent;
 
                     // Background track (Vertically centered)
-                    Rectangle {
+                    track := Rectangle {
                         x: 0px;
                         y: (parent.height - self.height) / 2;
                         width: parent.width;
-                        height: 17px;
+                        height: 10px;
                         background: #1c2430;
-                        border-radius: 8.5px;
+                        border-radius: 5px;
+                        clip: true;
 
                         // Filled played position bar
                         Rectangle {
                             x: 0px;
                             y: 0px;
-                            width: parent.width * Math.max(0.0, Math.min(1.0, root.scrubbing ? root.scrub_ratio : root.progress_ratio));
+                            width: root.duration_ms > 0 ? (parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio))) : 0px;
                             height: parent.height;
                             background: Theme.active.primary_accent;
-                            border-radius: 8.5px;
-                        }
-                    }
-
-                    // Scrubber handle knob (Vertically centered in parent container)
-                    Rectangle {
-                        x: Math.max(0px, Math.min(parent.width - self.width, parent.width * Math.max(0.0, Math.min(1.0, root.scrubbing ? root.scrub_ratio : root.progress_ratio)) - self.width / 2));
-                        y: (parent.height - self.height) / 2;
-                        width: 29px;
-                        height: 29px;
-                        border-radius: 14.5px;
-                        background: Theme.active.text_primary;
-                        border-width: 3px;
-                        border-color: Theme.active.primary_accent;
-                    }
-
-                    scrubber_touch := TouchArea {
-                        width: 100%;
-                        height: 100%;
-                        enabled: root.duration_ms > 0;
-
-                        pointer-event(event) => {
-                            if (event.kind == PointerEventKind.down) {
-                                root.scrubbing = true;
-                                root.scrub_ratio = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
-                            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
-                                if (root.scrubbing) {
-                                    root.scrubbing = false;
-                                    root.seek(root.scrub_ratio);
-                                }
-                            }
-                        }
-
-                        moved => {
-                            if (root.scrubbing) {
-                                root.scrub_ratio = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
-                            }
                         }
                     }
                 }

@@ -274,7 +274,7 @@ fn touch_viewport_golden_hit_testing_play_pause_and_skip() {
 }
 
 #[test]
-fn touch_viewport_scrubber_drag_physics_and_seek_on_release() {
+fn touch_viewport_progress_bar_is_read_only() {
     let fb = Framebuffer::new_mocked().0;
     let window = fb.init_platform().expect("Failed to initialize platform");
 
@@ -289,29 +289,17 @@ fn touch_viewport_scrubber_drag_physics_and_seek_on_release() {
     shell.set_track_metadata("Sultans of Swing", "Dire Straits", "Dire Straits");
     shell.set_playback_state(true, 10_000, 200_000);
 
-    // Scrubber bar center is approx Y: 245 in the right column (X spans ~440 to ~720)
-    // 1. Pointer Down at 50% along the scrubber track (X: 580, Y: 245)
+    // Progress bar center is approx Y: 245 in the right column (X spans ~440 to ~720)
+    // 1. Pointer Down at 50% along the progress track (X: 580, Y: 245)
     window.dispatch_event(WindowEvent::PointerPressed {
         position: LogicalPosition::new(580.0, 245.0),
         button: PointerEventButton::Left,
     });
 
-    // While held down, no seek command should be enqueued yet!
-    assert!(
-        commands.drain().is_empty(),
-        "Pointer down alone must not fire a seek command"
-    );
-
-    // 2. Drag finger along the scrubber track to 75% position
+    // 2. Drag finger along the progress track to 75% position
     window.dispatch_event(WindowEvent::PointerMoved {
         position: LogicalPosition::new(650.0, 245.0),
     });
-
-    // Still dragging: no seek command enqueued
-    assert!(
-        commands.drain().is_empty(),
-        "Pointer move during drag must not fire continuous seek commands"
-    );
 
     // 3. Pointer Up (Release)
     window.dispatch_event(WindowEvent::PointerReleased {
@@ -320,21 +308,10 @@ fn touch_viewport_scrubber_drag_physics_and_seek_on_release() {
     });
     window.dispatch_event(WindowEvent::PointerExited);
 
-    // Exactly ONE seek command should be enqueued upon release!
+    // Progress bar is read-only: NO seek command must be enqueued!
     let drained = commands.drain();
-    assert_eq!(
-        drained.len(),
-        1,
-        "Releasing the scrubber must enqueue exactly one seek command"
+    assert!(
+        drained.is_empty(),
+        "Read-only progress bar must not enqueue any seek commands on touch/drag/release"
     );
-    match drained[0] {
-        TransportCommand::Seek(pos) => {
-            // Target position should be approximately 75% of 200,000ms (~130,000 - ~170,000ms)
-            assert!(
-                pos > 100_000 && pos < 190_000,
-                "Seek target {pos}ms should match dragged position"
-            );
-        }
-        ref other => panic!("Expected Seek command, got {other:?}"),
-    }
 }
