@@ -1,4 +1,30 @@
 //! GPIO and board header pin abstractions and range-checked newtypes.
+//!
+//! Provides strongly-typed, range-validated newtypes for the Raspberry Pi 3
+//! Model B 40-pin header pins and Broadcom BCM GPIO numbers (`0..=27`).
+//!
+//! # Subsystem Architecture
+//! - [`BcmPin`]: Strongly typed Broadcom GPIO channel (`0..=27`) mapped to the
+//!   Broadcom BCM2837 `SoC` registers.
+//! - [`PhysicalPin`]: Physical board pin identifier (`1..=40`) corresponding to
+//!   the physical P1 header positions on the Raspberry Pi 3.
+//! - [`PinError`]: Diagnostic error capturing illegal pin numbers and backtraces.
+//!
+//! # Safety & Validation Invariants
+//! Physical pins outside `1..=40` or BCM pins outside `0..=27` cannot be
+//! instantiated without returning a [`PinError`], preventing out-of-bounds GPIO
+//! sysfs/cdev access or physical short circuits during peripheral initialization.
+//!
+//! # Usage Example
+//! ```rust
+//! use speaker_hardware::pins::{BcmPin, PhysicalPin};
+//!
+//! let bcm = BcmPin::new(23).expect("valid BCM pin");
+//! assert_eq!(bcm.get(), 23);
+//!
+//! let phys = PhysicalPin::new(16).expect("valid header pin");
+//! assert_eq!(phys.get(), 16);
+//! ```
 
 use std::backtrace::{Backtrace, BacktraceStatus};
 use std::fmt::{self, Display, Formatter};

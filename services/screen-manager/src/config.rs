@@ -197,15 +197,25 @@ impl CoreConfig {
     /// (`/etc/speaker-core/config.json`) if it exists on disk.
     #[must_use]
     pub fn resolve_path(override_path: Option<&Path>) -> PathBuf {
+        Self::resolve_path_with(override_path, Path::exists)
+    }
+
+    /// Resolves the configuration file path with an injectable existence predicate
+    /// for hermetic testing across host environments.
+    #[must_use]
+    pub fn resolve_path_with<F>(override_path: Option<&Path>, exists: F) -> PathBuf
+    where
+        F: Fn(&Path) -> bool,
+    {
         if let Some(path) = override_path {
             path.to_path_buf()
         } else {
             let primary = Path::new(DEFAULT_CONFIG_PATH);
-            if primary.exists() {
+            if exists(primary) {
                 primary.to_path_buf()
             } else {
                 let fallback = Path::new(FALLBACK_CONFIG_PATH);
-                if fallback.exists() {
+                if exists(fallback) {
                     fallback.to_path_buf()
                 } else {
                     primary.to_path_buf()

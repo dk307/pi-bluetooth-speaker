@@ -896,12 +896,13 @@ fn dsp_info_cli_argument_parsing_and_stats() {
     use std::time::Duration;
 
     use speaker_common::diag::{CliParse, OutputFormat};
+    use speaker_common::systemd::ServiceState;
     use speaker_diagnostics::cli::dsp::{
         CliOptions, DspStats, parse_cli_args_from, print_session_summary, print_usage,
     };
     use speaker_dsp::{
         DEFAULT_DSP_HOST, DEFAULT_DSP_PORT, DspChannelLevels, DspHost, DspPort, DspStatus,
-        ProcessingState, ServiceState, StopReason,
+        ProcessingState, StopReason,
     };
 
     print_usage("dsp-info-test");

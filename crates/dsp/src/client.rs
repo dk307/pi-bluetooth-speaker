@@ -25,7 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use speaker_common::runtime::FromJoinError;
-use speaker_common::systemd::{ServiceState, parse_systemd_state};
+use speaker_common::systemd::{ServiceState, probe_systemd_service};
 
 /// Default `CamillaDSP` WebSocket host address.
 pub const DEFAULT_DSP_HOST: &str = "127.0.0.1";
@@ -1367,78 +1367,6 @@ pub fn format_dbfs_meter(dbfs: f32, width: usize) -> String {
 pub fn format_load_meter(load_pct: f32, width: usize) -> String {
     let ratio = load_pct.clamp(0.0, 100.0) / 100.0;
     meter_bar(ratio, width)
-}
-
-/// Reports whether a D-Bus error indicates that a queried systemd unit was not found.
-fn is_no_such_unit_error(err: &zbus::Error) -> bool {
-    match err {
-        zbus::Error::MethodError(name, _, _) => {
-            let s = name.as_str();
-            s == "org.freedesktop.systemd1.NoSuchUnit"
-                || s == "org.freedesktop.systemd1.UnknownUnit"
-                || s.ends_with(".NoSuchUnit")
-                || s.ends_with(".UnknownUnit")
-        }
-        _ => false,
-    }
-}
-
-/// Probes systemd for a service unit state using D-Bus, adhering to M-MOCKABLE-SYSCALLS
-/// and distinguishing unit absence (`NoSuchUnit`) from degradation/failure.
-fn probe_systemd_service(unit_name: &str) -> ServiceState {
-    let Ok(conn) = zbus::blocking::Connection::system() else {
-        return ServiceState::Failed;
-    };
-    let Ok(manager) = SystemdManagerProxyBlocking::new(&conn) else {
-        return ServiceState::Failed;
-    };
-    match manager.get_unit(unit_name) {
-        Ok(path) => {
-            let unit = match SystemdUnitProxyBlocking::builder(&conn)
-                .path(path)
-                .and_then(zbus::blocking::proxy::Builder::build)
-            {
-                Ok(u) => u,
-                Err(ref e) if is_no_such_unit_error(e) => {
-                    return ServiceState::NotFound;
-                }
-                Err(_) => return ServiceState::Failed,
-            };
-            let Ok(active) = unit.active_state() else {
-                return ServiceState::Failed;
-            };
-            let Ok(load) = unit.load_state() else {
-                return ServiceState::Failed;
-            };
-            parse_systemd_state(&active, &load)
-        }
-        Err(ref e) if is_no_such_unit_error(e) => ServiceState::NotFound,
-        Err(_) => ServiceState::Failed,
-    }
-}
-
-#[zbus::proxy(
-    default_service = "org.freedesktop.systemd1",
-    default_path = "/org/freedesktop/systemd1",
-    interface = "org.freedesktop.systemd1.Manager",
-    gen_async = false,
-    blocking_name = "SystemdManagerProxyBlocking"
-)]
-trait SystemdManager {
-    fn get_unit(&self, name: &str) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
-}
-
-#[zbus::proxy(
-    default_service = "org.freedesktop.systemd1",
-    interface = "org.freedesktop.systemd1.Unit",
-    gen_async = false,
-    blocking_name = "SystemdUnitProxyBlocking"
-)]
-trait SystemdUnit {
-    #[zbus(property)]
-    fn active_state(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn load_state(&self) -> zbus::Result<String>;
 }
 
 #[cfg(feature = "test-util")]

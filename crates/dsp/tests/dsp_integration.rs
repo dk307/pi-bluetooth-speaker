@@ -3,10 +3,10 @@
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
+use speaker_common::systemd::ServiceState;
 use speaker_dsp::{
     DEFAULT_DSP_HOST, DEFAULT_DSP_PORT, DspChannelLevels, DspDevice, DspHost, DspPort, DspStatus,
-    ProcessingState, ServiceState, StopReason, dsp_test_helpers, format_dbfs_meter,
-    format_load_meter,
+    ProcessingState, StopReason, dsp_test_helpers, format_dbfs_meter, format_load_meter,
 };
 
 #[test]

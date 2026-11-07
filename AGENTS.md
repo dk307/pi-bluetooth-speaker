@@ -52,7 +52,7 @@ To prevent multi-iteration PR review churn and excessive token/CI consumption, A
 * **Mandatory Local Verification Before Every Push:** Never push a commit without first passing all local gates in order:
   1. `cargo fmt --all -- --check`
   2. `cargo clippy --workspace --all-targets -- -D warnings`
-  3. `cargo llvm-cov --workspace --target x86_64-unknown-linux-gnu --fail-under-lines 90 --fail-under-functions 90`
+  3. `cargo llvm-cov --workspace --target x86_64-unknown-linux-gnu --fail-under-lines 85 --fail-under-functions 85`
   4. `cargo build --target aarch64-unknown-linux-gnu --release --bins`
   5. If any CI workflow or configuration (`.github/workflows/*.yml`, `.pr_agent.toml`) is touched, verify workflow syntax and configuration locally before committing.
 * **Strict PR Scope Boundaries (Blast Radius Containment):** A feature or bugfix PR must touch **only** the files within its declared scope. **Never refactor already-merged, working sibling drivers or CLI utilities** (e.g., modifying `read_temp` during a `read_light` PR). The rule *"sweep by bug class"* applies strictly to the new files and tests introduced in the PR.

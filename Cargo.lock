@@ -4801,6 +4801,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zbus",
 ]
 
 [[package]]
@@ -4828,7 +4829,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
- "zbus",
 ]
 
 [[package]]

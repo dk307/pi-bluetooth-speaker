@@ -11,7 +11,7 @@ pub use connection::{
     BCM43438_FIRMWARE_PATH, BCM43438_UART_BAUD_RATE, BT_ADDRESS_OCTETS, BluetoothControllerInfo,
     BluetoothDevice, BluetoothDeviceMock, BluetoothHardwareInfo, BluetoothServices,
     BluetoothStatus, BluezSnapshot, BtAdapter, BtAddress, BtDevice, BtError, DEFAULT_BT_ADAPTER,
-    ServiceState, resolve_cover_art_with,
+    resolve_cover_art_with,
 };
 
 #[cfg(feature = "test-util")]

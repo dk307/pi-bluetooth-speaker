@@ -131,8 +131,8 @@ impl std::str::FromStr for BtAddress {
     }
 }
 
-/// Linux system service execution state.
-pub use speaker_common::systemd::{ServiceState, parse_systemd_state};
+pub use speaker_common::systemd::is_no_such_unit_error;
+use speaker_common::systemd::{ServiceState, SystemdManagerProxyBlocking, check_systemd_unit};
 
 /// Operational status of required Bluetooth daemon services.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -741,30 +741,6 @@ impl FromJoinError for BtError {
 // ============================================================================
 
 #[zbus::proxy(
-    default_service = "org.freedesktop.systemd1",
-    default_path = "/org/freedesktop/systemd1",
-    interface = "org.freedesktop.systemd1.Manager",
-    gen_async = false,
-    blocking_name = "SystemdManagerProxyBlocking"
-)]
-trait SystemdManager {
-    fn get_unit(&self, name: &str) -> zbus::Result<OwnedObjectPath>;
-}
-
-#[zbus::proxy(
-    default_service = "org.freedesktop.systemd1",
-    interface = "org.freedesktop.systemd1.Unit",
-    gen_async = false,
-    blocking_name = "SystemdUnitProxyBlocking"
-)]
-trait SystemdUnit {
-    #[zbus(property)]
-    fn active_state(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn load_state(&self) -> zbus::Result<String>;
-}
-
-#[zbus::proxy(
     default_service = "org.bluez",
     interface = "org.bluez.Adapter1",
     gen_async = false,
@@ -925,25 +901,6 @@ fn get_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Box<
             Some(bytes.into_boxed_slice())
         }
         _ => None,
-    }
-}
-
-/// Reports whether the D-Bus error means the queried systemd unit does not exist.
-#[must_use]
-pub fn is_no_such_unit_error(err: &zbus::Error) -> bool {
-    match err {
-        zbus::Error::MethodError(name, _, _) => {
-            let s = name.as_str();
-            s == "org.freedesktop.systemd1.NoSuchUnit"
-                || s == "org.freedesktop.systemd1.UnknownUnit"
-                || s.ends_with(".NoSuchUnit")
-                || s.ends_with(".UnknownUnit")
-        }
-        zbus::Error::FDO(fdo_err) => matches!(**fdo_err, zbus::fdo::Error::UnknownObject(_)),
-        other => {
-            let s = other.to_string();
-            s.contains("NoSuchUnit") || s.contains("UnknownUnit")
-        }
     }
 }
 
@@ -1216,23 +1173,7 @@ impl DbusClient {
         manager: &SystemdManagerProxyBlocking<'_>,
         name: &str,
     ) -> Result<ServiceState, BtError> {
-        match manager.get_unit(name) {
-            Ok(path) => {
-                let unit = match SystemdUnitProxyBlocking::builder(&self.conn())
-                    .path(path)
-                    .and_then(zbus::blocking::proxy::Builder::build)
-                {
-                    Ok(u) => u,
-                    Err(e) if is_no_such_unit_error(&e) => return Ok(ServiceState::NotFound),
-                    Err(e) => return Err(BtError::from(e)),
-                };
-                let active = unit.active_state()?;
-                let load = unit.load_state()?;
-                Ok(Self::parse_systemd_state(&active, &load))
-            }
-            Err(e) if is_no_such_unit_error(&e) => Ok(ServiceState::NotFound),
-            Err(e) => Err(BtError::from(e)),
-        }
+        check_systemd_unit(&self.conn(), manager, name).map_err(BtError::from)
     }
 
     #[must_use]

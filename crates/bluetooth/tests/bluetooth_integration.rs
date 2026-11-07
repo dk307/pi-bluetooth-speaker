@@ -7,10 +7,10 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use speaker_bluetooth::bluetooth_test_helpers::{DbusClient, ManagedObjects};
 use speaker_bluetooth::{
     BlueAlsaPcm, BluetoothControllerInfo, BluetoothDevice, BluetoothHardwareInfo,
-    BluetoothServices, BtAddress, BtDevice, BtError, BtPlaybackState, ServiceState,
-    bluetooth_test_helpers, decode_pcm_format, format_duration_ms, seek_offset_us,
-    validate_bip_handle,
+    BluetoothServices, BtAddress, BtDevice, BtError, BtPlaybackState, bluetooth_test_helpers,
+    decode_pcm_format, format_duration_ms, seek_offset_us, validate_bip_handle,
 };
+use speaker_common::systemd::ServiceState;
 
 #[test]
 fn address_validation_and_parsing() {

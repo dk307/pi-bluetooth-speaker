@@ -247,8 +247,18 @@ fn load_ignores_path_extension_for_json_format() {
 #[test]
 fn resolve_path_uses_override_and_default() {
     assert_eq!(
-        CoreConfig::resolve_path(None),
+        CoreConfig::resolve_path_with(None, |_| false),
         PathBuf::from(speaker_common::diag::DEFAULT_CONFIG_PATH)
+    );
+    assert_eq!(
+        CoreConfig::resolve_path_with(None, |p| p
+            == Path::new(speaker_common::diag::DEFAULT_CONFIG_PATH)),
+        PathBuf::from(speaker_common::diag::DEFAULT_CONFIG_PATH)
+    );
+    assert_eq!(
+        CoreConfig::resolve_path_with(None, |p| p
+            == Path::new(speaker_common::diag::FALLBACK_CONFIG_PATH)),
+        PathBuf::from(speaker_common::diag::FALLBACK_CONFIG_PATH)
     );
     assert_eq!(
         CoreConfig::resolve_path(Some(Path::new("/tmp/custom.json"))),
