@@ -480,6 +480,7 @@ fn run_app_headless_executes_successfully() {
     CoreConfig {
         theme: Some(screen_manager::ui::ThemePreset::Peppy),
         marquee_fps: screen_manager::config::MarqueeFps::FPS_30,
+        ..CoreConfig::default()
     }
     .save(&cfg_path)
     .expect("save config");
@@ -856,4 +857,39 @@ fn publish_device_gone_clears_cover() {
         "cover must clear on disconnect"
     );
     assert!(cover.path.is_none());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn run_render_loop_with_devices_polls_rotary_encoder_and_faults_gracefully() {
+    use screen_manager::daemon::run_render_loop_with_devices;
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use slint::ComponentHandle;
+    use speaker_bluetooth::TransportCommandQueue;
+    use speaker_hardware::EncoderDevice;
+
+    let (mut fb, _) = Framebuffer::new_mocked();
+    let window = fb.init_platform().unwrap();
+    let main_window = MainWindow::new().unwrap();
+    let shell = AppShell::new(main_window);
+    shell.set_volume(50.0);
+    shell.window().show().unwrap();
+    fb.render_frame(&window).unwrap();
+
+    let (enc, enc_mock) = EncoderDevice::new_mocked();
+    enc_mock.simulate_rotation(speaker_hardware::RotationDirection::Clockwise, 2);
+    let commands = TransportCommandQueue::new();
+
+    run_render_loop_with_devices(
+        &mut fb,
+        &window,
+        &shell,
+        None,
+        &commands,
+        Some(1),
+        None,
+        Some(&enc),
+    );
+    assert!((shell.volume() - 54.0).abs() < 1e-4);
+    assert!(shell.is_volume_hud_visible());
 }

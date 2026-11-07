@@ -7,20 +7,107 @@
 //!
 //! Follows Microsoft Pragmatic Rust Guidelines (`M-SERVICES-CLONE`, `M-STRONG-TYPES`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt::{self, Debug, Formatter};
 
 use slint::ComponentHandle;
+
+use crate::config::{
+    CoreConfig, DEFAULT_VOLUME_HUD_FADE_MS, DEFAULT_VOLUME_HUD_TIMEOUT_MS,
+    DEFAULT_VOLUME_STEP_PERCENT,
+};
 
 use super::framebuffer::MarqueeRowSpec;
 use super::generated::{MainWindow, MarqueeCompose, Theme};
 use super::marquee::{MarqueeStripCache, MarqueeTypography, StripRequest};
 use super::theme::ThemePreset;
 
+/// Tracks cumulative [`speaker_hardware::EncoderStatus`] counters and translates
+/// quadrature detents and push-switch presses into UI volume and mute actions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EncoderVolumeTracker {
+    clockwise: u64,
+    counter_clockwise: u64,
+    presses: u64,
+}
+
+impl EncoderVolumeTracker {
+    /// Creates a new tracker initialized at zero counts.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            clockwise: 0,
+            counter_clockwise: 0,
+            presses: 0,
+        }
+    }
+
+    /// Creates a tracker pre-seeded from an initial [`speaker_hardware::EncoderStatus`] snapshot.
+    #[must_use]
+    pub const fn seeded(status: &speaker_hardware::EncoderStatus) -> Self {
+        Self {
+            clockwise: status.cw_count,
+            counter_clockwise: status.ccw_count,
+            presses: status.press_count,
+        }
+    }
+
+    /// Applies any delta between the previous counters and `status` to `shell`.
+    ///
+    /// Returns `true` if any rotary detent or switch press occurred.
+    pub fn apply_status(
+        &mut self,
+        status: &speaker_hardware::EncoderStatus,
+        shell: &AppShell,
+    ) -> bool {
+        let up_steps = status.cw_count.saturating_sub(self.clockwise);
+        let down_steps = status.ccw_count.saturating_sub(self.counter_clockwise);
+        let press_delta = status.press_count.saturating_sub(self.presses);
+        self.clockwise = status.cw_count;
+        self.counter_clockwise = status.ccw_count;
+        self.presses = status.press_count;
+
+        let up_detents = i32::try_from(up_steps).unwrap_or(i32::MAX);
+        let down_detents = i32::try_from(down_steps).unwrap_or(i32::MAX);
+        let net_detents = up_detents.saturating_sub(down_detents);
+
+        if net_detents != 0 {
+            let _ = shell.apply_volume_delta(net_detents);
+        } else if up_steps > 0 {
+            shell.show_volume_hud();
+        }
+
+        if press_delta > 0 {
+            if press_delta % 2 == 1 {
+                let _ = shell.toggle_mute_and_show_hud();
+            } else {
+                shell.show_volume_hud();
+            }
+        }
+
+        up_steps > 0 || down_steps > 0 || press_delta > 0
+    }
+
+    /// Polls `encoder` and applies any counter deltas to `shell`.
+    ///
+    /// # Errors
+    /// Propagates [`speaker_hardware::EncoderError`] if reading the encoder status fails.
+    pub fn poll_and_apply(
+        &mut self,
+        encoder: &speaker_hardware::EncoderDevice,
+        shell: &AppShell,
+    ) -> Result<bool, speaker_hardware::EncoderError> {
+        let status = encoder.read_status()?;
+        Ok(self.apply_status(&status, shell))
+    }
+}
+
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
     strips: RefCell<MarqueeStripCache>,
+    volume_step_percent: Cell<u8>,
+    has_initial_pcm_seed: Cell<bool>,
 }
 
 impl Debug for AppShell {
@@ -39,11 +126,116 @@ impl AppShell {
         let shell = Self {
             window,
             strips: RefCell::new(MarqueeStripCache::default()),
+            volume_step_percent: Cell::new(DEFAULT_VOLUME_STEP_PERCENT),
+            has_initial_pcm_seed: Cell::new(false),
         };
 
+        shell.set_volume_hud_timeout_ms(DEFAULT_VOLUME_HUD_TIMEOUT_MS);
+        shell.set_volume_hud_fade_ms(DEFAULT_VOLUME_HUD_FADE_MS);
         shell.setup_callbacks();
         shell.apply_theme(ThemePreset::default());
         shell
+    }
+
+    /// Applies runtime parameters from [`CoreConfig`] (theme, marquee fps, volume step,
+    /// and Volume HUD timeout/fade durations) to this shell.
+    pub fn apply_config(&self, config: &CoreConfig) {
+        self.set_marquee_fps(config.marquee_fps.value());
+        self.set_volume_step_percent(config.volume_step_percent.value());
+        self.set_volume_hud_timeout_ms(config.volume_hud_timeout_ms.value());
+        self.set_volume_hud_fade_ms(config.volume_hud_fade_ms.value());
+        if let Some(theme) = config.theme {
+            self.apply_theme(theme);
+        }
+    }
+
+    /// Returns the configured volume step percentage per rotary encoder detent (`1..=25`).
+    #[must_use]
+    pub fn volume_step_percent(&self) -> u8 {
+        self.volume_step_percent.get()
+    }
+
+    /// Sets the volume step percentage per rotary encoder detent (clamped to `1..=25`).
+    pub fn set_volume_step_percent(&self, step: u8) {
+        self.volume_step_percent.set(step.clamp(1, 25));
+    }
+
+    /// Returns the Volume HUD auto-dismiss timeout in milliseconds.
+    #[must_use]
+    pub fn volume_hud_timeout_ms(&self) -> u32 {
+        u32::try_from(self.window.get_volume_hud_timeout_ms())
+            .unwrap_or(DEFAULT_VOLUME_HUD_TIMEOUT_MS)
+    }
+
+    /// Sets the Volume HUD auto-dismiss timeout in milliseconds.
+    pub fn set_volume_hud_timeout_ms(&self, timeout_ms: u32) {
+        self.window
+            .set_volume_hud_timeout_ms(i32::try_from(timeout_ms).unwrap_or(i32::MAX));
+    }
+
+    /// Returns the Volume HUD fade-out duration in milliseconds.
+    #[must_use]
+    pub fn volume_hud_fade_ms(&self) -> u32 {
+        u32::try_from(self.window.get_volume_hud_fade_ms()).unwrap_or(DEFAULT_VOLUME_HUD_FADE_MS)
+    }
+
+    /// Sets the Volume HUD fade-out duration in milliseconds.
+    pub fn set_volume_hud_fade_ms(&self, fade_ms: u32) {
+        self.window
+            .set_volume_hud_fade_ms(i32::try_from(fade_ms).unwrap_or(i32::MAX));
+    }
+
+    /// Returns whether the Volume HUD overlay is currently in its active hold state.
+    #[must_use]
+    pub fn is_volume_hud_visible(&self) -> bool {
+        self.window.get_volume_hud_visible()
+    }
+
+    /// Returns the current opacity (`0.0..=1.0`) of the Volume HUD overlay.
+    #[must_use]
+    pub fn volume_hud_opacity(&self) -> f32 {
+        self.window.get_volume_hud_opacity()
+    }
+
+    /// Returns `true` while the Volume HUD is visible or actively fading out (`opacity > 0.01`).
+    #[must_use]
+    pub fn is_volume_hud_active(&self) -> bool {
+        self.is_volume_hud_visible() || self.volume_hud_opacity() > 0.01
+    }
+
+    /// Opens the Volume HUD overlay and resets its auto-dismiss countdown timer.
+    pub fn show_volume_hud(&self) {
+        self.window.invoke_show_volume_hud();
+    }
+
+    /// Immediately begins dismissing (fading out) the Volume HUD overlay.
+    pub fn dismiss_volume_hud(&self) {
+        self.window.invoke_dismiss_volume_hud();
+    }
+
+    /// Adjusts volume by `detents * volume_step_percent`, unmutes, opens/refreshes the
+    /// Volume HUD, and fires the `volume_changed` callback.
+    ///
+    /// Returns the new clamped volume percentage (`0..=100`).
+    pub fn apply_volume_delta(&self, detents: i32) -> u8 {
+        let current = self.volume().round() as i32;
+        let delta = detents.saturating_mul(i32::from(self.volume_step_percent()));
+        let target = u8::try_from(current.saturating_add(delta).clamp(0, 100)).unwrap_or(100);
+        let target_f32 = f32::from(target);
+        self.set_volume(target_f32);
+        if self.is_muted() {
+            self.set_muted(false);
+        }
+        self.show_volume_hud();
+        self.window.invoke_volume_changed(target_f32);
+        target
+    }
+
+    /// Toggles the mute state, opens/refreshes the Volume HUD, and returns the new mute state.
+    pub fn toggle_mute_and_show_hud(&self) -> bool {
+        self.window.invoke_toggle_mute();
+        self.show_volume_hud();
+        self.is_muted()
     }
 
     /// Returns a reference to the underlying Slint [`MainWindow`] handle.
@@ -122,7 +314,9 @@ impl AppShell {
     #[must_use]
     pub fn marquee_row_specs(&self) -> Vec<MarqueeRowSpec> {
         let g = self.window.global::<MarqueeCompose>();
-        if !g.get_compose_in_rust() {
+        // Suppress Rust-side marquee composition whenever the Now Playing tab is not
+        // visible or while the Volume HUD overlay covers the middle viewport.
+        if !g.get_compose_in_rust() || self.current_tab() != 0 || self.is_volume_hud_active() {
             return Vec::new();
         }
         let px = |v: f32, max: f32| u32::try_from(v.round().clamp(0.0, max) as i64).unwrap_or(0);
@@ -342,14 +536,21 @@ impl AppShell {
         if self.window.get_stream_bit_depth().as_str() != bit_depth {
             self.set_stream_bit_depth(bit_depth);
         }
+        let was_seeded = self.has_initial_pcm_seed.replace(true);
+        let mut volume_or_mute_changed = false;
         if self.window.get_is_muted() != pcm.muted {
             self.window.set_is_muted(pcm.muted);
+            volume_or_mute_changed = true;
         }
         if let Some(pct) = pcm.volume_percent {
             let volume = f32::from(pct);
-            if (self.window.get_volume_value() - volume).abs() > f32::EPSILON {
+            if (self.window.get_volume_value() - volume).abs() >= 0.5 {
                 self.set_volume(volume);
+                volume_or_mute_changed = true;
             }
+        }
+        if was_seeded && volume_or_mute_changed {
+            self.show_volume_hud();
         }
     }
 
@@ -504,6 +705,40 @@ impl AppShell {
         self.window.on_previous_track(move || {
             commands_prev.push(speaker_bluetooth::TransportCommand::PreviousTrack);
         });
+
+        let commands_vol = commands.clone();
+        let win = self.window.as_weak();
+        self.window.on_volume_changed(move |val| {
+            if let Some(w) = win.upgrade() {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "clamped 0.0..=100.0 fits in u8"
+                )]
+                let clamped = if val.is_finite() {
+                    val.round().clamp(0.0, 100.0) as u8
+                } else {
+                    0
+                };
+                w.set_volume_value(f32::from(clamped));
+                if w.get_is_muted() {
+                    w.set_is_muted(false);
+                }
+                w.invoke_show_volume_hud();
+                commands_vol.push(speaker_bluetooth::TransportCommand::SetVolume(clamped));
+            }
+        });
+
+        let commands_mute = commands.clone();
+        let win = self.window.as_weak();
+        self.window.on_toggle_mute(move || {
+            if let Some(w) = win.upgrade() {
+                let next_muted = !w.get_is_muted();
+                w.set_is_muted(next_muted);
+                w.invoke_show_volume_hud();
+                commands_mute.push(speaker_bluetooth::TransportCommand::SetMute(next_muted));
+            }
+        });
     }
 
     fn setup_callbacks(&self) {
@@ -542,10 +777,15 @@ impl AppShell {
         let win = self.window.as_weak();
         self.window.on_toggle_mute(move || {
             if let Some(w) = win.upgrade() {
-                let current = w.get_is_muted();
-                w.set_is_muted(!current);
-                tracing::debug!("Mute toggled to {}", !current);
+                let next_muted = !w.get_is_muted();
+                w.set_is_muted(next_muted);
+                w.invoke_show_volume_hud();
+                tracing::debug!("Mute toggled to {next_muted}");
             }
+        });
+
+        self.window.on_volume_clicked(|| {
+            tracing::debug!("Top bar volume indicator clicked; showing Volume HUD");
         });
 
         self.window.on_next_track(|| {
@@ -568,8 +808,21 @@ impl AppShell {
             tracing::info!("Night mode clicked");
         });
 
-        self.window.on_volume_changed(|val| {
-            tracing::debug!("Volume changed to {val}%");
+        let win = self.window.as_weak();
+        self.window.on_volume_changed(move |val| {
+            if let Some(w) = win.upgrade() {
+                let clamped = if val.is_finite() {
+                    val.clamp(0.0, 100.0)
+                } else {
+                    0.0
+                };
+                w.set_volume_value(clamped);
+                if w.get_is_muted() {
+                    w.set_is_muted(false);
+                }
+                w.invoke_show_volume_hud();
+                tracing::debug!("Volume changed to {clamped}%");
+            }
         });
     }
 }

@@ -42,12 +42,40 @@ export component MainWindow inherits Window {
     in-out property <float> volume_value: 75.0;
     in-out property <bool> is_playing: false;
     in-out property <bool> is_muted: false;
+    in-out property <bool> volume_hud_visible: false;
+    in-out property <int> volume_hud_timeout_ms: 2500;
+    in-out property <int> volume_hud_fade_ms: 200;
+    in-out property <int> volume_hud_elapsed_ms: 0;
+    out property <float> volume_hud_opacity: root.volume_hud_visible ? 1.0 : 0.0;
+    animate volume_hud_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
     in-out property <bool> has_cover_art: false;
     in-out property <image> cover_image;
     in-out property <float> left_peak_ratio: 0.0;
     in-out property <float> right_peak_ratio: 0.0;
     in-out property <bool> cd_enabled: false;
-    out property <bool> is_animating: root.active_tab == 0;
+    out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01;
+
+    public function show_volume_hud() {
+        root.volume_hud_elapsed_ms = 0;
+        root.volume_hud_visible = true;
+    }
+
+    public function dismiss_volume_hud() {
+        root.volume_hud_visible = false;
+        root.volume_hud_elapsed_ms = 0;
+    }
+
+    Timer {
+        interval: 50ms;
+        running: root.volume_hud_visible;
+        triggered() => {
+            root.volume_hud_elapsed_ms += 50;
+            if (root.volume_hud_elapsed_ms >= root.volume_hud_timeout_ms) {
+                root.volume_hud_visible = false;
+                root.volume_hud_elapsed_ms = 0;
+            }
+        }
+    }
 
     // Marquee text strips pre-rendered offscreen by `MarqueeStripRasterizer`; the images
     // are re-rasterized from Rust only when their text, color, or typography changes.
@@ -62,6 +90,7 @@ export component MainWindow inherits Window {
     callback next_track();
     callback previous_track();
     callback toggle_mute();
+    callback volume_clicked();
     callback stream_pill_clicked();
     callback volume_changed(float);
     callback source_clicked();
@@ -74,7 +103,7 @@ export component MainWindow inherits Window {
         padding: 0px;
         spacing: 0px;
 
-        // Top Status Bar: 800 x 42
+        // Top Status Bar: 800 x 60
         status_bar := TopStatusBar {
             active_source: root.active_source;
             track_or_device: root.track_or_device;
@@ -85,10 +114,13 @@ export component MainWindow inherits Window {
             is_muted: root.is_muted;
             source_clicked => { root.source_clicked(); }
             night_mode_clicked => { root.night_mode_clicked(); }
-            volume_clicked => { root.toggle_mute(); }
+            volume_clicked => {
+                root.show_volume_hud();
+                root.volume_clicked();
+            }
         }
 
-        // Middle Viewport: 800 x 380
+        // Middle Viewport: 800 x 360
         viewport := MainViewport {
             active_tab <=> root.active_tab;
             track_title: root.track_title;
@@ -101,7 +133,8 @@ export component MainWindow inherits Window {
             progress_ratio: root.progress_ratio;
             volume_value <=> root.volume_value;
             is_playing: root.is_playing;
-            is_muted: root.is_muted;
+            is_muted <=> root.is_muted;
+            volume_hud_opacity: root.volume_hud_opacity;
             has_cover_art: root.has_cover_art;
             cover_image: root.cover_image;
             left_peak_ratio: root.left_peak_ratio;
@@ -116,6 +149,8 @@ export component MainWindow inherits Window {
             toggle_mute => { root.toggle_mute(); }
             stream_pill_clicked => { root.stream_pill_clicked(); }
             volume_changed(val) => { root.volume_changed(val); }
+            dismiss_volume_hud => { root.dismiss_volume_hud(); }
+            volume_hud_activity => { root.show_volume_hud(); }
             select_theme(idx) => { root.select_theme(idx); }
             cycle_theme => { root.cycle_theme(); }
         }

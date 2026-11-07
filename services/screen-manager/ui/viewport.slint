@@ -1,5 +1,6 @@
 import { Theme } from "theme.slint";
 import { NowPlayingView } from "now_playing.slint";
+import { VolumeHudOverlay } from "volume_hud.slint";
 
 export component MainViewport inherits Rectangle {
     background: Theme.active.chassis;
@@ -16,6 +17,7 @@ export component MainViewport inherits Rectangle {
     in-out property <float> volume_value: 75.0;
     in-out property <bool> is_playing: false;
     in-out property <bool> is_muted: false;
+    in property <float> volume_hud_opacity: 0.0;
     in-out property <bool> has_cover_art: false;
     in-out property <image> cover_image;
     in-out property <image> title_marquee_strip;
@@ -29,6 +31,8 @@ export component MainViewport inherits Rectangle {
     callback previous_track();
     callback toggle_mute();
     callback volume_changed(float);
+    callback dismiss_volume_hud();
+    callback volume_hud_activity();
     callback stream_pill_clicked();
     callback cycle_theme();
     callback select_theme(int);
@@ -610,5 +614,19 @@ export component MainViewport inherits Rectangle {
                 }
             }
         }
+    }
+
+    // Universal Full-Viewport Volume HUD Overlay (§3.2).
+    // Permanently mounted in the item tree with `visible` gated on opacity so fade-out
+    // transitions never destroy/recreate the item tree (`M-NO-PER-FRAME-ITEM-TREE-CHURN`).
+    volume_hud := VolumeHudOverlay {
+        visible: root.volume_hud_opacity > 0.01;
+        opacity: root.volume_hud_opacity;
+        volume_value <=> root.volume_value;
+        is_muted <=> root.is_muted;
+        volume_changed(val) => { root.volume_changed(val); }
+        toggle_mute => { root.toggle_mute(); }
+        dismiss_requested => { root.dismiss_volume_hud(); }
+        interaction_activity => { root.volume_hud_activity(); }
     }
 }

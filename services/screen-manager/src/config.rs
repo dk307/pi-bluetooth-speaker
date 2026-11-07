@@ -21,6 +21,30 @@ use speaker_common::impl_canonical_error_display;
 /// Production default marquee scroll rate (fps).
 pub const DEFAULT_MARQUEE_FPS: u32 = 60;
 
+/// Production default volume step per rotary encoder detent (`2%`).
+pub const DEFAULT_VOLUME_STEP_PERCENT: u8 = 2;
+
+/// Minimum allowed volume step per rotary encoder detent (`1%`).
+pub const MIN_VOLUME_STEP_PERCENT: u8 = 1;
+
+/// Maximum allowed volume step per rotary encoder detent (`25%`).
+pub const MAX_VOLUME_STEP_PERCENT: u8 = 25;
+
+/// Production default Volume HUD auto-dismiss timeout in milliseconds (`2500` ms).
+pub const DEFAULT_VOLUME_HUD_TIMEOUT_MS: u32 = 2_500;
+
+/// Minimum allowed Volume HUD auto-dismiss timeout in milliseconds (`250` ms).
+pub const MIN_VOLUME_HUD_TIMEOUT_MS: u32 = 250;
+
+/// Maximum allowed Volume HUD auto-dismiss timeout in milliseconds (`30_000` ms).
+pub const MAX_VOLUME_HUD_TIMEOUT_MS: u32 = 30_000;
+
+/// Production default Volume HUD fade-out duration in milliseconds (`200` ms).
+pub const DEFAULT_VOLUME_HUD_FADE_MS: u32 = 200;
+
+/// Maximum allowed Volume HUD fade-out duration in milliseconds (`2_000` ms).
+pub const MAX_VOLUME_HUD_FADE_MS: u32 = 2_000;
+
 /// Allowed marquee scroll rates: 60 is the production default and 30 halves the
 /// render load by scrolling 2 px per 33.3 ms tick at identical on-screen speed.
 const MARQUEE_FPS_ALLOWED: [u32; 2] = [30, 60];
@@ -82,14 +106,167 @@ impl From<MarqueeFps> for u32 {
 
 const _: () = {
     assert!((30 <= DEFAULT_MARQUEE_FPS) && (DEFAULT_MARQUEE_FPS <= 60));
+    assert!(
+        (MIN_VOLUME_STEP_PERCENT <= DEFAULT_VOLUME_STEP_PERCENT)
+            && (DEFAULT_VOLUME_STEP_PERCENT <= MAX_VOLUME_STEP_PERCENT)
+    );
+    assert!(
+        (MIN_VOLUME_HUD_TIMEOUT_MS <= DEFAULT_VOLUME_HUD_TIMEOUT_MS)
+            && (DEFAULT_VOLUME_HUD_TIMEOUT_MS <= MAX_VOLUME_HUD_TIMEOUT_MS)
+    );
+    assert!(DEFAULT_VOLUME_HUD_FADE_MS <= MAX_VOLUME_HUD_FADE_MS);
 };
+
+/// Strongly typed rotary encoder volume step percentage (`1..=25`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub struct VolumeStepPercent(u8);
+
+impl VolumeStepPercent {
+    /// Production default step (`2%`).
+    pub const DEFAULT: Self = Self::new(DEFAULT_VOLUME_STEP_PERCENT);
+
+    /// Unchecked const constructor for compile-time constants.
+    #[must_use]
+    pub const fn new(step: u8) -> Self {
+        Self(step)
+    }
+
+    /// Returns the raw step percentage (`1..=25`).
+    #[must_use]
+    pub const fn value(self) -> u8 {
+        self.0
+    }
+}
+
+impl Default for VolumeStepPercent {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl TryFrom<u8> for VolumeStepPercent {
+    type Error = ConfigError;
+
+    fn try_from(step: u8) -> Result<Self, Self::Error> {
+        if (MIN_VOLUME_STEP_PERCENT..=MAX_VOLUME_STEP_PERCENT).contains(&step) {
+            Ok(Self::new(step))
+        } else {
+            Err(ConfigError::invalid(format!(
+                "invalid volume_step_percent '{step}': expected {MIN_VOLUME_STEP_PERCENT}..={MAX_VOLUME_STEP_PERCENT}"
+            )))
+        }
+    }
+}
+
+impl From<VolumeStepPercent> for u8 {
+    fn from(step: VolumeStepPercent) -> Self {
+        step.0
+    }
+}
+
+/// Strongly typed Volume HUD auto-dismiss timeout in milliseconds (`250..=30_000`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct VolumeHudTimeoutMs(u32);
+
+impl VolumeHudTimeoutMs {
+    /// Production default timeout (`2500` ms).
+    pub const DEFAULT: Self = Self::new(DEFAULT_VOLUME_HUD_TIMEOUT_MS);
+
+    /// Unchecked const constructor for compile-time constants.
+    #[must_use]
+    pub const fn new(ms: u32) -> Self {
+        Self(ms)
+    }
+
+    /// Returns the raw timeout in milliseconds.
+    #[must_use]
+    pub const fn value(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for VolumeHudTimeoutMs {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl TryFrom<u32> for VolumeHudTimeoutMs {
+    type Error = ConfigError;
+
+    fn try_from(ms: u32) -> Result<Self, Self::Error> {
+        if (MIN_VOLUME_HUD_TIMEOUT_MS..=MAX_VOLUME_HUD_TIMEOUT_MS).contains(&ms) {
+            Ok(Self::new(ms))
+        } else {
+            Err(ConfigError::invalid(format!(
+                "invalid volume_hud_timeout_ms '{ms}': expected {MIN_VOLUME_HUD_TIMEOUT_MS}..={MAX_VOLUME_HUD_TIMEOUT_MS}"
+            )))
+        }
+    }
+}
+
+impl From<VolumeHudTimeoutMs> for u32 {
+    fn from(ms: VolumeHudTimeoutMs) -> Self {
+        ms.0
+    }
+}
+
+/// Strongly typed Volume HUD fade-out duration in milliseconds (`0..=2_000`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct VolumeHudFadeMs(u32);
+
+impl VolumeHudFadeMs {
+    /// Production default fade duration (`200` ms).
+    pub const DEFAULT: Self = Self::new(DEFAULT_VOLUME_HUD_FADE_MS);
+
+    /// Unchecked const constructor for compile-time constants.
+    #[must_use]
+    pub const fn new(ms: u32) -> Self {
+        Self(ms)
+    }
+
+    /// Returns the raw fade duration in milliseconds.
+    #[must_use]
+    pub const fn value(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for VolumeHudFadeMs {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl TryFrom<u32> for VolumeHudFadeMs {
+    type Error = ConfigError;
+
+    fn try_from(ms: u32) -> Result<Self, Self::Error> {
+        if ms <= MAX_VOLUME_HUD_FADE_MS {
+            Ok(Self::new(ms))
+        } else {
+            Err(ConfigError::invalid(format!(
+                "invalid volume_hud_fade_ms '{ms}': expected 0..={MAX_VOLUME_HUD_FADE_MS}"
+            )))
+        }
+    }
+}
+
+impl From<VolumeHudFadeMs> for u32 {
+    fn from(ms: VolumeHudFadeMs) -> Self {
+        ms.0
+    }
+}
 
 /// Strongly typed appliance configuration persisted as JSON on disk.
 ///
 /// Missing fields deserialize to their defaults, so minimal config files
-/// (e.g. `{}` or `{"theme": "peppy"}`) remain valid. [`MarqueeFps`] enforces
-/// the allowed scroll rates at the deserialization boundary, so an invalid
-/// value cannot inhabit this struct.
+/// (e.g. `{}` or `{"theme": "peppy"}`) remain valid. Domain newtypes enforce
+/// allowed bounds at the deserialization boundary, so an invalid value cannot
+/// inhabit this struct.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CoreConfig {
@@ -98,6 +275,12 @@ pub struct CoreConfig {
     pub theme: Option<ThemePreset>,
     /// Marquee scroll rate in fps (`30` or `60`).
     pub marquee_fps: MarqueeFps,
+    /// Rotary encoder volume step percentage per detent (`1..=25`, default `2`).
+    pub volume_step_percent: VolumeStepPercent,
+    /// Volume HUD auto-dismiss timeout in milliseconds (`250..=30000`, default `2500`).
+    pub volume_hud_timeout_ms: VolumeHudTimeoutMs,
+    /// Volume HUD fade-out duration in milliseconds (`0..=2000`, default `200`).
+    pub volume_hud_fade_ms: VolumeHudFadeMs,
 }
 
 impl CoreConfig {
@@ -343,6 +526,12 @@ mod tests {
         assert_eq!(config.marquee_fps, MarqueeFps::FPS_60);
         assert_eq!(config.marquee_fps.value(), 60);
         assert_eq!(DEFAULT_MARQUEE_FPS, 60);
+        assert_eq!(config.volume_step_percent, VolumeStepPercent::DEFAULT);
+        assert_eq!(config.volume_step_percent.value(), 2);
+        assert_eq!(config.volume_hud_timeout_ms, VolumeHudTimeoutMs::DEFAULT);
+        assert_eq!(config.volume_hud_timeout_ms.value(), 2_500);
+        assert_eq!(config.volume_hud_fade_ms, VolumeHudFadeMs::DEFAULT);
+        assert_eq!(config.volume_hud_fade_ms.value(), 200);
     }
 
     #[test]
@@ -374,6 +563,9 @@ mod tests {
         let config = CoreConfig {
             theme: Some(ThemePreset::Peppy),
             marquee_fps: MarqueeFps::FPS_30,
+            volume_step_percent: VolumeStepPercent::new(5),
+            volume_hud_timeout_ms: VolumeHudTimeoutMs::new(3_000),
+            volume_hud_fade_ms: VolumeHudFadeMs::new(250),
         };
         config.save(&path).expect("save");
         let loaded = CoreConfig::load(&path).expect("load");
@@ -382,6 +574,9 @@ mod tests {
         let raw = std::fs::read_to_string(&path).expect("raw read");
         assert!(raw.contains("\"theme\": \"peppy\""), "{raw}");
         assert!(raw.contains("\"marquee_fps\": 30"), "{raw}");
+        assert!(raw.contains("\"volume_step_percent\": 5"), "{raw}");
+        assert!(raw.contains("\"volume_hud_timeout_ms\": 3000"), "{raw}");
+        assert!(raw.contains("\"volume_hud_fade_ms\": 250"), "{raw}");
     }
 
     #[test]
@@ -536,12 +731,14 @@ mod tests {
         CoreConfig {
             theme: None,
             marquee_fps: MarqueeFps::FPS_60,
+            ..CoreConfig::default()
         }
         .save(&path)
         .expect("initial save");
         CoreConfig {
             theme: Some(ThemePreset::StudioDark),
             marquee_fps: MarqueeFps::FPS_30,
+            ..CoreConfig::default()
         }
         .save(&path)
         .expect("replacement save");
@@ -556,6 +753,42 @@ mod tests {
             .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(leftovers, vec!["config.json".to_string()]);
+    }
+
+    #[test]
+    fn volume_config_newtypes_enforce_domain_bounds() {
+        for good_step in [1u8, 2, 5, 25] {
+            let parsed = VolumeStepPercent::try_from(good_step).expect("valid step");
+            assert_eq!(parsed.value(), good_step);
+            assert_eq!(u8::from(parsed), good_step);
+        }
+        for bad_step in [0u8, 26, u8::MAX] {
+            let err = VolumeStepPercent::try_from(bad_step).expect_err("invalid step");
+            assert!(err.is_invalid_value());
+            assert!(err.summary().contains("invalid volume_step_percent"));
+        }
+
+        for good_timeout in [250u32, 2_500, 30_000] {
+            let parsed = VolumeHudTimeoutMs::try_from(good_timeout).expect("valid timeout");
+            assert_eq!(parsed.value(), good_timeout);
+            assert_eq!(u32::from(parsed), good_timeout);
+        }
+        for bad_timeout in [0u32, 249, 30_001, u32::MAX] {
+            let err = VolumeHudTimeoutMs::try_from(bad_timeout).expect_err("invalid timeout");
+            assert!(err.is_invalid_value());
+            assert!(err.summary().contains("invalid volume_hud_timeout_ms"));
+        }
+
+        for good_fade in [0u32, 200, 2_000] {
+            let parsed = VolumeHudFadeMs::try_from(good_fade).expect("valid fade");
+            assert_eq!(parsed.value(), good_fade);
+            assert_eq!(u32::from(parsed), good_fade);
+        }
+        for bad_fade in [2_001u32, u32::MAX] {
+            let err = VolumeHudFadeMs::try_from(bad_fade).expect_err("invalid fade");
+            assert!(err.is_invalid_value());
+            assert!(err.summary().contains("invalid volume_hud_fade_ms"));
+        }
     }
 
     #[test]
