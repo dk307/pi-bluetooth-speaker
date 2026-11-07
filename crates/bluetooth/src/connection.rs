@@ -555,6 +555,20 @@ impl BluetoothStatus {
     }
 }
 
+/// Lightweight adapter, device, and audio-stream snapshot for live UI refresh.
+///
+/// Unlike [`BluetoothStatus`] it skips the `systemd` unit queries and the
+/// `hciconfig` subprocess probe, so it is cheap enough for the 250 ms monitor tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkSnapshot {
+    /// Active local controller adapter, if detected.
+    pub adapter: Option<BtAdapter>,
+    /// Known remote devices.
+    pub devices: Box<[BtDevice]>,
+    /// Active `BlueALSA` audio PCM streams.
+    pub pcms: Box<[BlueAlsaPcm]>,
+}
+
 #[derive(Debug)]
 pub(crate) enum BtErrorKind {
     Dbus { details: Box<str> },
@@ -1909,7 +1923,7 @@ impl BluetoothDeviceMock {
                 volume: Some("L: 100 R: 100".into()),
                 volume_percent: Some(79),
                 muted: false,
-                delay: Some("2000".into()),
+                delay: Some("200.0 ms".into()),
             }],
             playback: Some(BtPlaybackState {
                 device_address: Some(phone_addr),
@@ -2320,6 +2334,18 @@ impl BluetoothDeviceMock {
         Ok(())
     }
 
+    fn link_snapshot(&self) -> Result<LinkSnapshot, BtError> {
+        let state = self.state.read().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        Ok(LinkSnapshot {
+            adapter: state.adapter.clone(),
+            devices: state.devices.clone().into_boxed_slice(),
+            pcms: state.pcms.clone().into_boxed_slice(),
+        })
+    }
+
     fn get_adapter_mut<'a>(
         state: &'a mut MockState,
         target_adapter: Option<&str>,
@@ -2605,7 +2631,26 @@ impl BluetoothDevice {
     /// # Errors
     /// Returns [`BtError`] if querying fails.
     pub fn audio_pcms(&self) -> Result<Box<[BlueAlsaPcm]>, BtError> {
-        Ok(self.status()?.pcms)
+        Ok(self.link_snapshot()?.pcms)
+    }
+
+    /// Returns the adapter, remote devices, and audio streams without service or hardware probes.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails or a mock fault is injected.
+    pub fn link_snapshot(&self) -> Result<LinkSnapshot, BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.link_snapshot(),
+            Backend::Dbus(dbus) => {
+                let (adapter, devices, _) = dbus.query_bluez(None)?;
+                let pcms = dbus.query_bluealsa(&devices)?;
+                Ok(LinkSnapshot {
+                    adapter,
+                    devices,
+                    pcms,
+                })
+            }
+        }
     }
 
     /// Returns the active media player playback state, if available.

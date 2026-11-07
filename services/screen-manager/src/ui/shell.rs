@@ -103,6 +103,148 @@ impl EncoderVolumeTracker {
     }
 }
 
+/// Placeholder shown for details that are unknown or not applicable.
+const NO_DETAIL: &str = "—";
+
+/// Point-in-time Bluetooth connection details shown on the details screen.
+///
+/// Built off the render thread from a [`speaker_bluetooth::LinkSnapshot`] and applied
+/// by [`AppShell::apply_bt_link_details`]; `None` fields clear the matching text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BtLinkDetails {
+    /// Connected remote device, if any.
+    pub device: Option<speaker_bluetooth::BtDevice>,
+    /// Local controller adapter, if detected.
+    pub adapter: Option<speaker_bluetooth::BtAdapter>,
+    /// Audio stream negotiated with the connected device, if any.
+    pub pcm: Option<speaker_bluetooth::BlueAlsaPcm>,
+}
+
+impl BtLinkDetails {
+    /// Selects the connected device (preferring `preferred`) and its audio stream.
+    #[must_use]
+    pub fn select(
+        snapshot: &speaker_bluetooth::LinkSnapshot,
+        preferred: Option<speaker_bluetooth::BtAddress>,
+    ) -> Self {
+        let device = preferred
+            .and_then(|addr| {
+                snapshot
+                    .devices
+                    .iter()
+                    .find(|d| d.connected && d.address == addr)
+            })
+            .or_else(|| snapshot.devices.iter().find(|d| d.connected))
+            .cloned();
+        let pcm = device.as_ref().and_then(|d| {
+            snapshot
+                .pcms
+                .iter()
+                .find(|p| p.device_address == d.address)
+                .cloned()
+        });
+        Self {
+            device,
+            adapter: snapshot.adapter.clone(),
+            pcm,
+        }
+    }
+
+    fn address_text(&self) -> String {
+        self.device
+            .as_ref()
+            .map_or_else(|| NO_DETAIL.into(), |d| d.address.to_string())
+    }
+
+    fn link_text(&self) -> String {
+        let Some(device) = &self.device else {
+            return "Waiting for connection".into();
+        };
+        let mut parts = vec![if self.pcm.as_ref().is_some_and(|p| p.running) {
+            "Streaming"
+        } else {
+            "Connected"
+        }];
+        if device.paired {
+            parts.push("Paired");
+        }
+        if device.trusted {
+            parts.push("Trusted");
+        }
+        parts.join(" • ")
+    }
+
+    fn rssi_text(&self) -> String {
+        self.device
+            .as_ref()
+            .and_then(|d| d.rssi)
+            .map_or_else(String::new, |rssi| format!("{rssi} dBm"))
+    }
+
+    fn battery_text(&self) -> String {
+        self.device
+            .as_ref()
+            .and_then(|d| d.battery_percentage)
+            .map_or_else(String::new, |pct| format!("{pct}%"))
+    }
+
+    fn stream_format_text(&self) -> String {
+        let Some(pcm) = &self.pcm else {
+            return NO_DETAIL.into();
+        };
+        let rate = if pcm.sampling_rate % 1000 == 0 {
+            format!("{} kHz", pcm.sampling_rate / 1000)
+        } else {
+            format!("{:.1} kHz", f64::from(pcm.sampling_rate) / 1000.0)
+        };
+        let channels = match pcm.channels {
+            1 => "Mono".to_string(),
+            2 => "Stereo".to_string(),
+            n => format!("{n} ch"),
+        };
+        format!("{rate} • {} • {channels}", pcm_bit_depth(&pcm.format))
+    }
+
+    fn delay_text(&self) -> String {
+        self.pcm
+            .as_ref()
+            .and_then(|p| p.delay.as_deref())
+            .unwrap_or(NO_DETAIL)
+            .into()
+    }
+
+    fn adapter_name_text(&self) -> String {
+        self.adapter.as_ref().map_or_else(
+            || NO_DETAIL.into(),
+            |a| {
+                if a.alias.is_empty() {
+                    a.name.to_string()
+                } else {
+                    a.alias.to_string()
+                }
+            },
+        )
+    }
+
+    fn adapter_address_text(&self) -> String {
+        self.adapter
+            .as_ref()
+            .map_or_else(|| NO_DETAIL.into(), |a| a.address.to_string())
+    }
+}
+
+/// Maps a `BlueALSA` PCM sample-format identifier to a bit-depth label.
+fn pcm_bit_depth(format: &str) -> &'static str {
+    match format {
+        "S16_LE" | "S16_BE" => "16-bit",
+        "S24_LE" | "S24_BE" | "S24_3LE" => "24-bit",
+        "S32_LE" | "S32_BE" => "32-bit",
+        other if other.contains("24") => "24-bit",
+        other if other.contains("32") => "32-bit",
+        _ => "16-bit",
+    }
+}
+
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
@@ -545,22 +687,7 @@ impl AppShell {
             self.set_stream_sample_rate(rate_khz);
         }
 
-        let bit_depth = match pcm.format.as_ref() {
-            "S16_LE" | "S16_BE" => "16-bit",
-            "S24_LE" | "S24_BE" | "S24_3LE" => "24-bit",
-            "S32_LE" | "S32_BE" => "32-bit",
-            other => {
-                if other.contains("16") {
-                    "16-bit"
-                } else if other.contains("24") {
-                    "24-bit"
-                } else if other.contains("32") {
-                    "32-bit"
-                } else {
-                    "16-bit"
-                }
-            }
-        };
+        let bit_depth = pcm_bit_depth(pcm.format.as_ref());
         if self.window.get_stream_bit_depth().as_str() != bit_depth {
             self.set_stream_bit_depth(bit_depth);
         }
@@ -660,6 +787,47 @@ impl AppShell {
         // handle-less track or a fetch pending on the cover-fetch worker — blanking
         // here would drop working art on every 250 ms position tick. Only an
         // explicit device-disconnect delta clears the displayed cover.
+    }
+
+    /// Applies Bluetooth connection details to the details screen (change-guarded).
+    pub fn apply_bt_link_details(&self, details: &BtLinkDetails) {
+        let w = &self.window;
+        macro_rules! guarded {
+            ($get:ident, $set:ident, $text:expr) => {
+                let text = $text;
+                if w.$get().as_str() != text.as_str() {
+                    w.$set(text.into());
+                }
+            };
+        }
+        guarded!(
+            get_bt_device_address,
+            set_bt_device_address,
+            details.address_text()
+        );
+        guarded!(get_bt_link_text, set_bt_link_text, details.link_text());
+        guarded!(get_bt_rssi_text, set_bt_rssi_text, details.rssi_text());
+        guarded!(
+            get_bt_battery_text,
+            set_bt_battery_text,
+            details.battery_text()
+        );
+        guarded!(
+            get_bt_stream_format,
+            set_bt_stream_format,
+            details.stream_format_text()
+        );
+        guarded!(get_bt_delay_text, set_bt_delay_text, details.delay_text());
+        guarded!(
+            get_bt_adapter_name,
+            set_bt_adapter_name,
+            details.adapter_name_text()
+        );
+        guarded!(
+            get_bt_adapter_address,
+            set_bt_adapter_address,
+            details.adapter_address_text()
+        );
     }
 
     /// Applies a theme preset to the UI shell.
