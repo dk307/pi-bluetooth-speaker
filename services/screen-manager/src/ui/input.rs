@@ -578,13 +578,15 @@ impl Default for TouchCalibration {
 }
 
 impl TouchCalibration {
-    /// Returns true if all axis limit coordinates are finite numbers.
+    /// Returns true if all axis limit coordinates are finite numbers and form valid ranges (`min < max`).
     #[must_use]
-    pub fn is_finite(&self) -> bool {
+    pub fn is_valid(&self) -> bool {
         self.min_x.is_finite()
             && self.max_x.is_finite()
             && self.min_y.is_finite()
             && self.max_y.is_finite()
+            && self.min_x < self.max_x
+            && self.min_y < self.max_y
     }
 
     /// Normalizes raw digitizer coordinates into logical screen pixels.
@@ -596,7 +598,7 @@ impl TouchCalibration {
         screen_w: f32,
         screen_h: f32,
     ) -> (f32, f32) {
-        if !self.is_finite() || !screen_w.is_finite() || !screen_h.is_finite() {
+        if !self.is_valid() || !screen_w.is_finite() || !screen_h.is_finite() {
             return (0.0, 0.0);
         }
 
@@ -662,10 +664,10 @@ impl TouchDecoder {
 
     /// Mutably updates the calibration profile.
     pub fn set_calibration(&mut self, calibration: TouchCalibration) {
-        if calibration.is_finite() {
+        if calibration.is_valid() {
             self.calibration = calibration;
         } else {
-            tracing::warn!(?calibration, "Rejected non-finite touch calibration");
+            tracing::warn!(?calibration, "Rejected invalid touch calibration");
         }
     }
 
@@ -1539,15 +1541,28 @@ mod tests {
         });
         assert!(dev.decoder.calibration().swap_xy);
 
-        // Test NaN calibration rejection
+        // Test NaN and inverted/zero span calibration rejection
         let nan_cal = TouchCalibration {
             min_x: f32::NAN,
             ..Default::default()
         };
-        assert!(!nan_cal.is_finite());
+        assert!(!nan_cal.is_valid());
         assert_eq!(nan_cal.map_to_screen(100, 100, 800.0, 480.0), (0.0, 0.0));
         dev.set_calibration(nan_cal);
-        assert!(dev.decoder.calibration().is_finite());
+        assert!(dev.decoder.calibration().is_valid());
+
+        let zero_span_cal = TouchCalibration {
+            min_x: 100.0,
+            max_x: 100.0,
+            ..Default::default()
+        };
+        assert!(!zero_span_cal.is_valid());
+        assert_eq!(
+            zero_span_cal.map_to_screen(100, 100, 800.0, 480.0),
+            (0.0, 0.0)
+        );
+        dev.set_calibration(zero_span_cal);
+        assert!(dev.decoder.calibration().is_valid());
 
         // NativeEvdevSyscall error paths with invalid fd (-1)
         let native = NativeEvdevSyscall;
