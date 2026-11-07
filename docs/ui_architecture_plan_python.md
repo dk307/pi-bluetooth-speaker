@@ -283,7 +283,7 @@ Whenever the physical **EC12 rotary knob is turned** (or a volume change is rece
   - Each item shows: Device Name, Bluetooth Address, Connection Badge (`🟢 Active` or `⚪ Disconnected`).
   - **Action 1: Connect / Disconnect:** 1-tap connection toggle.
   - **Action 2: Forget / Remove:** Trashcan icon with confirmation to unpair from BlueZ.
-* **Auto-Trust Status Indicator:** Confirms that `bt-agent.service` is actively running to authorize pairing without PIN prompts.
+* **Auto-Trust Status Indicator:** Confirms that the Bluetooth auto-trust pairing agent is actively running to authorize pairing without PIN prompts.
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐

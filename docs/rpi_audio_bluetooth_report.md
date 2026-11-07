@@ -165,7 +165,7 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 | Service Name | State | Type | Executable & Key Parameters | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | **`bluetooth.service`** | `active (running)` | System | `/usr/libexec/bluetooth/bluetoothd` | Official BlueZ daemon managing HCI controller and A2DP profile. |
-| **`bt-agent.service`** | `active (running)` | Custom | `/usr/local/bin/bt-auto-trust-agent.py` | Python D-Bus agent providing headless auto-pairing and auto-trusting of incoming Bluetooth connections without PIN prompts. |
+| **`bt-manager.service`** | `active (running)` | Appliance | `/usr/local/bin/bt-manager` | Pure-Rust service providing native BlueZ `org.bluez.Agent1` headless auto-pairing & auto-trust agent, BlueZ/BlueALSA status monitoring, and BIP cover-art publisher (replaces legacy `bt-agent.service`). |
 | **`bluealsa.service`** | `active (running)` | Custom/System | `/usr/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+` | BlueALSA v5.0.0 daemon acting as an A2DP sink supporting all high-resolution codecs except Opus, with native AVRCP volume. |
 | **`bluealsa-aplay.service`**| `active (running)` | Custom/System | `/usr/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"` | Pipes incoming decoded audio stream from BlueALSA to ALSA `default` (`dsp_dmix` -> `Loopback,0,0` -> CamillaDSP) with hardware-only volume auto-sync to the Merus MA12070P chip (`hw:sndrpimerusamp`). |
 | **`camilladsp.service`** | `active (running)` | Custom | `/usr/local/bin/camilladsp -p 1234 -o /var/log/camilladsp/camilladsp.log /etc/camilladsp/crossover.yml` | CamillaDSP v4.1.3 crossover and filter engine with WebSocket control API on port 1234. |
@@ -302,7 +302,7 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
     Type=dbus
     BusName=org.bluealsa
     ```
-    With `Type=dbus`, systemd defines bluealsa as started only when `org.bluealsa` actually appears on the bus, making the `After=`/`Requires=` ordering in `bluealsa-aplay.service` genuinely effective. This matches the pattern already used by `obex.service` (`Type=dbus`, `BusName=org.bluez.obex`). Other services are safe as-is: `bt-agent` depends on `bluetooth.service`, which is `Type=notify` upstream (readiness-tracked); `camilladsp` has no D-Bus dependency (ALSA-only, with `Restart=always` as retry).
+    With `Type=dbus`, systemd defines bluealsa as started only when `org.bluealsa` actually appears on the bus, making the `After=`/`Requires=` ordering in `bluealsa-aplay.service` genuinely effective. This matches the pattern already used by `obex.service` (`Type=dbus`, `BusName=org.bluez.obex`). Other services are safe as-is: `bt-manager` depends on `bluetooth.service`, which is `Type=notify` upstream (readiness-tracked); `camilladsp` has no D-Bus dependency (ALSA-only, with `Restart=always` as retry).
 
 ### 7.3. ALSA Routing Configuration (`/etc/asound.conf`)
 - **Module:** `snd-aloop` loaded via `/etc/modules-load.d/snd-aloop.conf`
@@ -538,7 +538,7 @@ ssh root@192.168.2.120 "i2cdetect -y 1"
 
 ### Audio Services Status
 ```bash
-ssh root@192.168.2.120 "systemctl status bluetooth bt-agent bluealsa bluealsa-aplay camilladsp --no-pager"
+ssh root@192.168.2.120 "systemctl status bluetooth bt-manager bluealsa bluealsa-aplay camilladsp --no-pager"
 ```
 
 ### BlueALSA Active Streams & Connected Devices
@@ -763,125 +763,44 @@ systemctl daemon-reload
 systemctl enable --now bluealsa bluealsa-aplay
 ```
 
-### 10.7. Bluetooth Headless Auto-Pairing & Trust Agent (`bt-agent.service`)
-Headless Bluetooth sinks require a D-Bus agent to automatically authorize incoming connections and set devices as "Trusted" without PIN dialog prompts:
+### 10.7. Bluetooth Headless Auto-Pairing & Trust Agent (`bt-manager.service`)
+Headless Bluetooth sinks require a D-Bus agent to automatically authorize incoming connections and set devices as "Trusted" without PIN dialog prompts.
 
-```bash
-# 1. Install D-Bus agent script (/usr/local/bin/bt-auto-trust-agent.py)
-cat <<'EOF' > /usr/local/bin/bt-auto-trust-agent.py
-#!/usr/bin/env python3
-import sys
-import signal
-import dbus
-import dbus.service
-import dbus.mainloop.glib
-from gi.repository import GLib
+In this appliance, auto-pairing and trust management is handled natively by **`bt-manager.service`** (`/usr/local/bin/bt-manager`), a pure-Rust service that hosts `org.bluez.Agent1` directly via `zbus`. This consolidates pairing supervision with the status monitor loop and BIP cover-art provider, eliminating the legacy standalone Python `bt-agent.service` and `/usr/local/bin/bt-auto-trust-agent.py`.
 
-AGENT_PATH = "/test/agent"
+#### Key Architecture & Capabilities
+1. **Zero Python Dependencies:** Operates natively in Rust without `python3-dbus` or `python3-gi`.
+2. **Re-Pairing Bug Remediation:** Advertises `DisplayYesNo` capability by default, auto-confirming numeric comparison requests and permanently resolving the Raspberry Pi BlueZ 5.55+ silent bond-drop re-pairing bug.
+3. **Non-Blocking Trust Assignment:** Uses asynchronous D-Bus property calls (`Device1.Trusted = true`) to prevent D-Bus re-entrancy deadlocks with `bluetoothd`.
+4. **Lifecycle Supervision:** Automatically re-claims default agent status if `bluetoothd` stops or restarts.
 
-class AutoTrustAgent(dbus.service.Object):
-    def __init__(self, bus, path):
-        super().__init__(bus, path)
-        self.bus = bus
-
-    def _set_trusted(self, path):
-        try:
-            dev = self.bus.get_object("org.bluez", path)
-            props = dbus.Interface(dev, "org.freedesktop.DBus.Properties")
-            props.Set("org.bluez.Device1", "Trusted", dbus.Boolean(True))
-            print(f"[Agent] Automatically set {path} to Trusted: yes", flush=True)
-        except Exception as e:
-            print(f"[Agent] Failed to trust {path}: {e}", flush=True)
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
-    def Release(self):
-        print("[Agent] Release requested by BlueZ", flush=True)
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
-    def AuthorizeService(self, device, uuid):
-        self._set_trusted(device)
-        return
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="s")
-    def RequestPinCode(self, device):
-        self._set_trusted(device)
-        return "0000"
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
-    def RequestPasskey(self, device):
-        self._set_trusted(device)
-        return dbus.UInt32(0)
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
-    def RequestConfirmation(self, device, passkey):
-        self._set_trusted(device)
-        return
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="")
-    def RequestAuthorization(self, device):
-        self._set_trusted(device)
-        return
-
-def cleanup(signum, frame):
-    print(f"\n[Agent] Caught signal {signum}, unregistering agent...", flush=True)
-    try:
-        manager.UnregisterAgent(AGENT_PATH)
-        print("[Agent] Successfully unregistered agent from BlueZ", flush=True)
-    except Exception as e:
-        print(f"[Agent] Cleanup exception: {e}", flush=True)
-    finally:
-        if loop and loop.is_running():
-            loop.quit()
-    sys.exit(0)
-
-if __name__ == "__main__":
-    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-    bus = dbus.SystemBus()
-    agent = AutoTrustAgent(bus, AGENT_PATH)
-
-    obj = bus.get_object("org.bluez", "/org/bluez")
-    manager = dbus.Interface(obj, "org.bluez.AgentManager1")
-
-    try:
-        manager.UnregisterAgent(AGENT_PATH)
-    except dbus.exceptions.DBusException:
-        pass
-
-    manager.RegisterAgent(AGENT_PATH, "NoInputNoOutput")
-    manager.RequestDefaultAgent(AGENT_PATH)
-    print(f"[Agent] Registered {AGENT_PATH} (NoInputNoOutput)", flush=True)
-
-    signal.signal(signal.SIGINT, cleanup)
-    signal.signal(signal.SIGTERM, cleanup)
-
-    loop = GLib.MainLoop()
-    try:
-        loop.run()
-    except KeyboardInterrupt:
-        cleanup(signal.SIGINT, None)
-EOF
-chmod +x /usr/local/bin/bt-auto-trust-agent.py
-
-# 2. Create bt-agent systemd service (/etc/systemd/system/bt-agent.service)
-cat <<'EOF' > /etc/systemd/system/bt-agent.service
+#### Service Definition (`/etc/systemd/system/bt-manager.service`)
+```ini
 [Unit]
-Description=Bluetooth Auto-Trust Headless Agent
+Description=DietPi Bluetooth Manager Service (Auto-Trust & Cover Art)
 After=bluetooth.service
 Requires=bluetooth.service
 
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/bt-auto-trust-agent.py
+ExecStart=/usr/local/bin/bt-manager
 Restart=always
 RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
-EOF
+```
 
+```bash
+# Enable and start the native bt-manager service
 systemctl daemon-reload
-systemctl enable --now bt-agent
+systemctl enable --now bt-manager
+
+# Decommission legacy bt-agent if previously installed
+systemctl disable --now bt-agent.service 2>/dev/null || true
+systemctl mask bt-agent.service 2>/dev/null || true
+rm -f /etc/systemd/system/bt-agent.service /usr/local/bin/bt-auto-trust-agent.py
 ```
 
 ### 10.8. BlueALSA Runtime Directories & Package Note
@@ -898,10 +817,9 @@ chmod 700 /var/lib/bluealsa
 *(Note: Installing `bluez-alsa-utils` installs `bluealsa-cli` without overwriting the custom-compiled `/usr/bin/bluealsa` daemon).*
 
 ### 10.9. Python Libraries & Peripherals Dependencies
-```bash
-# D-Bus & GObject (for bt-auto-trust-agent.py)
-apt update && apt install -y python3-dbus python3-gi
+*(Note: Python D-Bus & GObject packages previously required for `bt-auto-trust-agent.py` have been deprecated; `bt-manager` runs as a compiled pure-Rust binary).*
 
+```bash
 # Hardware libraries (GPIO, SPI, SMBus for light sensor, PIL for displays)
 apt install -y python3-pil python3-spidev python3-rpi.gpio python3-smbus2
 
