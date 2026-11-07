@@ -564,7 +564,11 @@ where
                                 .await;
 
                             reconciler_handle.abort();
-                            let _ = reconciler_handle.await;
+                            if let Err(e) = reconciler_handle.await
+                                && e.is_panic()
+                            {
+                                std::panic::resume_unwind(e.into_panic());
+                            }
                             if *shutdown_rx.borrow() {
                                 break;
                             }
