@@ -560,16 +560,17 @@ pub fn build_snapshots(
         let transport_str = extract_str(pcm_props, "Transport").unwrap_or("");
 
         // Check for A2DP sink (audio from phone playing through speaker)
-        if path_str.ends_with("/a2dpsnk/source") || transport_str == "A2DP-sink" {
+        if path_str.contains("a2dp") || transport_str.contains("A2DP") {
             devices_with_pcm.insert(dev_path.clone());
         }
 
         // Check for active HFP/HSP/SCO voice call
-        if path_str.contains("/hfp")
-            || path_str.contains("/hsp")
-            || path_str.contains("/sco")
+        if path_str.contains("hfp")
+            || path_str.contains("hsp")
+            || path_str.contains("sco")
             || transport_str.starts_with("HFP")
             || transport_str.starts_with("HSP")
+            || transport_str.starts_with("SCO")
         {
             devices_with_voice.insert(dev_path);
         }
@@ -863,15 +864,6 @@ pub fn extract_string_array<S: BuildHasher>(
         return vec;
     }
     if let Ok(arr) = Array::try_from(val.clone()) {
-        return arr
-            .iter()
-            .filter_map(|item| match item {
-                Value::Str(s) => Some(s.as_str().to_string()),
-                _ => item.downcast_ref::<&str>().ok().map(|s| (*s).to_string()),
-            })
-            .collect();
-    }
-    if let Ok(arr) = <&Array<'_>>::try_from(val) {
         return arr
             .iter()
             .filter_map(|item| match item {
