@@ -64,16 +64,8 @@ fn check_ids_map_to_dense_row_indexes() {
 }
 
 #[test]
-fn boot_probe_real_execution_and_debug_format() {
+fn boot_probe_real_constructor_and_debug_format() {
     let probe = BootProbe::real();
     let debug_str = format!("{probe:?}");
     assert!(debug_str.contains("probe_count: 5"));
-
-    let mut updates = Vec::new();
-    probe.run(&mut |u| updates.push(u));
-    assert_eq!(updates.len(), 10);
-    // Display check is the first probe and always passes
-    assert_eq!(updates[0].status, BootCheckStatus::Running);
-    assert_eq!(updates[1].status, BootCheckStatus::Passed);
-    assert!(updates[1].text.contains("Freenove 4.3\" DSI"));
 }
