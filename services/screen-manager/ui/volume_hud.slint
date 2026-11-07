@@ -1,0 +1,208 @@
+import { Theme } from "theme.slint";
+
+export component VolumeHudOverlay inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: @linear-gradient(150deg, Theme.active.card_surface 0%, Theme.active.chassis 100%);
+    border-width: 1px;
+    border-color: Theme.active.card_border;
+    clip: true;
+
+    in-out property <float> volume_value: 75.0;
+    in-out property <bool> is_muted: false;
+
+    // NaN-safe normalized volume ratio (0.0 .. 1.0)
+    property <float> clamped_ratio: root.volume_value >= 0.0 ? Math.min(1.0, root.volume_value / 100.0) : 0.0;
+    property <length> slider_width: 620px;
+    property <length> slider_touch_height: 64px;
+    property <length> track_height: 16px;
+    property <length> thumb_diameter: 44px;
+
+    callback volume_changed(float);
+    callback toggle_mute();
+    callback dismiss_requested();
+    callback interaction_activity();
+
+    // Full-viewport backdrop touch catcher: prevents touches from leaking through to
+    // the underlying tab and allows tapping empty space to dismiss the HUD early.
+    backdrop_touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            root.dismiss_requested();
+        }
+    }
+
+    VerticalLayout {
+        padding-top: 18px;
+        padding-bottom: 18px;
+        padding-left: 24px;
+        padding-right: 24px;
+        alignment: space-between;
+
+        // 1. Header Label
+        Text {
+            text: root.is_muted ? "VOLUME — MUTED" : "VOLUME";
+            color: root.is_muted ? #EF4444 : Theme.active.secondary_accent;
+            font-size: 16px;
+            font-weight: 800;
+            letter-spacing: 2px;
+            horizontal-alignment: center;
+        }
+
+        // 2. Giant Center Volume Readout (as big as possible in center)
+        Rectangle {
+            height: 148px;
+            background: transparent;
+
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                text: root.is_muted ? "MUTE" : (Math.round(root.clamped_ratio * 100.0) + "%");
+                color: root.is_muted ? #EF4444 : Theme.active.text_primary;
+                font-size: 128px;
+                font-weight: 800;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        // 3. Interactive Horizontal Slider with Big Circular Thumb
+        Rectangle {
+            height: root.slider_touch_height;
+            background: transparent;
+
+            slider_box := Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: root.slider_width;
+                height: root.slider_touch_height;
+                background: transparent;
+
+                function update_from_touch(mx: length) {
+                    let eff_x = Math.max(0px, Math.min(track_bar.width, mx - track_bar.x));
+                    let pct = Math.round((eff_x / track_bar.width) * 100.0);
+                    root.volume_value = pct;
+                    root.interaction_activity();
+                    root.volume_changed(pct);
+                }
+
+                // Horizontal pill track inset by half the thumb diameter so the big circle
+                // never clips at 0% or 100%.
+                track_bar := Rectangle {
+                    x: root.thumb_diameter / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: parent.width - root.thumb_diameter;
+                    height: root.track_height;
+                    border-radius: self.height / 2;
+                    background: #1c2430;
+                    border-width: 1px;
+                    border-color: Theme.active.card_border;
+                    clip: true;
+
+                    // Active fill bar
+                    Rectangle {
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width * root.clamped_ratio;
+                        height: parent.height;
+                        border-radius: self.height / 2;
+                        background: root.is_muted ? Theme.active.text_muted : Theme.active.primary_accent;
+                    }
+                }
+
+                // Big circular thumb handle
+                thumb_circle := Rectangle {
+                    width: root.thumb_diameter;
+                    height: root.thumb_diameter;
+                    border-radius: self.height / 2;
+                    x: track_bar.x + (track_bar.width * root.clamped_ratio) - (self.width / 2);
+                    y: (parent.height - self.height) / 2;
+                    background: root.is_muted ? Theme.active.card_surface : Theme.active.primary_accent;
+                    border-width: 4px;
+                    border-color: Theme.active.text_primary;
+
+                    // High-contrast center dot inside the big circle
+                    Rectangle {
+                        width: 14px;
+                        height: 14px;
+                        border-radius: self.height / 2;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        background: Theme.active.text_primary;
+                    }
+                }
+
+                slider_touch := TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down) {
+                            slider_box.update_from_touch(self.mouse-x);
+                        }
+                    }
+                    moved => {
+                        if (self.pressed) {
+                            slider_box.update_from_touch(self.mouse-x);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Dedicated Mute / Unmute Button Row
+        Rectangle {
+            height: 48px;
+            background: transparent;
+
+            mute_btn := Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 220px;
+                height: 48px;
+                border-radius: self.height / 2;
+                background: root.is_muted ? #EF4444 : Theme.active.card_surface;
+                border-width: 2px;
+                border-color: root.is_muted ? #EF4444 : Theme.active.primary_accent;
+                opacity: mute_touch.pressed ? 0.75 : 1.0;
+
+                VerticalLayout {
+                    alignment: center;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 12px;
+
+                        Image {
+                            source: root.is_muted
+                                ? @image-url("../../../assets/icons/volume-mute.svg")
+                                : @image-url("../../../assets/icons/volume-3.svg");
+                            colorize: root.is_muted ? #FFFFFF : Theme.active.primary_accent;
+                            width: 24px;
+                            height: 24px;
+                            image-fit: contain;
+                        }
+
+                        Text {
+                            text: root.is_muted ? "UNMUTE" : "MUTE";
+                            color: root.is_muted ? #FFFFFF : Theme.active.text_primary;
+                            font-size: 16px;
+                            font-weight: 800;
+                            letter-spacing: 1px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                mute_touch := TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => {
+                        root.interaction_activity();
+                        root.toggle_mute();
+                    }
+                }
+            }
+        }
+    }
+}

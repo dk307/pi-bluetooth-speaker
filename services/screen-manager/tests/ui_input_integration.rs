@@ -315,3 +315,109 @@ fn touch_viewport_progress_bar_is_read_only() {
         "Read-only progress bar must not enqueue any seek commands on touch/drag/release"
     );
 }
+
+#[test]
+fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+    shell.window().show().expect("Failed to show MainWindow");
+    let _ = fb.render_frame(&window).expect("Initial frame render");
+
+    let commands = TransportCommandQueue::new();
+    shell.wire_bluetooth_transport(&commands);
+
+    assert!(!shell.is_volume_hud_visible());
+
+    // 1. Click the volume control in TopStatusBar (top-right area before DIM button: X: 690, Y: 30)
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: LogicalPosition::new(690.0, 30.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: LogicalPosition::new(690.0, 30.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+
+    assert!(
+        shell.is_volume_hud_visible(),
+        "Clicking top status bar volume control must open the Volume HUD screen"
+    );
+    let _ = fb.render_frame(&window).expect("Render HUD open");
+
+    // 2. Touch and drag the big-circle slider in the Volume HUD (centered at Y: ~300, X: 112..688)
+    // Tap near the left end of the track (X: 112 -> 0%) and drag to center (X: 400 -> 50%) and right (X: 688 -> 100%)
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: LogicalPosition::new(112.0, 295.0),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(shell.volume(), 0.0);
+
+    window.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(400.0, 295.0),
+    });
+    assert_eq!(shell.volume(), 50.0);
+
+    window.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(688.0, 295.0),
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: LogicalPosition::new(688.0, 295.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert_eq!(shell.volume(), 100.0);
+
+    // Consecutive SetVolume commands coalesce to the latest value (100%)
+    let drained = commands.drain();
+    assert_eq!(drained, vec![TransportCommand::SetVolume(100)]);
+
+    // 3. Click the dedicated MUTE / UNMUTE button at the bottom of the Volume HUD (X: 400, Y: 378)
+    assert!(!shell.is_muted());
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: LogicalPosition::new(400.0, 378.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: LogicalPosition::new(400.0, 378.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+
+    assert!(
+        shell.is_muted(),
+        "Clicking dedicated MUTE button inside Volume HUD must mute audio"
+    );
+    assert_eq!(commands.drain(), vec![TransportCommand::SetMute(true)]);
+
+    // Click UNMUTE button again
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: LogicalPosition::new(400.0, 378.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: LogicalPosition::new(400.0, 378.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert!(!shell.is_muted());
+    assert_eq!(commands.drain(), vec![TransportCommand::SetMute(false)]);
+
+    // 4. Tap backdrop outside controls (e.g., X: 40, Y: 100) to dismiss HUD immediately
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: LogicalPosition::new(40.0, 100.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: LogicalPosition::new(40.0, 100.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert!(
+        !shell.is_volume_hud_visible(),
+        "Tapping backdrop outside controls must dismiss Volume HUD"
+    );
+}

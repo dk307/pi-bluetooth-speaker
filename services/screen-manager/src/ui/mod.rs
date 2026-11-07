@@ -42,7 +42,7 @@ pub use marquee::{
     StripRequest,
 };
 #[doc(inline)]
-pub use shell::AppShell;
+pub use shell::{AppShell, EncoderVolumeTracker};
 #[doc(inline)]
 pub use theme::ThemePreset;
 

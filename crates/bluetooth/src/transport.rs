@@ -52,6 +52,13 @@ impl BlueAlsaPcm {
     }
 }
 
+/// Selects the primary active [`BlueAlsaPcm`] from `pcms`, preferring an actively
+/// streaming (`running`) transport, otherwise falling back to the first available stream.
+#[must_use]
+pub fn select_active_pcm(pcms: &[BlueAlsaPcm]) -> Option<&BlueAlsaPcm> {
+    pcms.iter().find(|p| p.running).or_else(|| pcms.first())
+}
+
 /// Computes the playback progress ratio clamped to `0.0..=1.0`.
 ///
 /// A zero or unknown duration maps to `0.0`. Shared between
@@ -192,6 +199,51 @@ pub fn decode_pcm_format(id: u16) -> Box<str> {
     }
 }
 
+/// Converts a volume percentage (`0..=100`) to a `BlueALSA` / AVRCP 7-bit level (`0..=127`).
+///
+/// Percentages above `100` clamp to `127`. Rounding is chosen so that
+/// [`format_volume_bytes`] recovers the exact percentage for every `0..=100`.
+#[must_use]
+pub const fn percent_to_bluealsa_level(percent: u8) -> u8 {
+    let clamped = if percent > 100 { 100 } else { percent };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "(100 * 127 + 50) / 100 == 127 fits in u8"
+    )]
+    let level = ((clamped as u16 * 127 + 50) / 100) as u8;
+    level
+}
+
+/// Encodes a `BlueALSA` per-channel `Volume` (`ay`) byte array from percentage and mute state.
+///
+/// Each byte encodes `(muted << 7) | (level & 0x7F)` across `channels.max(1)` channels.
+#[must_use]
+pub fn encode_volume_bytes(channels: u8, percent: u8, muted: bool) -> Vec<u8> {
+    let count = usize::from(channels.max(1));
+    let level = percent_to_bluealsa_level(percent) & 0x7F;
+    let byte = if muted { level | 0x80 } else { level };
+    vec![byte; count]
+}
+
+/// Updates the mute bit (`0x80`) across an existing `BlueALSA` `Volume` byte slice
+/// while preserving each channel's 7-bit level.
+///
+/// If `existing` is empty, falls back to [`encode_volume_bytes`] at level `0%` to avoid
+/// unintended high-volume playback on unmute.
+#[must_use]
+pub fn apply_mute_to_volume_bytes(existing: &[u8], channels: u8, muted: bool) -> Vec<u8> {
+    if existing.is_empty() {
+        return encode_volume_bytes(channels, 0, muted);
+    }
+    existing
+        .iter()
+        .map(|&b| {
+            let level = b & 0x7F;
+            if muted { level | 0x80 } else { level }
+        })
+        .collect()
+}
+
 /// Renders `BlueALSA` per-channel volume bytes (`(muted << 7) | level`) and calculates average volume percent.
 ///
 /// Uses channel names when provided (`ChannelMap`), falling back to generic indices.
@@ -242,6 +294,10 @@ pub enum TransportCommand {
     PreviousTrack,
     /// Seek to an absolute playback position in milliseconds.
     Seek(u32),
+    /// Set output volume percentage (`0..=100`) and unmute.
+    SetVolume(u8),
+    /// Set output mute state (`true` = muted, `false` = unmuted).
+    SetMute(bool),
 }
 
 /// Thread-safe command queue bridging Slint render-thread callbacks and the
@@ -278,6 +334,20 @@ impl TransportCommandQueue {
                 poisoned.into_inner()
             }
         };
+        // Coalesce consecutive SetVolume or SetMute updates so rapid slider drags
+        // or rotary encoder turns only execute the latest target on D-Bus without
+        // filling the 32-entry queue.
+        match (lock.back_mut(), command) {
+            (Some(TransportCommand::SetVolume(prev)), TransportCommand::SetVolume(next)) => {
+                *prev = next;
+                return;
+            }
+            (Some(TransportCommand::SetMute(prev)), TransportCommand::SetMute(next)) => {
+                *prev = next;
+                return;
+            }
+            _ => {}
+        }
         // Bounded to 32 commands: rapid-fire clicks can never accumulate an
         // unbounded backlog. Play/pause drops reconcile on the next publish,
         // but seek/navigation drops have no such reconciliation, so overflow
