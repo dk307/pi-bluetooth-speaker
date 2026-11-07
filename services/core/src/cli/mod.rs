@@ -8,6 +8,7 @@ pub mod amp;
 pub mod bt;
 pub mod bt_manager;
 pub mod core_daemon;
+pub mod cover_provider;
 pub mod dsp;
 pub mod encoder;
 pub mod light;

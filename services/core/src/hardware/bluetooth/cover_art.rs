@@ -1,9 +1,6 @@
 //! BIP cover-art discovery, caching, and validation helpers.
 
-use std::collections::HashMap;
 use std::io::Read;
-
-use zbus::zvariant::OwnedValue;
 
 use super::connection::BtAddress;
 
@@ -35,243 +32,6 @@ pub fn is_complete_jpeg(path: &std::path::Path) -> bool {
     footer == [0xFF, 0xD9]
 }
 
-/// Maximum accepted OBEX native image size in bytes.
-///
-/// Larger descriptors risk Android `TransactionTooLargeException` crashes on the
-/// phone side when the bitmaps are scaled during the Binder IPC reply.
-pub const BIP_MAX_NATIVE_BYTES: u64 = 280_000;
-
-/// Default per-device resolution ceiling in pixels (800x800).
-pub const BIP_DEFAULT_CAP_PX: u32 = 640_000;
-
-/// Minimum pixel area for a Tier-1 candidate; 200x200 is reserved for the thumbnail tier.
-pub const BIP_MIN_HIGHRES_PX: u32 = 40_000;
-
-/// Poll interval for OBEX `Transfer1` progress watchdogs, in milliseconds.
-pub const BIP_POLL_INTERVAL_MS: u64 = 40;
-
-/// Stall watchdog: abort a transfer only after this many milliseconds with zero byte progress.
-pub const BIP_STALL_TIMEOUT_MS: u64 = 2_500;
-
-/// Total watchdog for the zero-descriptor native pull, in milliseconds.
-pub const BIP_NATIVE_TIMEOUT_MS: u64 = 8_000;
-
-/// Total watchdog for an explicit high-res variant transfer, in milliseconds.
-pub const BIP_VARIANT_TIMEOUT_MS: u64 = 4_000;
-
-/// Total watchdog for the baseline `Image1.GetThumbnail` transfer, in milliseconds.
-pub const BIP_THUMBNAIL_TIMEOUT_MS: u64 = 2_500;
-
-/// Settle wait after `TrackChanged` before any OBEX traffic, in milliseconds.
-///
-/// Keep short: live Pi measurements show OBEX Get requests are accepted ~90 ms
-/// after fetch start, so a long fixed sleep only adds dead latency to every
-/// track change.
-pub const BIP_TRACK_SETTLE_MS: u64 = 80;
-
-/// Default per-device maximum safe native image size in bytes for the zero-descriptor pull.
-pub const BIP_DEFAULT_NATIVE_BYTES_CAP: u64 = 1_500_000;
-
-/// ACL link supervision timeout in Bluetooth clock slots (32000 slots = 20 s).
-pub const HCI_SUPERVISION_TIMEOUT_SLOTS: u32 = 32_000;
-
-/// Raised kernel socket receive buffer ceiling (`net.core.rmem_max`), in bytes.
-pub const BT_SOCKET_RMEM_MAX: u32 = 2_097_152;
-
-/// Raised kernel socket receive buffer default (`net.core.rmem_default`), in bytes.
-pub const BT_SOCKET_RMEM_DEFAULT: u32 = 1_048_576;
-
-/// Synthetic explicit targets used when a BIP descriptor advertises an open range.
-pub const BIP_SYNTHETIC_TARGETS: [(u32, u32); 3] = [(800, 800), (600, 600), (400, 400)];
-
-/// A concrete BIP image variant selected for an `Image1.Get` transfer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BipImageCandidate {
-    /// BIP `Pixel` descriptor string, e.g. `600*600`.
-    pub pixel: String,
-    /// BIP `Encoding` string, e.g. `JPEG`.
-    pub encoding: String,
-    /// Pixel area `width * height` used for step-down ordering.
-    pub area: u32,
-}
-
-/// Parses a BIP `Pixel` descriptor like `600*600` or a range `0*0-65535*65535`.
-#[must_use]
-pub fn parse_bip_pixel(s: &str) -> Option<(u32, u32)> {
-    let first = s.split('-').next()?;
-    let (w, h) = first.split_once('*')?;
-    let w = w.trim().parse::<u32>().ok()?;
-    let h = h.trim().parse::<u32>().ok()?;
-    Some((w, h))
-}
-
-/// Whether a BIP `Pixel` descriptor is an open-ended range (min `0*0`).
-#[must_use]
-pub fn is_bip_pixel_range(s: &str) -> bool {
-    s.split('-').next() == Some("0*0")
-}
-
-/// Returns the maximum advertised native image `Size` in bytes across all descriptors.
-///
-/// Compares the `Size` key case-insensitively (BIP descriptors are case-insensitive in
-/// practice) and returns 0 when no descriptor advertises a parseable byte count, meaning
-/// the native size is unknown and a zero-descriptor pull is safe to attempt.
-#[must_use]
-pub fn native_image_size<S: ::std::hash::BuildHasher>(
-    descriptors: &[HashMap<String, OwnedValue, S>],
-) -> u64 {
-    descriptors
-        .iter()
-        .filter_map(|descriptor| {
-            descriptor
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("Size"))
-                .and_then(|(_, v)| v.downcast_ref::<u64>().ok())
-        })
-        .max()
-        .unwrap_or(0)
-}
-
-/// Selects BIP `Get` candidates from `Image1.Properties` descriptors, descending by pixel area.
-///
-/// Descriptors advertising `Size` above [`BIP_MAX_NATIVE_BYTES`] are discarded, as are
-/// candidates above the per-device pixel ceiling or at/below [`BIP_MIN_HIGHRES_PX`]
-/// (the 200x200 baseline is reserved for the thumbnail fallback tier). Open range
-/// descriptors are expanded into the explicit [`BIP_SYNTHETIC_TARGETS`] that fit the ceiling.
-#[must_use]
-pub fn select_bip_candidates(
-    descriptors: &[HashMap<String, OwnedValue>],
-    max_cap_px: u32,
-) -> Vec<BipImageCandidate> {
-    let mut out: Vec<BipImageCandidate> = Vec::new();
-    for descriptor in descriptors {
-        // BIP descriptors are case-insensitive in practice (obexd emits lowercase keys).
-        let get_value = |key: &str| -> Option<&OwnedValue> {
-            descriptor
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(key))
-                .map(|(_, v)| v)
-        };
-        let get_str = |key: &str| -> Option<String> {
-            get_value(key)
-                .and_then(|v| v.downcast_ref::<&str>().ok())
-                .map(str::to_owned)
-        };
-        let (Some(pixel), Some(encoding)) = (get_str("Pixel"), get_str("Encoding")) else {
-            continue;
-        };
-        // `Size` is in bytes; BIP `MaxSize` is in kilobytes.
-        let size_bytes = get_value("Size")
-            .and_then(|v| v.downcast_ref::<u64>().ok())
-            .unwrap_or(0);
-        let max_size_kb = get_value("MaxSize")
-            .and_then(|v| v.downcast_ref::<u64>().ok())
-            .unwrap_or(0);
-        if size_bytes > BIP_MAX_NATIVE_BYTES || max_size_kb > BIP_MAX_NATIVE_BYTES / 1024 {
-            continue;
-        }
-        if is_bip_pixel_range(&pixel) {
-            for (w, h) in BIP_SYNTHETIC_TARGETS {
-                let Some(area) = w.checked_mul(h) else {
-                    continue;
-                };
-                if area <= max_cap_px && area > BIP_MIN_HIGHRES_PX {
-                    out.push(BipImageCandidate {
-                        pixel: format!("{w}*{h}"),
-                        encoding: encoding.clone(),
-                        area,
-                    });
-                }
-            }
-            continue;
-        }
-        let Some((w, h)) = parse_bip_pixel(&pixel) else {
-            continue;
-        };
-        // Descriptor dimensions come from the remote phone's `Image1.Properties`
-        // (peer-controlled OBEX data); reject any pair whose product overflows `u32`
-        // instead of wrapping around and letting a huge candidate pass the cap filter.
-        let Some(area) = w.checked_mul(h) else {
-            continue;
-        };
-        if area > max_cap_px || area <= BIP_MIN_HIGHRES_PX {
-            continue;
-        }
-        out.push(BipImageCandidate {
-            pixel,
-            encoding,
-            area,
-        });
-    }
-    out.sort_by_key(|a| std::cmp::Reverse(a.area));
-    out.dedup_by(|a, b| a.pixel == b.pixel && a.encoding == b.encoding);
-    out
-}
-
-/// Per-device resolution ceilings keyed by sanitized MAC address.
-pub type DeviceCaps = HashMap<String, u32>;
-
-/// Name of the persistent per-device BIP resolution ceiling file.
-pub const DEVICE_CAPS_FILENAME: &str = "device_caps.json";
-
-/// Loads per-device BIP pixel ceilings from a directory (hermetic variant).
-#[must_use]
-pub fn load_device_caps_in(dir: &std::path::Path) -> DeviceCaps {
-    std::fs::read_to_string(dir.join(DEVICE_CAPS_FILENAME))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<DeviceCaps>(&raw).ok())
-        .unwrap_or_default()
-}
-
-/// Persists a single device ceiling into a caps file (read-modify-write).
-///
-/// # Errors
-/// Returns an error string when the file cannot be written.
-pub fn store_device_cap_in(
-    dir: &std::path::Path,
-    sanitized_mac: &str,
-    max_px: u32,
-) -> Result<(), Box<str>> {
-    let mut caps = load_device_caps_in(dir);
-    caps.insert(sanitized_mac.to_owned(), max_px);
-    let raw =
-        serde_json::to_string(&caps).map_err(|e| Box::<str>::from(format!("caps encode: {e}")))?;
-    std::fs::write(dir.join(DEVICE_CAPS_FILENAME), raw)
-        .map_err(|e| Box::<str>::from(format!("cannot write {DEVICE_CAPS_FILENAME}: {e}")))
-}
-
-/// Per-device native-pull byte ceilings keyed by sanitized MAC address.
-pub type NativeCaps = HashMap<String, u64>;
-
-/// Name of the persistent per-device native byte ceiling file.
-pub const NATIVE_CAPS_FILENAME: &str = "native_caps.json";
-
-/// Loads per-device native byte ceilings from a directory (hermetic variant).
-#[must_use]
-pub fn load_native_caps_in(dir: &std::path::Path) -> NativeCaps {
-    std::fs::read_to_string(dir.join(NATIVE_CAPS_FILENAME))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<NativeCaps>(&raw).ok())
-        .unwrap_or_default()
-}
-
-/// Persists a single native byte ceiling into a caps file (read-modify-write).
-///
-/// # Errors
-/// Returns an error string when the file cannot be written.
-pub fn store_native_cap_in(
-    dir: &std::path::Path,
-    sanitized_mac: &str,
-    max_bytes: u64,
-) -> Result<(), Box<str>> {
-    let mut caps = load_native_caps_in(dir);
-    caps.insert(sanitized_mac.to_owned(), max_bytes);
-    let raw = serde_json::to_string(&caps)
-        .map_err(|e| Box::<str>::from(format!("native caps encode: {e}")))?;
-    std::fs::write(dir.join(NATIVE_CAPS_FILENAME), raw)
-        .map_err(|e| Box::<str>::from(format!("cannot write {NATIVE_CAPS_FILENAME}: {e}")))
-}
-
 /// Root-only spool directory for OBEX cover art cache files.
 ///
 /// A predictable path under the world-writable `/tmp` would let a local process
@@ -284,7 +44,7 @@ pub const COVER_ART_CACHE_DIR: &str = "/var/cache/speaker-covers";
 ///
 /// # Errors
 /// Returns an error string when the directory cannot be created or locked down.
-pub(super) fn ensure_cover_art_cache_dir_in(dir: &std::path::Path) -> Result<(), Box<str>> {
+pub fn ensure_cover_art_cache_dir_in(dir: &std::path::Path) -> Result<(), Box<str>> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir)
         .map_err(|e| Box::<str>::from(format!("cannot create {}: {e}", dir.display())))?;
@@ -396,4 +156,86 @@ pub fn clean_old_cover_art(sanitized_mac: &str, current_handle: &str) {
 /// production cache directory).
 pub fn clean_old_cover_art_in(dir: &std::path::Path, sanitized_mac: &str, current_handle: &str) {
     clean_cover_art_in_dir(dir, sanitized_mac, current_handle);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        COVER_ART_CACHE_DIR, ensure_cover_art_cache_dir_in, is_complete_jpeg, validate_bip_handle,
+    };
+    use crate::diag::ScopedTempDir;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    /// Minimal valid JPEG: >= 100 bytes, SOI header, EOI footer.
+    fn jpeg_bytes(total: usize, with_eoi: bool) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xD8];
+        bytes.resize(total, 0x00);
+        if with_eoi {
+            let n = bytes.len();
+            bytes[n - 2] = 0xFF;
+            bytes[n - 1] = 0xD9;
+        }
+        bytes
+    }
+
+    #[test]
+    fn cache_dir_is_created_with_owner_only_permissions() {
+        let dir = ScopedTempDir::new("cover_art_dir_ok");
+        let target = dir.path().join("nested/covers");
+        ensure_cover_art_cache_dir_in(&target).expect("dir created");
+        let mode = std::fs::metadata(&target)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "cache dir must be owner-only");
+    }
+
+    #[test]
+    fn cache_dir_creation_fails_when_parent_is_a_file() {
+        let dir = ScopedTempDir::new("cover_art_dir_bad");
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").expect("blocker written");
+        let err = ensure_cover_art_cache_dir_in(&blocker.join("sub")).expect_err("must fail");
+        assert!(err.contains("cannot create"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn complete_jpeg_accepts_only_complete_files() {
+        let dir = ScopedTempDir::new("cover_art_jpeg");
+        let write = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).expect("fixture");
+            path
+        };
+        assert!(!is_complete_jpeg(Path::new("/nonexistent/cover.jpg")));
+        let short = write("short.jpg", &jpeg_bytes(40, true));
+        assert!(!is_complete_jpeg(&short), "below the 100-byte minimum");
+        let corrupt_soi = write("bad_soi.jpg", &{
+            let mut b = vec![0x00, 0x00];
+            b.resize(120, 0x11);
+            b
+        });
+        assert!(!is_complete_jpeg(&corrupt_soi), "missing SOI marker");
+        let missing_eoi = write("bad_eoi.jpg", &jpeg_bytes(120, false));
+        assert!(!is_complete_jpeg(&missing_eoi), "missing EOI marker");
+        let ok = write("ok.jpg", &jpeg_bytes(120, true));
+        assert!(is_complete_jpeg(&ok), "SOI + EOI >= 100 bytes is complete");
+    }
+
+    #[test]
+    fn bip_handles_are_exactly_seven_digits() {
+        assert!(validate_bip_handle("5630701").is_some());
+        assert!(validate_bip_handle("0000000").is_some());
+        assert!(validate_bip_handle("563070").is_none(), "too short");
+        assert!(validate_bip_handle("56307012").is_none(), "too long");
+        assert!(validate_bip_handle("56307a1").is_none(), "non-digit");
+        assert!(validate_bip_handle("../../x").is_none(), "path traversal");
+        assert!(validate_bip_handle("").is_none());
+    }
+
+    #[test]
+    fn production_cache_dir_is_documented_constant() {
+        assert_eq!(COVER_ART_CACHE_DIR, "/var/cache/speaker-covers");
+    }
 }

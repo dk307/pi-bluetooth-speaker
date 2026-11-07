@@ -96,12 +96,21 @@ tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 async-trait = "=0.1.86"
 memmap2 = { version = "=0.9.12", optional = true }
 
-# Raw `ioctl` syscalls for framebuffer VSync pacing (`FBIO_WAITFORVSYNC`)
-libc = { version = "=0.2.191", optional = true }
+# Direct OBEX Cover Art over RFCOMM (AVRCP/BIP, obexd replacement)
+bluer = { version = "=0.17.4", default-features = false, features = ["rfcomm", "l2cap"] }
+obex-protocol = { version = "=0.1.0", default-features = false, features = ["tokio"] }
+bluesdp = "=0.1.1"
+
+# Raw syscalls: framebuffer VSync pacing (`FBIO_WAITFORVSYNC`) and the
+# L2CAP_OPTIONS sockopt for BIP cover-art throughput (`SOL_L2CAP`)
+libc = { version = "=0.2.191" }
+
+# Signal handling for graceful shutdown
+ctrlc = { version = "=3.4.2" }
 
 [features]
 default = ["ui"]
-ui = ["dep:slint", "dep:slint-build", "dep:i-slint-core", "dep:memmap2", "dep:libc"]
+ui = ["dep:slint", "dep:slint-build", "dep:i-slint-core", "dep:memmap2"]
 linuxkms = ["ui", "slint/backend-linuxkms"]
 simulator = ["ui", "slint/backend-winit", "slint/renderer-femtovg"]
 test-util = []

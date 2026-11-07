@@ -66,6 +66,15 @@ pub fn playback_progress_ratio(position_ms: u32, duration_ms: u32) -> f32 {
     }
 }
 
+/// Computes the `MediaPlayer1.Seek` relative offset for an absolute target.
+///
+/// `BlueZ` `Seek` takes a *relative* offset in microseconds; convert the
+/// absolute millisecond target using the freshly observed position.
+#[must_use]
+pub fn seek_offset_us(position_ms: u32, current_ms: u32) -> i64 {
+    (i64::from(position_ms) - i64::from(current_ms)) * 1_000
+}
+
 /// Formats a duration in milliseconds into a user-friendly string (`MM:SS` or `HH:MM:SS`).
 #[must_use]
 pub fn format_duration_ms(ms: u32) -> String {

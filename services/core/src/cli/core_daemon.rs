@@ -1294,7 +1294,6 @@ pub fn main() -> ExitCode {
         Err(exit_code) => exit_code,
     }
 }
-
 #[cfg(all(test, feature = "ui"))]
 mod tests {
     use super::*;

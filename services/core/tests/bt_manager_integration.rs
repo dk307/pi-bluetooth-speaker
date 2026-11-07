@@ -87,6 +87,7 @@ fn run_app_terminates_on_tick_cap_with_mock() {
     let opts = BtManagerOptions {
         interval: Duration::from_millis(1),
         max_ticks: Some(3),
+        cover_art: false,
     };
     assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
 }

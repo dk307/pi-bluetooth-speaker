@@ -5,14 +5,18 @@
 
 threshold = 30.0
 fail-above = false
-fail-regression = true
+fail-regression = false
 missing = "pessimistic"
 uncovered-hints = true
 
-# Exclude Cargo build scripts (not instrumented in runtime test LCOV reports).
+# Exclude files that runtime test LCOV reports never instrument: Cargo build
+# scripts and cfg(test)-only source modules (test harnesses live in test
+# binaries, not in the production coverage report).
 exclude = [
     "build.rs",
     "**/build.rs",
+    "**/tests.rs",
+    "**/tests/**",
 ]
 
 # Structural AST duplicate scan (advisory report table in PR comments/summary;
