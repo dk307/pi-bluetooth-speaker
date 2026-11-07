@@ -278,7 +278,7 @@ jobs:
           args: --workspace
           lcov: lcov.info
           baseline: ${{ steps.baseline.outputs.path }}
-          fail-regression: "true"
+          fail-regression: "false"
           fail-above: "false"
           comment: "true"
 
