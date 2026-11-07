@@ -141,6 +141,7 @@ fn run_app_terminates_on_tick_cap_with_mock() {
 fn run_app_terminates_on_tick_cap_with_auto_trust_and_mock() {
     let (bt, _mock) = BluetoothDevice::new_mocked();
     let dir = speaker_common::diag::ScopedTempDir::new("bt_app_trust_test");
+    let missing_bus = dir.path().join("nonexistent-bus.sock");
     let opts = BtManagerOptions {
         config: Some(dir.path().join("missing.json")),
         interval: Duration::from_millis(1),
@@ -149,7 +150,7 @@ fn run_app_terminates_on_tick_cap_with_auto_trust_and_mock() {
         cover_art: false,
         auto_trust: true,
         capability: Some(AgentCapabilityMode::DisplayYesNo),
-        auto_trust_bus_address: Some("unix:path=/dev/null".to_string()),
+        auto_trust_bus_address: Some(format!("unix:path={}", missing_bus.display())),
     };
     assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
 }

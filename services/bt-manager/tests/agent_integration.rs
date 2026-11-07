@@ -375,3 +375,105 @@ async fn unregister_agent_fails_gracefully_when_bluez_not_present() {
     let res = bt_manager::agent::unregister_agent_on(&conn, &path).await;
     assert!(res.is_err(), "unregister without BlueZ must return error");
 }
+
+struct MockBluezDevice {
+    trusted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[zbus::interface(name = "org.bluez.Device1")]
+impl MockBluezDevice {
+    #[zbus(property)]
+    fn trusted(&self) -> bool {
+        self.trusted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[zbus(property)]
+    fn set_trusted(&self, value: bool) {
+        self.trusted
+            .store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn set_device_trusted_updates_property_on_bluez() {
+    let (_daemon, address) = spawn_private_bus();
+    let trusted_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let device_mock = MockBluezDevice {
+        trusted: std::sync::Arc::clone(&trusted_flag),
+    };
+    let dev_path = ObjectPath::try_from("/org/bluez/hci0/dev_11_22_33_44_55_66").unwrap();
+
+    let bluez_conn = zbus::connection::Builder::address(address.as_str())
+        .expect("valid address")
+        .name("org.bluez")
+        .expect("valid name")
+        .build()
+        .await
+        .expect("bluez connection");
+
+    bluez_conn
+        .object_server()
+        .at(&dev_path, device_mock)
+        .await
+        .expect("export device");
+
+    let client_conn = zbus::connection::Builder::address(address.as_str())
+        .expect("valid address")
+        .build()
+        .await
+        .expect("client connection");
+
+    assert!(!trusted_flag.load(std::sync::atomic::Ordering::SeqCst));
+
+    bt_manager::agent::set_device_trusted(&client_conn, &dev_path)
+        .await
+        .expect("set_device_trusted must succeed");
+
+    assert!(trusted_flag.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn spawn_set_trusted_in_tokio_runtime_marks_device_trusted() {
+    let (_daemon, address) = spawn_private_bus();
+    let trusted_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let device_mock = MockBluezDevice {
+        trusted: std::sync::Arc::clone(&trusted_flag),
+    };
+    let dev_path =
+        zbus::zvariant::OwnedObjectPath::try_from("/org/bluez/hci0/dev_11_22_33_44_55_66").unwrap();
+
+    let bluez_conn = zbus::connection::Builder::address(address.as_str())
+        .expect("valid address")
+        .name("org.bluez")
+        .expect("valid name")
+        .build()
+        .await
+        .expect("bluez connection");
+
+    bluez_conn
+        .object_server()
+        .at(dev_path.as_ref(), device_mock)
+        .await
+        .expect("export device");
+
+    let client_conn = zbus::connection::Builder::address(address.as_str())
+        .expect("valid address")
+        .build()
+        .await
+        .expect("client connection");
+
+    bt_manager::agent::spawn_set_trusted(client_conn, dev_path);
+
+    let mut success = false;
+    for _ in 0..50 {
+        if trusted_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            success = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        success,
+        "spawn_set_trusted must asynchronously set Trusted property to true"
+    );
+}
