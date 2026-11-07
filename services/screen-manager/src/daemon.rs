@@ -1279,9 +1279,10 @@ fn idle_sleep(touch_fd: Option<RawFd>) {
                 )]
                 libc::poll(&raw mut pfd, 1, timeout.as_millis() as libc::c_int)
             };
-            // Sleep on poll timeout, error, or if hangup/error revents are signaled without readable data,
+            // Sleep on poll error (ret < 0, e.g. EINTR) or if hangup/error revents are signaled without readable data,
             // so device disconnects do not cause a 100% CPU busy-spin loop while pending touch events are preserved.
-            ret <= 0
+            // When poll times out (ret == 0), poll has already blocked for the full duration, so we do not double-sleep.
+            ret < 0
                 || ((pfd.revents & libc::POLLIN) == 0
                     && (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0))
         }
@@ -1768,6 +1769,18 @@ mod tests {
         unsafe {
             libc::close(rfd);
             libc::close(wfd);
-        }
+        };
+
+        // 5. Pipe fd with write end closed (poll immediately wakes with POLLHUP, sleeps to avoid busy-spin)
+        let mut fds2 = [0; 2];
+        // SAFETY: pipe creates 2 valid descriptors.
+        let ret2 = unsafe { libc::pipe(fds2.as_mut_ptr()) };
+        assert_eq!(ret2, 0);
+        let [rfd2, wfd2] = fds2;
+        // SAFETY: closing writer triggers POLLHUP on reader without pending data.
+        unsafe { libc::close(wfd2) };
+        idle_sleep(Some(rfd2));
+        // SAFETY: clean up test reader.
+        unsafe { libc::close(rfd2) };
     }
 }

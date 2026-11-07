@@ -865,6 +865,12 @@ impl Drop for TouchInputDevice {
     }
 }
 
+/// Returns true if a device name matches recognized touchscreen hardware.
+fn is_touchscreen_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains("touch") || lower.contains("raspberrypi-ts")
+}
+
 impl TouchInputDevice {
     /// Opens the touch input device at `path` using production POSIX syscalls.
     ///
@@ -1004,11 +1010,10 @@ impl TouchInputDevice {
     ) -> Result<Self, TouchError> {
         let default_path = input_dir.join("event0");
         // 1. Check default path first
-        if let Ok(dev) = Self::open_with(&default_path, Arc::clone(syscall)) {
-            let name = dev.query_device_name().to_lowercase();
-            if name.contains("touch") || name.contains("raspberrypi-ts") {
-                return Ok(dev);
-            }
+        if let Ok(dev) = Self::open_with(&default_path, Arc::clone(syscall))
+            && is_touchscreen_name(&dev.query_device_name())
+        {
+            return Ok(dev);
         }
 
         // 2. Scan input_dir event* entries
@@ -1025,11 +1030,10 @@ impl TouchInputDevice {
             candidates.sort();
 
             for path in candidates {
-                if let Ok(dev) = Self::open_with(&path, Arc::clone(syscall)) {
-                    let name = dev.query_device_name().to_lowercase();
-                    if name.contains("touch") || name.contains("raspberrypi-ts") {
-                        return Ok(dev);
-                    }
+                if let Ok(dev) = Self::open_with(&path, Arc::clone(syscall))
+                    && is_touchscreen_name(&dev.query_device_name())
+                {
+                    return Ok(dev);
                 }
             }
         }
