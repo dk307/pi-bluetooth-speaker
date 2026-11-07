@@ -32,11 +32,11 @@ baseline/
 │       ├── camilladsp.service     # CamillaDSP WebSocket & filtering engine daemon
 │       ├── bluealsa.service       # BlueALSA high-res A2DP audio sink daemon
 │       ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA dmix + MA12070P HW volume sync
-│       └── bt-agent.service       # Headless auto-trust & auto-pairing D-Bus agent
+│       └── bt-agent.service       # Legacy standalone agent (superseded by bt-manager.service)
 ├── alsa/
 │   └── asound.state               # Persisted MA12070P hardware mixer gains & limiter states
 ├── bin/
-│   └── bt-auto-trust-agent.py     # Python D-Bus auto-trust pairing handler
+│   └── bt-auto-trust-agent.py     # Legacy Python D-Bus auto-trust pairing handler (superseded by bt-manager)
 └── scripts/
     ├── read_temp.py               # DS18B20 1-Wire thermal monitor
     ├── read_light_level.py        # BH1750 ambient light lux reader (I2C)
@@ -85,7 +85,7 @@ cd /root/baseline
 ```
 This performs an automated 25-point check across:
 - Kernel modules (`snd-aloop`, `i2c-dev`, `snd_soc_ma120x0p`)
-- Systemd services (`bluetooth`, `bt-agent`, `bluealsa`, `bluealsa-aplay`, `camilladsp`)
+- Systemd services (`bluetooth`, `bt-manager` [superseding `bt-agent`], `bluealsa`, `bluealsa-aplay`, `camilladsp`)
 - Listening ports (`1234` for DSP WebSocket, `22` for SSH)
 - ALSA sound cards (Card 0 Loopback, Card 1 MA12070P Amp)
 - Hardware sensors (I2C address 0x20 amp, 0x23 BH1750 light sensor, 1-Wire DS18B20)

@@ -9,7 +9,7 @@ This directory contains the modular microservices that power the **Raspberry Pi 
 | Service | Language / Stack | Status | Description |
 | :--- | :--- | :--- | :--- |
 | [`screen-manager`](screen-manager) | Rust 2024 / Slint / Tokio | **Production** | Audiophile touchscreen console (800x480 DSI `/dev/fb0`), dual PeppyMeter VU visualizers, rotary encoder volume sync, and display backlight controls (`screen-manager.service`). |
-| [`bt-manager`](bt-manager) | Rust 2024 / Bluer / Tokio | **Production** | Dedicated Bluetooth manager daemon, BlueZ & BlueALSA status monitoring, and BIP cover art D-Bus service (`bt-manager.service`). |
+| [`bt-manager`](bt-manager) | Rust 2024 / Bluer / Tokio / zbus | **Production** | Dedicated Bluetooth manager daemon, BlueZ & BlueALSA status monitoring, native `org.bluez.Agent1` auto-trust pairing agent, and BIP cover art D-Bus service (`bt-manager.service`, replaces legacy `bt-agent.service`). |
 
 ---
 

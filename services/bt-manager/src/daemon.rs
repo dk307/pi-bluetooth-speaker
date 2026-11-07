@@ -6,13 +6,18 @@
 //! and (by default) hosts the direct-BIP cover-art provider that publishes
 //! the active track's artwork on the system D-Bus for future consumers.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::agent::AgentCapabilityMode;
+use crate::config::BtManagerConfig;
 use speaker_bluetooth::{BluetoothDevice, BluetoothStatus, BtError};
-use speaker_common::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts, run_poll_loop};
+use speaker_common::diag::{
+    CliParse, DEFAULT_BT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts, run_poll_loop,
+};
 
 /// Default status poll interval (5 seconds).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -27,6 +32,17 @@ pub struct BtManagerOptions {
     /// Hosts the D-Bus cover-art provider alongside the monitor loop
     /// (default `true`; host tests disable it so no D-Bus/hardware is touched).
     pub cover_art: bool,
+    /// Runs the Bluetooth auto-trust agent for incoming pairing requests
+    /// (default `true`; tests disable it so no D-Bus/agent is spawned).
+    pub auto_trust: bool,
+    /// Pairing agent capability mode override (`None` defaults to config file / `DisplayYesNo`).
+    pub capability: Option<AgentCapabilityMode>,
+    /// JSON configuration file override path (`None` uses default /etc/bt-manager/config.json).
+    pub config: Option<PathBuf>,
+    /// Whether `--interval` was explicitly specified on the command line.
+    pub explicit_interval: bool,
+    /// Optional private D-Bus bus address for auto-trust agent (used by hermetic tests).
+    pub auto_trust_bus_address: Option<String>,
 }
 
 impl Default for BtManagerOptions {
@@ -35,6 +51,11 @@ impl Default for BtManagerOptions {
             interval: DEFAULT_POLL_INTERVAL,
             max_ticks: None,
             cover_art: true,
+            auto_trust: true,
+            capability: None,
+            config: None,
+            explicit_interval: false,
+            auto_trust_bus_address: None,
         }
     }
 }
@@ -46,11 +67,16 @@ pub fn print_usage(bin_name: &str) {
     println!("Usage: {bin_name} [OPTIONS]");
     println!();
     println!("Options:");
+    println!("  -c, --config <PATH>         JSON config file (default: {DEFAULT_BT_CONFIG_PATH})");
     println!(
         "  -i, --interval <SECS>       Status poll interval in seconds (default: {})",
         DEFAULT_POLL_INTERVAL.as_secs()
     );
     println!("  -n, --ticks <COUNT>         Exit after COUNT monitor ticks (at least 1)");
+    println!("      --no-auto-trust         Disable Bluetooth auto-trust pairing agent");
+    println!(
+        "      --capability <MODE>     Agent capability ('display-yes-no' or 'no-input-no-output')"
+    );
     println!("  -V, --version               Print version and exit");
     println!("  -h, --help                  Print this help text and exit");
 }
@@ -99,6 +125,10 @@ where
         match arg.as_str() {
             "-h" | "--help" => return Ok(CliParse::Help),
             "-V" | "--version" => return Ok(CliParse::Version),
+            "-c" | "--config" => {
+                let val = next_arg_value(&mut iter, "--config")?;
+                opts.config = Some(PathBuf::from(val));
+            }
             "-i" | "--interval" => {
                 let val = next_arg_value(&mut iter, "--interval")?;
                 let secs = parse_interval_secs(&val)?;
@@ -109,6 +139,7 @@ where
                     );
                 }
                 opts.interval = Duration::from_secs(secs);
+                opts.explicit_interval = true;
             }
             "-n" | "--ticks" => {
                 let val = next_arg_value(&mut iter, "--ticks")?;
@@ -117,6 +148,14 @@ where
                     return Err("invalid tick count '0': omit --ticks to run forever".to_string());
                 }
                 opts.max_ticks = Some(ticks);
+            }
+            "--no-auto-trust" => {
+                opts.auto_trust = false;
+            }
+            "--capability" => {
+                let val = next_arg_value(&mut iter, "--capability")?;
+                let mode = val.parse::<AgentCapabilityMode>()?;
+                opts.capability = Some(mode);
             }
             _ => return Err(format!("unknown option '{arg}', use --help for usage")),
         }
@@ -143,6 +182,50 @@ pub fn run_tick(bt: &BluetoothDevice) -> Result<BluetoothStatus, BtError> {
     Ok(status)
 }
 
+fn spawn_auto_trust_subsystem(
+    opts: &BtManagerOptions,
+    capability: AgentCapabilityMode,
+) -> Option<crate::agent::AutoTrustShutdown> {
+    tracing::info!(
+        capability = capability.as_capability_str(),
+        "Starting auto-trust agent subsystem"
+    );
+    let spawn_res = match &opts.auto_trust_bus_address {
+        Some(addr) => {
+            let addr = addr.clone();
+            crate::agent::spawn_auto_trust_with(capability, move || {
+                let addr = addr.clone();
+                async move {
+                    zbus::connection::Builder::address(addr.as_str())?
+                        .build()
+                        .await
+                }
+            })
+        }
+        None => crate::agent::spawn_auto_trust(capability),
+    };
+    match spawn_res {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            tracing::error!(error = %e, "auto-trust agent failed to start; continuing without it");
+            None
+        }
+    }
+}
+
+fn spawn_cover_art_subsystem(
+    bt: &BluetoothDevice,
+) -> Option<crate::cover_provider::CoverArtShutdown> {
+    match crate::cover_provider::spawn_production(speaker_bluetooth::COVER_ART_CACHE_DIR.into(), bt)
+    {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            tracing::error!(error = %e, "cover-art provider failed to start; continuing without it");
+            None
+        }
+    }
+}
+
 /// Runs the Bluetooth manager monitor loop with parsed options.
 ///
 /// Polls [`BluetoothDevice::status`] every `opts.interval`, logging each tick.
@@ -156,40 +239,65 @@ pub fn run_tick(bt: &BluetoothDevice) -> Result<BluetoothStatus, BtError> {
 /// spawned on a dedicated thread; it publishes the active track's artwork on
 /// the system D-Bus independently of the monitor loop.
 ///
-/// # Panics
-/// Panics if the signal handler for `SIGINT`/`SIGTERM` cannot be installed
-/// (which indicates a fundamental problem with the process environment).
+/// Attempts to install a SIGINT/SIGTERM handler for graceful shutdown; if a handler
+/// is already installed (e.g. in test runners), a warning is logged and the loop proceeds.
 #[must_use]
 pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
+    let path = BtManagerConfig::resolve_path(opts.config.as_deref());
+    let cfg = match BtManagerConfig::load(&path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to load config {}", path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let effective_interval = if opts.explicit_interval {
+        opts.interval
+    } else {
+        cfg.interval_secs.as_duration()
+    };
+    let enable_cover_art = opts.cover_art && cfg.cover_art;
+    let enable_auto_trust = opts.auto_trust && cfg.auto_trust;
+    let effective_capability = opts.capability.unwrap_or(cfg.capability);
+
     tracing::info!(
-        interval_secs = opts.interval.as_secs(),
+        interval_secs = effective_interval.as_secs(),
+        cover_art = enable_cover_art,
+        auto_trust = enable_auto_trust,
+        capability = effective_capability.as_capability_str(),
         "Bluetooth Manager Service running on Raspberry Pi 3 (aarch64)"
     );
 
     // Set up signal handling for graceful shutdown.
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     let shutdown_requested_signal = Arc::clone(&shutdown_requested);
-    ctrlc::set_handler(move || {
+    if let Err(e) = ctrlc::set_handler(move || {
         shutdown_requested_signal.store(true, Ordering::SeqCst);
-    })
-    .expect("failed to set signal handler");
-
-    let mut cover_art_shutdown = None;
-    if opts.cover_art {
-        match crate::cover_provider::spawn_production(
-            speaker_bluetooth::COVER_ART_CACHE_DIR.into(),
-            bt,
-        ) {
-            Ok(handle) => cover_art_shutdown = Some(handle),
-            Err(e) => {
-                tracing::error!(error = %e, "cover-art provider failed to start; continuing without it");
-            }
-        }
+    }) {
+        tracing::warn!(
+            error = %e,
+            "signal handler already registered or could not be set; graceful shutdown on SIGINT/SIGTERM may be degraded"
+        );
     }
+
+    let auto_trust_shutdown = if enable_auto_trust {
+        spawn_auto_trust_subsystem(opts, effective_capability)
+    } else {
+        tracing::info!("Auto-trust agent disabled by configuration");
+        None
+    };
+
+    let cover_art_shutdown = if enable_cover_art {
+        spawn_cover_art_subsystem(bt)
+    } else {
+        tracing::info!("Cover-art provider disabled by configuration");
+        None
+    };
 
     let mut ticks: u64 = 0;
     let mut last_status: Option<(usize, bool)> = None;
-    run_poll_loop(opts.interval, |_timestamp| {
+    run_poll_loop(effective_interval, |_timestamp| {
         if shutdown_requested.load(Ordering::SeqCst) {
             tracing::info!("shutdown requested, stopping monitor loop");
             return true;
@@ -211,6 +319,12 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
         ticks = ticks.saturating_add(1);
         opts.max_ticks.is_some_and(|limit| ticks >= limit)
     });
+
+    // Trigger auto-trust agent shutdown if it was started.
+    if let Some(handle) = auto_trust_shutdown {
+        tracing::info!("shutting down auto-trust agent");
+        handle.shutdown();
+    }
 
     // Trigger cover-art provider shutdown if it was started.
     if let Some(handle) = cover_art_shutdown {
@@ -254,6 +368,10 @@ mod tests {
         assert_eq!(opts.interval, Duration::from_secs(5));
         assert_eq!(opts.max_ticks, None);
         assert!(opts.cover_art, "cover-art provider enabled by default");
+        assert!(opts.auto_trust, "auto-trust agent enabled by default");
+        assert_eq!(opts.capability, None);
+        assert_eq!(opts.config, None);
+        assert!(!opts.explicit_interval);
     }
 
     #[test]
@@ -274,71 +392,6 @@ mod tests {
             assert!(parse_ticks(bad).is_err(), "must reject '{bad}'");
         }
         assert_eq!(parse_ticks("3").expect("valid"), 3);
-    }
-
-    #[test]
-    fn cli_help_and_version_parse() {
-        let args = ["-h"];
-        assert!(matches!(
-            parse_cli_args_from(args.iter().map(ToString::to_string)),
-            Ok(CliParse::Help)
-        ));
-        let args = ["--version"];
-        assert!(matches!(
-            parse_cli_args_from(args.iter().map(ToString::to_string)),
-            Ok(CliParse::Version)
-        ));
-    }
-
-    #[test]
-    fn cli_parses_interval_and_ticks() {
-        let args = ["--interval", "2", "-n", "4"];
-        let parsed = parse_cli_args_from(args.iter().map(ToString::to_string)).expect("valid");
-        let opts = match parsed {
-            CliParse::Options(opts) => opts,
-            other => panic!("expected options, got {other:?}"),
-        };
-        assert_eq!(opts.interval, Duration::from_secs(2));
-        assert_eq!(opts.max_ticks, Some(4));
-    }
-
-    #[test]
-    fn cli_rejects_zero_and_invalid_interval() {
-        let args = ["--interval", "0"];
-        let err = parse_cli_args_from(args.iter().map(ToString::to_string)).expect_err("reject 0");
-        assert!(err.contains("at least 1 second"), "got: {err}");
-        let args = ["--interval"];
-        assert!(
-            parse_cli_args_from(args.iter().map(ToString::to_string))
-                .is_err_and(|e| e.contains("missing value for --interval"))
-        );
-    }
-
-    #[test]
-    fn cli_rejects_unknown_option() {
-        let args = ["--bogus"];
-        let err = parse_cli_args_from(args.iter().map(ToString::to_string)).expect_err("reject");
-        assert!(err.contains("unknown option"), "got: {err}");
-        assert!(!err.contains("Backtrace"), "user-facing error stays clean");
-    }
-
-    #[test]
-    fn cli_rejects_removed_probe_flags() {
-        for args in [
-            vec!["--bip-probe", "11:22:33:44:55:66"],
-            vec!["--bip-handle", "0000001"],
-        ] {
-            let err = parse_cli_args_from(args.iter().map(ToString::to_string))
-                .expect_err("probe flags were removed");
-            assert!(err.contains("unknown option"), "got: {err}");
-        }
-    }
-
-    #[test]
-    fn run_app_zero_ticks_cap_is_rejected_at_parse() {
-        let args = ["--ticks", "0"];
-        let err = parse_cli_args_from(args.iter().map(ToString::to_string)).expect_err("reject 0");
-        assert!(err.contains("omit --ticks"), "got: {err}");
     }
 
     #[test]

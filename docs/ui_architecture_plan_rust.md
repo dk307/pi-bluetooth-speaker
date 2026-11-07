@@ -379,7 +379,7 @@ export component PeppyMeterView {
   - Each item shows: Device Name, Bluetooth Address, Connection Badge (`🟢 Active` or `⚪ Disconnected`).
   - **Action 1: Connect / Disconnect:** 1-tap connection toggle.
   - **Action 2: Forget / Remove:** Trashcan icon with confirmation to unpair from BlueZ.
-* **Integrated Auto-Trust Pairing Agent (`org.bluez.Agent1`):** The native Rust `audio-ui` process hosts the `org.bluez.Agent1` D-Bus interface directly via `zbus`, automatically authorizing and trusting incoming pairing requests without PIN prompts and eliminating the legacy Python `bt-agent.service`.
+* **Integrated Auto-Trust Pairing Agent (`org.bluez.Agent1`):** The native Rust `bt-manager` appliance process hosts the `org.bluez.Agent1` D-Bus interface directly via `zbus`, automatically authorizing and trusting incoming pairing requests without PIN prompts and eliminating the legacy standalone Python `bt-agent.service`.
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -925,8 +925,8 @@ rustflags = [
   ```
 
 * **Service Consolidation & Decommissioning of `bt-agent.service`:**
-  * In the existing setup, an external Python daemon `/usr/local/bin/bt-auto-trust-agent.py` was running as `bt-agent.service` to authorize Bluetooth connections.
-  * In this Rust architecture, `audio-ui` **natively implements the BlueZ `org.bluez.Agent1` D-Bus interface** using `zbus`.
+  * In the legacy setup, an external Python daemon `/usr/local/bin/bt-auto-trust-agent.py` was running as `bt-agent.service` to authorize Bluetooth connections.
+  * In the appliance architecture, `bt-manager` **natively implements the BlueZ `org.bluez.Agent1` D-Bus interface** using `zbus`.
   * The legacy service is disabled and masked during deployment:
     ```bash
     systemctl disable --now bt-agent.service
@@ -934,7 +934,8 @@ rustflags = [
     ```
   * **Result (Zero Python Daemons):** 100% of the runtime audio appliance services on DietPi are pure compiled binaries:
     - **CamillaDSP:** Native Rust binary (`/usr/local/bin/camilladsp`)
-    - **Audio UI & Agent:** Native Rust binary (`/usr/local/bin/audio-ui`)
+    - **Screen Console:** Native Rust binary (`/usr/local/bin/screen-manager`)
+    - **Bluetooth Manager & Agent:** Native Rust binary (`/usr/local/bin/bt-manager`)
     - **BlueALSA & BlueZ:** Native C binaries (`/usr/bin/bluealsa`, `/usr/libexec/bluetooth/bluetoothd`)
 
 ---
