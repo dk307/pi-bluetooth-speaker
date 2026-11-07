@@ -258,7 +258,6 @@ pub struct MockReconcilerDbus {
     state: Arc<Mutex<MockReconcilerState>>,
 }
 
-#[expect(clippy::missing_panics_doc, reason = "Internal mutex locks in mock")]
 impl MockReconcilerDbus {
     /// Creates a mocked reconciler D-Bus backend along with its fault-injection controller (M-MOCKABLE-SYSCALLS).
     #[must_use]
@@ -276,59 +275,6 @@ impl MockReconcilerDbus {
     #[must_use]
     pub fn new() -> Self {
         Self::new_mocked().0
-    }
-
-    /// Sets the managed objects to return on the next `fetch_bluez_objects` call.
-    pub fn set_bluez_objects(&self, objs: ManagedObjects) {
-        self.state.lock().unwrap().bluez_result = Some(Ok(objs));
-    }
-
-    /// Sets the error to return on the next `fetch_bluez_objects` call.
-    pub fn set_bluez_error(&self, err: zbus::Error) {
-        self.state.lock().unwrap().bluez_result = Some(Err(err));
-    }
-
-    /// Sets the managed objects to return on the next `fetch_bluealsa_objects` call.
-    pub fn set_bluealsa_objects(&self, objs: ManagedObjects) {
-        self.state.lock().unwrap().bluealsa_result = Some(Ok(objs));
-    }
-
-    /// Sets the error to return on the next `fetch_bluealsa_objects` call.
-    pub fn set_bluealsa_error(&self, err: zbus::Error) {
-        self.state.lock().unwrap().bluealsa_result = Some(Err(err));
-    }
-
-    /// Sets the result to return on subsequent `connect_profile` calls.
-    pub fn set_connect_profile_result(&self, res: zbus::Result<()>) {
-        self.state.lock().unwrap().connect_profile_result = Some(res);
-    }
-
-    /// Sets the result to return on subsequent `disconnect` calls.
-    pub fn set_disconnect_result(&self, res: zbus::Result<()>) {
-        self.state.lock().unwrap().disconnect_result = Some(res);
-    }
-
-    /// Sets the result to return on subsequent `connect` calls.
-    pub fn set_connect_result(&self, res: zbus::Result<()>) {
-        self.state.lock().unwrap().connect_result = Some(res);
-    }
-
-    /// Returns all recorded `(device_path, uuid)` arguments passed to `connect_profile`.
-    #[must_use]
-    pub fn connect_profile_calls(&self) -> Vec<(String, String)> {
-        self.state.lock().unwrap().connect_profile_calls.clone()
-    }
-
-    /// Returns all recorded `device_path` arguments passed to `disconnect`.
-    #[must_use]
-    pub fn disconnect_calls(&self) -> Vec<String> {
-        self.state.lock().unwrap().disconnect_calls.clone()
-    }
-
-    /// Returns all recorded `device_path` arguments passed to `connect`.
-    #[must_use]
-    pub fn connect_calls(&self) -> Vec<String> {
-        self.state.lock().unwrap().connect_calls.clone()
     }
 }
 
@@ -1311,10 +1257,10 @@ mod tests {
 
     #[tokio::test]
     async fn mock_dbus_collect_snapshots_fast_path_and_errors() {
-        let mock = MockReconcilerDbus::new();
+        let (mock, ctrl) = MockReconcilerDbus::new_mocked();
 
         // 1. BlueZ query fails with D-Bus error
-        mock.set_bluez_error(zbus::Error::Address("unreachable bus".into()));
+        ctrl.set_bluez_error(zbus::Error::Address("unreachable bus".into()));
         let res = collect_snapshots(&mock).await;
         let _ = res.unwrap_err();
 
@@ -1327,8 +1273,8 @@ mod tests {
         dev_ifaces.insert(owned_iface("org.bluez.Device1"), dev_props);
         bluez_objs.insert(owned_path("/org/bluez/hci0/dev_1"), dev_ifaces);
 
-        mock.set_bluez_objects(bluez_objs.clone());
-        mock.set_bluealsa_error(zbus::Error::Failure("must not be called".into()));
+        ctrl.set_bluez_objects(bluez_objs.clone());
+        ctrl.set_bluealsa_error(zbus::Error::Failure("must not be called".into()));
         let snapshots = collect_snapshots(&mock).await.expect("fast path succeeds");
         assert_eq!(snapshots.len(), 1);
         assert!(!snapshots[0].connected);
@@ -1342,15 +1288,15 @@ mod tests {
         let mut connected_bluez = ManagedObjects::new();
         connected_bluez.insert(owned_path("/org/bluez/hci0/dev_2"), connected_ifaces);
 
-        mock.set_bluez_objects(connected_bluez);
-        mock.set_bluealsa_error(zbus::Error::Failure("bluealsa down".into()));
+        ctrl.set_bluez_objects(connected_bluez);
+        ctrl.set_bluealsa_error(zbus::Error::Failure("bluealsa down".into()));
         let err_res = collect_snapshots(&mock).await;
         let _ = err_res.unwrap_err();
     }
 
     #[tokio::test]
     async fn mock_dbus_execute_actions_and_cycle_connection() {
-        let mock = MockReconcilerDbus::new();
+        let (mock, ctrl) = MockReconcilerDbus::new_mocked();
         let dev_path = "/org/bluez/hci0/dev_action_test";
 
         // Successful ConnectProfile
@@ -1359,12 +1305,12 @@ mod tests {
         };
         execute_reconcile_actions_with_settle(&mock, &[action1], Duration::from_millis(1)).await;
         assert_eq!(
-            mock.connect_profile_calls(),
+            ctrl.connect_profile_calls(),
             vec![(dev_path.to_string(), UUID_A2DP_SOURCE.to_string())]
         );
 
         // Failing ConnectProfile (handles error branch cleanly)
-        mock.set_connect_profile_result(Err(zbus::Error::Failure("profile rejected".into())));
+        ctrl.set_connect_profile_result(Err(zbus::Error::Failure("profile rejected".into())));
         let action2 = ReconcileAction::ConnectA2dpProfile {
             device_path: dev_path.to_string(),
         };
@@ -1376,29 +1322,29 @@ mod tests {
             reason: DisconnectReason::OrphanedBluezTransport,
         };
         execute_reconcile_actions_with_settle(&mock, &[action3], Duration::from_millis(1)).await;
-        assert_eq!(mock.disconnect_calls(), vec![dev_path.to_string()]);
-        assert_eq!(mock.connect_calls(), vec![dev_path.to_string()]);
+        assert_eq!(ctrl.disconnect_calls(), vec![dev_path.to_string()]);
+        assert_eq!(ctrl.connect_calls(), vec![dev_path.to_string()]);
 
         // Failing Disconnect and Connect
-        mock.set_disconnect_result(Err(zbus::Error::Failure("disconnect failed".into())));
-        mock.set_connect_result(Err(zbus::Error::Failure("connect failed".into())));
+        ctrl.set_disconnect_result(Err(zbus::Error::Failure("disconnect failed".into())));
+        ctrl.set_connect_result(Err(zbus::Error::Failure("connect failed".into())));
         cycle_device_connection_with_settle(&mock, dev_path, Duration::from_millis(1)).await;
-        assert_eq!(mock.disconnect_calls().len(), 2);
-        assert_eq!(mock.connect_calls().len(), 2);
+        assert_eq!(ctrl.disconnect_calls().len(), 2);
+        assert_eq!(ctrl.connect_calls().len(), 2);
     }
 
     #[tokio::test]
     async fn mock_dbus_reconciler_tick_outcomes() {
-        let mock = MockReconcilerDbus::new();
+        let (mock, ctrl) = MockReconcilerDbus::new_mocked();
         let mut tracked = HashMap::new();
 
         // 1. Query error outcome
-        mock.set_bluez_error(zbus::Error::Failure("service absent".into()));
+        ctrl.set_bluez_error(zbus::Error::Failure("service absent".into()));
         let outcome1 = reconciler_tick(&mock, &mut tracked, Duration::from_millis(1)).await;
         assert!(matches!(outcome1, TickOutcome::SkippedQueryError(_)));
 
         // 2. Normal tick with no actions needed (empty devices)
-        mock.set_bluez_objects(ManagedObjects::new());
+        ctrl.set_bluez_objects(ManagedObjects::new());
         let outcome2 = reconciler_tick(&mock, &mut tracked, Duration::from_millis(1)).await;
         assert_eq!(outcome2, TickOutcome::ActionsExecuted(0));
 
@@ -1420,8 +1366,8 @@ mod tests {
         fd_ifaces.insert(owned_iface("org.bluez.MediaTransport1"), HashMap::new());
         bluez_objs.insert(owned_path(&format!("{dev_path}/fd0")), fd_ifaces);
 
-        mock.set_bluez_objects(bluez_objs.clone());
-        mock.set_bluealsa_objects(ManagedObjects::new());
+        ctrl.set_bluez_objects(bluez_objs.clone());
+        ctrl.set_bluealsa_objects(ManagedObjects::new());
 
         // Tick 1 (debounce): 0 actions executed
         let outcome3 = reconciler_tick(&mock, &mut tracked, Duration::from_millis(1)).await;
@@ -1429,8 +1375,8 @@ mod tests {
         assert_eq!(tracked.get(dev_path).unwrap().divergence_ticks, 1);
 
         // Tick 2 (escalate): 1 action executed (CycleConnection)
-        mock.set_bluez_objects(bluez_objs);
-        mock.set_bluealsa_objects(ManagedObjects::new());
+        ctrl.set_bluez_objects(bluez_objs);
+        ctrl.set_bluealsa_objects(ManagedObjects::new());
         let outcome4 = reconciler_tick(&mock, &mut tracked, Duration::from_millis(1)).await;
         assert_eq!(outcome4, TickOutcome::ActionsExecuted(1));
         assert_eq!(tracked.get(dev_path).unwrap().divergence_ticks, 0);
@@ -1485,8 +1431,8 @@ mod tests {
         mock_ref.disconnect("/dev/ref").await.unwrap();
         mock_ref.connect("/dev/ref").await.unwrap();
 
-        assert_eq!(mock.connect_profile_calls().len(), 2);
-        assert_eq!(mock.disconnect_calls().len(), 2);
-        assert_eq!(mock.connect_calls().len(), 2);
+        assert_eq!(ctrl.connect_profile_calls().len(), 2);
+        assert_eq!(ctrl.disconnect_calls().len(), 2);
+        assert_eq!(ctrl.connect_calls().len(), 2);
     }
 }

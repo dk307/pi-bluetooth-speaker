@@ -2131,7 +2131,7 @@ async fn reconciler_di_spawn_and_lifecycle_integration() {
     };
     use std::time::Duration;
 
-    let mock = MockReconcilerDbus::new();
+    let (mock, ctrl) = MockReconcilerDbus::new_mocked();
     let dev_path = "/org/bluez/hci1/dev_di_test";
 
     // 1. Test execute_reconcile_actions and cycle_device_connection with defaults
@@ -2139,11 +2139,11 @@ async fn reconciler_di_spawn_and_lifecycle_integration() {
         device_path: dev_path.to_string(),
     }];
     execute_reconcile_actions(&mock, &actions).await;
-    assert_eq!(mock.connect_profile_calls().len(), 1);
+    assert_eq!(ctrl.connect_profile_calls().len(), 1);
 
     cycle_device_connection(&mock, dev_path).await;
-    assert_eq!(mock.disconnect_calls(), vec![dev_path.to_string()]);
-    assert_eq!(mock.connect_calls(), vec![dev_path.to_string()]);
+    assert_eq!(ctrl.disconnect_calls(), vec![dev_path.to_string()]);
+    assert_eq!(ctrl.connect_calls(), vec![dev_path.to_string()]);
 
     // 2. Test tick outcome with empty state
     let mut tracked = std::collections::HashMap::new();

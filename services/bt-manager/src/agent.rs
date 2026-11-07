@@ -558,7 +558,7 @@ where
                             // Run the BlueZ 5.82 <-> bluez-alsa v5.0.0 audio transport reconciler
                             // alongside the agent supervisor on the active D-Bus connection.
                             let reconciler_handle =
-                                speaker_bluetooth::connection::spawn_bt_transport_reconciler(conn.clone());
+                                speaker_bluetooth::spawn_bt_transport_reconciler(conn.clone());
 
                             run_agent_supervisor(conn, default_agent_path(), mode, &mut shutdown_rx)
                                 .await;
