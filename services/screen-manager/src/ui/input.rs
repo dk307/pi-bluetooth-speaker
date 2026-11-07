@@ -665,11 +665,18 @@ impl TouchDecoder {
     }
 
     /// Mutably updates the calibration profile.
-    pub fn set_calibration(&mut self, calibration: TouchCalibration) {
+    ///
+    /// # Errors
+    /// Returns [`TouchError`] if `calibration` contains non-finite numbers or zero/inverted axis bounds.
+    pub fn set_calibration(&mut self, calibration: TouchCalibration) -> Result<(), TouchError> {
         if calibration.is_valid() {
             self.calibration = calibration;
+            Ok(())
         } else {
             tracing::warn!(?calibration, "Rejected invalid touch calibration");
+            Err(TouchError::invalid_config(
+                "Invalid touch calibration bounds or non-finite coordinates",
+            ))
         }
     }
 
@@ -1099,8 +1106,11 @@ impl TouchInputDevice {
     }
 
     /// Updates the coordinate calibration profile.
-    pub fn set_calibration(&mut self, calibration: TouchCalibration) {
-        self.decoder.set_calibration(calibration);
+    ///
+    /// # Errors
+    /// Returns [`TouchError`] if `calibration` contains non-finite numbers or zero/inverted axis bounds.
+    pub fn set_calibration(&mut self, calibration: TouchCalibration) -> Result<(), TouchError> {
+        self.decoder.set_calibration(calibration)
     }
 
     /// Reads pending touch events from hardware or mock controller.
@@ -1553,7 +1563,8 @@ mod tests {
             invert_y: true,
             swap_xy: true,
             ..Default::default()
-        });
+        })
+        .expect("valid calibration should be accepted");
         assert!(dev.decoder.calibration().swap_xy);
 
         // Test NaN and inverted/zero span calibration rejection
@@ -1563,7 +1574,8 @@ mod tests {
         };
         assert!(!nan_cal.is_valid());
         assert_eq!(nan_cal.map_to_screen(100, 100, 800.0, 480.0), (0.0, 0.0));
-        dev.set_calibration(nan_cal);
+        let err_nan = dev.set_calibration(nan_cal).unwrap_err();
+        assert!(format!("{err_nan}").contains("Invalid touch calibration"));
         assert!(dev.decoder.calibration().is_valid());
 
         let zero_span_cal = TouchCalibration {
@@ -1576,7 +1588,8 @@ mod tests {
             zero_span_cal.map_to_screen(100, 100, 800.0, 480.0),
             (0.0, 0.0)
         );
-        dev.set_calibration(zero_span_cal);
+        let err_zero = dev.set_calibration(zero_span_cal).unwrap_err();
+        assert!(format!("{err_zero}").contains("Invalid touch calibration"));
         assert!(dev.decoder.calibration().is_valid());
 
         // NativeEvdevSyscall error paths with invalid fd (-1)
