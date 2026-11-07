@@ -24,6 +24,14 @@ use speaker_common::runtime::FromJoinError;
 use crate::cover_art::{COVER_ART_CACHE_DIR, cover_art_cached_path_in};
 use crate::transport::{BlueAlsaPcm, BtPlaybackState, decode_pcm_format, format_volume_bytes};
 
+#[doc(inline)]
+pub use crate::reconciler::{
+    BluezDeviceSnapshot, DBUS_CALL_TIMEOUT, DeviceWatchState, DisconnectReason,
+    MAX_HARD_RESETS_PER_SESSION, POLL_INTERVAL, RECONNECT_SETTLE_DELAY, ReconcileAction,
+    UUID_A2DP_SOURCE, build_snapshots, collect_snapshots, fetch_bluealsa_objects,
+    reconcile_snapshots, run_reconciler_loop, spawn_bt_transport_reconciler,
+};
+
 /// Number of octets in a standard Bluetooth MAC address.
 pub const BT_ADDRESS_OCTETS: usize = 6;
 
@@ -765,7 +773,7 @@ pub(crate) trait BlueZAdapter1 {
 pub type ManagedObjects =
     HashMap<OwnedObjectPath, HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>>;
 
-fn find_iface<'a>(
+pub(crate) fn find_iface<'a>(
     ifaces: &'a HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>,
     target: &str,
 ) -> Option<&'a HashMap<String, OwnedValue>> {

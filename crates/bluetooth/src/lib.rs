@@ -4,6 +4,7 @@
 pub mod connection;
 pub mod cover_art;
 pub mod cover_service;
+pub mod reconciler;
 pub mod transport;
 
 #[doc(inline)]
@@ -12,6 +13,14 @@ pub use connection::{
     BluetoothDevice, BluetoothDeviceMock, BluetoothHardwareInfo, BluetoothServices,
     BluetoothStatus, BluezSnapshot, BtAdapter, BtAddress, BtDevice, BtError, DEFAULT_BT_ADAPTER,
     resolve_cover_art_with,
+};
+
+#[doc(inline)]
+pub use reconciler::{
+    BluezDeviceSnapshot, DBUS_CALL_TIMEOUT, DeviceWatchState, DisconnectReason,
+    MAX_HARD_RESETS_PER_SESSION, POLL_INTERVAL, RECONNECT_SETTLE_DELAY, ReconcileAction,
+    UUID_A2DP_SOURCE, build_snapshots, collect_snapshots, fetch_bluealsa_objects,
+    reconcile_snapshots, run_reconciler_loop, spawn_bt_transport_reconciler,
 };
 
 #[cfg(feature = "test-util")]

@@ -1958,3 +1958,167 @@ fn dbus_player_path_toggle_and_seek_helpers_coverage() {
     assert_eq!(cur_ms, 2_000);
     assert_eq!(offset_us, 3_500_000);
 }
+
+#[test]
+fn reconciler_constants_and_defaults() {
+    use speaker_bluetooth::reconciler::{
+        DBUS_CALL_TIMEOUT, DeviceWatchState, DisconnectReason, MAX_HARD_RESETS_PER_SESSION,
+        POLL_INTERVAL, RECONNECT_SETTLE_DELAY, ReconcileAction, UUID_A2DP_SOURCE,
+    };
+
+    assert_eq!(UUID_A2DP_SOURCE, "0000110a-0000-1000-8000-00805f9b34fb");
+    assert_eq!(POLL_INTERVAL, std::time::Duration::from_secs(3));
+    assert_eq!(DBUS_CALL_TIMEOUT, std::time::Duration::from_secs(2));
+    assert_eq!(
+        RECONNECT_SETTLE_DELAY,
+        std::time::Duration::from_millis(1500)
+    );
+    assert_eq!(MAX_HARD_RESETS_PER_SESSION, 2);
+
+    let state = DeviceWatchState::default();
+    assert_eq!(state.divergence_ticks, 0);
+    assert_eq!(state.hard_resets_attempted, 0);
+
+    let action = ReconcileAction::CycleConnection {
+        device_path: "/org/bluez/hci1/dev_test".into(),
+        reason: DisconnectReason::OrphanedBluezTransport,
+    };
+    assert!(matches!(action, ReconcileAction::CycleConnection { .. }));
+}
+
+#[test]
+fn reconciler_build_snapshots_comprehensive_matrix() {
+    use speaker_bluetooth::reconciler::{UUID_A2DP_SOURCE, build_snapshots};
+
+    let mut bluez_objs = ManagedObjects::new();
+    let mut bluealsa_objs = ManagedObjects::new();
+
+    // Dev 1: Healthy A2DP session
+    let dev1_path = "/org/bluez/hci0/dev_11_11_11_11_11_11";
+    let mut dev1_props = HashMap::new();
+    dev1_props.insert("Connected".to_string(), to_val(true));
+    dev1_props.insert("Paired".to_string(), to_val(true));
+    dev1_props.insert("Bonded".to_string(), to_val(true));
+    dev1_props.insert("ServicesResolved".to_string(), to_val(true));
+    dev1_props.insert("UUIDs".to_string(), to_val(vec![UUID_A2DP_SOURCE]));
+    let mut dev1_ifaces = HashMap::new();
+    dev1_ifaces.insert(iface("org.bluez.Device1"), dev1_props);
+    bluez_objs.insert(OwnedObjectPath::try_from(dev1_path).unwrap(), dev1_ifaces);
+
+    let mut fd1_ifaces = HashMap::new();
+    fd1_ifaces.insert(iface("org.bluez.MediaTransport1"), HashMap::new());
+    bluez_objs.insert(
+        OwnedObjectPath::try_from(format!("{dev1_path}/fd0")).unwrap(),
+        fd1_ifaces,
+    );
+
+    let mut pcm1_props = HashMap::new();
+    pcm1_props.insert(
+        "Device".to_string(),
+        to_val(zbus::zvariant::ObjectPath::try_from(dev1_path).unwrap()),
+    );
+    pcm1_props.insert("Transport".to_string(), to_val("A2DP-sink"));
+    let mut pcm1_ifaces = HashMap::new();
+    pcm1_ifaces.insert(iface("org.bluealsa.PCM1"), pcm1_props);
+    bluealsa_objs.insert(
+        OwnedObjectPath::try_from("/org/bluealsa/hci0/dev_11_11_11_11_11_11/a2dpsnk/source")
+            .unwrap(),
+        pcm1_ifaces,
+    );
+
+    // Dev 2: In voice call (HFP active)
+    let dev2_path = "/org/bluez/hci0/dev_22_22_22_22_22_22";
+    let mut dev2_props = HashMap::new();
+    dev2_props.insert("Connected".to_string(), to_val(true));
+    dev2_props.insert("Paired".to_string(), to_val(true));
+    dev2_props.insert("Bonded".to_string(), to_val(true));
+    dev2_props.insert("ServicesResolved".to_string(), to_val(true));
+    dev2_props.insert("UUIDs".to_string(), to_val(vec![UUID_A2DP_SOURCE]));
+    let mut dev2_ifaces = HashMap::new();
+    dev2_ifaces.insert(iface("org.bluez.Device1"), dev2_props);
+    bluez_objs.insert(OwnedObjectPath::try_from(dev2_path).unwrap(), dev2_ifaces);
+
+    let mut pcm2_props = HashMap::new();
+    pcm2_props.insert("Transport".to_string(), to_val("HFP-AG"));
+    let mut pcm2_ifaces = HashMap::new();
+    pcm2_ifaces.insert(iface("org.bluealsa.PCM1"), pcm2_props);
+    bluealsa_objs.insert(
+        OwnedObjectPath::try_from("/org/bluealsa/hci0/dev_22_22_22_22_22_22/hfphf/source").unwrap(),
+        pcm2_ifaces,
+    );
+
+    let snapshots = build_snapshots(&bluez_objs, &bluealsa_objs);
+    assert_eq!(snapshots.len(), 2);
+
+    let s1 = &snapshots[0];
+    assert_eq!(s1.path, dev1_path);
+    assert!(s1.has_bluez_transport);
+    assert!(s1.has_bluealsa_pcm);
+    assert!(!s1.has_voice_call_pcm);
+
+    let s2 = &snapshots[1];
+    assert_eq!(s2.path, dev2_path);
+    assert!(!s2.has_bluez_transport);
+    assert!(!s2.has_bluealsa_pcm);
+    assert!(s2.has_voice_call_pcm);
+}
+
+#[test]
+fn reconciler_session_cap_and_recovery_flow() {
+    use speaker_bluetooth::reconciler::{
+        BluezDeviceSnapshot, DisconnectReason, ReconcileAction, reconcile_snapshots,
+    };
+
+    let dev_path = "/org/bluez/hci1/dev_repeat_fail".to_string();
+    let mut tracked = HashMap::new();
+
+    let divergent_snapshot = BluezDeviceSnapshot {
+        path: dev_path.clone(),
+        connected: true,
+        paired: true,
+        bonded: true,
+        services_resolved: true,
+        supports_a2dp_source: true,
+        has_bluez_transport: true,
+        has_bluealsa_pcm: false,
+        has_voice_call_pcm: false,
+    };
+
+    // Cycle 1: Tick 1 (divergence 1) -> Tick 2 (Hard reset 1)
+    let acts1 = reconcile_snapshots(&mut tracked, std::slice::from_ref(&divergent_snapshot));
+    assert_eq!(acts1, []);
+    assert_eq!(tracked.get(&dev_path).unwrap().divergence_ticks, 1);
+
+    let acts2 = reconcile_snapshots(&mut tracked, std::slice::from_ref(&divergent_snapshot));
+    assert_eq!(acts2.len(), 1);
+    assert_eq!(
+        acts2[0],
+        ReconcileAction::CycleConnection {
+            device_path: dev_path.clone(),
+            reason: DisconnectReason::OrphanedBluezTransport,
+        }
+    );
+    assert_eq!(tracked.get(&dev_path).unwrap().hard_resets_attempted, 1);
+
+    // Cycle 2: Tick 3 (divergence 1) -> Tick 4 (Hard reset 2)
+    let acts3 = reconcile_snapshots(&mut tracked, std::slice::from_ref(&divergent_snapshot));
+    assert_eq!(acts3, []);
+
+    let acts4 = reconcile_snapshots(&mut tracked, std::slice::from_ref(&divergent_snapshot));
+    assert_eq!(acts4.len(), 1);
+    assert_eq!(tracked.get(&dev_path).unwrap().hard_resets_attempted, 2);
+
+    // After MAX_HARD_RESETS_PER_SESSION (2): Reconciler must back off
+    let acts5 = reconcile_snapshots(&mut tracked, std::slice::from_ref(&divergent_snapshot));
+    assert_eq!(acts5, []);
+
+    // Once healthy stream establishes, resets count clears back to 0
+    let healthy_snapshot = BluezDeviceSnapshot {
+        has_bluealsa_pcm: true,
+        ..divergent_snapshot
+    };
+    let acts6 = reconcile_snapshots(&mut tracked, std::slice::from_ref(&healthy_snapshot));
+    assert_eq!(acts6, []);
+    assert_eq!(tracked.get(&dev_path).unwrap().hard_resets_attempted, 0);
+    assert_eq!(tracked.get(&dev_path).unwrap().divergence_ticks, 0);
+}
