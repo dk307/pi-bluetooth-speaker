@@ -502,14 +502,19 @@ pub fn build_snapshots(
     bluez_objs: &ManagedObjects,
     bluealsa_objs: &ManagedObjects,
 ) -> Vec<BluezDeviceSnapshot> {
-    // 1. Identify all BlueZ device paths that currently own a MediaTransport1 (/fd*)
+    // 1. Identify all BlueZ device paths that currently own an A2DP MediaTransport1 (/fd*)
     let mut devices_with_fd = HashSet::new();
     for (path, ifaces) in bluez_objs {
-        if find_iface(ifaces, "org.bluez.MediaTransport1").is_some()
+        if let Some(transport_props) = find_iface(ifaces, "org.bluez.MediaTransport1")
             && let Some((dev_prefix, fd_suffix)) = path.as_str().rsplit_once('/')
             && fd_suffix.starts_with("fd")
         {
-            devices_with_fd.insert(dev_prefix.to_string());
+            let is_a2dp = extract_str(transport_props, "UUID").is_none_or(|u| {
+                u.eq_ignore_ascii_case(UUID_A2DP_SOURCE) || u.contains("110a") || u.contains("110b")
+            });
+            if is_a2dp {
+                devices_with_fd.insert(dev_prefix.to_string());
+            }
         }
     }
 
@@ -615,8 +620,16 @@ pub fn reconcile_snapshots<S: BuildHasher>(
 
     for dev in snapshots {
         // Never interfere with unpaired/unbonded devices (active pairing) or non-A2DP devices
-        if !dev.connected || !dev.paired || !dev.bonded || !dev.supports_a2dp_source {
+        if !dev.paired || !dev.bonded || !dev.supports_a2dp_source {
             tracked.remove(&dev.path);
+            continue;
+        }
+
+        // When device is temporarily disconnected, pause divergence tracking without resetting the session cap
+        if !dev.connected {
+            if let Some(st) = tracked.get_mut(&dev.path) {
+                st.divergence_ticks = 0;
+            }
             continue;
         }
 
@@ -641,7 +654,21 @@ pub fn reconcile_snapshots<S: BuildHasher>(
         }
 
         let state = tracked.entry(dev.path.clone()).or_default();
-        state.divergence_ticks = state.divergence_ticks.saturating_add(1);
+        if let Some(action) = evaluate_divergent_device(state, dev) {
+            actions.push(action);
+        }
+    }
+
+    actions
+}
+
+/// Evaluates divergence state for an actively connected, divergent device and returns any healing action.
+fn evaluate_divergent_device(
+    state: &mut DeviceWatchState,
+    dev: &BluezDeviceSnapshot,
+) -> Option<ReconcileAction> {
+    state.divergence_ticks = state.divergence_ticks.saturating_add(1);
+    if state.divergence_ticks == 1 {
         tracing::warn!(
             device = %dev.path,
             tick = state.divergence_ticks,
@@ -650,65 +677,74 @@ pub fn reconcile_snapshots<S: BuildHasher>(
             bluealsa_pcm = dev.has_bluealsa_pcm,
             "BT transport divergence detected"
         );
+    } else {
+        tracing::debug!(
+            device = %dev.path,
+            tick = state.divergence_ticks,
+            services_resolved = dev.services_resolved,
+            bluez_fd = dev.has_bluez_transport,
+            bluealsa_pcm = dev.has_bluealsa_pcm,
+            "BT transport divergence persisting"
+        );
+    }
 
-        // CASE A: Orphaned fd* in BlueZ.
-        // BlueZ holds MediaTransport1, but bluealsad has dropped the device / has 0 PCMs.
-        // ConnectProfile is ineffective; we must Disconnect -> Settle -> Connect.
-        if dev.has_bluez_transport && !dev.has_bluealsa_pcm && state.divergence_ticks >= 2 {
+    // CASE A: Orphaned fd* in BlueZ.
+    // BlueZ holds MediaTransport1, but bluealsad has dropped the device / has 0 PCMs.
+    // ConnectProfile is ineffective; we must Disconnect -> Settle -> Connect.
+    if dev.has_bluez_transport && !dev.has_bluealsa_pcm && state.divergence_ticks >= 2 {
+        if state.hard_resets_attempted >= MAX_HARD_RESETS_PER_SESSION {
+            tracing::debug!(
+                device = %dev.path,
+                hard_resets = state.hard_resets_attempted,
+                "Device reached maximum hard resets for this ACL session; backing off"
+            );
+            return None;
+        }
+        tracing::warn!(
+            device = %dev.path,
+            "Orphaned BlueZ MediaTransport1 detected; scheduling Disconnect -> Connect cycle"
+        );
+        state.divergence_ticks = 0;
+        return Some(ReconcileAction::CycleConnection {
+            device_path: dev.path.clone(),
+            reason: DisconnectReason::OrphanedBluezTransport,
+        });
+    }
+
+    // CASE B: ACL Half-Reconnect.
+    // Connected=true, no BlueZ fd* transport, and no BlueALSA PCM.
+    if !dev.has_bluez_transport && !dev.has_bluealsa_pcm {
+        if state.divergence_ticks == 2 {
+            tracing::info!(
+                device = %dev.path,
+                "Stage 1 recovery: requesting ConnectProfile(A2DP_SOURCE)"
+            );
+            return Some(ReconcileAction::ConnectA2dpProfile {
+                device_path: dev.path.clone(),
+            });
+        }
+        if state.divergence_ticks >= 4 {
             if state.hard_resets_attempted >= MAX_HARD_RESETS_PER_SESSION {
                 tracing::debug!(
                     device = %dev.path,
                     hard_resets = state.hard_resets_attempted,
                     "Device reached maximum hard resets for this ACL session; backing off"
                 );
-                continue;
+                return None;
             }
             tracing::warn!(
                 device = %dev.path,
-                "Orphaned BlueZ MediaTransport1 detected; scheduling Disconnect -> Connect cycle"
+                "Stage 2 recovery: ConnectProfile failed to establish transport; scheduling Disconnect -> Connect cycle"
             );
-            actions.push(ReconcileAction::CycleConnection {
-                device_path: dev.path.clone(),
-                reason: DisconnectReason::OrphanedBluezTransport,
-            });
             state.divergence_ticks = 0;
-            continue;
-        }
-
-        // CASE B: ACL Half-Reconnect.
-        // Connected=true, no BlueZ fd* transport, and no BlueALSA PCM.
-        if !dev.has_bluez_transport && !dev.has_bluealsa_pcm {
-            if state.divergence_ticks == 2 {
-                tracing::info!(
-                    device = %dev.path,
-                    "Stage 1 recovery: requesting ConnectProfile(A2DP_SOURCE)"
-                );
-                actions.push(ReconcileAction::ConnectA2dpProfile {
-                    device_path: dev.path.clone(),
-                });
-            } else if state.divergence_ticks >= 4 {
-                if state.hard_resets_attempted >= MAX_HARD_RESETS_PER_SESSION {
-                    tracing::debug!(
-                        device = %dev.path,
-                        hard_resets = state.hard_resets_attempted,
-                        "Device reached maximum hard resets for this ACL session; backing off"
-                    );
-                    continue;
-                }
-                tracing::warn!(
-                    device = %dev.path,
-                    "Stage 2 recovery: ConnectProfile failed to establish transport; scheduling Disconnect -> Connect cycle"
-                );
-                actions.push(ReconcileAction::CycleConnection {
-                    device_path: dev.path.clone(),
-                    reason: DisconnectReason::AclHalfReconnect,
-                });
-                state.divergence_ticks = 0;
-            }
+            return Some(ReconcileAction::CycleConnection {
+                device_path: dev.path.clone(),
+                reason: DisconnectReason::AclHalfReconnect,
+            });
         }
     }
 
-    actions
+    None
 }
 
 /// Executes decided actions with a specified settle delay, incrementing `hard_resets_attempted`
@@ -749,10 +785,9 @@ pub async fn execute_reconcile_actions_with_settle<D: ReconcilerDbus, S: BuildHa
                     reason = ?reason,
                     "Executing connection cycle (Disconnect -> Settle -> Connect)"
                 );
-                if cycle_device_connection_with_settle(dbus, device_path, settle_delay).await {
-                    let state = tracked.entry(device_path.clone()).or_default();
-                    state.hard_resets_attempted = state.hard_resets_attempted.saturating_add(1);
-                }
+                cycle_device_connection_with_settle(dbus, device_path, settle_delay).await;
+                let state = tracked.entry(device_path.clone()).or_default();
+                state.hard_resets_attempted = state.hard_resets_attempted.saturating_add(1);
             }
         }
     }
@@ -1169,6 +1204,40 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_snapshots_preserves_cap_across_transient_disconnect() {
+        let dev_path: Box<str> = "/org/bluez/hci1/dev_disconnect".into();
+        let mut tracked = HashMap::new();
+        tracked.insert(
+            dev_path.clone(),
+            DeviceWatchState {
+                divergence_ticks: 2,
+                hard_resets_attempted: 1,
+            },
+        );
+
+        let disconnected_snapshot = BluezDeviceSnapshot {
+            path: dev_path.clone(),
+            connected: false,
+            paired: true,
+            bonded: true,
+            services_resolved: true,
+            supports_a2dp_source: true,
+            has_bluez_transport: false,
+            has_bluealsa_pcm: false,
+            has_voice_call_pcm: false,
+        };
+
+        let actions =
+            reconcile_snapshots(&mut tracked, std::slice::from_ref(&disconnected_snapshot));
+        assert_eq!(actions, []);
+        let state = tracked
+            .get(&dev_path)
+            .expect("tracked state preserved across disconnect");
+        assert_eq!(state.divergence_ticks, 0);
+        assert_eq!(state.hard_resets_attempted, 1);
+    }
+
+    #[test]
     fn reconcile_snapshots_voice_call_protection() {
         let dev_path: Box<str> = "/org/bluez/hci1/dev_call".into();
         let mut tracked = HashMap::new();
@@ -1348,7 +1417,7 @@ mod tests {
         assert_eq!(ctrl.connect_calls(), vec![dev_path.clone()]);
         assert_eq!(tracked.get(&dev_path).unwrap().hard_resets_attempted, 1);
 
-        // Failing Disconnect and Connect does NOT increment hard_resets_attempted
+        // Failing Disconnect/Connect also consumes the hard resets budget to prevent infinite thrashing loops
         ctrl.set_disconnect_result(Err(zbus::Error::Failure("disconnect failed".into())));
         ctrl.set_connect_result(Err(zbus::Error::Failure("connect failed".into())));
         execute_reconcile_actions_with_settle(
@@ -1360,7 +1429,7 @@ mod tests {
         .await;
         assert_eq!(ctrl.disconnect_calls().len(), 2);
         assert_eq!(ctrl.connect_calls().len(), 2);
-        assert_eq!(tracked.get(&dev_path).unwrap().hard_resets_attempted, 1);
+        assert_eq!(tracked.get(&dev_path).unwrap().hard_resets_attempted, 2);
     }
 
     #[tokio::test]
