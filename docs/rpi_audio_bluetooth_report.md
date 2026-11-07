@@ -49,7 +49,7 @@ The system features:
 - **Device:** TP-Link UB500 Bluetooth 5.0 Adapter (`USB ID 2357:0604`)
 - **Internal Radios:** Onboard Wi-Fi and BT disabled via `/boot/firmware/config.txt` (`dtoverlay=disable-wifi`, `dtoverlay=disable-bt`).
 - **Controller MAC:** `20:E1:5D:B2:16:BF`
-- **Bluetooth Name / Class:** `DietPi Speaker` / `0x240418` (Audio/Video Loudspeaker).
+- **Bluetooth Name / Class:** `DietPi Speaker` / `0x240414` (Audio/Video Loudspeaker).
 - **Firmware Override (mandatory):** The upstream Linux firmware `rtl_bt/rtl8761bu_fw.bin` (0xdfc6d922, May 2023) contains a stability regression causing **silent ACL link stalls** — the controller drops the link without emitting a disconnect event, so BlueZ/bluealsad wedge on stale connection state (no audio despite "connected"; `bluetoothctl disconnect` + `connect` temporarily recovers). Fix: install the newer Realtek firmware **0xddd5c761** (BT 5.4, from Windows WHQL driver 1.9.1038.3023) as a kernel-prioritized override:
   ```bash
   # Source: https://github.com/yurinogueira/rtl8761bu-firmware (md5 6c3729e7376259dbc1edc53e35f5e265, 43340 bytes)
@@ -164,7 +164,7 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 
 | Service Name | State | Type | Executable & Key Parameters | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| **`bluetooth.service`** | `active (running)` | System | `/usr/libexec/bluetooth/bluetoothd` | Official BlueZ daemon managing HCI controller and A2DP profile. |
+| **`bluetooth.service`** | `active (running)` | System | `/usr/libexec/bluetooth/bluetoothd` | Official BlueZ 5.88 daemon managing HCI controller and A2DP profile. |
 | **`bt-manager.service`** | `active (running)` | Appliance | `/usr/local/bin/bt-manager` | Pure-Rust service providing native BlueZ `org.bluez.Agent1` headless auto-pairing & auto-trust agent, BlueZ/BlueALSA status monitoring, and BIP cover-art publisher (replaces legacy `bt-agent.service`). |
 | **`bluealsa.service`** | `active (running)` | Custom/System | `/usr/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+` | BlueALSA v5.0.0 daemon acting as an A2DP sink supporting all high-resolution codecs except Opus, with native AVRCP volume. |
 | **`bluealsa-aplay.service`**| `active (running)` | Custom/System | `/usr/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"` | Pipes incoming decoded audio stream from BlueALSA to ALSA `default` (`dsp_dmix` -> `Loopback,0,0` -> CamillaDSP) with hardware-only volume auto-sync to the Merus MA12070P chip (`hw:sndrpimerusamp`). |
@@ -376,9 +376,9 @@ Volume control is a **three-stage chain**, and a failure at any stage freezes th
 
 **Critical BlueZ gate (Rank 1 root cause of "volume stuck at 0"):** `bluetoothd`'s AVRCP target init only registers the Volume-Changed notification (AVRCP event 0x0D) with the phone if `btd_device_get_volume()` returns a valid value. If the device info file `/var/lib/bluetooth/<adapter_mac>/<device_mac>/info` has **no `Volume=` entry** under `[General]`, this returns -1 and the phone is never told the sink supports absolute volume — the phone then never sends volume updates, and the transport volume stays frozen (observed: stuck at 10/127 ≈ 8% while the Merus mixer stayed at a stale 107/144). Seeding `Volume=64` once in the info file bootstrap-resolves this; afterwards BlueZ persists the phone's last volume automatically on every change.
 
-**Critical BlueZ gate (Rank 2 root cause — ControllerMode collision):** With BlueZ 5.82 on a `ControllerMode = dual` adapter, the BLE Media Control (MCP) profile collides with Classic AVRCP on modern Android (Pixel) devices, and the AVRCP TG feature init is skipped. The transport then exposes **no `SetVolume` method** and a read-only `Volume` property. Fix: set `ControllerMode = bredr` in `/etc/bluetooth/main.conf` and re-pair. The device `Class` must also be a loudspeaker CoD (`0x240414`), not a generic audio class.
+**Critical BlueZ gate (Rank 2 root cause — ControllerMode collision):** On a `ControllerMode = dual` adapter, the BLE Media Control (MCP) profile collides with Classic AVRCP on modern Android (Pixel) devices, and the AVRCP TG feature init is skipped. The transport then exposes **no `SetVolume` method** and a read-only `Volume` property. Fix: set `ControllerMode = bredr` in `/etc/bluetooth/main.conf` and re-pair. The device `Class` must also be a loudspeaker CoD (`0x240414`), not a generic audio class. Note that starting with BlueZ 5.88, BlueZ also introduces automatic 1Hz `GetPlayStatus` polling (PR #2570) when remote targets lack `AVRCP_EVENT_PLAYBACK_POS_CHANGED`, along with inbound ACL connection race fixes (PR #2320/#2308) and deterministic A2DP codec prioritization (PR #2189).
 
-#### 7.6.2. Applied Configuration Fixes (2026-11-03)
+#### 7.6.2. Applied Configuration Fixes (2026-11-03 / 2026-11-07)
 Persistent changes deployed to the Pi (previous values recoverable from backups):
 
 1. `/etc/bluetooth/main.conf` (backup: `/tmp/main.conf.bak`) — full deployed content:
@@ -418,12 +418,12 @@ bluetoothctl remove 30:E0:44:67:38:A2   # on the Pi (then "Forget" the device on
 ```
 
 #### 7.6.3. Bluetooth Controller Configuration (`/etc/bluetooth/main.conf`)
-- **File:** `/etc/bluetooth/main.conf` (BlueZ 5.82 daemon config)
+- **File:** `/etc/bluetooth/main.conf` (BlueZ 5.88 daemon config)
 - **Purpose:** Defines the Classic/BLE mode split and device class, both critical for AVRCP absolute volume (see 7.6.1) and correct device-type advertisement to phones.
-- **Full deployed content (2026-11-03):**
+- **Full deployed content:**
   ```ini
   [General]
-  Experimental = true        # required for bluez-alsa battery/codec extras
+  Experimental = true        # required for bluez-alsa battery/codec extras and player features
   Name = DietPi Speaker
   Class = 0x240414           # Bluetooth loudspeaker CoD (Major: Audio/Video, Minor: Loudspeaker)
   DiscoverableTimeout = 0    # permanently discoverable
@@ -434,7 +434,7 @@ bluetoothctl remove 30:E0:44:67:38:A2   # on the Pi (then "Forget" the device on
   AutoEnable = true          # power adapter on automatically at boot
   ```
 - **Class code breakdown (`0x240414`):** Major Device Class = Audio/Video, Minor Device Class = Loudspeaker, Service Classes = Rendering. Phones use this to present the sink as a speaker and to select appropriate volume UX. The previous value `0x240418` mapped to Minor = Headphones.
-- **ControllerMode implications:** The default is `dual` (Classic + BLE). On BlueZ 5.82, BLE Media Control Profile (MCP) server registration can collide with Classic AVRCP target init on Android 15+ phones, causing `MediaTransport1.SetVolume` to be missing and the transport `Volume` property to be read-only (transport stuck; volume sync dead). `bredr` removes the collision by disabling all BLE GATT server profiles on this controller.
+- **ControllerMode implications:** The default is `dual` (Classic + BLE). On dual mode, BLE Media Control Profile (MCP) server registration can collide with Classic AVRCP target init on Android 15+ phones, causing `MediaTransport1.SetVolume` to be missing and the transport `Volume` property to be read-only (transport stuck; volume sync dead). `bredr` removes the collision by disabling all BLE GATT server profiles on this controller.
 
 #### 7.6.4. Verified Volume Mapping (Transport → Merus Hardware Mixer)
 Measured calibration after the fixes (transport `MediaTransport1.Volume` set via `busctl set-property ... org.bluez.MediaTransport1 Volume q <v>`; mixer read via `amixer -c sndrpimerusamp sget 'A.Mstr Vol'`):
@@ -645,7 +645,77 @@ systemctl daemon-reload
 systemctl enable --now camilladsp
 ```
 
-### 10.5. Building Fraunhofer LC3plus & BlueALSA v5.0.0 from Source (with NEON & Cortex-A53 Tuning)
+### 10.5. Building & Installing BlueZ 5.88 from Source (with C23 GCC 14 Patch)
+BlueZ 5.88 brings key audio improvements to the appliance:
+- **AVRCP 1Hz Position Polling (PR #2570):** Automatically queries `GetPlayStatus` every 1s when remote players do not fire `AVRCP_EVENT_PLAYBACK_POS_CHANGED`, keeping track progress and UI progress bars accurate.
+- **Inbound ACL Connection Fallback (PR #2320 / #2308):** Introduces a 2-second connection fallback delay preventing premature AVDTP/AVCTP profile drops when phones initiate ACL connection before encryption keys finish exchanging.
+- **Deterministic A2DP Codec Prioritization (PR #2189):** Automatic ordering (`LDAC > aptX-HD > aptX > AAC > SBC`).
+
+```bash
+# 1. Install BlueZ compilation dependencies
+apt update && apt install -y \
+  libudev-dev libical-dev libreadline-dev python3-docutils \
+  libasound2-dev libglib2.0-dev libdbus-1-dev
+
+# 2. Download and extract BlueZ 5.88
+mkdir -p /root/build && cd /root/build
+wget https://www.kernel.org/pub/linux/bluetooth/bluez-5.88.tar.xz
+tar xf bluez-5.88.tar.xz
+cd bluez-5.88
+
+# 3. Apply GCC 14 (C23 default) fix in src/shared/ad.c:
+# Line 1248 has 'return false;' in 'struct bt_ad_data *bt_ad_has_data(...)',
+# which causes GCC 14 to fail compilation with incompatible pointer type error.
+sed -i 's/return false;/return NULL;/' src/shared/ad.c
+
+# 4. Configure BlueZ with systemd integration and appliance paths
+./configure \
+  --prefix=/usr \
+  --mandir=/usr/share/man \
+  --sysconfdir=/etc \
+  --localstatedir=/var \
+  --libexecdir=/usr/libexec \
+  --enable-library \
+  --enable-deprecated \
+  --enable-pie \
+  --enable-threads \
+  --enable-systemd \
+  --with-systemdsystemunitdir=/usr/lib/systemd/system \
+  --with-systemduserunitdir=/usr/lib/systemd/user \
+  --with-udevdir=/usr/lib/udev \
+  --disable-cups \
+  --disable-mesh \
+  --disable-manpages
+
+# 5. Compile and install
+make -j$(nproc)
+make install
+
+# 6. Update multiarch shared libraries and run ldconfig
+cp -a /usr/lib/libbluetooth.so* /usr/lib/aarch64-linux-gnu/
+cp -a /usr/lib/pkgconfig/bluez.pc /usr/lib/aarch64-linux-gnu/pkgconfig/
+ldconfig
+
+# 7. Restore appliance /etc/bluetooth/main.conf
+cat <<'EOF' > /etc/bluetooth/main.conf
+[General]
+Experimental = true
+Name = DietPi Speaker
+Class = 0x240414
+DiscoverableTimeout = 0
+PairableTimeout = 0
+ControllerMode = bredr
+
+[Policy]
+AutoEnable = true
+EOF
+
+# 8. Reload systemd and restart Bluetooth daemon
+systemctl daemon-reload
+systemctl restart bluetooth
+```
+
+### 10.6. Building Fraunhofer LC3plus & BlueALSA v5.0.0 from Source (with NEON & Cortex-A53 Tuning)
 Custom build targeting the Raspberry Pi 3's ARM Cortex-A53 CPU with hardware ARM NEON SIMD auto-vectorization (`-O2 -mcpu=cortex-a53+crc+simd -ftree-vectorize`) to ensure maximum DSP throughput with rock-solid stability and zero L1 instruction cache bloat:
 
 ```bash
@@ -716,7 +786,7 @@ ln -sf /usr/bin/bluealsad /usr/bin/bluealsa
 ln -sf /usr/bin/bluealsactl /usr/bin/bluealsa-cli
 ```
 
-### 10.6. BlueALSA Systemd Services Installation
+### 10.7. BlueALSA Systemd Services Installation
 Configure the background daemon and audio pipe services:
 
 ```bash
@@ -763,7 +833,7 @@ systemctl daemon-reload
 systemctl enable --now bluealsa bluealsa-aplay
 ```
 
-### 10.7. Bluetooth Headless Auto-Pairing & Trust Agent (`bt-manager.service`)
+### 10.8. Bluetooth Headless Auto-Pairing & Trust Agent (`bt-manager.service`)
 Headless Bluetooth sinks require a D-Bus agent to automatically authorize incoming connections and set devices as "Trusted" without PIN dialog prompts.
 
 In this appliance, auto-pairing and trust management is handled natively by **`bt-manager.service`** (`/usr/local/bin/bt-manager`), a pure-Rust service that hosts `org.bluez.Agent1` directly via `zbus`. This consolidates pairing supervision with the status monitor loop and BIP cover-art provider, eliminating the legacy standalone Python `bt-agent.service` and `/usr/local/bin/bt-auto-trust-agent.py`.
@@ -803,7 +873,7 @@ systemctl mask bt-agent.service 2>/dev/null || true
 rm -f /etc/systemd/system/bt-agent.service /usr/local/bin/bt-auto-trust-agent.py
 ```
 
-### 10.8. BlueALSA Runtime Directories & Package Note
+### 10.9. BlueALSA Runtime Directories & Package Note
 ```bash
 # Install bluez tools & CLI status utility
 apt update && apt install -y bluez bluez-tools bluez-alsa-utils
@@ -816,7 +886,7 @@ chmod 700 /var/lib/bluealsa
 ```
 *(Note: Installing `bluez-alsa-utils` installs `bluealsa-cli` without overwriting the custom-compiled `/usr/bin/bluealsa` daemon).*
 
-### 10.9. Python Libraries & Peripherals Dependencies
+### 10.10. Python Libraries & Peripherals Dependencies
 *(Note: Python D-Bus & GObject packages previously required for `bt-auto-trust-agent.py` have been deprecated; `bt-manager` runs as a compiled pure-Rust binary).*
 
 ```bash
@@ -827,7 +897,7 @@ apt install -y python3-pil python3-spidev python3-rpi.gpio python3-smbus2
 pip install --break-system-packages git+https://github.com/HEnquist/pycamilladsp.git
 ```
 
-### 10.10. Console Display Formatting
+### 10.11. Console Display Formatting
 Suppresses the blinking text cursor on the framebuffer / DSI display console:
 ```bash
 sudo sed -i 's/$/ vt.global_cursor_default=0/' /boot/firmware/cmdline.txt
