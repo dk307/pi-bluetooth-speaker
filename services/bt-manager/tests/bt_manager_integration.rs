@@ -149,6 +149,7 @@ fn run_app_terminates_on_tick_cap_with_auto_trust_and_mock() {
         cover_art: false,
         auto_trust: true,
         capability: Some(AgentCapabilityMode::DisplayYesNo),
+        auto_trust_bus_address: Some("unix:path=/dev/null".to_string()),
     };
     assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
 }

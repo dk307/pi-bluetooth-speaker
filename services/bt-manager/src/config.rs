@@ -36,9 +36,13 @@ impl PollIntervalSecs {
     /// Production default poll interval constant (5 seconds).
     pub const DEFAULT: Self = Self::new(DEFAULT_POLL_INTERVAL_SECS);
 
-    /// Unchecked const constructor for fixed constants.
+    /// Const constructor enforcing the `>= 1` invariant at compile-time and runtime.
+    ///
+    /// # Panics
+    /// Panics if `secs == 0`.
     #[must_use]
     pub const fn new(secs: u64) -> Self {
+        assert!(secs >= 1, "poll interval must be at least 1 second");
         Self(secs)
     }
 
@@ -338,6 +342,12 @@ mod tests {
         assert_eq!(u64::from(interval), 10);
         assert_eq!(PollIntervalSecs::try_from(10).unwrap(), interval);
         let _ = PollIntervalSecs::try_from(0).unwrap_err();
+    }
+
+    #[test]
+    #[should_panic(expected = "poll interval must be at least 1 second")]
+    fn poll_interval_secs_new_rejects_zero() {
+        let _ = PollIntervalSecs::new(0);
     }
 
     #[test]

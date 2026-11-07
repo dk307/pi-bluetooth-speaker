@@ -41,6 +41,8 @@ pub struct BtManagerOptions {
     pub config: Option<PathBuf>,
     /// Whether `--interval` was explicitly specified on the command line.
     pub explicit_interval: bool,
+    /// Optional private D-Bus bus address for auto-trust agent (used by hermetic tests).
+    pub auto_trust_bus_address: Option<String>,
 }
 
 impl Default for BtManagerOptions {
@@ -53,6 +55,7 @@ impl Default for BtManagerOptions {
             capability: None,
             config: None,
             explicit_interval: false,
+            auto_trust_bus_address: None,
         }
     }
 }
@@ -229,7 +232,21 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
 
     let mut auto_trust_shutdown = None;
     if enable_auto_trust {
-        match crate::agent::spawn_auto_trust(effective_capability) {
+        let spawn_res = match &opts.auto_trust_bus_address {
+            Some(addr) => {
+                let addr = addr.clone();
+                crate::agent::spawn_auto_trust_with(effective_capability, move || {
+                    let addr = addr.clone();
+                    async move {
+                        zbus::connection::Builder::address(addr.as_str())?
+                            .build()
+                            .await
+                    }
+                })
+            }
+            None => crate::agent::spawn_auto_trust(effective_capability),
+        };
+        match spawn_res {
             Ok(handle) => auto_trust_shutdown = Some(handle),
             Err(e) => {
                 tracing::error!(error = %e, "auto-trust agent failed to start; continuing without it");

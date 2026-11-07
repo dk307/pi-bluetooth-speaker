@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bt_manager::agent::{
     AgentCapabilityMode, AutoTrustAgent, DEFAULT_AGENT_PATH, default_agent_path,
-    run_agent_supervisor, spawn_auto_trust, spawn_auto_trust_with,
+    run_agent_supervisor, spawn_auto_trust_with,
 };
 use tokio::sync::watch;
 use zbus::zvariant::ObjectPath;
@@ -200,8 +200,16 @@ async fn supervisor_shuts_down_on_signal() {
 
 #[test]
 fn spawn_auto_trust_shuts_down_cleanly() {
-    let handle = spawn_auto_trust(AgentCapabilityMode::NoInputNoOutput)
-        .expect("spawn auto trust background thread");
+    let (_daemon, address) = spawn_private_bus();
+    let handle = spawn_auto_trust_with(AgentCapabilityMode::NoInputNoOutput, move || {
+        let addr = address.clone();
+        async move {
+            zbus::connection::Builder::address(addr.as_str())?
+                .build()
+                .await
+        }
+    })
+    .expect("spawn auto trust background thread");
     handle.shutdown();
     std::thread::sleep(Duration::from_millis(50));
 }
