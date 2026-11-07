@@ -229,7 +229,10 @@ fn spawn_set_trusted_outside_tokio_runtime_does_not_panic() {
             .expect("conn")
     });
     let path = zbus::zvariant::OwnedObjectPath::try_from("/org/bluez/test").unwrap();
-    bt_manager::agent::spawn_set_trusted(conn, path);
+    assert!(
+        bt_manager::agent::spawn_set_trusted(conn, path).is_none(),
+        "spawn_set_trusted outside runtime must return None"
+    );
 }
 
 #[tokio::test]
@@ -462,7 +465,9 @@ async fn spawn_set_trusted_in_tokio_runtime_marks_device_trusted() {
         .await
         .expect("client connection");
 
-    bt_manager::agent::spawn_set_trusted(client_conn, dev_path);
+    let join_handle = bt_manager::agent::spawn_set_trusted(client_conn, dev_path)
+        .expect("must return JoinHandle inside Tokio runtime");
+    let _ = join_handle.await;
 
     let mut success = false;
     for _ in 0..50 {

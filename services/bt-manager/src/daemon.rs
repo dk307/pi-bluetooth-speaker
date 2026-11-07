@@ -238,6 +238,9 @@ fn spawn_cover_art_subsystem(
 /// With `opts.cover_art` (the default), the direct-BIP cover-art provider is
 /// spawned on a dedicated thread; it publishes the active track's artwork on
 /// the system D-Bus independently of the monitor loop.
+///
+/// Attempts to install a SIGINT/SIGTERM handler for graceful shutdown; if a handler
+/// is already installed (e.g. in test runners), a warning is logged and the loop proceeds.
 #[must_use]
 pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
     let path = BtManagerConfig::resolve_path(opts.config.as_deref());

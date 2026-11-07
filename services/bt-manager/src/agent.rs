@@ -96,12 +96,12 @@ impl std::error::Error for AgentError {
 }
 
 /// Returns the canonical default D-Bus [`OwnedObjectPath`] for the auto-trust agent.
-///
-/// # Panics
-/// Panics if [`DEFAULT_AGENT_PATH`] is not a valid D-Bus object path (infallible constant).
 #[must_use]
 pub fn default_agent_path() -> OwnedObjectPath {
-    OwnedObjectPath::try_from(DEFAULT_AGENT_PATH).expect("valid constant object path")
+    match OwnedObjectPath::try_from(DEFAULT_AGENT_PATH) {
+        Ok(path) => path,
+        Err(_) => unreachable!("DEFAULT_AGENT_PATH is a validated constant"),
+    }
 }
 
 /// `BlueZ` pairing agent capability negotiation mode.
@@ -218,7 +218,7 @@ impl AutoTrustAgent {
 
     pub fn request_passkey(&self, device: ObjectPath<'_>) -> zbus::fdo::Result<u32> {
         tracing::info!(%device, "RequestPasskey called; auto-trusting and returning 0");
-        spawn_set_trusted(self.connection.clone(), device.into());
+        let _ = spawn_set_trusted(self.connection.clone(), device.into());
         Ok(0)
     }
 
@@ -243,13 +243,13 @@ impl AutoTrustAgent {
             passkey,
             "RequestConfirmation called; auto-confirming numeric comparison and auto-trusting"
         );
-        spawn_set_trusted(self.connection.clone(), device.into());
+        let _ = spawn_set_trusted(self.connection.clone(), device.into());
         Ok(())
     }
 
     pub fn request_authorization(&self, device: ObjectPath<'_>) -> zbus::fdo::Result<()> {
         tracing::info!(%device, "RequestAuthorization called; auto-authorizing and auto-trusting");
-        spawn_set_trusted(self.connection.clone(), device.into());
+        let _ = spawn_set_trusted(self.connection.clone(), device.into());
         Ok(())
     }
 
@@ -259,7 +259,7 @@ impl AutoTrustAgent {
             %uuid,
             "AuthorizeService called; auto-authorizing service UUID and auto-trusting"
         );
-        spawn_set_trusted(self.connection.clone(), device.into());
+        let _ = spawn_set_trusted(self.connection.clone(), device.into());
         Ok(())
     }
 
@@ -321,20 +321,25 @@ pub async fn set_device_trusted(
 /// Spawns a background task to set `device.Trusted = true` asynchronously.
 ///
 /// If a Tokio runtime handle is available in the current context, the task is
-/// spawned on that runtime. Otherwise, a warning is logged so caller threads
+/// spawned on that runtime and its [`tokio::task::JoinHandle`] is returned.
+/// Otherwise, a warning is logged and `None` is returned so caller threads
 /// never panic.
-pub fn spawn_set_trusted(connection: zbus::Connection, device: OwnedObjectPath) {
+pub fn spawn_set_trusted(
+    connection: zbus::Connection,
+    device: OwnedObjectPath,
+) -> Option<tokio::task::JoinHandle<()>> {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async move {
+        Some(handle.spawn(async move {
             match set_device_trusted(&connection, &device).await {
                 Ok(()) => tracing::info!(%device, "Device successfully marked as Trusted: yes"),
                 Err(e) => {
                     tracing::warn!(%device, error = %e, "Failed to set device Trusted property");
                 }
             }
-        });
+        }))
     } else {
         tracing::warn!(%device, "No Tokio runtime available to set device Trusted asynchronously");
+        None
     }
 }
 
