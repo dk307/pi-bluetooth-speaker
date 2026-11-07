@@ -1260,32 +1260,33 @@ fn sync_marquee_overlay(
 /// so physical touches wake the render loop immediately (<20 ms) rather than sleeping.
 #[cfg(feature = "ui")]
 fn idle_sleep(touch_fd: Option<RawFd>) {
-    let timer_duration = slint::platform::duration_until_next_timer_update();
-    let sleep_duration = match timer_duration {
-        Some(d) => d.min(Duration::from_millis(50)),
-        None => Duration::from_millis(50),
-    };
-    let timeout = sleep_duration.max(Duration::from_millis(10));
-    if let Some(fd) = touch_fd {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: poll with 1 descriptor and bounded timeout is safe.
-        let ret = unsafe {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "bounded 10..=50 ms fits in c_int"
-            )]
-            libc::poll(&raw mut pfd, 1, timeout.as_millis() as libc::c_int)
-        };
-        // Sleep on poll timeout, error, or if hangup/error revents are signaled
-        // so device disconnects do not cause a 100% CPU busy-spin loop.
-        if ret <= 0 || (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0) {
-            std::thread::sleep(timeout);
+    let timeout = slint::platform::duration_until_next_timer_update()
+        .unwrap_or(Duration::from_millis(50))
+        .clamp(Duration::from_millis(10), Duration::from_millis(50));
+
+    let should_sleep = match touch_fd {
+        Some(fd) => {
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: poll with 1 descriptor and bounded timeout is safe.
+            let ret = unsafe {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "bounded 10..=50 ms fits in c_int"
+                )]
+                libc::poll(&raw mut pfd, 1, timeout.as_millis() as libc::c_int)
+            };
+            // Sleep on poll timeout, error, or if hangup/error revents are signaled
+            // so device disconnects do not cause a 100% CPU busy-spin loop.
+            ret <= 0 || (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0)
         }
-    } else {
+        None => true,
+    };
+
+    if should_sleep {
         std::thread::sleep(timeout);
     }
 }
@@ -1736,5 +1737,35 @@ mod tests {
             finish_boot_worker(Some(panic_handle), true);
         }));
         assert!(res.is_err(), "worker panic must be re-raised");
+    }
+
+    #[test]
+    fn idle_sleep_various_fd_conditions() {
+        // 1. None fd (always sleeps timeout)
+        idle_sleep(None);
+
+        // 2. Closed / invalid fd (poll fails with POLLNVAL / error, sleeps safely without panic)
+        idle_sleep(Some(-1));
+
+        // 3. Pipe fd with no data (poll times out, sleeps safely)
+        let mut fds = [0; 2];
+        // SAFETY: pipe creates 2 valid descriptors.
+        let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(ret, 0);
+        let [rfd, wfd] = fds;
+
+        idle_sleep(Some(rfd));
+
+        // 4. Pipe fd with pending data (poll wakes immediately)
+        let data = b"touch";
+        // SAFETY: writing test bytes into valid pipe.
+        let _ = unsafe { libc::write(wfd, data.as_ptr().cast::<libc::c_void>(), data.len()) };
+        idle_sleep(Some(rfd));
+
+        // SAFETY: close test pipe descriptors.
+        unsafe {
+            libc::close(rfd);
+            libc::close(wfd);
+        }
     }
 }
