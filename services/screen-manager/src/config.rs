@@ -30,8 +30,8 @@ pub const MIN_VOLUME_STEP_PERCENT: u8 = 1;
 /// Maximum allowed volume step per rotary encoder detent (`25%`).
 pub const MAX_VOLUME_STEP_PERCENT: u8 = 25;
 
-/// Production default Volume HUD auto-dismiss timeout in milliseconds (`2500` ms).
-pub const DEFAULT_VOLUME_HUD_TIMEOUT_MS: u32 = 2_500;
+/// Production default Volume HUD auto-dismiss timeout in milliseconds (`4000` ms).
+pub const DEFAULT_VOLUME_HUD_TIMEOUT_MS: u32 = 4_000;
 
 /// Minimum allowed Volume HUD auto-dismiss timeout in milliseconds (`250` ms).
 pub const MIN_VOLUME_HUD_TIMEOUT_MS: u32 = 250;
@@ -529,7 +529,7 @@ mod tests {
         assert_eq!(config.volume_step_percent, VolumeStepPercent::DEFAULT);
         assert_eq!(config.volume_step_percent.value(), 2);
         assert_eq!(config.volume_hud_timeout_ms, VolumeHudTimeoutMs::DEFAULT);
-        assert_eq!(config.volume_hud_timeout_ms.value(), 2_500);
+        assert_eq!(config.volume_hud_timeout_ms.value(), 4_000);
         assert_eq!(config.volume_hud_fade_ms, VolumeHudFadeMs::DEFAULT);
         assert_eq!(config.volume_hud_fade_ms.value(), 200);
     }

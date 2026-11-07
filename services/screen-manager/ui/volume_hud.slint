@@ -42,7 +42,7 @@ export component VolumeHudOverlay inherits Rectangle {
 
         // 1. Header Label
         Text {
-            text: root.is_muted ? "MASTER VOLUME — MUTED" : "MASTER VOLUME";
+            text: root.is_muted ? "VOLUME — MUTED" : "VOLUME";
             color: root.is_muted ? #EF4444 : Theme.active.secondary_accent;
             font-size: 16px;
             font-weight: 800;
@@ -166,28 +166,31 @@ export component VolumeHudOverlay inherits Rectangle {
                 border-color: root.is_muted ? #EF4444 : Theme.active.primary_accent;
                 opacity: mute_touch.pressed ? 0.75 : 1.0;
 
-                HorizontalLayout {
+                VerticalLayout {
                     alignment: center;
-                    spacing: 10px;
 
-                    Image {
-                        source: root.is_muted
-                            ? @image-url("../../../assets/icons/volume-mute.svg")
-                            : @image-url("../../../assets/icons/volume-3.svg");
-                        colorize: root.is_muted ? #FFFFFF : Theme.active.primary_accent;
-                        width: 24px;
-                        height: 24px;
-                        image-fit: contain;
-                        vertical-alignment: center;
-                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 12px;
 
-                    Text {
-                        text: root.is_muted ? "UNMUTE" : "MUTE";
-                        color: root.is_muted ? #FFFFFF : Theme.active.text_primary;
-                        font-size: 16px;
-                        font-weight: 800;
-                        letter-spacing: 1px;
-                        vertical-alignment: center;
+                        Image {
+                            source: root.is_muted
+                                ? @image-url("../../../assets/icons/volume-mute.svg")
+                                : @image-url("../../../assets/icons/volume-3.svg");
+                            colorize: root.is_muted ? #FFFFFF : Theme.active.primary_accent;
+                            width: 24px;
+                            height: 24px;
+                            image-fit: contain;
+                        }
+
+                        Text {
+                            text: root.is_muted ? "UNMUTE" : "MUTE";
+                            color: root.is_muted ? #FFFFFF : Theme.active.text_primary;
+                            font-size: 16px;
+                            font-weight: 800;
+                            letter-spacing: 1px;
+                            vertical-alignment: center;
+                        }
                     }
                 }
 

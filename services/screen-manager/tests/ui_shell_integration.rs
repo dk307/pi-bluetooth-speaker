@@ -719,7 +719,7 @@ fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
     assert!(!shell.is_volume_hud_active());
     assert_eq!(shell.volume_hud_opacity(), 0.0);
     assert_eq!(shell.volume_step_percent(), 2);
-    assert_eq!(shell.volume_hud_timeout_ms(), 2_500);
+    assert_eq!(shell.volume_hud_timeout_ms(), 4_000);
     assert_eq!(shell.volume_hud_fade_ms(), 200);
 
     // 2. Apply CoreConfig overrides

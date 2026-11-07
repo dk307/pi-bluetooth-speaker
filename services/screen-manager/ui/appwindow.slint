@@ -43,7 +43,7 @@ export component MainWindow inherits Window {
     in-out property <bool> is_playing: false;
     in-out property <bool> is_muted: false;
     in-out property <bool> volume_hud_visible: false;
-    in-out property <int> volume_hud_timeout_ms: 2500;
+    in-out property <int> volume_hud_timeout_ms: 4000;
     in-out property <int> volume_hud_fade_ms: 200;
     in-out property <int> volume_hud_elapsed_ms: 0;
     out property <float> volume_hud_opacity: root.volume_hud_visible ? 1.0 : 0.0;
