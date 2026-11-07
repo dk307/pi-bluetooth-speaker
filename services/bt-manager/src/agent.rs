@@ -211,7 +211,8 @@ impl AutoTrustAgent {
         device: ObjectPath<'_>,
         pincode: String,
     ) -> zbus::fdo::Result<()> {
-        tracing::info!(%device, %pincode, "DisplayPinCode called");
+        let _ = pincode;
+        tracing::info!(%device, "DisplayPinCode called");
         Ok(())
     }
 
@@ -227,7 +228,8 @@ impl AutoTrustAgent {
         passkey: u32,
         entered: u16,
     ) -> zbus::fdo::Result<()> {
-        tracing::info!(%device, passkey, entered, "DisplayPasskey called");
+        let _ = passkey;
+        tracing::info!(%device, entered, "DisplayPasskey called");
         Ok(())
     }
 

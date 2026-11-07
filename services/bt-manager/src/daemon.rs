@@ -272,7 +272,10 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
     if let Err(e) = ctrlc::set_handler(move || {
         shutdown_requested_signal.store(true, Ordering::SeqCst);
     }) {
-        tracing::debug!(error = %e, "signal handler already registered or could not be set");
+        tracing::warn!(
+            error = %e,
+            "signal handler already registered or could not be set; graceful shutdown on SIGINT/SIGTERM may be degraded"
+        );
     }
 
     let auto_trust_shutdown = if enable_auto_trust {
