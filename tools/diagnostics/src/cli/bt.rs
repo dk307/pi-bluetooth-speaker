@@ -219,7 +219,7 @@ pub fn print_human_services(status: &BluetoothStatus) {
     println!("Bluetooth Service (bluetoothd) : {}", svcs.bluetoothd);
     println!("BlueALSA Service (bluealsa)    : {}", svcs.bluealsa);
     println!("BlueALSA Aplay (audio forward) : {}", svcs.bluealsa_aplay);
-    println!("BT Auto-Trust Agent (bt-agent) : {}", svcs.bt_agent);
+    println!("BT Agent Service (bt-manager)  : {}", svcs.bt_agent);
     println!("---------------------------------------------------------");
 }
 

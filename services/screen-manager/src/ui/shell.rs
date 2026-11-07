@@ -764,7 +764,22 @@ impl AppShell {
     fn setup_transport_callbacks(&self) {
         let transport_play = Rc::clone(&self.transport_commands);
         let win = self.window.as_weak();
+        let last_toggle = std::sync::Arc::new(std::sync::Mutex::new(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or_else(std::time::Instant::now),
+        ));
         self.window.on_toggle_play_pause(move || {
+            let mut last = match last_toggle.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let now = std::time::Instant::now();
+            if now.duration_since(*last) < std::time::Duration::from_millis(300) {
+                return;
+            }
+            *last = now;
+            drop(last);
             if let Some(w) = win.upgrade() {
                 if let Some(cmds) = transport_play.borrow().as_ref() {
                     cmds.push(speaker_bluetooth::TransportCommand::TogglePlayPause);

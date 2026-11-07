@@ -600,6 +600,7 @@ fn ui_shell_now_playing_callbacks() {
     assert!(!bt.status().unwrap().playback.unwrap().is_playing());
     assert!(!shell.is_playing());
 
+    std::thread::sleep(std::time::Duration::from_millis(310));
     shell.window().invoke_toggle_play_pause();
     assert!(shell.is_playing());
     drain_worker_commands(&bt, &commands, &shell);
