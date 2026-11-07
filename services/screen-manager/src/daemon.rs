@@ -6,6 +6,8 @@
 // `PathBuf` backs the unconditionally compiled `-c/--config` CLI field;
 // `Path` is only referenced by the ui-gated framebuffer paths.
 #[cfg(feature = "ui")]
+use std::os::fd::RawFd;
+#[cfg(feature = "ui")]
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -1047,6 +1049,29 @@ pub fn run_render_loop(
     commands: &speaker_bluetooth::TransportCommandQueue,
     preview_secs: Option<u64>,
 ) {
+    let touch_dev = crate::ui::TouchInputDevice::auto_discover().ok();
+    run_render_loop_with_input(
+        fb,
+        window,
+        shell,
+        maybe_bt,
+        commands,
+        preview_secs,
+        touch_dev,
+    );
+}
+
+/// Runs the UI render loop with explicit touch input device injection.
+#[cfg(feature = "ui")]
+pub fn run_render_loop_with_input(
+    fb: &mut Framebuffer,
+    window: &Rc<MinimalSoftwareWindow>,
+    shell: &AppShell,
+    maybe_bt: Option<&speaker_bluetooth::BluetoothDevice>,
+    commands: &speaker_bluetooth::TransportCommandQueue,
+    preview_secs: Option<u64>,
+    mut touch_dev: Option<crate::ui::TouchInputDevice>,
+) {
     let start = Instant::now();
     let duration = preview_secs.map(Duration::from_secs);
     tracing::info!("Running UI render loop");
@@ -1075,6 +1100,20 @@ pub fn run_render_loop(
     let mut overlay_theme: Option<ThemePreset> = None;
     while duration.is_none_or(|d| start.elapsed() < d) {
         let frame_start = Instant::now();
+
+        // Process and dispatch pending touch events directly on the UI render thread
+        if let Some(ref mut touch) = touch_dev {
+            match touch.dispatch_to_window(window) {
+                Ok(count) => {
+                    if count > 0 {
+                        window.window().request_redraw();
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Touch dispatch failed");
+                }
+            }
+        }
 
         if let Err(e) = sync_marquee_overlay(fb, shell, window, &mut overlay_theme) {
             report_display(tracing::Level::ERROR, "Marquee overlay sync failed", &e);
@@ -1109,7 +1148,10 @@ pub fn run_render_loop(
                 std::thread::sleep(remaining);
             }
         } else {
-            idle_sleep();
+            let touch_fd = touch_dev
+                .as_ref()
+                .and_then(crate::ui::TouchInputDevice::as_raw_fd);
+            idle_sleep(touch_fd);
         }
     }
 
@@ -1213,14 +1255,34 @@ fn sync_marquee_overlay(
 }
 
 /// Adaptive power-saving sleep when the UI is completely static (0% CPU at idle).
+///
+/// If a touch device file descriptor is present, polls it with a bounded timeout
+/// so physical touches wake the render loop immediately (<20 ms) rather than sleeping.
 #[cfg(feature = "ui")]
-fn idle_sleep() {
+fn idle_sleep(touch_fd: Option<RawFd>) {
     let timer_duration = slint::platform::duration_until_next_timer_update();
     let sleep_duration = match timer_duration {
         Some(d) => d.min(Duration::from_millis(50)),
         None => Duration::from_millis(50),
     };
-    std::thread::sleep(sleep_duration.max(Duration::from_millis(10)));
+    let timeout = sleep_duration.max(Duration::from_millis(10));
+    if let Some(fd) = touch_fd {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll with 1 descriptor and bounded timeout is safe.
+        unsafe {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "bounded 10..=50 ms fits in c_int"
+            )]
+            libc::poll(&raw mut pfd, 1, timeout.as_millis() as libc::c_int);
+        }
+    } else {
+        std::thread::sleep(timeout);
+    }
 }
 
 /// Aggregated frame phase timings for render-loop CPU diagnostics.

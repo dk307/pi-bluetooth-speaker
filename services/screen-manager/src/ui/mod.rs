@@ -19,6 +19,7 @@ mod generated {
 
 pub mod boot;
 pub(crate) mod framebuffer;
+pub mod input;
 pub(crate) mod marquee;
 pub(crate) mod shell;
 pub(crate) mod theme;
@@ -31,6 +32,10 @@ pub use framebuffer::{
 };
 #[doc(inline)]
 pub use generated::{BootCheckLine, MainWindow, SplashScreen, Theme, ThemePalette};
+#[doc(inline)]
+pub use input::{
+    TouchAction, TouchCalibration, TouchDecoder, TouchError, TouchInputDevice, TouchMockCtrl,
+};
 #[doc(inline)]
 pub use marquee::{
     MarqueeStrip, MarqueeStripCache, MarqueeStripRasterizer, MarqueeTypography, RgbaPremulPixel,
