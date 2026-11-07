@@ -1160,11 +1160,20 @@ impl DbusClient {
 
     pub(crate) fn check_services(&self) -> Result<BluetoothServices, BtError> {
         let manager = SystemdManagerProxyBlocking::new(&self.conn())?;
+        // Check for bt-manager.service (native auto-trust agent + cover art provider),
+        // falling back to legacy bt-agent.service if present.
+        let bt_agent = match self.check_service(&manager, "bt-manager.service")? {
+            s if s.is_active() => s,
+            s => match self.check_service(&manager, "bt-agent.service")? {
+                legacy if legacy.is_active() => legacy,
+                _ => s,
+            },
+        };
         Ok(BluetoothServices {
             bluetoothd: self.check_service(&manager, "bluetooth.service")?,
             bluealsa: self.check_service(&manager, "bluealsa.service")?,
             bluealsa_aplay: self.check_service(&manager, "bluealsa-aplay.service")?,
-            bt_agent: self.check_service(&manager, "bt-agent.service")?,
+            bt_agent,
         })
     }
 
