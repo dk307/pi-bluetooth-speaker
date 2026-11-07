@@ -153,9 +153,18 @@ impl BtManagerConfig {
             .map_err(|e| {
                 ConfigError::config(format!("failed to read config {}", path.display()), e)
             })?;
-        settings
+        let cfg: Self = settings
             .try_deserialize::<Self>()
-            .map_err(|e| ConfigError::config(format!("invalid config {}", path.display()), e))
+            .map_err(|e| ConfigError::config(format!("invalid config {}", path.display()), e))?;
+        tracing::info!(
+            path = %path.display(),
+            interval_secs = cfg.interval_secs.value(),
+            cover_art = cfg.cover_art,
+            auto_trust = cfg.auto_trust,
+            capability = cfg.capability.as_capability_str(),
+            "loaded configuration from file"
+        );
+        Ok(cfg)
     }
 
     /// Atomically persists this configuration to `path` as pretty-printed JSON.
@@ -198,6 +207,7 @@ impl BtManagerConfig {
                 e.error,
             )
         })?;
+        tracing::info!(path = %path.display(), "saved configuration atomically");
         Ok(())
     }
 

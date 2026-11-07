@@ -491,7 +491,11 @@ pub async fn run_agent_supervisor_with_interval(
 
     tracing::info!("Auto-trust agent shutting down; unregistering from BlueZ");
     if is_registered {
-        let _ = unregister_agent_on(&connection, &agent_path).await;
+        if let Err(e) = unregister_agent_on(&connection, &agent_path).await {
+            tracing::warn!(path = %agent_path, error = %e, "Failed to unregister agent during shutdown");
+        } else {
+            tracing::info!(path = %agent_path, "Agent successfully unregistered from BlueZ");
+        }
     }
     let _ = connection
         .object_server()
@@ -518,7 +522,7 @@ pub fn spawn_auto_trust_with<F, Fut>(
     conn_factory: F,
 ) -> Result<AutoTrustShutdown, AgentError>
 where
-    F: FnOnce() -> Fut + Send + 'static,
+    F: Fn() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = zbus::Result<zbus::Connection>> + Send + 'static,
 {
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -539,16 +543,37 @@ where
             };
 
             runtime.block_on(async move {
-                match conn_factory().await {
-                    Ok(conn) => {
-                        run_agent_supervisor(conn, default_agent_path(), mode, &mut shutdown_rx)
-                            .await;
+                let mut retry_delay = Duration::from_secs(1);
+                while !*shutdown_rx.borrow() {
+                    match conn_factory().await {
+                        Ok(conn) => {
+                            retry_delay = Duration::from_secs(1);
+                            run_agent_supervisor(conn, default_agent_path(), mode, &mut shutdown_rx)
+                                .await;
+                            if *shutdown_rx.borrow() {
+                                break;
+                            }
+                            tracing::warn!(
+                                "Auto-trust agent connection dropped; reconnecting in {retry_delay:?}"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Cannot establish D-Bus connection for auto-trust agent; retrying in {retry_delay:?}"
+                            );
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Cannot establish D-Bus connection for auto-trust agent; agent disabled"
-                        );
+
+                    tokio::select! {
+                        () = tokio::time::sleep(retry_delay) => {
+                            retry_delay = (retry_delay * 2).min(Duration::from_secs(10));
+                        }
+                        res = shutdown_rx.changed() => {
+                            if res.is_err() || *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
                     }
                 }
             });

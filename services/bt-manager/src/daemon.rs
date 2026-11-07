@@ -182,6 +182,50 @@ pub fn run_tick(bt: &BluetoothDevice) -> Result<BluetoothStatus, BtError> {
     Ok(status)
 }
 
+fn spawn_auto_trust_subsystem(
+    opts: &BtManagerOptions,
+    capability: AgentCapabilityMode,
+) -> Option<crate::agent::AutoTrustShutdown> {
+    tracing::info!(
+        capability = capability.as_capability_str(),
+        "Starting auto-trust agent subsystem"
+    );
+    let spawn_res = match &opts.auto_trust_bus_address {
+        Some(addr) => {
+            let addr = addr.clone();
+            crate::agent::spawn_auto_trust_with(capability, move || {
+                let addr = addr.clone();
+                async move {
+                    zbus::connection::Builder::address(addr.as_str())?
+                        .build()
+                        .await
+                }
+            })
+        }
+        None => crate::agent::spawn_auto_trust(capability),
+    };
+    match spawn_res {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            tracing::error!(error = %e, "auto-trust agent failed to start; continuing without it");
+            None
+        }
+    }
+}
+
+fn spawn_cover_art_subsystem(
+    bt: &BluetoothDevice,
+) -> Option<crate::cover_provider::CoverArtShutdown> {
+    match crate::cover_provider::spawn_production(speaker_bluetooth::COVER_ART_CACHE_DIR.into(), bt)
+    {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            tracing::error!(error = %e, "cover-art provider failed to start; continuing without it");
+            None
+        }
+    }
+}
+
 /// Runs the Bluetooth manager monitor loop with parsed options.
 ///
 /// Polls [`BluetoothDevice::status`] every `opts.interval`, logging each tick.
@@ -207,10 +251,8 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
 
     let effective_interval = if opts.explicit_interval {
         opts.interval
-    } else if cfg.interval_secs.as_duration() != DEFAULT_POLL_INTERVAL {
-        cfg.interval_secs.as_duration()
     } else {
-        opts.interval
+        cfg.interval_secs.as_duration()
     };
     let enable_cover_art = opts.cover_art && cfg.cover_art;
     let enable_auto_trust = opts.auto_trust && cfg.auto_trust;
@@ -218,6 +260,9 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
 
     tracing::info!(
         interval_secs = effective_interval.as_secs(),
+        cover_art = enable_cover_art,
+        auto_trust = enable_auto_trust,
+        capability = effective_capability.as_capability_str(),
         "Bluetooth Manager Service running on Raspberry Pi 3 (aarch64)"
     );
 
@@ -230,42 +275,19 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
         tracing::debug!(error = %e, "signal handler already registered or could not be set");
     }
 
-    let mut auto_trust_shutdown = None;
-    if enable_auto_trust {
-        let spawn_res = match &opts.auto_trust_bus_address {
-            Some(addr) => {
-                let addr = addr.clone();
-                crate::agent::spawn_auto_trust_with(effective_capability, move || {
-                    let addr = addr.clone();
-                    async move {
-                        zbus::connection::Builder::address(addr.as_str())?
-                            .build()
-                            .await
-                    }
-                })
-            }
-            None => crate::agent::spawn_auto_trust(effective_capability),
-        };
-        match spawn_res {
-            Ok(handle) => auto_trust_shutdown = Some(handle),
-            Err(e) => {
-                tracing::error!(error = %e, "auto-trust agent failed to start; continuing without it");
-            }
-        }
-    }
+    let auto_trust_shutdown = if enable_auto_trust {
+        spawn_auto_trust_subsystem(opts, effective_capability)
+    } else {
+        tracing::info!("Auto-trust agent disabled by configuration");
+        None
+    };
 
-    let mut cover_art_shutdown = None;
-    if enable_cover_art {
-        match crate::cover_provider::spawn_production(
-            speaker_bluetooth::COVER_ART_CACHE_DIR.into(),
-            bt,
-        ) {
-            Ok(handle) => cover_art_shutdown = Some(handle),
-            Err(e) => {
-                tracing::error!(error = %e, "cover-art provider failed to start; continuing without it");
-            }
-        }
-    }
+    let cover_art_shutdown = if enable_cover_art {
+        spawn_cover_art_subsystem(bt)
+    } else {
+        tracing::info!("Cover-art provider disabled by configuration");
+        None
+    };
 
     let mut ticks: u64 = 0;
     let mut last_status: Option<(usize, bool)> = None;
