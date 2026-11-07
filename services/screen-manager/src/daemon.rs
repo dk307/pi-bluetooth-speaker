@@ -1279,9 +1279,11 @@ fn idle_sleep(touch_fd: Option<RawFd>) {
                 )]
                 libc::poll(&raw mut pfd, 1, timeout.as_millis() as libc::c_int)
             };
-            // Sleep on poll timeout, error, or if hangup/error revents are signaled
-            // so device disconnects do not cause a 100% CPU busy-spin loop.
-            ret <= 0 || (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0)
+            // Sleep on poll timeout, error, or if hangup/error revents are signaled without readable data,
+            // so device disconnects do not cause a 100% CPU busy-spin loop while pending touch events are preserved.
+            ret <= 0
+                || ((pfd.revents & libc::POLLIN) == 0
+                    && (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0))
         }
         None => true,
     };

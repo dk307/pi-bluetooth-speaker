@@ -10,12 +10,14 @@
 //! `M-MOCKABLE-SYSCALLS`, `M-ERRORS-CANONICAL-STRUCTS`).
 
 use std::backtrace::Backtrace;
+#[cfg(test)]
 use std::collections::HashMap;
 use std::fmt::{self, Debug, Formatter};
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{IntoRawFd, RawFd};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -69,6 +71,7 @@ const fn eviocgabs_ioctl(abs: u8) -> libc::c_ulong {
 
 /// Constructs a Linux `libc::input_event`.
 #[must_use]
+#[cfg(test)]
 pub fn make_input_event(type_: u16, code: u16, value: i32) -> libc::input_event {
     libc::input_event {
         time: libc::timeval {
@@ -83,6 +86,7 @@ pub fn make_input_event(type_: u16, code: u16, value: i32) -> libc::input_event 
 
 /// Serializes a `libc::input_event` to raw bytes matching host C struct memory layout.
 #[must_use]
+#[cfg(test)]
 pub fn input_event_to_bytes(
     ev: &libc::input_event,
 ) -> [u8; std::mem::size_of::<libc::input_event>()] {
@@ -219,6 +223,7 @@ impl EvdevSyscall for NativeEvdevSyscall {
 
 /// Configuration for a simulated evdev touch device.
 #[derive(Debug, Clone)]
+#[cfg(test)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "Mock fault injection flags require individual toggles"
@@ -246,6 +251,7 @@ pub struct MockDeviceConfig {
     pub fail_name: bool,
 }
 
+#[cfg(test)]
 impl Default for MockDeviceConfig {
     fn default() -> Self {
         Self {
@@ -278,7 +284,8 @@ impl Default for MockDeviceConfig {
 }
 
 /// Simulated evdev syscall backend for deterministic testing.
-#[derive(Debug, Default)]
+#[derive(Debug)]
+#[cfg(test)]
 pub struct MockEvdevSyscall {
     devices: Mutex<HashMap<RawFd, MockDeviceConfig>>,
     path_configs: Mutex<HashMap<PathBuf, MockDeviceConfig>>,
@@ -286,16 +293,24 @@ pub struct MockEvdevSyscall {
     closed_fds: Mutex<Vec<RawFd>>,
 }
 
-impl MockEvdevSyscall {
-    /// Creates a new empty [`MockEvdevSyscall`].
-    #[must_use]
-    pub fn new() -> Self {
+#[cfg(test)]
+impl Default for MockEvdevSyscall {
+    fn default() -> Self {
         Self {
             devices: Mutex::new(HashMap::new()),
             path_configs: Mutex::new(HashMap::new()),
             next_fd: AtomicI32::new(100),
             closed_fds: Mutex::new(Vec::new()),
         }
+    }
+}
+
+#[cfg(test)]
+impl MockEvdevSyscall {
+    /// Creates a new empty [`MockEvdevSyscall`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Registers a device config mapped to a filesystem path.
@@ -329,6 +344,7 @@ impl MockEvdevSyscall {
     }
 }
 
+#[cfg(test)]
 impl EvdevSyscall for MockEvdevSyscall {
     fn open(&self, path: &Path) -> io::Result<RawFd> {
         let configs = self.path_configs.lock().expect("path_configs poisoned");
@@ -1491,9 +1507,6 @@ mod tests {
         // Test production open on nonexistent path
         let err = TouchInputDevice::open("/dev/input/nonexistent-test-node").unwrap_err();
         assert!(err.is_io());
-
-        // Test auto_discover production wrapper on host
-        let _ = TouchInputDevice::auto_discover();
 
         // Test set_calibration on device
         let (mut dev, _) = TouchInputDevice::new_mocked();
