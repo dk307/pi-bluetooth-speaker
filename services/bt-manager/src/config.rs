@@ -202,15 +202,6 @@ impl BtManagerConfig {
     /// Checks the override path first, falling back to [`DEFAULT_BT_CONFIG_PATH`].
     #[must_use]
     pub fn resolve_path(override_path: Option<&Path>) -> PathBuf {
-        Self::resolve_path_with(override_path, Path::exists)
-    }
-
-    /// Resolves the effective config path using an injectable filesystem probe.
-    #[must_use]
-    pub fn resolve_path_with<F>(override_path: Option<&Path>, _exists_fn: F) -> PathBuf
-    where
-        F: Fn(&Path) -> bool,
-    {
         if let Some(p) = override_path {
             p.to_path_buf()
         } else {
@@ -327,8 +318,6 @@ impl std::error::Error for ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use speaker_common::diag::ScopedTempDir;
-    use std::error::Error as _;
 
     #[test]
     fn defaults_are_sensible() {
@@ -352,76 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn load_missing_file_returns_defaults() {
-        let dir = ScopedTempDir::new("bt_cfg_missing");
-        let path = dir.path().join("does-not-exist.json");
-        let config = BtManagerConfig::load(&path).expect("missing file must yield defaults");
-        assert_eq!(config, BtManagerConfig::default());
-    }
-
-    #[test]
-    fn save_and_load_roundtrip() {
-        let dir = ScopedTempDir::new("bt_cfg_roundtrip");
-        let path = dir.path().join("config.json");
-        let config = BtManagerConfig {
-            interval_secs: PollIntervalSecs::new(10),
-            cover_art: false,
-            auto_trust: false,
-            capability: AgentCapabilityMode::NoInputNoOutput,
-        };
-        config.save(&path).expect("save");
-        let loaded = BtManagerConfig::load(&path).expect("load");
-        assert_eq!(loaded, config);
-        let raw = std::fs::read_to_string(&path).expect("raw read");
-        assert!(raw.contains("\"interval_secs\": 10"), "{raw}");
-        assert!(raw.contains("\"cover_art\": false"), "{raw}");
-        assert!(raw.contains("\"auto_trust\": false"), "{raw}");
-        assert!(
-            raw.contains("\"capability\": \"no-input-no-output\""),
-            "{raw}"
-        );
-    }
-
-    #[test]
-    fn minimal_config_deserializes_with_defaults() {
-        let config: BtManagerConfig = serde_json::from_str("{}").expect("empty object");
-        assert_eq!(config, BtManagerConfig::default());
-        let config: BtManagerConfig =
-            serde_json::from_str(r#"{"interval_secs": 15}"#).expect("interval only");
-        assert_eq!(config.interval_secs, PollIntervalSecs::new(15));
-        assert!(config.cover_art);
-        assert!(config.auto_trust);
-        assert_eq!(config.capability, AgentCapabilityMode::DisplayYesNo);
-    }
-
-    #[test]
-    fn load_malformed_json_is_hard_parse_error() {
-        let dir = ScopedTempDir::new("bt_cfg_malformed");
-        let path = dir.path().join("config.json");
-        std::fs::write(&path, "{not json").expect("write");
-        let err = BtManagerConfig::load(&path).expect_err("malformed JSON must fail");
-        assert!(err.is_config());
-        assert!(err.to_string().contains("failed to read config"));
-        assert!(err.summary().contains("config error"));
-        assert!(!err.summary().contains("Backtrace"));
-        assert!(err.source().is_some());
-    }
-
-    #[test]
-    fn load_rejects_zero_interval() {
-        let dir = ScopedTempDir::new("bt_cfg_zero_interval");
-        let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{"interval_secs": 0}"#).expect("write");
-        let err = BtManagerConfig::load(&path).expect_err("zero interval must fail");
-        assert!(err.is_config());
-        let rendered = err.to_string();
-        assert!(
-            rendered.contains("interval must be at least 1 second"),
-            "{rendered}"
-        );
-    }
-
-    #[test]
     fn resolve_path_uses_override_and_default() {
         assert_eq!(
             BtManagerConfig::resolve_path(None),
@@ -430,10 +349,6 @@ mod tests {
         assert_eq!(
             BtManagerConfig::resolve_path(Some(Path::new("/tmp/custom.json"))),
             PathBuf::from("/tmp/custom.json")
-        );
-        assert_eq!(
-            BtManagerConfig::resolve_path_with(None, |_| true),
-            PathBuf::from(DEFAULT_BT_CONFIG_PATH)
         );
     }
 
@@ -451,27 +366,5 @@ mod tests {
         assert!(io_err.is_io());
         let layered_err = ConfigError::config("ctx", config::ConfigError::Message("boom".into()));
         assert!(layered_err.is_config());
-    }
-
-    #[test]
-    fn save_io_failure_on_directory_target() {
-        let dir = ScopedTempDir::new("bt_cfg_save_dir");
-        let config = BtManagerConfig::default();
-        let target = dir.path().join("blocked");
-        std::fs::create_dir(&target).expect("create blocking directory");
-        let err = config
-            .save(&target)
-            .expect_err("rename over directory must fail");
-        assert!(err.is_io());
-        assert!(err.to_string().contains("failed to install config"));
-    }
-
-    #[test]
-    fn save_installs_world_readable_mode() {
-        let dir = ScopedTempDir::new("bt_cfg_mode");
-        let path = dir.path().join("config.json");
-        BtManagerConfig::default().save(&path).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o644);
     }
 }

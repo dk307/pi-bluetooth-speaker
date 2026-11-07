@@ -7,7 +7,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use bt_manager::agent::{
-    AgentCapabilityMode, AutoTrustAgent, DEFAULT_AGENT_PATH, run_agent_supervisor, spawn_auto_trust,
+    AgentCapabilityMode, AutoTrustAgent, DEFAULT_AGENT_PATH, default_agent_path,
+    run_agent_supervisor, spawn_auto_trust, spawn_auto_trust_with,
 };
 use tokio::sync::watch;
 use zbus::zvariant::ObjectPath;
@@ -177,7 +178,7 @@ async fn supervisor_shuts_down_on_signal() {
     let supervisor_task = tokio::spawn(async move {
         run_agent_supervisor(
             conn,
-            DEFAULT_AGENT_PATH.to_string(),
+            default_agent_path(),
             AgentCapabilityMode::DisplayYesNo,
             &mut shutdown_rx,
         )
@@ -205,8 +206,24 @@ fn spawn_auto_trust_shuts_down_cleanly() {
     std::thread::sleep(Duration::from_millis(50));
 }
 
+#[test]
+fn spawn_auto_trust_with_custom_bus() {
+    let (_daemon, address) = spawn_private_bus();
+    let handle = spawn_auto_trust_with(AgentCapabilityMode::DisplayYesNo, move || {
+        let addr = address.clone();
+        async move {
+            zbus::connection::Builder::address(addr.as_str())?
+                .build()
+                .await
+        }
+    })
+    .expect("spawn must succeed");
+    handle.shutdown();
+    std::thread::sleep(Duration::from_millis(50));
+}
+
 #[tokio::test]
-async fn supervisor_handles_invalid_object_path() {
+async fn supervisor_shuts_down_when_sender_dropped() {
     let (_daemon, address) = spawn_private_bus();
     let conn = zbus::connection::Builder::address(address.as_str())
         .expect("valid address")
@@ -214,15 +231,125 @@ async fn supervisor_handles_invalid_object_path() {
         .await
         .expect("conn");
 
-    let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
-    // Invalid object path causes run_agent_supervisor to return immediately
-    run_agent_supervisor(
-        conn,
-        "invalid-not-starting-with-slash".to_string(),
-        AgentCapabilityMode::DisplayYesNo,
-        &mut shutdown_rx,
-    )
-    .await;
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+    let supervisor_task = tokio::spawn(async move {
+        run_agent_supervisor(
+            conn,
+            default_agent_path(),
+            AgentCapabilityMode::DisplayYesNo,
+            &mut shutdown_rx,
+        )
+        .await;
+    });
+
+    // Drop the sender without explicitly calling .shutdown()
+    drop(shutdown_tx);
+
+    // Supervisor should detect the dropped handle and terminate without busy-spinning
+    tokio::time::timeout(Duration::from_secs(2), supervisor_task)
+        .await
+        .expect("supervisor exited promptly on sender drop")
+        .expect("task join succeeded");
+}
+
+struct MockAgentManager {
+    registered: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[zbus::interface(name = "org.bluez.AgentManager1")]
+#[expect(
+    clippy::unused_self,
+    clippy::unnecessary_wraps,
+    clippy::needless_pass_by_value,
+    reason = "D-Bus AgentManager1 contract requires specific signatures"
+)]
+impl MockAgentManager {
+    fn register_agent(&self, agent: ObjectPath<'_>, capability: &str) -> zbus::fdo::Result<()> {
+        let _ = (agent, capability);
+        self.registered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn request_default_agent(&self, agent: ObjectPath<'_>) -> zbus::fdo::Result<()> {
+        let _ = agent;
+        Ok(())
+    }
+
+    fn unregister_agent(&self, agent: ObjectPath<'_>) -> zbus::fdo::Result<()> {
+        let _ = agent;
+        self.registered
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn supervisor_registers_when_bluez_becomes_available() {
+    let (_daemon, address) = spawn_private_bus();
+    let conn = zbus::connection::Builder::address(address.as_str())
+        .expect("valid address")
+        .build()
+        .await
+        .expect("conn");
+
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+    let supervisor_task = tokio::spawn(async move {
+        bt_manager::agent::run_agent_supervisor_with_interval(
+            conn,
+            default_agent_path(),
+            AgentCapabilityMode::DisplayYesNo,
+            Duration::from_millis(50),
+            &mut shutdown_rx,
+        )
+        .await;
+    });
+
+    // Wait 60ms; BlueZ not present yet
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    // Now spawn MockAgentManager owning "org.bluez"
+    let bluez_conn = zbus::connection::Builder::address(address.as_str())
+        .expect("valid address")
+        .name("org.bluez")
+        .expect("request name")
+        .build()
+        .await
+        .expect("bluez conn");
+
+    let registered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mock = MockAgentManager {
+        registered: std::sync::Arc::clone(&registered),
+    };
+    let bluez_path = ObjectPath::try_from("/org/bluez").expect("path");
+    bluez_conn
+        .object_server()
+        .at(&bluez_path, mock)
+        .await
+        .expect("export mock bluez");
+
+    // Supervisor should detect the new owner on the next tick and register!
+    let mut success = false;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if registered.load(std::sync::atomic::Ordering::SeqCst) {
+            success = true;
+            break;
+        }
+    }
+    assert!(
+        success,
+        "supervisor must register once org.bluez becomes available"
+    );
+
+    // Clean up
+    shutdown_tx.send(true).expect("shutdown");
+    tokio::time::timeout(Duration::from_secs(2), supervisor_task)
+        .await
+        .expect("clean exit")
+        .expect("join");
 }
 
 #[tokio::test]

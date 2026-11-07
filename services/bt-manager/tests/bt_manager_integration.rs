@@ -124,8 +124,11 @@ fn cli_rejects_malformed_capability_option() {
 #[test]
 fn run_app_terminates_on_tick_cap_with_mock() {
     let (bt, _mock) = BluetoothDevice::new_mocked();
+    let dir = speaker_common::diag::ScopedTempDir::new("bt_app_test");
     let opts = BtManagerOptions {
+        config: Some(dir.path().join("missing.json")),
         interval: Duration::from_millis(1),
+        explicit_interval: true,
         max_ticks: Some(3),
         cover_art: false,
         auto_trust: false,
@@ -137,15 +140,47 @@ fn run_app_terminates_on_tick_cap_with_mock() {
 #[test]
 fn run_app_terminates_on_tick_cap_with_auto_trust_and_mock() {
     let (bt, _mock) = BluetoothDevice::new_mocked();
+    let dir = speaker_common::diag::ScopedTempDir::new("bt_app_trust_test");
     let opts = BtManagerOptions {
+        config: Some(dir.path().join("missing.json")),
         interval: Duration::from_millis(1),
+        explicit_interval: true,
         max_ticks: Some(2),
         cover_art: false,
         auto_trust: true,
         capability: Some(AgentCapabilityMode::DisplayYesNo),
+    };
+    assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
+}
+
+#[test]
+fn run_app_respects_config_interval_when_not_explicit() {
+    let (bt, _mock) = BluetoothDevice::new_mocked();
+    let dir = speaker_common::diag::ScopedTempDir::new("bt_app_cfg_interval");
+    let path = dir.path().join("config.json");
+    std::fs::write(&path, r#"{"interval_secs": 1}"#).expect("write");
+    let opts = BtManagerOptions {
+        config: Some(path),
+        interval: Duration::from_secs(5),
+        explicit_interval: false,
+        max_ticks: Some(1),
+        cover_art: false,
+        auto_trust: false,
         ..Default::default()
     };
     assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
+}
+
+#[test]
+fn cli_rejects_removed_probe_flags() {
+    for args in [
+        vec!["--bip-probe", "11:22:33:44:55:66"],
+        vec!["--bip-handle", "0000001"],
+    ] {
+        let err = parse_cli_args_from(args.iter().map(ToString::to_string))
+            .expect_err("probe flags were removed");
+        assert!(err.contains("unknown option"), "got: {err}");
+    }
 }
 
 #[test]

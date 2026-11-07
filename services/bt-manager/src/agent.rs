@@ -38,6 +38,15 @@ use zbus::zvariant::{ObjectPath, OwnedObjectPath, Value};
 /// Default D-Bus object path for the speaker auto-trust agent.
 pub const DEFAULT_AGENT_PATH: &str = "/org/speaker/agent";
 
+/// Returns the canonical default D-Bus [`OwnedObjectPath`] for the auto-trust agent.
+///
+/// # Panics
+/// Panics if [`DEFAULT_AGENT_PATH`] is not a valid D-Bus object path (infallible constant).
+#[must_use]
+pub fn default_agent_path() -> OwnedObjectPath {
+    OwnedObjectPath::try_from(DEFAULT_AGENT_PATH).expect("valid constant object path")
+}
+
 /// `BlueZ` pairing agent capability negotiation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -123,7 +132,7 @@ impl AutoTrustAgent {
 }
 
 #[zbus::interface(name = "org.bluez.Agent1")]
-#[allow(
+#[expect(
     clippy::needless_pass_by_value,
     clippy::missing_errors_doc,
     reason = "D-Bus org.bluez.Agent1 interface contract requires specific signatures"
@@ -201,30 +210,31 @@ impl AutoTrustAgent {
     }
 }
 
+async fn get_bluez_owner(connection: &zbus::Connection) -> Option<String> {
+    let dbus = zbus::fdo::DBusProxy::new(connection).await.ok()?;
+    let name = zbus::names::BusName::try_from("org.bluez").ok()?;
+    dbus.get_name_owner(name).await.ok().map(|u| u.to_string())
+}
+
 /// Sets the `device.Trusted` property to `true` on `org.bluez`.
 ///
 /// # Errors
-/// Returns an error string if the D-Bus call to `org.bluez` fails.
+/// Returns an error if the D-Bus call to `org.bluez` fails.
 pub async fn set_device_trusted(
     connection: &zbus::Connection,
     device: &ObjectPath<'_>,
-) -> Result<(), String> {
+) -> zbus::Result<()> {
     let proxy = zbus::fdo::PropertiesProxy::builder(connection)
-        .destination("org.bluez")
-        .map_err(|e| e.to_string())?
-        .path(device)
-        .map_err(|e| e.to_string())?
+        .destination("org.bluez")?
+        .path(device)?
         .build()
-        .await
-        .map_err(|e| e.to_string())?;
-    let iface = match InterfaceName::from_static_str("org.bluez.Device1") {
-        Ok(name) => name,
-        Err(e) => return Err(e.to_string()),
-    };
+        .await?;
+    let iface = InterfaceName::try_from("org.bluez.Device1")
+        .map_err(|e| zbus::Error::Address(e.to_string()))?;
     proxy
         .set(iface, "Trusted", Value::Bool(true))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| zbus::Error::FDO(Box::new(e)))
 }
 
 /// Spawns a background task to set `device.Trusted = true` asynchronously.
@@ -306,18 +316,28 @@ impl AutoTrustShutdown {
 /// Runs the supervisor loop for the auto-trust agent until shutdown is signaled.
 pub async fn run_agent_supervisor(
     connection: zbus::Connection,
-    agent_path_str: String,
+    agent_path: OwnedObjectPath,
     mode: AgentCapabilityMode,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) {
-    let agent_path = match ObjectPath::try_from(agent_path_str.as_str()) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(path = %agent_path_str, error = %e, "Invalid D-Bus object path for agent");
-            return;
-        }
-    };
+    run_agent_supervisor_with_interval(
+        connection,
+        agent_path,
+        mode,
+        Duration::from_secs(3),
+        shutdown_rx,
+    )
+    .await;
+}
 
+/// Runs the supervisor loop with a custom check interval for testing or appliance configuration.
+pub async fn run_agent_supervisor_with_interval(
+    connection: zbus::Connection,
+    agent_path: OwnedObjectPath,
+    mode: AgentCapabilityMode,
+    interval: Duration,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) {
     let agent = AutoTrustAgent::new(connection.clone());
     if let Err(e) = connection.object_server().at(&agent_path, agent).await {
         tracing::error!(path = %agent_path, error = %e, "Failed to export Agent1 interface on ObjectServer");
@@ -331,24 +351,13 @@ pub async fn run_agent_supervisor(
     );
 
     let mut is_registered = false;
-    let mut check_interval = tokio::time::interval(Duration::from_secs(3));
+    let mut last_owner: Option<String> = None;
+    let mut check_interval = tokio::time::interval(interval);
 
     while !*shutdown_rx.borrow() {
-        if !is_registered {
-            match register_agent_on(&connection, &agent_path, mode).await {
-                Ok(()) => {
-                    is_registered = true;
-                    tracing::info!("Auto-trust agent successfully registered with BlueZ");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to register agent with BlueZ; retrying");
-                }
-            }
-        }
-
         tokio::select! {
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
+            res = shutdown_rx.changed() => {
+                if res.is_err() || *shutdown_rx.borrow() {
                     break;
                 }
             }
@@ -356,6 +365,29 @@ pub async fn run_agent_supervisor(
                 if connection.is_closed() {
                     tracing::warn!("D-Bus connection closed; agent terminating");
                     break;
+                }
+
+                let current_owner = get_bluez_owner(&connection).await;
+                if current_owner != last_owner {
+                    if current_owner.is_none() {
+                        tracing::warn!("BlueZ daemon disconnected; agent registration dropped");
+                    } else if last_owner.is_some() {
+                        tracing::info!("BlueZ daemon restarted; re-registering auto-trust agent");
+                    }
+                    last_owner = current_owner.clone();
+                    is_registered = false;
+                }
+
+                if last_owner.is_some() && !is_registered {
+                    match register_agent_on(&connection, &agent_path, mode).await {
+                        Ok(()) => {
+                            is_registered = true;
+                            tracing::info!("Auto-trust agent successfully registered with BlueZ");
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to register agent with BlueZ; retrying");
+                        }
+                    }
                 }
             }
         }
@@ -376,6 +408,23 @@ pub async fn run_agent_supervisor(
 /// # Errors
 /// Returns an error string if the background thread cannot be spawned.
 pub fn spawn_auto_trust(mode: AgentCapabilityMode) -> Result<AutoTrustShutdown, String> {
+    spawn_auto_trust_with(mode, zbus::Connection::system)
+}
+
+/// Spawns the auto-trust agent on a background thread using a custom connection factory.
+///
+/// Enables mockable/hermetic unit and integration testing without requiring the host system bus.
+///
+/// # Errors
+/// Returns an error string if the background thread cannot be spawned.
+pub fn spawn_auto_trust_with<F, Fut>(
+    mode: AgentCapabilityMode,
+    conn_factory: F,
+) -> Result<AutoTrustShutdown, String>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = zbus::Result<zbus::Connection>> + Send + 'static,
+{
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let handle = AutoTrustShutdown::new(shutdown_tx);
 
@@ -394,20 +443,15 @@ pub fn spawn_auto_trust(mode: AgentCapabilityMode) -> Result<AutoTrustShutdown, 
             };
 
             runtime.block_on(async move {
-                match zbus::Connection::system().await {
+                match conn_factory().await {
                     Ok(conn) => {
-                        run_agent_supervisor(
-                            conn,
-                            DEFAULT_AGENT_PATH.to_string(),
-                            mode,
-                            &mut shutdown_rx,
-                        )
-                        .await;
+                        run_agent_supervisor(conn, default_agent_path(), mode, &mut shutdown_rx)
+                            .await;
                     }
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
-                            "Cannot connect to system D-Bus for auto-trust agent; agent disabled"
+                            "Cannot establish D-Bus connection for auto-trust agent; agent disabled"
                         );
                     }
                 }
@@ -486,11 +530,8 @@ mod tests {
     }
 
     #[test]
-    fn spawn_auto_trust_shuts_down_cleanly() {
-        let handle =
-            spawn_auto_trust(AgentCapabilityMode::DisplayYesNo).expect("thread spawn must succeed");
-        handle.shutdown();
-        std::thread::sleep(Duration::from_millis(50));
+    fn default_agent_path_is_valid() {
+        assert_eq!(default_agent_path().as_str(), DEFAULT_AGENT_PATH);
     }
 
     #[test]

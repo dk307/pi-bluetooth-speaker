@@ -31,7 +31,6 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 speaker-bluetooth = { workspace = true, features = ["test-util"] }
-tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [lints]

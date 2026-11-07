@@ -15,6 +15,7 @@ use std::time::Duration;
 fn defaults_are_sensible() {
     let config = BtManagerConfig::default();
     assert_eq!(config.interval_secs, PollIntervalSecs::DEFAULT);
+    assert_eq!(config.interval_secs, PollIntervalSecs::default());
     assert_eq!(config.interval_secs.value(), 5);
     assert_eq!(config.interval_secs.as_duration(), Duration::from_secs(5));
     assert_eq!(DEFAULT_POLL_INTERVAL_SECS, 5);
@@ -209,12 +210,7 @@ fn load_ignores_path_extension_for_json_format() {
 #[test]
 fn resolve_path_uses_override_and_default() {
     assert_eq!(
-        BtManagerConfig::resolve_path_with(None, |_| false),
-        PathBuf::from(speaker_common::diag::DEFAULT_BT_CONFIG_PATH)
-    );
-    assert_eq!(
-        BtManagerConfig::resolve_path_with(None, |p| p
-            == Path::new(speaker_common::diag::DEFAULT_BT_CONFIG_PATH)),
+        BtManagerConfig::resolve_path(None),
         PathBuf::from(speaker_common::diag::DEFAULT_BT_CONFIG_PATH)
     );
     assert_eq!(

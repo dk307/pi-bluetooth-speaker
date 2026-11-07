@@ -191,10 +191,6 @@ pub fn run_tick(bt: &BluetoothDevice) -> Result<BluetoothStatus, BtError> {
 /// With `opts.cover_art` (the default), the direct-BIP cover-art provider is
 /// spawned on a dedicated thread; it publishes the active track's artwork on
 /// the system D-Bus independently of the monitor loop.
-///
-/// # Panics
-/// Panics if the signal handler for `SIGINT`/`SIGTERM` cannot be installed
-/// (which indicates a fundamental problem with the process environment).
 #[must_use]
 pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
     let path = BtManagerConfig::resolve_path(opts.config.as_deref());
@@ -334,51 +330,6 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_auto_trust_and_capability() {
-        let args = ["--no-auto-trust", "--capability", "no-input-no-output"];
-        let parsed = parse_cli_args_from(args.iter().map(ToString::to_string)).expect("valid");
-        let opts = match parsed {
-            CliParse::Options(opts) => opts,
-            other => panic!("expected options, got {other:?}"),
-        };
-        assert!(!opts.auto_trust);
-        assert_eq!(opts.capability, Some(AgentCapabilityMode::NoInputNoOutput));
-
-        let args = ["--capability", "display-yes-no"];
-        let parsed = parse_cli_args_from(args.iter().map(ToString::to_string)).expect("valid");
-        let opts = match parsed {
-            CliParse::Options(opts) => opts,
-            other => panic!("expected options, got {other:?}"),
-        };
-        assert!(opts.auto_trust);
-        assert_eq!(opts.capability, Some(AgentCapabilityMode::DisplayYesNo));
-    }
-
-    #[test]
-    fn cli_rejects_invalid_or_missing_capability() {
-        let args = ["--capability"];
-        let err = parse_cli_args_from(args.iter().map(ToString::to_string))
-            .expect_err("missing capability arg");
-        assert!(err.contains("missing value for --capability"), "got: {err}");
-
-        let args = ["--capability", "super-display"];
-        let err = parse_cli_args_from(args.iter().map(ToString::to_string))
-            .expect_err("invalid capability mode");
-        assert!(err.contains("invalid capability mode"), "got: {err}");
-    }
-
-    #[test]
-    fn cli_parses_config_path() {
-        let args = ["-c", "/tmp/custom-config.json"];
-        let parsed = parse_cli_args_from(args.iter().map(ToString::to_string)).expect("valid");
-        let opts = match parsed {
-            CliParse::Options(opts) => opts,
-            other => panic!("expected options, got {other:?}"),
-        };
-        assert_eq!(opts.config, Some(PathBuf::from("/tmp/custom-config.json")));
-    }
-
-    #[test]
     fn parse_interval_accepts_plain_value() {
         assert_eq!(parse_interval_secs("10").expect("valid"), 10);
     }
@@ -399,88 +350,10 @@ mod tests {
     }
 
     #[test]
-    fn cli_help_and_version_parse() {
-        let args = ["-h"];
-        assert!(matches!(
-            parse_cli_args_from(args.iter().map(ToString::to_string)),
-            Ok(CliParse::Help)
-        ));
-        let args = ["--version"];
-        assert!(matches!(
-            parse_cli_args_from(args.iter().map(ToString::to_string)),
-            Ok(CliParse::Version)
-        ));
-    }
-
-    #[test]
-    fn cli_parses_interval_and_ticks() {
-        let args = ["--interval", "2", "-n", "4"];
-        let parsed = parse_cli_args_from(args.iter().map(ToString::to_string)).expect("valid");
-        let opts = match parsed {
-            CliParse::Options(opts) => opts,
-            other => panic!("expected options, got {other:?}"),
-        };
-        assert_eq!(opts.interval, Duration::from_secs(2));
-        assert_eq!(opts.max_ticks, Some(4));
-    }
-
-    #[test]
-    fn cli_rejects_zero_and_invalid_interval() {
-        let args = ["--interval", "0"];
-        let err = parse_cli_args_from(args.iter().map(ToString::to_string)).expect_err("reject 0");
-        assert!(err.contains("at least 1 second"), "got: {err}");
-        let args = ["--interval"];
-        assert!(
-            parse_cli_args_from(args.iter().map(ToString::to_string))
-                .is_err_and(|e| e.contains("missing value for --interval"))
-        );
-    }
-
-    #[test]
-    fn cli_rejects_unknown_option() {
-        let args = ["--bogus"];
-        let err = parse_cli_args_from(args.iter().map(ToString::to_string)).expect_err("reject");
-        assert!(err.contains("unknown option"), "got: {err}");
-        assert!(!err.contains("Backtrace"), "user-facing error stays clean");
-    }
-
-    #[test]
-    fn cli_rejects_removed_probe_flags() {
-        for args in [
-            vec!["--bip-probe", "11:22:33:44:55:66"],
-            vec!["--bip-handle", "0000001"],
-        ] {
-            let err = parse_cli_args_from(args.iter().map(ToString::to_string))
-                .expect_err("probe flags were removed");
-            assert!(err.contains("unknown option"), "got: {err}");
-        }
-    }
-
-    #[test]
-    fn run_app_zero_ticks_cap_is_rejected_at_parse() {
-        let args = ["--ticks", "0"];
-        let err = parse_cli_args_from(args.iter().map(ToString::to_string)).expect_err("reject 0");
-        assert!(err.contains("omit --ticks"), "got: {err}");
-    }
-
-    #[test]
     fn run_tick_surfaces_status_from_mock() {
         let (bt, _mock) = BluetoothDevice::new_mocked();
         let status = run_tick(&bt).expect("mock status");
         // The mock initializes with one default connected peer.
         assert_eq!(status.connected_count(), 1);
-    }
-
-    #[test]
-    fn run_app_fails_on_invalid_config() {
-        let (bt, _mock) = BluetoothDevice::new_mocked();
-        let dir = speaker_common::diag::ScopedTempDir::new("bt_daemon_invalid_cfg");
-        let path = dir.path().join("config.json");
-        std::fs::write(&path, "{not-json").expect("write");
-        let opts = BtManagerOptions {
-            config: Some(path),
-            ..Default::default()
-        };
-        assert_eq!(run_app(&bt, &opts), ExitCode::FAILURE);
     }
 }
