@@ -36,6 +36,8 @@ fn bt_manager_help_display() {
         assert!(stdout.contains("DietPi Bluetooth Manager Service"));
         assert!(stdout.contains("--interval"));
         assert!(stdout.contains("--config"));
+        assert!(stdout.contains("--no-auto-trust"));
+        assert!(stdout.contains("--capability"));
     }
 }
 
@@ -71,6 +73,8 @@ fn bt_manager_cli_argument_validation() {
                 "invalid tick count 'not-a-number'",
             ),
             (&["--ticks", "0"], "omit --ticks to run forever"),
+            (&["--capability"], "missing value for --capability"),
+            (&["--capability", "invalid-mode"], "invalid capability mode"),
         ],
     );
 }

@@ -15,6 +15,7 @@ use std::time::Duration;
 use config::Config as LayeredConfig;
 use serde::{Deserialize, Serialize};
 
+use crate::agent::AgentCapabilityMode;
 use speaker_common::diag::DEFAULT_BT_CONFIG_PATH;
 use speaker_common::impl_canonical_error_display;
 
@@ -99,6 +100,8 @@ pub struct BtManagerConfig {
     pub cover_art: bool,
     /// Runs the Bluetooth auto-trust agent for incoming pairing requests.
     pub auto_trust: bool,
+    /// `BlueZ` pairing agent capability negotiation mode.
+    pub capability: AgentCapabilityMode,
 }
 
 impl Default for BtManagerConfig {
@@ -107,6 +110,7 @@ impl Default for BtManagerConfig {
             interval_secs: PollIntervalSecs::DEFAULT,
             cover_art: true,
             auto_trust: true,
+            capability: AgentCapabilityMode::DisplayYesNo,
         }
     }
 }
@@ -334,6 +338,7 @@ mod tests {
         assert_eq!(config.interval_secs.as_duration(), Duration::from_secs(5));
         assert!(config.cover_art);
         assert!(config.auto_trust);
+        assert_eq!(config.capability, AgentCapabilityMode::DisplayYesNo);
     }
 
     #[test]
@@ -362,6 +367,7 @@ mod tests {
             interval_secs: PollIntervalSecs::new(10),
             cover_art: false,
             auto_trust: false,
+            capability: AgentCapabilityMode::NoInputNoOutput,
         };
         config.save(&path).expect("save");
         let loaded = BtManagerConfig::load(&path).expect("load");
@@ -370,6 +376,10 @@ mod tests {
         assert!(raw.contains("\"interval_secs\": 10"), "{raw}");
         assert!(raw.contains("\"cover_art\": false"), "{raw}");
         assert!(raw.contains("\"auto_trust\": false"), "{raw}");
+        assert!(
+            raw.contains("\"capability\": \"no-input-no-output\""),
+            "{raw}"
+        );
     }
 
     #[test]
@@ -381,6 +391,7 @@ mod tests {
         assert_eq!(config.interval_secs, PollIntervalSecs::new(15));
         assert!(config.cover_art);
         assert!(config.auto_trust);
+        assert_eq!(config.capability, AgentCapabilityMode::DisplayYesNo);
     }
 
     #[test]

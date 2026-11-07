@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::agent::AgentCapabilityMode;
 use crate::config::BtManagerConfig;
 use speaker_bluetooth::{BluetoothDevice, BluetoothStatus, BtError};
 use speaker_common::diag::{
@@ -31,6 +32,11 @@ pub struct BtManagerOptions {
     /// Hosts the D-Bus cover-art provider alongside the monitor loop
     /// (default `true`; host tests disable it so no D-Bus/hardware is touched).
     pub cover_art: bool,
+    /// Runs the Bluetooth auto-trust agent for incoming pairing requests
+    /// (default `true`; tests disable it so no D-Bus/agent is spawned).
+    pub auto_trust: bool,
+    /// Pairing agent capability mode override (`None` defaults to config file / `DisplayYesNo`).
+    pub capability: Option<AgentCapabilityMode>,
     /// JSON configuration file override path (`None` uses default /etc/bt-manager/config.json).
     pub config: Option<PathBuf>,
     /// Whether `--interval` was explicitly specified on the command line.
@@ -43,6 +49,8 @@ impl Default for BtManagerOptions {
             interval: DEFAULT_POLL_INTERVAL,
             max_ticks: None,
             cover_art: true,
+            auto_trust: true,
+            capability: None,
             config: None,
             explicit_interval: false,
         }
@@ -62,6 +70,10 @@ pub fn print_usage(bin_name: &str) {
         DEFAULT_POLL_INTERVAL.as_secs()
     );
     println!("  -n, --ticks <COUNT>         Exit after COUNT monitor ticks (at least 1)");
+    println!("      --no-auto-trust         Disable Bluetooth auto-trust pairing agent");
+    println!(
+        "      --capability <MODE>     Agent capability ('display-yes-no' or 'no-input-no-output')"
+    );
     println!("  -V, --version               Print version and exit");
     println!("  -h, --help                  Print this help text and exit");
 }
@@ -134,6 +146,14 @@ where
                 }
                 opts.max_ticks = Some(ticks);
             }
+            "--no-auto-trust" => {
+                opts.auto_trust = false;
+            }
+            "--capability" => {
+                let val = next_arg_value(&mut iter, "--capability")?;
+                let mode = val.parse::<AgentCapabilityMode>()?;
+                opts.capability = Some(mode);
+            }
             _ => return Err(format!("unknown option '{arg}', use --help for usage")),
         }
     }
@@ -194,6 +214,8 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
         opts.interval
     };
     let enable_cover_art = opts.cover_art && cfg.cover_art;
+    let enable_auto_trust = opts.auto_trust && cfg.auto_trust;
+    let effective_capability = opts.capability.unwrap_or(cfg.capability);
 
     tracing::info!(
         interval_secs = effective_interval.as_secs(),
@@ -203,10 +225,21 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
     // Set up signal handling for graceful shutdown.
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     let shutdown_requested_signal = Arc::clone(&shutdown_requested);
-    ctrlc::set_handler(move || {
+    if let Err(e) = ctrlc::set_handler(move || {
         shutdown_requested_signal.store(true, Ordering::SeqCst);
-    })
-    .expect("failed to set signal handler");
+    }) {
+        tracing::debug!(error = %e, "signal handler already registered or could not be set");
+    }
+
+    let mut auto_trust_shutdown = None;
+    if enable_auto_trust {
+        match crate::agent::spawn_auto_trust(effective_capability) {
+            Ok(handle) => auto_trust_shutdown = Some(handle),
+            Err(e) => {
+                tracing::error!(error = %e, "auto-trust agent failed to start; continuing without it");
+            }
+        }
+    }
 
     let mut cover_art_shutdown = None;
     if enable_cover_art {
@@ -245,6 +278,12 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
         ticks = ticks.saturating_add(1);
         opts.max_ticks.is_some_and(|limit| ticks >= limit)
     });
+
+    // Trigger auto-trust agent shutdown if it was started.
+    if let Some(handle) = auto_trust_shutdown {
+        tracing::info!("shutting down auto-trust agent");
+        handle.shutdown();
+    }
 
     // Trigger cover-art provider shutdown if it was started.
     if let Some(handle) = cover_art_shutdown {
@@ -288,8 +327,44 @@ mod tests {
         assert_eq!(opts.interval, Duration::from_secs(5));
         assert_eq!(opts.max_ticks, None);
         assert!(opts.cover_art, "cover-art provider enabled by default");
+        assert!(opts.auto_trust, "auto-trust agent enabled by default");
+        assert_eq!(opts.capability, None);
         assert_eq!(opts.config, None);
         assert!(!opts.explicit_interval);
+    }
+
+    #[test]
+    fn cli_parses_auto_trust_and_capability() {
+        let args = ["--no-auto-trust", "--capability", "no-input-no-output"];
+        let parsed = parse_cli_args_from(args.iter().map(ToString::to_string)).expect("valid");
+        let opts = match parsed {
+            CliParse::Options(opts) => opts,
+            other => panic!("expected options, got {other:?}"),
+        };
+        assert!(!opts.auto_trust);
+        assert_eq!(opts.capability, Some(AgentCapabilityMode::NoInputNoOutput));
+
+        let args = ["--capability", "display-yes-no"];
+        let parsed = parse_cli_args_from(args.iter().map(ToString::to_string)).expect("valid");
+        let opts = match parsed {
+            CliParse::Options(opts) => opts,
+            other => panic!("expected options, got {other:?}"),
+        };
+        assert!(opts.auto_trust);
+        assert_eq!(opts.capability, Some(AgentCapabilityMode::DisplayYesNo));
+    }
+
+    #[test]
+    fn cli_rejects_invalid_or_missing_capability() {
+        let args = ["--capability"];
+        let err = parse_cli_args_from(args.iter().map(ToString::to_string))
+            .expect_err("missing capability arg");
+        assert!(err.contains("missing value for --capability"), "got: {err}");
+
+        let args = ["--capability", "super-display"];
+        let err = parse_cli_args_from(args.iter().map(ToString::to_string))
+            .expect_err("invalid capability mode");
+        assert!(err.contains("invalid capability mode"), "got: {err}");
     }
 
     #[test]

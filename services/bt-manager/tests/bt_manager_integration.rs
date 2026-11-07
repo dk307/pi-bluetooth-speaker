@@ -1,5 +1,6 @@
 //! Integration tests for the bt-manager CLI application logic.
 
+use bt_manager::agent::AgentCapabilityMode;
 use bt_manager::daemon::{
     BtManagerOptions, parse_cli_args_from, parse_interval_secs, parse_ticks, run_app, run_tick,
 };
@@ -14,6 +15,8 @@ fn defaults_match_documented_values() {
     assert_eq!(opts.interval, Duration::from_secs(5));
     assert_eq!(opts.max_ticks, None);
     assert!(opts.cover_art);
+    assert!(opts.auto_trust);
+    assert_eq!(opts.capability, None);
     assert_eq!(opts.config, None);
     assert!(!opts.explicit_interval);
 }
@@ -85,12 +88,61 @@ fn cli_rejects_unknown_option() {
 }
 
 #[test]
+fn cli_parses_auto_trust_and_capability_options() {
+    let args = ["--no-auto-trust", "--capability", "no-input-no-output"];
+    let parsed = parse_cli_args_from(args.iter().map(ToString::to_string)).expect("valid");
+    let opts = match parsed {
+        CliParse::Options(opts) => opts,
+        other => panic!("expected options, got {other:?}"),
+    };
+    assert!(!opts.auto_trust);
+    assert_eq!(opts.capability, Some(AgentCapabilityMode::NoInputNoOutput));
+
+    let args = ["--capability", "display-yes-no"];
+    let parsed = parse_cli_args_from(args.iter().map(ToString::to_string)).expect("valid");
+    let opts = match parsed {
+        CliParse::Options(opts) => opts,
+        other => panic!("expected options, got {other:?}"),
+    };
+    assert!(opts.auto_trust);
+    assert_eq!(opts.capability, Some(AgentCapabilityMode::DisplayYesNo));
+}
+
+#[test]
+fn cli_rejects_malformed_capability_option() {
+    let args = ["--capability"];
+    let err =
+        parse_cli_args_from(args.iter().map(ToString::to_string)).expect_err("missing arg value");
+    assert!(err.contains("missing value for --capability"), "got: {err}");
+
+    let args = ["--capability", "invalid-mode"];
+    let err =
+        parse_cli_args_from(args.iter().map(ToString::to_string)).expect_err("invalid mode value");
+    assert!(err.contains("invalid capability mode"), "got: {err}");
+}
+
+#[test]
 fn run_app_terminates_on_tick_cap_with_mock() {
     let (bt, _mock) = BluetoothDevice::new_mocked();
     let opts = BtManagerOptions {
         interval: Duration::from_millis(1),
         max_ticks: Some(3),
         cover_art: false,
+        auto_trust: false,
+        ..Default::default()
+    };
+    assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
+}
+
+#[test]
+fn run_app_terminates_on_tick_cap_with_auto_trust_and_mock() {
+    let (bt, _mock) = BluetoothDevice::new_mocked();
+    let opts = BtManagerOptions {
+        interval: Duration::from_millis(1),
+        max_ticks: Some(2),
+        cover_art: false,
+        auto_trust: true,
+        capability: Some(AgentCapabilityMode::DisplayYesNo),
         ..Default::default()
     };
     assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);

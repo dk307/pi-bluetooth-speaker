@@ -1,5 +1,6 @@
 //! Integration tests for the Bluetooth manager configuration store (`BtManagerConfig`).
 
+use bt_manager::agent::AgentCapabilityMode;
 use bt_manager::config::{
     BtManagerConfig, ConfigError, DEFAULT_POLL_INTERVAL_SECS, PollIntervalSecs,
 };
@@ -19,6 +20,7 @@ fn defaults_are_sensible() {
     assert_eq!(DEFAULT_POLL_INTERVAL_SECS, 5);
     assert!(config.cover_art);
     assert!(config.auto_trust);
+    assert_eq!(config.capability, AgentCapabilityMode::DisplayYesNo);
 }
 
 #[test]
@@ -51,6 +53,7 @@ fn save_and_load_roundtrip() {
         interval_secs: PollIntervalSecs::new(10),
         cover_art: false,
         auto_trust: false,
+        capability: AgentCapabilityMode::NoInputNoOutput,
     };
     config.save(&path).expect("save");
     let loaded = BtManagerConfig::load(&path).expect("load");
@@ -60,6 +63,10 @@ fn save_and_load_roundtrip() {
     assert!(raw.contains("\"interval_secs\": 10"), "{raw}");
     assert!(raw.contains("\"cover_art\": false"), "{raw}");
     assert!(raw.contains("\"auto_trust\": false"), "{raw}");
+    assert!(
+        raw.contains("\"capability\": \"no-input-no-output\""),
+        "{raw}"
+    );
 }
 
 #[test]
@@ -71,6 +78,7 @@ fn minimal_config_deserializes_with_defaults() {
     assert_eq!(config.interval_secs, PollIntervalSecs::new(15));
     assert!(config.cover_art);
     assert!(config.auto_trust);
+    assert_eq!(config.capability, AgentCapabilityMode::DisplayYesNo);
 }
 
 #[test]
@@ -161,6 +169,7 @@ fn save_replaces_existing_config_atomically() {
         interval_secs: PollIntervalSecs::new(5),
         cover_art: true,
         auto_trust: true,
+        capability: AgentCapabilityMode::DisplayYesNo,
     }
     .save(&path)
     .expect("initial save");
@@ -168,6 +177,7 @@ fn save_replaces_existing_config_atomically() {
         interval_secs: PollIntervalSecs::new(10),
         cover_art: false,
         auto_trust: false,
+        capability: AgentCapabilityMode::NoInputNoOutput,
     }
     .save(&path)
     .expect("replacement save");
@@ -175,6 +185,7 @@ fn save_replaces_existing_config_atomically() {
     assert_eq!(loaded.interval_secs.value(), 10);
     assert!(!loaded.cover_art);
     assert!(!loaded.auto_trust);
+    assert_eq!(loaded.capability, AgentCapabilityMode::NoInputNoOutput);
     let leftovers: Vec<_> = dir
         .path()
         .read_dir()
