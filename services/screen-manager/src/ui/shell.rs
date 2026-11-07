@@ -504,36 +504,6 @@ impl AppShell {
         self.window.on_previous_track(move || {
             commands_prev.push(speaker_bluetooth::TransportCommand::PreviousTrack);
         });
-
-        let commands_seek = commands.clone();
-        let win = self.window.as_weak();
-        self.window.on_seek(move |ratio| {
-            if let Some(w) = win.upgrade() {
-                // Optimistic scrub: move the progress bar immediately, then let the
-                // worker translate the absolute position into a D-Bus `Seek` call.
-                let pos = Self::apply_seek_ratio(&w, ratio);
-                commands_seek.push(speaker_bluetooth::TransportCommand::Seek(pos));
-            }
-        });
-    }
-
-    fn apply_seek_ratio(w: &MainWindow, ratio: f32) -> u32 {
-        let clamped = if ratio.is_finite() {
-            ratio.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        w.set_progress_ratio(clamped);
-        let dur = u32::try_from(w.get_duration_ms()).unwrap_or(0);
-        #[expect(
-            clippy::cast_sign_loss,
-            clippy::cast_possible_truncation,
-            reason = "clamped is non-negative <= 1.0 and dur is positive u32"
-        )]
-        let pos = (clamped * dur as f32).round() as u32;
-        w.set_position_text(speaker_bluetooth::format_duration_ms(pos).into());
-        tracing::debug!("Seek to ratio: {clamped} ({pos}ms)");
-        pos
     }
 
     fn setup_callbacks(&self) {
@@ -575,13 +545,6 @@ impl AppShell {
                 let current = w.get_is_muted();
                 w.set_is_muted(!current);
                 tracing::debug!("Mute toggled to {}", !current);
-            }
-        });
-
-        let win = self.window.as_weak();
-        self.window.on_seek(move |ratio| {
-            if let Some(w) = win.upgrade() {
-                Self::apply_seek_ratio(&w, ratio);
             }
         });
 

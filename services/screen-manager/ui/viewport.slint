@@ -11,6 +11,7 @@ export component MainViewport inherits Rectangle {
     in-out property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit -> DSP 32-bit";
     in-out property <string> position_text: "00:00";
     in-out property <string> duration_text: "00:00";
+    in-out property <int> duration_ms: 0;
     in-out property <float> progress_ratio: 0.0;
     in-out property <float> volume_value: 75.0;
     in-out property <bool> is_playing: false;
@@ -26,7 +27,6 @@ export component MainViewport inherits Rectangle {
     callback toggle_play_pause();
     callback next_track();
     callback previous_track();
-    callback seek(float);
     callback toggle_mute();
     callback volume_changed(float);
     callback stream_pill_clicked();
@@ -50,6 +50,7 @@ export component MainViewport inherits Rectangle {
                 track_album: root.track_album;
                 position_text: root.position_text;
                 duration_text: root.duration_text;
+                duration_ms: root.duration_ms;
                 progress_ratio: root.progress_ratio;
                 is_playing: root.is_playing;
                 has_cover_art: root.has_cover_art;
@@ -60,7 +61,6 @@ export component MainViewport inherits Rectangle {
                 toggle_play_pause => { root.toggle_play_pause(); }
                 next_track => { root.next_track(); }
                 previous_track => { root.previous_track(); }
-                seek(ratio) => { root.seek(ratio); }
             }
         }
     }

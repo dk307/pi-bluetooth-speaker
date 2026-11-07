@@ -562,18 +562,14 @@ fn ui_shell_now_playing_callbacks() {
     shell.window().invoke_toggle_mute();
     assert!(!shell.is_muted());
 
-    // Seeking and position text sync
-    shell.set_playback_state(false, 0, 100_000);
-    shell.window().invoke_seek(0.65);
+    // Playback state and position text sync
+    shell.set_playback_state(false, 65_000, 100_000);
     assert_eq!(shell.window().get_progress_ratio(), 0.65);
     assert_eq!(shell.window().get_position_text(), "01:05");
-    shell.window().invoke_seek(1.5);
+    shell.set_playback_state(false, 100_000, 100_000);
     assert_eq!(shell.window().get_progress_ratio(), 1.0);
     assert_eq!(shell.window().get_position_text(), "01:40");
-    shell.window().invoke_seek(-0.2);
-    assert_eq!(shell.window().get_progress_ratio(), 0.0);
-    assert_eq!(shell.window().get_position_text(), "00:00");
-    shell.window().invoke_seek(f32::NAN);
+    shell.set_playback_state(false, 0, 100_000);
     assert_eq!(shell.window().get_progress_ratio(), 0.0);
     assert_eq!(shell.window().get_position_text(), "00:00");
 
@@ -607,9 +603,6 @@ fn ui_shell_now_playing_callbacks() {
     shell.window().invoke_previous_track();
     drain_worker_commands(&bt, &commands, &shell);
     assert_eq!(shell.window().get_track_title(), "Money for Nothing");
-    shell.window().invoke_seek(0.5);
-    drain_worker_commands(&bt, &commands, &shell);
-    assert_eq!(bt.status().unwrap().playback.unwrap().position_ms, 115_000);
 
     // Callbacks without panicking
     shell.window().invoke_stream_pill_clicked();

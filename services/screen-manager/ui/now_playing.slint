@@ -165,10 +165,13 @@ export component NowPlayingView inherits Rectangle {
     in property <image> artist_marquee_strip;
     in property <string> position_text: "00:00";
     in property <string> duration_text: "00:00";
+    in property <int> duration_ms: 0;
     in property <float> progress_ratio: 0.0;
     in property <bool> is_playing: false;
     in property <bool> has_cover_art: false;
     in property <image> cover_image;
+    in property <bool> transport_available: root.duration_ms > 0 || root.is_playing || (root.track_title != "" && root.track_title != "Waiting for Bluetooth Connection...");
+    property <float> last_toggle_t: -1000.0;
     // Marquee scroll rate in ticks per second (30 or 60; default 60). One shared
     // 16.65 ms timer advances `marquee_clock` by one scroll step every
     // `step_frames` triggers, so both marquees scroll in lockstep and the render
@@ -221,7 +224,6 @@ export component NowPlayingView inherits Rectangle {
     callback toggle_play_pause();
     callback next_track();
     callback previous_track();
-    callback seek(float);
 
     HorizontalLayout {
         padding: 16px;
@@ -320,7 +322,7 @@ export component NowPlayingView inherits Rectangle {
                 }
             }
 
-            // Playback progress scrubber (Thick bar + large draggable knob)
+            // Playback progress bar (Read-only, sleek audiophile pill)
             HorizontalLayout {
                 spacing: 16px;
 
@@ -336,47 +338,26 @@ export component NowPlayingView inherits Rectangle {
 
                 Rectangle {
                     horizontal-stretch: 1;
-                    height: 28px;
+                    height: 24px;
                     background: transparent;
 
                     // Background track (Vertically centered)
-                    Rectangle {
+                    track := Rectangle {
                         x: 0px;
                         y: (parent.height - self.height) / 2;
                         width: parent.width;
-                        height: 17px;
+                        height: 10px;
                         background: #1c2430;
-                        border-radius: 8.5px;
+                        border-radius: 5px;
+                        clip: true;
 
                         // Filled played position bar
                         Rectangle {
                             x: 0px;
                             y: 0px;
-                            width: parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio));
+                            width: root.duration_ms > 0 ? (parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio))) : 0px;
                             height: parent.height;
                             background: Theme.active.primary_accent;
-                            border-radius: 8.5px;
-                        }
-                    }
-
-                    // Scrubber handle knob (Vertically centered in parent container)
-                    Rectangle {
-                        x: Math.max(0px, Math.min(parent.width - self.width, parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio)) - self.width / 2));
-                        y: (parent.height - self.height) / 2;
-                        width: 29px;
-                        height: 29px;
-                        border-radius: 14.5px;
-                        background: Theme.active.text_primary;
-                        border-width: 3px;
-                        border-color: Theme.active.primary_accent;
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.seek(Math.max(0.0, Math.min(1.0, self.mouse-x / self.width)));
-                        }
-                        moved => {
-                            root.seek(Math.max(0.0, Math.min(1.0, self.mouse-x / self.width)));
                         }
                     }
                 }
@@ -407,6 +388,8 @@ export component NowPlayingView inherits Rectangle {
                         background: Theme.active.card_surface;
                         border-width: 1px;
                         border-color: Theme.active.card_border;
+                        opacity: !root.transport_available ? 0.35 : (touch_prev.pressed ? 0.7 : 1.0);
+                        animate opacity { duration: 80ms; easing: ease-out; }
 
                         VerticalLayout {
                             alignment: center;
@@ -424,7 +407,8 @@ export component NowPlayingView inherits Rectangle {
                             }
                         }
 
-                        TouchArea {
+                        touch_prev := TouchArea {
+                            enabled: root.transport_available;
                             clicked => {
                                 root.previous_track();
                             }
@@ -440,6 +424,8 @@ export component NowPlayingView inherits Rectangle {
                         height: 86px;
                         border-radius: 43px;
                         background: Theme.active.primary_accent;
+                        opacity: !root.transport_available ? 0.35 : (touch_play.pressed ? 0.8 : 1.0);
+                        animate opacity { duration: 80ms; easing: ease-out; }
 
                         VerticalLayout {
                             alignment: center;
@@ -466,9 +452,14 @@ export component NowPlayingView inherits Rectangle {
                             }
                         }
 
-                        TouchArea {
+                        touch_play := TouchArea {
+                            enabled: root.transport_available;
                             clicked => {
-                                root.toggle_play_pause();
+                                let now = animation-tick() / 1ms;
+                                if (now - root.last_toggle_t >= 250.0 || root.last_toggle_t < 0.0) {
+                                    root.last_toggle_t = now;
+                                    root.toggle_play_pause();
+                                }
                             }
                         }
                     }
@@ -484,24 +475,27 @@ export component NowPlayingView inherits Rectangle {
                         background: Theme.active.card_surface;
                         border-width: 1px;
                         border-color: Theme.active.card_border;
+                        opacity: !root.transport_available ? 0.35 : (touch_next.pressed ? 0.7 : 1.0);
+                        animate opacity { duration: 80ms; easing: ease-out; }
 
-                            VerticalLayout {
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
                                 alignment: center;
-                                HorizontalLayout {
-                                    alignment: center;
 
-                                    Image {
-                                        source: @image-url("../../../assets/icons/next.svg");
-                                        colorize: Theme.active.text_primary;
-                                        width: 24px;
-                                        height: 24px;
-                                        image-fit: contain;
-                                        vertical-alignment: center;
-                                    }
+                                Image {
+                                    source: @image-url("../../../assets/icons/next.svg");
+                                    colorize: Theme.active.text_primary;
+                                    width: 24px;
+                                    height: 24px;
+                                    image-fit: contain;
+                                    vertical-alignment: center;
                                 }
                             }
+                        }
 
-                        TouchArea {
+                        touch_next := TouchArea {
+                            enabled: root.transport_available;
                             clicked => {
                                 root.next_track();
                             }
