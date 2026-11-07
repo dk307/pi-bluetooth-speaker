@@ -1284,7 +1284,8 @@ fn idle_sleep(touch_fd: Option<RawFd>) {
             // Sleep on unrecoverable poll errors (ret < 0, excluding EINTR) or if hangup/error revents are signaled
             // without readable data, preventing a 100% CPU busy-spin while preserving pending touch events and prompt EINTR retry.
             // When poll times out (ret == 0), poll has already blocked for the full duration, avoiding double-sleep.
-            (ret < 0 && last_err.as_ref().and_then(std::io::Error::raw_os_error) != Some(libc::EINTR))
+            (ret < 0
+                && last_err.as_ref().and_then(std::io::Error::raw_os_error) != Some(libc::EINTR))
                 || ((pfd.revents & libc::POLLIN) == 0
                     && (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0))
         }
