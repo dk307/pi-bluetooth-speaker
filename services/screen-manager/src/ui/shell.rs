@@ -15,7 +15,7 @@ use slint::ComponentHandle;
 
 use crate::config::{
     CoreConfig, DEFAULT_VOLUME_HUD_FADE_MS, DEFAULT_VOLUME_HUD_TIMEOUT_MS,
-    DEFAULT_VOLUME_STEP_PERCENT,
+    DEFAULT_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT, MIN_VOLUME_STEP_PERCENT,
 };
 
 use super::framebuffer::MarqueeRowSpec;
@@ -160,7 +160,8 @@ impl AppShell {
 
     /// Sets the volume step percentage per rotary encoder detent (clamped to `1..=25`).
     pub fn set_volume_step_percent(&self, step: u8) {
-        self.volume_step_percent.set(step.clamp(1, 25));
+        self.volume_step_percent
+            .set(step.clamp(MIN_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT));
     }
 
     /// Returns the Volume HUD auto-dismiss timeout in milliseconds.
@@ -319,6 +320,13 @@ impl AppShell {
         vec![rect(g.get_title_origin(), g.get_title_w(), g.get_title_h())]
     }
 
+    /// Returns whether the raw marquee overlay should be suppressed
+    /// (e.g. when not on the Now Playing tab or when the Volume HUD is active).
+    #[must_use]
+    pub fn should_suppress_marquee(&self) -> bool {
+        self.current_tab() != 0 || self.is_volume_hud_active()
+    }
+
     /// Builds [`MarqueeRowSpec`]s for the Rust-side composer from the shared global and
     /// the cached strip pixels; rows are omitted when the text does not overflow.
     ///
@@ -330,7 +338,7 @@ impl AppShell {
         let g = self.window.global::<MarqueeCompose>();
         // Suppress Rust-side marquee composition whenever the Now Playing tab is not
         // visible or while the Volume HUD overlay covers the middle viewport.
-        if !g.get_compose_in_rust() || self.current_tab() != 0 || self.is_volume_hud_active() {
+        if !g.get_compose_in_rust() || self.should_suppress_marquee() {
             return Vec::new();
         }
         let px = |v: f32, max: f32| u32::try_from(v.round().clamp(0.0, max) as i64).unwrap_or(0);

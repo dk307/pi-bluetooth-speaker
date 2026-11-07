@@ -52,6 +52,13 @@ impl BlueAlsaPcm {
     }
 }
 
+/// Selects the primary active [`BlueAlsaPcm`] from `pcms`, preferring an actively
+/// streaming (`running`) transport, otherwise falling back to the first available stream.
+#[must_use]
+pub fn select_active_pcm(pcms: &[BlueAlsaPcm]) -> Option<&BlueAlsaPcm> {
+    pcms.iter().find(|p| p.running).or_else(|| pcms.first())
+}
+
 /// Computes the playback progress ratio clamped to `0.0..=1.0`.
 ///
 /// A zero or unknown duration maps to `0.0`. Shared between

@@ -190,6 +190,15 @@ pub fn report_display(level: tracing::Level, context: &str, err: impl std::fmt::
     }
 }
 
+#[cfg(feature = "ui")]
+fn legacy_config(theme: Option<crate::ui::ThemePreset>, marquee_fps: u32) -> CoreConfig {
+    CoreConfig {
+        theme,
+        marquee_fps: crate::config::MarqueeFps::try_from(marquee_fps).unwrap_or_default(),
+        ..CoreConfig::default()
+    }
+}
+
 /// Runs the UI display loop on the default `/dev/fb0` device path.
 #[cfg(feature = "ui")]
 pub fn run_ui_display(
@@ -199,11 +208,7 @@ pub fn run_ui_display(
     tab: Option<i32>,
     marquee_fps: u32,
 ) {
-    let config = CoreConfig {
-        theme,
-        marquee_fps: crate::config::MarqueeFps::try_from(marquee_fps).unwrap_or_default(),
-        ..CoreConfig::default()
-    };
+    let config = legacy_config(theme, marquee_fps);
     run_ui_display_with_config(screen, preview_secs, tab, &config);
 }
 
@@ -245,11 +250,7 @@ pub fn run_ui_display_on_path(
     tab: Option<i32>,
     marquee_fps: u32,
 ) {
-    let config = CoreConfig {
-        theme,
-        marquee_fps: crate::config::MarqueeFps::try_from(marquee_fps).unwrap_or_default(),
-        ..CoreConfig::default()
-    };
+    let config = legacy_config(theme, marquee_fps);
     run_ui_display_on_path_with_config(fb_path, screen, preview_secs, tab, &config);
 }
 
@@ -559,11 +560,7 @@ pub fn init_shell(
     tab: Option<i32>,
     marquee_fps: u32,
 ) -> ShellInit {
-    let config = CoreConfig {
-        theme,
-        marquee_fps: crate::config::MarqueeFps::try_from(marquee_fps).unwrap_or_default(),
-        ..CoreConfig::default()
-    };
+    let config = legacy_config(theme, marquee_fps);
     init_shell_with_config(main_window, mocked_device, tab, &config)
 }
 
@@ -1018,7 +1015,7 @@ impl BtMonitorState {
         }
         if let Ok(ref pcms) = bt.audio_pcms()
             && self.last_pcms.as_ref() != Some(pcms)
-            && let Some(active) = pcms.iter().find(|p| p.running).or_else(|| pcms.first())
+            && let Some(active) = speaker_bluetooth::select_active_pcm(pcms)
         {
             let settling = self
                 .pcm_settle
@@ -1425,7 +1422,7 @@ fn sync_marquee_overlay(
     window: &MinimalSoftwareWindow,
     overlay_theme: &mut Option<ThemePreset>,
 ) -> Result<(), FramebufferError> {
-    if shell.current_tab() != 0 || shell.is_volume_hud_active() {
+    if shell.should_suppress_marquee() {
         fb.set_marquee_rows(Vec::new());
         return Ok(());
     }
@@ -1557,11 +1554,7 @@ pub fn run_shell_on(
     tab: Option<i32>,
     marquee_fps: u32,
 ) {
-    let config = CoreConfig {
-        theme,
-        marquee_fps: crate::config::MarqueeFps::try_from(marquee_fps).unwrap_or_default(),
-        ..CoreConfig::default()
-    };
+    let config = legacy_config(theme, marquee_fps);
     run_shell_on_with_config(fb, preview_secs, tab, &config);
 }
 

@@ -1579,12 +1579,9 @@ impl DbusClient {
     }
 
     fn select_active_pcm(pcms: &[BlueAlsaPcm]) -> Result<&BlueAlsaPcm, BtError> {
-        pcms.iter()
-            .find(|p| p.running)
-            .or_else(|| pcms.first())
-            .ok_or_else(|| {
-                BtError::no_active_player("no active BlueALSA PCM stream found on D-Bus")
-            })
+        crate::transport::select_active_pcm(pcms).ok_or_else(|| {
+            BtError::no_active_player("no active BlueALSA PCM stream found on D-Bus")
+        })
     }
 
     /// Selects the target `BlueALSA` PCM stream (preferring an actively `running`
