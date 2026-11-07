@@ -1,0 +1,15 @@
+[Unit]
+Description=DietPi Touchscreen Appliance Console & Screen Manager
+After=network.target sound.target camilladsp.service bt-manager.service
+Wants=camilladsp.service bt-manager.service
+
+[Service]
+Type=simple
+User=root
+Environment=RUST_LOG=info
+ExecStart=/usr/local/bin/screen-manager --loop
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

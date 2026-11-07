@@ -1,0 +1,48 @@
+[package]
+name = "speaker-diagnostics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Diagnostic CLI utilities for Raspberry Pi Bluetooth Speaker & DSP appliance"
+
+[[bin]]
+name = "amp-info"
+path = "src/bin/amp-info.rs"
+
+[[bin]]
+name = "bt-info"
+path = "src/bin/bt-info.rs"
+
+[[bin]]
+name = "dsp-info"
+path = "src/bin/dsp-info.rs"
+
+[[bin]]
+name = "encoder-read"
+path = "src/bin/encoder-read.rs"
+
+[[bin]]
+name = "light-read"
+path = "src/bin/light-read.rs"
+
+[[bin]]
+name = "temp-read"
+path = "src/bin/temp-read.rs"
+
+[dependencies]
+speaker-common = { workspace = true }
+speaker-hardware = { workspace = true }
+speaker-bluetooth = { workspace = true }
+speaker-dsp = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+speaker-hardware = { workspace = true, features = ["test-util"] }
+speaker-bluetooth = { workspace = true, features = ["test-util"] }
+speaker-dsp = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

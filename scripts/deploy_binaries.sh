@@ -23,14 +23,16 @@ TARGET_TRIPLE="aarch64-unknown-linux-gnu"
 RELEASE_DIR="target/${TARGET_TRIPLE}/release"
 
 # All known deployable binaries produced by the workspace. Extend this list
-# when new binaries are added to services/core.
+# when new binaries are added to services or tools.
 KNOWN_BINARIES=(
-  core
+  screen-manager
   bt-manager
-  temp-read
-  light-read
   amp-info
   bt-info
+  dsp-info
+  encoder-read
+  light-read
+  temp-read
 )
 
 # Prefer git worktrees: binaries are built per worktree, so resolve paths
@@ -46,7 +48,7 @@ die() { echo "[deploy] ERROR: $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 
 [[ -d "${RELEASE_PATH}" ]] || die "Release directory not found: ${RELEASE_PATH}.
-Run: cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target ${TARGET_TRIPLE} --release --bins"
+Run: cargo build --target ${TARGET_TRIPLE} --release --bins"
 
 select_binaries() {
   if [[ $# -eq 0 ]]; then

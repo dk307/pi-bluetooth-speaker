@@ -8,7 +8,8 @@ This directory contains the modular microservices that power the **Raspberry Pi 
 
 | Service | Language / Stack | Status | Description |
 | :--- | :--- | :--- | :--- |
-| [`core`](core) | Rust 2024 / Slint / Tokio | **In Progress** | Central speaker daemon & logic: audiophile touchscreen console (800x480 DSI `/dev/fb0`), dual PeppyMeter VU visualizers, rotary encoder volume sync, BlueZ D-Bus integration, and hardware orchestration. |
+| [`screen-manager`](screen-manager) | Rust 2024 / Slint / Tokio | **Production** | Audiophile touchscreen console (800x480 DSI `/dev/fb0`), dual PeppyMeter VU visualizers, rotary encoder volume sync, and display backlight controls (`screen-manager.service`). |
+| [`bt-manager`](bt-manager) | Rust 2024 / Bluer / Tokio | **Production** | Dedicated Bluetooth manager daemon, BlueZ & BlueALSA status monitoring, and BIP cover art D-Bus service (`bt-manager.service`). |
 
 ---
 

@@ -7,11 +7,11 @@ This document defines the behavioral, architectural, and engineering rules for A
 ## 1. Target Platform & Compilation Environment
 
 * **Target Hardware:** **Raspberry Pi 3 Model B** (Broadcom BCM2837, quad-core ARM Cortex-A53 `aarch64`, running DietPi / Debian 13 Trixie).
-* **Primary Rust Target:** `aarch64-unknown-linux-gnu` with Cortex-A53 pipeline scheduling (`-C target-cpu=cortex-a53`) and hardware ARM NEON SIMD vectorization with crypto disabled (`-C target-feature=+neon,-aes,-sha2`), configured in [`services/core/.cargo/config.toml`](services/core/.cargo/config.toml).
+* **Primary Rust Target:** `aarch64-unknown-linux-gnu` with Cortex-A53 pipeline scheduling (`-C target-cpu=cortex-a53`) and hardware ARM NEON SIMD vectorization with crypto disabled (`-C target-feature=+neon,-aes,-sha2`), configured in [`.cargo/config.toml`](.cargo/config.toml).
 * **Building for the Target Platform:**
   Always compile binaries for the Raspberry Pi 3 `aarch64-unknown-linux-gnu` target:
   ```bash
-  cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins
+  cargo build --target aarch64-unknown-linux-gnu --release --bins
   ```
 * **Live Hardware Testing via SSH (`root@192.168.2.120`):**
   * You can test compiled `aarch64` binaries directly on the live Raspberry Pi 3 over SSH at `root@192.168.2.120`.
@@ -24,9 +24,9 @@ This document defines the behavioral, architectural, and engineering rules for A
 
 All Rust code in this repository **MUST** strictly adhere to the **Microsoft Pragmatic Rust Guidelines** already downloaded in this repository:
 * **Local Reference:** [`services/.guidelines/microsoft-rust-guidelines.md`](services/.guidelines/microsoft-rust-guidelines.md)
-* **Service Instructions & Canonical Checklist:** [`services/core/AGENTS.md`](services/core/AGENTS.md#2-primary-engineering-rule-microsoft-pragmatic-rust-guidelines)
+* **Service Instructions & Canonical Checklist:** [`services/screen-manager/AGENTS.md`](services/screen-manager/AGENTS.md#2-primary-engineering-rule-microsoft-pragmatic-rust-guidelines)
 
-Before designing types, writing modules, implementing error handling, or writing tests, consult [`services/.guidelines/microsoft-rust-guidelines.md`](services/.guidelines/microsoft-rust-guidelines.md) and the canonical checklist in [`services/core/AGENTS.md`](services/core/AGENTS.md) to ensure all newly created or modified code complies with its rules.
+Before designing types, writing modules, implementing error handling, or writing tests, consult [`services/.guidelines/microsoft-rust-guidelines.md`](services/.guidelines/microsoft-rust-guidelines.md) and the canonical checklist in [`services/screen-manager/AGENTS.md`](services/screen-manager/AGENTS.md) to ensure all newly created or modified code complies with its rules.
 
 ---
 
@@ -35,7 +35,7 @@ Before designing types, writing modules, implementing error handling, or writing
 All code developed in this repository must maintain high, verifiable test coverage:
 * **Tooling:** Use `cargo llvm-cov` to measure line, function, and region coverage across crates, modules, and CLI utilities:
   ```bash
-  cargo llvm-cov --manifest-path services/core/Cargo.toml --target x86_64-unknown-linux-gnu
+  cargo llvm-cov --workspace --target x86_64-unknown-linux-gnu
   ```
 * **Coverage Standards:**
   * Always check code coverage when writing, modifying, or refactoring code, and improve coverage to a reasonable extent (target **>85%–90%+** line and function coverage).
@@ -50,10 +50,10 @@ To prevent multi-iteration PR review churn and excessive token/CI consumption, A
 
 ### 4.1 Zero-Retry Pre-Push Gate & Review Triage
 * **Mandatory Local Verification Before Every Push:** Never push a commit without first passing all local gates in order:
-  1. `cargo fmt --manifest-path services/core/Cargo.toml -- --check`
-  2. `cargo clippy --manifest-path services/core/Cargo.toml --all-targets -- -D warnings`
-  3. `cargo llvm-cov --manifest-path services/core/Cargo.toml --target x86_64-unknown-linux-gnu --fail-under-lines 90 --fail-under-functions 90`
-  4. `cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins`
+  1. `cargo fmt --all -- --check`
+  2. `cargo clippy --workspace --all-targets -- -D warnings`
+  3. `cargo llvm-cov --workspace --target x86_64-unknown-linux-gnu --fail-under-lines 90 --fail-under-functions 90`
+  4. `cargo build --target aarch64-unknown-linux-gnu --release --bins`
   5. If any CI workflow or configuration (`.github/workflows/*.yml`, `.pr_agent.toml`) is touched, verify workflow syntax and configuration locally before committing.
 * **Strict PR Scope Boundaries (Blast Radius Containment):** A feature or bugfix PR must touch **only** the files within its declared scope. **Never refactor already-merged, working sibling drivers or CLI utilities** (e.g., modifying `read_temp` during a `read_light` PR). The rule *"sweep by bug class"* applies strictly to the new files and tests introduced in the PR.
 * **Review Triage Classification (The 3-Tier Rule to Stop Review Churn):**
@@ -80,7 +80,7 @@ To prevent multi-iteration PR review churn and excessive token/CI consumption, A
 * **Review Requirement — How Code Can Be Simplified:** Every self-review and automated PR review **MUST** explicitly evaluate how the code can be simplified: identifying duplicated logic to unify, over-engineered abstractions to flatten, verbose error/lock plumbing to streamline, and lines of code that can be removed while preserving safety and domain invariants.
 
 ### 4.3 Continuous Post-Review Distillation & Anti-Churn Rules
-* **Mandatory Post-Review Distillation:** Whenever code review feedback (PR-Agent AI review, human reviewer comments, or CI failures) identifies architectural placement issues, anti-patterns, or subtle edge cases, distill the root cause and record actionable rules in [`AGENTS.md`](AGENTS.md) / [`services/core/AGENTS.md`](services/core/AGENTS.md) before finishing the task.
+* **Mandatory Post-Review Distillation:** Whenever code review feedback (PR-Agent AI review, human reviewer comments, or CI failures) identifies architectural placement issues, anti-patterns, or subtle edge cases, distill the root cause and record actionable rules in [`AGENTS.md`](AGENTS.md) / [`services/screen-manager/AGENTS.md`](services/screen-manager/AGENTS.md) before finishing the task.
 * **How to Apply Guidelines (Practical Anti-Churn Rules):**
   * **Keep Hardware and Async Runtime Separated:** Generic task join helpers and error-mapping glue (`map_join_result`, `FromJoinError`) belong in `crate::runtime` or `crate::util`, never mixed into peripheral hardware modules (`hardware::*`). Concrete trait implementations belong alongside the respective domain error.
   * **Do Not Create Dead Branches for Tokio JoinError:** In Tokio, `JoinError` is guaranteed to be either a panic or cancellation. Never add artificial trait bounds (such as forcing `From<io::Error>`) just to serve an unreachable branch; use `unreachable!()` with a descriptive message.
@@ -171,7 +171,7 @@ Before writing any new hardware driver, protocol parser, or peripheral module, a
 
 
 ### 4.4 Learned Rules: Coverage Target, D-Bus Testing & Honest Reporting
-* **Host Coverage Target Is Mandatory:** `services/core/.cargo/config.toml` forces `build.target = aarch64-unknown-linux-gnu`, so a bare `cargo llvm-cov` tries to execute aarch64 test binaries on the x86-64 host and fails with `Exec format error`. Always pass `--target x86_64-unknown-linux-gnu` to `cargo llvm-cov`, `cargo clippy` and `cargo test` on the dev host; use the aarch64 target only for release builds.
+* **Host Coverage Target Is Mandatory:** Always pass `--target x86_64-unknown-linux-gnu` to `cargo llvm-cov` on the dev host to measure coverage for the host target; use the aarch64 target for cross-compilation and release builds.
 * **Gate on the Right Metric and Exit Code:** The gates are *line* and *function* coverage, not region coverage (the `TOTAL` row's first percentage). Never pipe a gate command into `tail`/`grep` and then read `$?`; capture the real exit code (`> log 2>&1; echo $?` or `${PIPESTATUS[0]}`).
 * **Test Real D-Bus Code Paths with a Private Bus:** For `zbus` code that cannot be mocked (OBEX session/transfer handling), spawn a private `dbus-daemon --session --nofork --print-address=1`, serve a fake `org.bluez`/`org.bluez.obex` with `#[zbus::interface]`, and inject the client via `BluetoothDevice::with_connection`. Use a distinct MAC per test (cover-art cache files are keyed by MAC and cleaned per MAC), kill the daemon in `Drop`, and fail loudly if `dbus-daemon` is missing. See `services/core/tests/bluetooth_obex_integration.rs`.
 * **Never Claim Unverified Results:** Do not report tests as written, or coverage/gate numbers, unless the files exist and the commands were actually run and observed in that session.

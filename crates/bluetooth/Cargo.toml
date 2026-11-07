@@ -1,0 +1,28 @@
+[package]
+name = "speaker-bluetooth"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Bluetooth & BlueALSA peripheral drivers, D-Bus connection management, and AVRCP transport"
+
+[dependencies]
+speaker-common = { workspace = true }
+zbus = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tempfile = { workspace = true }
+
+[features]
+default = []
+test-util = []
+
+[dev-dependencies]
+speaker-bluetooth = { path = ".", features = ["test-util"] }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

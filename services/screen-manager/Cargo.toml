@@ -1,0 +1,55 @@
+[package]
+name = "screen-manager"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Touchscreen Appliance Console & Screen Manager service for Raspberry Pi"
+default-run = "screen-manager"
+
+[[bin]]
+name = "screen-manager"
+path = "src/main.rs"
+
+[dependencies]
+speaker-common = { workspace = true }
+speaker-hardware = { workspace = true }
+speaker-bluetooth = { workspace = true }
+speaker-dsp = { workspace = true }
+config = { workspace = true }
+tempfile = { workspace = true }
+image = { workspace = true }
+memmap2 = { workspace = true, optional = true }
+libc = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+# Slint UI
+i-slint-core = { workspace = true, optional = true }
+slint = { workspace = true, optional = true }
+
+[features]
+default = ["ui"]
+ui = ["dep:slint", "dep:slint-build", "dep:i-slint-core", "dep:memmap2"]
+linuxkms = ["ui", "slint/backend-linuxkms"]
+simulator = ["ui", "slint/backend-winit", "slint/renderer-femtovg"]
+test-util = []
+
+[dev-dependencies]
+screen-manager = { path = ".", features = ["test-util"] }
+speaker-common = { workspace = true }
+speaker-hardware = { workspace = true, features = ["test-util"] }
+speaker-bluetooth = { workspace = true, features = ["test-util"] }
+speaker-dsp = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+slint-build = { workspace = true, optional = true }
+
+[lints]
+workspace = true
