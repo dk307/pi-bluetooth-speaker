@@ -105,6 +105,9 @@ bluesdp = "=0.1.1"
 # L2CAP_OPTIONS sockopt for BIP cover-art throughput (`SOL_L2CAP`)
 libc = { version = "=0.2.191" }
 
+# Signal handling for graceful shutdown
+ctrlc = { version = "=3.4.2" }
+
 [features]
 default = ["ui"]
 ui = ["dep:slint", "dep:slint-build", "dep:i-slint-core", "dep:memmap2"]

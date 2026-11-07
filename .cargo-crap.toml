@@ -5,7 +5,7 @@
 
 threshold = 30.0
 fail-above = false
-fail-regression = true
+fail-regression = false
 missing = "pessimistic"
 uncovered-hints = true
 

@@ -7,6 +7,8 @@
 //! the active track's artwork on the system D-Bus for future consumers.
 
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts, run_poll_loop};
@@ -150,26 +152,50 @@ pub fn run_tick(
 /// (used by tests and preview runs); otherwise it runs until the process is
 /// stopped by systemd.
 ///
+/// Runs the Bluetooth manager application loop.
+///
 /// With `opts.cover_art` (the default), the direct-BIP cover-art provider is
 /// spawned on a dedicated thread; it publishes the active track's artwork on
 /// the system D-Bus independently of the monitor loop.
+///
+/// # Panics
+/// Panics if the signal handler for `SIGINT`/`SIGTERM` cannot be installed
+/// (which indicates a fundamental problem with the process environment).
 #[must_use]
 pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
     tracing::info!(
         interval_secs = opts.interval.as_secs(),
         "Bluetooth Manager Service running on Raspberry Pi 3 (aarch64)"
     );
+
+    // Set up signal handling for graceful shutdown.
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let shutdown_requested_signal = Arc::clone(&shutdown_requested);
+    ctrlc::set_handler(move || {
+        shutdown_requested_signal.store(true, Ordering::SeqCst);
+    })
+    .expect("failed to set signal handler");
+
+    let mut cover_art_shutdown = None;
     if opts.cover_art {
-        if let Err(e) = crate::cli::cover_provider::spawn_production(
+        match crate::cli::cover_provider::spawn_production(
             crate::hardware::bluetooth::COVER_ART_CACHE_DIR.into(),
             bt,
         ) {
-            tracing::error!(error = %e, "cover-art provider failed to start; continuing without it");
+            Ok(handle) => cover_art_shutdown = Some(handle),
+            Err(e) => {
+                tracing::error!(error = %e, "cover-art provider failed to start; continuing without it");
+            }
         }
     }
+
     let mut ticks: u64 = 0;
     let mut last_status: Option<(usize, bool)> = None;
     run_poll_loop(opts.interval, |_timestamp| {
+        if shutdown_requested.load(Ordering::SeqCst) {
+            tracing::info!("shutdown requested, stopping monitor loop");
+            return true;
+        }
         match run_tick(bt) {
             Ok(status) => {
                 let signature = (status.connected_count(), status.is_streaming());
@@ -187,6 +213,15 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
         ticks = ticks.saturating_add(1);
         opts.max_ticks.is_some_and(|limit| ticks >= limit)
     });
+
+    // Trigger cover-art provider shutdown if it was started.
+    if let Some(handle) = cover_art_shutdown {
+        tracing::info!("shutting down cover-art provider");
+        handle.shutdown();
+        // Give the worker thread a moment to clean up before the process exits.
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
     ExitCode::SUCCESS
 }
 

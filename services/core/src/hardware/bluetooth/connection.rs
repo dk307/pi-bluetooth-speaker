@@ -379,8 +379,19 @@ impl BluetoothControllerInfo {
 }
 
 /// Runs `hciconfig <adapter> version` with a hard deadline, capturing stdout.
+/// Hard deadline for external probe commands (production). Shrunk under
+/// `cfg(test)` so the timeout path is testable in real time.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn probe_timeout() -> Duration {
+    if cfg!(test) {
+        Duration::from_millis(150)
+    } else {
+        PROBE_TIMEOUT
+    }
+}
+
 fn run_probe_command(program: &str, args: &[&str]) -> Result<String, std::io::Error> {
-    const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
     let mut child = Command::new(program)
@@ -388,7 +399,7 @@ fn run_probe_command(program: &str, args: &[&str]) -> Result<String, std::io::Er
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let deadline = Instant::now() + probe_timeout();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -2728,7 +2739,7 @@ impl BluetoothDevice {
 
 #[cfg(feature = "test-util")]
 pub mod test_helpers {
-    use super::BtError;
+    use super::{BlueAlsaPcm, BtDevice, BtError};
     pub use super::{
         DbusClient, ManagedObjects, is_no_such_unit_error, is_service_absent_error,
         is_service_absent_fdo_error, parse_hciconfig_version,
@@ -2737,6 +2748,18 @@ pub mod test_helpers {
     use crate::runtime::FromJoinError;
 
     /// Creates a `BtError::dbus` error for testing.
+    /// Calls [`DbusClient::query_bluealsa`] (integration-test seam for the
+    /// `pub(crate)` method).
+    ///
+    /// # Errors
+    /// Returns the underlying [`BtError`] from the D-Bus query.
+    pub fn query_bluealsa(
+        client: &DbusClient,
+        devices: &[BtDevice],
+    ) -> Result<Box<[BlueAlsaPcm]>, BtError> {
+        client.query_bluealsa(devices)
+    }
+
     #[must_use]
     pub fn make_dbus_error(details: &str) -> BtError {
         BtError::dbus(details)
@@ -2890,6 +2913,33 @@ mod tests {
         assert!(!is_unknown_method_error(&zbus::Error::FDO(Box::new(
             zbus::fdo::Error::AccessDenied("denied".into())
         ))));
+    }
+
+    #[test]
+    fn run_probe_command_captures_stdout() {
+        let out = run_probe_command("sh", &["-c", "printf hello"]).expect("probe must succeed");
+        assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn run_probe_command_rejects_non_success_status() {
+        let error = run_probe_command("sh", &["-c", "exit 3"])
+            .expect_err("non-zero exit must surface as an error");
+        assert!(error.to_string().contains("non-success status"));
+    }
+
+    #[test]
+    fn run_probe_command_rejects_missing_binary() {
+        let error = run_probe_command("/nonexistent/speaker-probe", &[])
+            .expect_err("missing binary must surface as an error");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn run_probe_command_kills_on_timeout() {
+        let error = run_probe_command("sh", &["-c", "sleep 5"])
+            .expect_err("an unresponsive probe must time out");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 
     #[test]

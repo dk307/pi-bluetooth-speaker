@@ -335,6 +335,8 @@ struct CoverArtWorker {
     suppress_retry: Option<(Box<str>, Instant)>,
     /// Session-scoped handle cache; purged on every session generation change.
     session_cache: SessionCoverCache,
+    /// Shutdown signal receiver.
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl CoverArtWorker {
@@ -345,6 +347,7 @@ impl CoverArtWorker {
         cache_dir: PathBuf,
         wake: Arc<Notify>,
         emitter: Option<SignalEmitter<'static>>,
+        shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) -> Self {
         Self {
             source,
@@ -357,6 +360,7 @@ impl CoverArtWorker {
             track_change_at: None,
             suppress_retry: None,
             session_cache: SessionCoverCache::new(),
+            shutdown_rx,
         }
     }
 
@@ -672,11 +676,12 @@ impl CoverArtWorker {
     /// Takes `&mut self` (not `self`) so the caller can keep ownership and
     /// avoid dropping the worker — which owns the blocking D-Bus connection —
     /// inside a tokio runtime context.
-    async fn run(&mut self) {
+    async fn run(&mut self) -> Box<dyn PlaybackSource> {
         tracing::info!(
             fallback_poll_secs = COVER_FALLBACK_POLL.as_secs(),
             "cover-art provider started (signal-driven, periodic fallback poll)"
         );
+        let mut shutdown_rx = self.shutdown_rx.clone();
         loop {
             tokio::select! {
                 () = tokio::time::sleep(COVER_FALLBACK_POLL) => self.poll_once().await,
@@ -689,8 +694,27 @@ impl CoverArtWorker {
                         .unwrap_or_else(|| Instant::now() + KEEPALIVE_INTERVAL)
                         .into(),
                 ), if self.keepalive_deadline.is_some() => self.keepalive().await,
+                // Graceful shutdown signal.
+                _ = shutdown_rx.changed() => {
+                    tracing::info!("cover-art provider received shutdown signal");
+                    self.deactivate("shutdown requested").await;
+                    break;
+                },
             }
         }
+        // Return the source so it can be dropped outside the runtime context.
+        std::mem::replace(&mut self.source, Box::new(EmptyPlaybackSource))
+    }
+}
+
+/// Empty playback source used as a placeholder after the real source is
+/// extracted from the worker during shutdown.
+struct EmptyPlaybackSource;
+
+#[async_trait::async_trait]
+impl PlaybackSource for EmptyPlaybackSource {
+    async fn status(&self) -> Result<Option<BtPlaybackState>, BtError> {
+        Ok(None)
     }
 }
 
@@ -865,10 +889,34 @@ async fn spawn_track_signal_listener(wake: Arc<Notify>) {
 /// Returns an error string when the D-Bus connection or the worker thread
 /// cannot be created. The monitor loop keeps running either way (see
 /// [`crate::cli::bt_manager::run_app`]).
-pub fn spawn_production(cache_dir: PathBuf, bt: &BluetoothDevice) -> Result<(), String> {
-    // A cheap `Arc`-backed clone of the caller's device: shares its system
-    // D-Bus connection instead of opening a second one (and its listener
-    // thread / second startup failure point).
+/// Shutdown handle for the cover-art worker.
+#[derive(Debug, Clone)]
+pub struct CoverArtShutdown {
+    tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl CoverArtShutdown {
+    /// Triggers graceful shutdown of the cover-art worker.
+    pub fn shutdown(&self) {
+        let _ = self.tx.send(true);
+    }
+}
+
+/// Spawns the cover-art provider in a background thread and returns a
+/// shutdown handle that can be used to trigger graceful termination.
+///
+/// The worker runs its own tokio runtime and D-Bus connection, and
+/// publishes cover art on the system bus under `org.speaker.CoverArt`.
+///
+/// # Errors
+/// Returns an error string if the background thread cannot be spawned.
+pub fn spawn_production(
+    cache_dir: PathBuf,
+    bt: &BluetoothDevice,
+) -> Result<CoverArtShutdown, String> {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let shutdown_handle = CoverArtShutdown { tx: shutdown_tx };
+
     let source = DevicePlaybackSource { bt: bt.clone() };
     std::thread::Builder::new()
         .name("cover-art-provider".into())
@@ -915,20 +963,17 @@ pub fn spawn_production(cache_dir: PathBuf, bt: &BluetoothDevice) -> Result<(), 
                     cache_dir,
                     wake,
                     Some(emitter),
+                    shutdown_rx,
                 );
-                worker.run().await;
-                // `run` only returns on shutdown; the worker owns the source
-                // (and its blocking connection), which must not be dropped
-                // inside the runtime context, so leak it intentionally — the
-                // process is exiting anyway.
-                std::mem::forget(worker);
+                let _source = worker.run().await;
                 drop(connection);
                 None
             });
             drop(source);
         })
         .map_err(|e| format!("cannot spawn cover-art provider thread: {e}"))?;
-    Ok(())
+
+    Ok(shutdown_handle)
 }
 
 #[cfg(test)]
@@ -1129,10 +1174,16 @@ mod tests {
         keepalive_error: bool,
         body: &'static [u8],
         source_results: VecDeque<Result<Option<BtPlaybackState>, BtError>>,
+        #[allow(
+            clippy::used_underscore_binding,
+            reason = "kept alive to prevent watch channel closure"
+        )]
+        _shutdown_tx: tokio::sync::watch::Sender<bool>,
     }
 
     impl TestHarness {
         fn new(body: &'static [u8]) -> Self {
+            let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
             Self {
                 dir: ScopedTempDir::new("cover-provider-test"),
                 state: SharedCoverState::new(),
@@ -1144,6 +1195,7 @@ mod tests {
                 keepalive_error: false,
                 body,
                 source_results: VecDeque::new(),
+                _shutdown_tx: shutdown_tx,
             }
         }
 
@@ -1152,6 +1204,8 @@ mod tests {
         }
 
         fn worker(&mut self, emitter: Option<SignalEmitter<'static>>) -> CoverArtWorker {
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            self._shutdown_tx = shutdown_tx;
             CoverArtWorker::new(
                 Box::new(FakeSource {
                     results: Mutex::new(std::mem::take(&mut self.source_results)),
@@ -1170,6 +1224,7 @@ mod tests {
                 self.dir.path().to_path_buf(),
                 Arc::new(Notify::new()),
                 emitter,
+                shutdown_rx,
             )
         }
 
