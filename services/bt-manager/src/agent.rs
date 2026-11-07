@@ -45,7 +45,7 @@ pub const DEFAULT_SUPERVISOR_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Error kind for [`AgentError`].
 #[derive(Debug)]
-pub enum AgentErrorKind {
+pub(crate) enum AgentErrorKind {
     /// Thread spawn failure.
     Spawn(io::Error),
 }
@@ -64,11 +64,6 @@ impl AgentError {
             kind: AgentErrorKind::Spawn(source),
             backtrace: Backtrace::capture(),
         }
-    }
-
-    #[must_use]
-    pub const fn kind(&self) -> &AgentErrorKind {
-        &self.kind
     }
 
     #[must_use]
@@ -272,10 +267,32 @@ impl AutoTrustAgent {
     }
 }
 
-async fn get_bluez_owner(connection: &zbus::Connection) -> Option<String> {
-    let dbus = zbus::fdo::DBusProxy::new(connection).await.ok()?;
-    let name = zbus::names::BusName::try_from("org.bluez").ok()?;
-    dbus.get_name_owner(name).await.ok().map(|u| u.to_string())
+#[derive(Debug, PartialEq, Eq)]
+enum BlueZOwnerState {
+    Present(String),
+    Absent,
+    Unknown,
+}
+
+async fn get_bluez_owner(connection: &zbus::Connection) -> BlueZOwnerState {
+    let Ok(dbus) = zbus::fdo::DBusProxy::new(connection).await else {
+        return BlueZOwnerState::Unknown;
+    };
+    let Ok(name) = zbus::names::BusName::try_from("org.bluez") else {
+        return BlueZOwnerState::Unknown;
+    };
+    match dbus.get_name_owner(name).await {
+        Ok(unique_name) => BlueZOwnerState::Present(unique_name.to_string()),
+        Err(zbus::fdo::Error::NameHasNoOwner(_)) => BlueZOwnerState::Absent,
+        Err(_) => BlueZOwnerState::Unknown,
+    }
+}
+
+fn is_already_exists(err: &zbus::Error) -> bool {
+    match err {
+        zbus::Error::MethodError(name, _, _) => name.as_str() == "org.bluez.Error.AlreadyExists",
+        _ => err.to_string().contains("AlreadyExists"),
+    }
 }
 
 /// Sets the `device.Trusted` property to `true` on `org.bluez`.
@@ -429,15 +446,28 @@ pub async fn run_agent_supervisor_with_interval(
                     break;
                 }
 
-                let current_owner = get_bluez_owner(&connection).await;
-                if current_owner != last_owner {
-                    if current_owner.is_none() {
-                        tracing::warn!("BlueZ daemon disconnected; agent registration dropped");
-                    } else if last_owner.is_some() {
-                        tracing::info!("BlueZ daemon restarted; re-registering auto-trust agent");
+                match get_bluez_owner(&connection).await {
+                    BlueZOwnerState::Present(current_owner) => {
+                        if last_owner.as_deref() != Some(&current_owner) {
+                            if last_owner.is_some() {
+                                tracing::info!(
+                                    "BlueZ daemon restarted; re-registering auto-trust agent"
+                                );
+                            }
+                            last_owner = Some(current_owner);
+                            is_registered = false;
+                        }
                     }
-                    last_owner = current_owner.clone();
-                    is_registered = false;
+                    BlueZOwnerState::Absent => {
+                        if last_owner.is_some() {
+                            tracing::warn!("BlueZ daemon disconnected; agent registration dropped");
+                            last_owner = None;
+                            is_registered = false;
+                        }
+                    }
+                    BlueZOwnerState::Unknown => {
+                        // Transient D-Bus query failure; do not declare BlueZ disconnected
+                    }
                 }
 
                 if last_owner.is_some() && !is_registered {
@@ -445,6 +475,10 @@ pub async fn run_agent_supervisor_with_interval(
                         Ok(()) => {
                             is_registered = true;
                             tracing::info!("Auto-trust agent successfully registered with BlueZ");
+                        }
+                        Err(e) if is_already_exists(&e) => {
+                            is_registered = true;
+                            tracing::info!("Auto-trust agent already registered with BlueZ");
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "Failed to register agent with BlueZ; retrying");
@@ -600,11 +634,19 @@ mod tests {
     fn agent_error_predicates_and_display() {
         let err = AgentError::spawn(io::Error::other("thread spawn failed"));
         assert!(err.is_spawn());
-        assert!(matches!(err.kind(), AgentErrorKind::Spawn(_)));
         assert_eq!(
             err.summary(),
             "failed to spawn auto-trust agent thread: thread spawn failed"
         );
         assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn already_exists_detection() {
+        let err_already = zbus::Error::Address("org.bluez.Error.AlreadyExists".into());
+        assert!(is_already_exists(&err_already));
+
+        let other_err = zbus::Error::Address("other error".into());
+        assert!(!is_already_exists(&other_err));
     }
 }
