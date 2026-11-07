@@ -486,7 +486,22 @@ impl AppShell {
     pub fn wire_bluetooth_transport(&self, commands: &speaker_bluetooth::TransportCommandQueue) {
         let commands_toggle = commands.clone();
         let win = self.window.as_weak();
+        let last_toggle = std::sync::Arc::new(std::sync::Mutex::new(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or_else(std::time::Instant::now),
+        ));
         self.window.on_toggle_play_pause(move || {
+            let mut last = match last_toggle.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let now = std::time::Instant::now();
+            if now.duration_since(*last) < std::time::Duration::from_millis(300) {
+                return;
+            }
+            *last = now;
+            drop(last);
             if let Some(w) = win.upgrade() {
                 // Optimistic local toggle: the worker's next authoritative publish
                 // (within one monitor tick) reconciles the real player state.
