@@ -564,6 +564,7 @@ where
                                 .await;
 
                             reconciler_handle.abort();
+                            let _ = reconciler_handle.await;
                             if *shutdown_rx.borrow() {
                                 break;
                             }

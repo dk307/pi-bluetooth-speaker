@@ -27,12 +27,13 @@ use crate::transport::{BlueAlsaPcm, BtPlaybackState, decode_pcm_format, format_v
 #[doc(inline)]
 pub use crate::reconciler::{
     BluezDeviceSnapshot, DBUS_CALL_TIMEOUT, DeviceWatchState, DisconnectReason,
-    MAX_HARD_RESETS_PER_SESSION, MockReconcilerDbus, POLL_INTERVAL, RECONNECT_SETTLE_DELAY,
-    ReconcileAction, ReconcilerDbus, TickOutcome, UUID_A2DP_SOURCE, build_snapshots,
-    collect_snapshots, cycle_device_connection, cycle_device_connection_with_settle,
-    execute_reconcile_actions, execute_reconcile_actions_with_settle, fetch_bluealsa_objects,
-    reconcile_snapshots, reconciler_tick, run_reconciler_loop, run_reconciler_loop_with,
-    spawn_bt_transport_reconciler, spawn_bt_transport_reconciler_with,
+    MAX_HARD_RESETS_PER_SESSION, MockReconcilerController, MockReconcilerDbus, POLL_INTERVAL,
+    RECONNECT_SETTLE_DELAY, ReconcileAction, ReconcilerDbus, TickOutcome, UUID_A2DP_SOURCE,
+    build_snapshots, collect_snapshots, cycle_device_connection,
+    cycle_device_connection_with_settle, execute_reconcile_actions,
+    execute_reconcile_actions_with_settle, fetch_bluealsa_objects, reconcile_snapshots,
+    reconciler_tick, run_reconciler_loop, run_reconciler_loop_with, spawn_bt_transport_reconciler,
+    spawn_bt_transport_reconciler_with,
 };
 
 /// Number of octets in a standard Bluetooth MAC address.

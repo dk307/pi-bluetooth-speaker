@@ -177,78 +177,158 @@ impl<T: ReconcilerDbus + Sync> ReconcilerDbus for &T {
     }
 }
 
-/// Hermetic mock implementation of [`ReconcilerDbus`] for deterministic testing.
-#[derive(Debug, Default, Clone)]
-pub struct MockReconcilerDbus {
-    bluez_result: Arc<Mutex<Option<zbus::Result<ManagedObjects>>>>,
-    bluealsa_result: Arc<Mutex<Option<zbus::Result<ManagedObjects>>>>,
-    connect_profile_result: Arc<Mutex<Option<zbus::Result<()>>>>,
-    disconnect_result: Arc<Mutex<Option<zbus::Result<()>>>>,
-    connect_result: Arc<Mutex<Option<zbus::Result<()>>>>,
-    connect_profile_calls: Arc<Mutex<Vec<(String, String)>>>,
-    disconnect_calls: Arc<Mutex<Vec<String>>>,
-    connect_calls: Arc<Mutex<Vec<String>>>,
+/// Internal shared state for [`MockReconcilerDbus`] and [`MockReconcilerController`].
+#[derive(Debug, Default)]
+struct MockReconcilerState {
+    bluez_result: Option<zbus::Result<ManagedObjects>>,
+    bluealsa_result: Option<zbus::Result<ManagedObjects>>,
+    connect_profile_result: Option<zbus::Result<()>>,
+    disconnect_result: Option<zbus::Result<()>>,
+    connect_result: Option<zbus::Result<()>>,
+    connect_profile_calls: Vec<(String, String)>,
+    disconnect_calls: Vec<String>,
+    connect_calls: Vec<String>,
+}
+
+/// Controller handle for injecting responses and inspecting invocations on [`MockReconcilerDbus`].
+#[derive(Debug, Clone)]
+pub struct MockReconcilerController {
+    state: Arc<Mutex<MockReconcilerState>>,
 }
 
 #[expect(clippy::missing_panics_doc, reason = "Internal mutex locks in mock")]
-impl MockReconcilerDbus {
-    /// Creates a new empty mock reconciler.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
+impl MockReconcilerController {
     /// Sets the managed objects to return on the next `fetch_bluez_objects` call.
     pub fn set_bluez_objects(&self, objs: ManagedObjects) {
-        *self.bluez_result.lock().unwrap() = Some(Ok(objs));
+        self.state.lock().unwrap().bluez_result = Some(Ok(objs));
     }
 
     /// Sets the error to return on the next `fetch_bluez_objects` call.
     pub fn set_bluez_error(&self, err: zbus::Error) {
-        *self.bluez_result.lock().unwrap() = Some(Err(err));
+        self.state.lock().unwrap().bluez_result = Some(Err(err));
     }
 
     /// Sets the managed objects to return on the next `fetch_bluealsa_objects` call.
     pub fn set_bluealsa_objects(&self, objs: ManagedObjects) {
-        *self.bluealsa_result.lock().unwrap() = Some(Ok(objs));
+        self.state.lock().unwrap().bluealsa_result = Some(Ok(objs));
     }
 
     /// Sets the error to return on the next `fetch_bluealsa_objects` call.
     pub fn set_bluealsa_error(&self, err: zbus::Error) {
-        *self.bluealsa_result.lock().unwrap() = Some(Err(err));
+        self.state.lock().unwrap().bluealsa_result = Some(Err(err));
     }
 
     /// Sets the result to return on subsequent `connect_profile` calls.
     pub fn set_connect_profile_result(&self, res: zbus::Result<()>) {
-        *self.connect_profile_result.lock().unwrap() = Some(res);
+        self.state.lock().unwrap().connect_profile_result = Some(res);
     }
 
     /// Sets the result to return on subsequent `disconnect` calls.
     pub fn set_disconnect_result(&self, res: zbus::Result<()>) {
-        *self.disconnect_result.lock().unwrap() = Some(res);
+        self.state.lock().unwrap().disconnect_result = Some(res);
     }
 
     /// Sets the result to return on subsequent `connect` calls.
     pub fn set_connect_result(&self, res: zbus::Result<()>) {
-        *self.connect_result.lock().unwrap() = Some(res);
+        self.state.lock().unwrap().connect_result = Some(res);
     }
 
     /// Returns all recorded `(device_path, uuid)` arguments passed to `connect_profile`.
     #[must_use]
     pub fn connect_profile_calls(&self) -> Vec<(String, String)> {
-        self.connect_profile_calls.lock().unwrap().clone()
+        self.state.lock().unwrap().connect_profile_calls.clone()
     }
 
     /// Returns all recorded `device_path` arguments passed to `disconnect`.
     #[must_use]
     pub fn disconnect_calls(&self) -> Vec<String> {
-        self.disconnect_calls.lock().unwrap().clone()
+        self.state.lock().unwrap().disconnect_calls.clone()
     }
 
     /// Returns all recorded `device_path` arguments passed to `connect`.
     #[must_use]
     pub fn connect_calls(&self) -> Vec<String> {
-        self.connect_calls.lock().unwrap().clone()
+        self.state.lock().unwrap().connect_calls.clone()
+    }
+}
+
+/// Hermetic mock implementation of [`ReconcilerDbus`] for deterministic testing.
+#[derive(Debug, Default, Clone)]
+pub struct MockReconcilerDbus {
+    state: Arc<Mutex<MockReconcilerState>>,
+}
+
+#[expect(clippy::missing_panics_doc, reason = "Internal mutex locks in mock")]
+impl MockReconcilerDbus {
+    /// Creates a mocked reconciler D-Bus backend along with its fault-injection controller (M-MOCKABLE-SYSCALLS).
+    #[must_use]
+    pub fn new_mocked() -> (Self, MockReconcilerController) {
+        let state = Arc::new(Mutex::new(MockReconcilerState::default()));
+        (
+            Self {
+                state: Arc::clone(&state),
+            },
+            MockReconcilerController { state },
+        )
+    }
+
+    /// Creates a new empty mock reconciler.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::new_mocked().0
+    }
+
+    /// Sets the managed objects to return on the next `fetch_bluez_objects` call.
+    pub fn set_bluez_objects(&self, objs: ManagedObjects) {
+        self.state.lock().unwrap().bluez_result = Some(Ok(objs));
+    }
+
+    /// Sets the error to return on the next `fetch_bluez_objects` call.
+    pub fn set_bluez_error(&self, err: zbus::Error) {
+        self.state.lock().unwrap().bluez_result = Some(Err(err));
+    }
+
+    /// Sets the managed objects to return on the next `fetch_bluealsa_objects` call.
+    pub fn set_bluealsa_objects(&self, objs: ManagedObjects) {
+        self.state.lock().unwrap().bluealsa_result = Some(Ok(objs));
+    }
+
+    /// Sets the error to return on the next `fetch_bluealsa_objects` call.
+    pub fn set_bluealsa_error(&self, err: zbus::Error) {
+        self.state.lock().unwrap().bluealsa_result = Some(Err(err));
+    }
+
+    /// Sets the result to return on subsequent `connect_profile` calls.
+    pub fn set_connect_profile_result(&self, res: zbus::Result<()>) {
+        self.state.lock().unwrap().connect_profile_result = Some(res);
+    }
+
+    /// Sets the result to return on subsequent `disconnect` calls.
+    pub fn set_disconnect_result(&self, res: zbus::Result<()>) {
+        self.state.lock().unwrap().disconnect_result = Some(res);
+    }
+
+    /// Sets the result to return on subsequent `connect` calls.
+    pub fn set_connect_result(&self, res: zbus::Result<()>) {
+        self.state.lock().unwrap().connect_result = Some(res);
+    }
+
+    /// Returns all recorded `(device_path, uuid)` arguments passed to `connect_profile`.
+    #[must_use]
+    pub fn connect_profile_calls(&self) -> Vec<(String, String)> {
+        self.state.lock().unwrap().connect_profile_calls.clone()
+    }
+
+    /// Returns all recorded `device_path` arguments passed to `disconnect`.
+    #[must_use]
+    pub fn disconnect_calls(&self) -> Vec<String> {
+        self.state.lock().unwrap().disconnect_calls.clone()
+    }
+
+    /// Returns all recorded `device_path` arguments passed to `connect`.
+    #[must_use]
+    pub fn connect_calls(&self) -> Vec<String> {
+        self.state.lock().unwrap().connect_calls.clone()
     }
 }
 
@@ -258,46 +338,45 @@ impl MockReconcilerDbus {
 )]
 impl ReconcilerDbus for MockReconcilerDbus {
     async fn fetch_bluez_objects(&self) -> zbus::Result<ManagedObjects> {
-        let mut guard = self.bluez_result.lock().unwrap();
-        guard.take().unwrap_or_else(|| Ok(ManagedObjects::new()))
+        let mut guard = self.state.lock().unwrap();
+        guard
+            .bluez_result
+            .take()
+            .unwrap_or_else(|| Ok(ManagedObjects::new()))
     }
 
     async fn fetch_bluealsa_objects(&self) -> zbus::Result<ManagedObjects> {
-        let mut guard = self.bluealsa_result.lock().unwrap();
-        guard.take().unwrap_or_else(|| Ok(ManagedObjects::new()))
+        let mut guard = self.state.lock().unwrap();
+        guard
+            .bluealsa_result
+            .take()
+            .unwrap_or_else(|| Ok(ManagedObjects::new()))
     }
 
     async fn connect_profile(&self, device_path: &str, uuid: &str) -> zbus::Result<()> {
-        self.connect_profile_calls
-            .lock()
-            .unwrap()
+        let mut guard = self.state.lock().unwrap();
+        guard
+            .connect_profile_calls
             .push((device_path.to_string(), uuid.to_string()));
-        let guard = self.connect_profile_result.lock().unwrap();
-        match &*guard {
+        match &guard.connect_profile_result {
             Some(Ok(())) | None => Ok(()),
             Some(Err(e)) => Err(zbus::Error::Failure(e.to_string())),
         }
     }
 
     async fn disconnect(&self, device_path: &str) -> zbus::Result<()> {
-        self.disconnect_calls
-            .lock()
-            .unwrap()
-            .push(device_path.to_string());
-        let guard = self.disconnect_result.lock().unwrap();
-        match &*guard {
+        let mut guard = self.state.lock().unwrap();
+        guard.disconnect_calls.push(device_path.to_string());
+        match &guard.disconnect_result {
             Some(Ok(())) | None => Ok(()),
             Some(Err(e)) => Err(zbus::Error::Failure(e.to_string())),
         }
     }
 
     async fn connect(&self, device_path: &str) -> zbus::Result<()> {
-        self.connect_calls
-            .lock()
-            .unwrap()
-            .push(device_path.to_string());
-        let guard = self.connect_result.lock().unwrap();
-        match &*guard {
+        let mut guard = self.state.lock().unwrap();
+        guard.connect_calls.push(device_path.to_string());
+        match &guard.connect_result {
             Some(Ok(())) | None => Ok(()),
             Some(Err(e)) => Err(zbus::Error::Failure(e.to_string())),
         }
@@ -1356,5 +1435,58 @@ mod tests {
         assert_eq!(outcome4, TickOutcome::ActionsExecuted(1));
         assert_eq!(tracked.get(dev_path).unwrap().divergence_ticks, 0);
         assert_eq!(tracked.get(dev_path).unwrap().hard_resets_attempted, 1);
+    }
+
+    #[tokio::test]
+    async fn test_mock_reconciler_new_mocked_and_controller() {
+        let (mock, ctrl) = MockReconcilerDbus::new_mocked();
+
+        // Test controller setters and mock calls
+        ctrl.set_bluez_error(zbus::Error::Failure("bluez failure".into()));
+        let bluez_err = mock.fetch_bluez_objects().await;
+        let _ = bluez_err.unwrap_err();
+
+        ctrl.set_bluealsa_error(zbus::Error::Failure("bluealsa failure".into()));
+        let bluealsa_err = mock.fetch_bluealsa_objects().await;
+        let _ = bluealsa_err.unwrap_err();
+
+        ctrl.set_connect_profile_result(Err(zbus::Error::Failure("profile err".into())));
+        let cp_res = mock.connect_profile("/dev/test", "uuid").await;
+        let _ = cp_res.unwrap_err();
+
+        ctrl.set_disconnect_result(Err(zbus::Error::Failure("disc err".into())));
+        let disc_res = mock.disconnect("/dev/test").await;
+        let _ = disc_res.unwrap_err();
+
+        ctrl.set_connect_result(Err(zbus::Error::Failure("conn err".into())));
+        let conn_res = mock.connect("/dev/test").await;
+        let _ = conn_res.unwrap_err();
+
+        // Verify calls recorded through controller
+        assert_eq!(
+            ctrl.connect_profile_calls(),
+            vec![("/dev/test".to_string(), "uuid".to_string())]
+        );
+        assert_eq!(ctrl.disconnect_calls(), vec!["/dev/test".to_string()]);
+        assert_eq!(ctrl.connect_calls(), vec!["/dev/test".to_string()]);
+
+        // Test &T blanket impl of ReconcilerDbus
+        let mock_ref = &mock;
+        let empty_bluez = mock_ref.fetch_bluez_objects().await.unwrap();
+        assert!(empty_bluez.is_empty());
+        let empty_bluealsa = mock_ref.fetch_bluealsa_objects().await.unwrap();
+        assert!(empty_bluealsa.is_empty());
+
+        ctrl.set_connect_profile_result(Ok(()));
+        ctrl.set_disconnect_result(Ok(()));
+        ctrl.set_connect_result(Ok(()));
+
+        mock_ref.connect_profile("/dev/ref", "uuid2").await.unwrap();
+        mock_ref.disconnect("/dev/ref").await.unwrap();
+        mock_ref.connect("/dev/ref").await.unwrap();
+
+        assert_eq!(mock.connect_profile_calls().len(), 2);
+        assert_eq!(mock.disconnect_calls().len(), 2);
+        assert_eq!(mock.connect_calls().len(), 2);
     }
 }
