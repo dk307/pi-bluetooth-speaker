@@ -1273,12 +1273,17 @@ fn idle_sleep(touch_fd: Option<RawFd>) {
             revents: 0,
         };
         // SAFETY: poll with 1 descriptor and bounded timeout is safe.
-        unsafe {
+        let ret = unsafe {
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "bounded 10..=50 ms fits in c_int"
             )]
-            libc::poll(&raw mut pfd, 1, timeout.as_millis() as libc::c_int);
+            libc::poll(&raw mut pfd, 1, timeout.as_millis() as libc::c_int)
+        };
+        // Sleep on poll timeout, error, or if hangup/error revents are signaled
+        // so device disconnects do not cause a 100% CPU busy-spin loop.
+        if ret <= 0 || (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0) {
+            std::thread::sleep(timeout);
         }
     } else {
         std::thread::sleep(timeout);
