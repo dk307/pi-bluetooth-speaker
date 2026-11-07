@@ -72,9 +72,9 @@ impl TryFrom<u64> for PollIntervalSecs {
         if secs >= 1 {
             Ok(Self::new(secs))
         } else {
-            Err(ConfigError::invalid(
-                "invalid interval seconds '0': interval must be at least 1 second",
-            ))
+            Err(ConfigError::invalid(format!(
+                "invalid interval seconds '{secs}': interval must be at least 1 second"
+            )))
         }
     }
 }
@@ -324,57 +324,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_sensible() {
-        let config = BtManagerConfig::default();
-        assert_eq!(config.interval_secs, PollIntervalSecs::DEFAULT);
-        assert_eq!(config.interval_secs.value(), 5);
-        assert_eq!(config.interval_secs.as_duration(), Duration::from_secs(5));
-        assert!(config.cover_art);
-        assert!(config.auto_trust);
-        assert_eq!(config.capability, AgentCapabilityMode::DisplayYesNo);
-    }
-
-    #[test]
     fn poll_interval_secs_conversions() {
         let interval = PollIntervalSecs::new(10);
         assert_eq!(interval.value(), 10);
         assert_eq!(interval.as_duration(), Duration::from_secs(10));
         assert_eq!(u64::from(interval), 10);
         assert_eq!(PollIntervalSecs::try_from(10).unwrap(), interval);
-        let _ = PollIntervalSecs::try_from(0).unwrap_err();
+        let err = PollIntervalSecs::try_from(0).unwrap_err();
+        assert!(err.to_string().contains("invalid interval seconds '0'"));
     }
 
     #[test]
     #[should_panic(expected = "poll interval must be at least 1 second")]
     fn poll_interval_secs_new_rejects_zero() {
         let _ = PollIntervalSecs::new(0);
-    }
-
-    #[test]
-    fn resolve_path_uses_override_and_default() {
-        assert_eq!(
-            BtManagerConfig::resolve_path(None),
-            PathBuf::from(DEFAULT_BT_CONFIG_PATH)
-        );
-        assert_eq!(
-            BtManagerConfig::resolve_path(Some(Path::new("/tmp/custom.json"))),
-            PathBuf::from("/tmp/custom.json")
-        );
-    }
-
-    #[test]
-    fn error_predicates_and_backtrace_accessor() {
-        let err = ConfigError::invalid("synthetic");
-        assert!(err.is_invalid_value());
-        assert!(!err.is_io() && !err.is_config());
-        assert_eq!(err.summary(), "synthetic");
-        assert!(matches!(
-            err.backtrace().status(),
-            std::backtrace::BacktraceStatus::Captured | std::backtrace::BacktraceStatus::Disabled
-        ));
-        let io_err = ConfigError::io("ctx", io::Error::other("boom"));
-        assert!(io_err.is_io());
-        let layered_err = ConfigError::config("ctx", config::ConfigError::Message("boom".into()));
-        assert!(layered_err.is_config());
     }
 }

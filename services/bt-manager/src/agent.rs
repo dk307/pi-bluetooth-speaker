@@ -26,7 +26,9 @@
 //! 6. **Graceful Shutdown:** Controlled via cooperative channel signaling
 //!    ([`AutoTrustShutdown`]) without global signal hijacking.
 
+use std::backtrace::Backtrace;
 use std::fmt::{self, Display, Formatter};
+use std::io;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -37,6 +39,66 @@ use zbus::zvariant::{ObjectPath, OwnedObjectPath, Value};
 
 /// Default D-Bus object path for the speaker auto-trust agent.
 pub const DEFAULT_AGENT_PATH: &str = "/org/speaker/agent";
+
+/// Default check and reconnection interval for the auto-trust agent supervisor (3 seconds).
+pub const DEFAULT_SUPERVISOR_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Error kind for [`AgentError`].
+#[derive(Debug)]
+pub enum AgentErrorKind {
+    /// Thread spawn failure.
+    Spawn(io::Error),
+}
+
+/// Canonical error for auto-trust agent initialization failures.
+#[derive(Debug)]
+pub struct AgentError {
+    kind: AgentErrorKind,
+    backtrace: Backtrace,
+}
+
+impl AgentError {
+    #[must_use]
+    pub fn spawn(source: io::Error) -> Self {
+        Self {
+            kind: AgentErrorKind::Spawn(source),
+            backtrace: Backtrace::capture(),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> &AgentErrorKind {
+        &self.kind
+    }
+
+    #[must_use]
+    pub const fn is_spawn(&self) -> bool {
+        matches!(self.kind, AgentErrorKind::Spawn(_))
+    }
+
+    #[must_use]
+    pub const fn backtrace(&self) -> &Backtrace {
+        &self.backtrace
+    }
+
+    fn fmt_kind(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match &self.kind {
+            AgentErrorKind::Spawn(source) => {
+                write!(f, "failed to spawn auto-trust agent thread: {source}")
+            }
+        }
+    }
+}
+
+speaker_common::impl_canonical_error_display!(AgentError);
+
+impl std::error::Error for AgentError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.kind {
+            AgentErrorKind::Spawn(source) => Some(source),
+        }
+    }
+}
 
 /// Returns the canonical default D-Bus [`OwnedObjectPath`] for the auto-trust agent.
 ///
@@ -324,7 +386,7 @@ pub async fn run_agent_supervisor(
         connection,
         agent_path,
         mode,
-        Duration::from_secs(3),
+        DEFAULT_SUPERVISOR_INTERVAL,
         shutdown_rx,
     )
     .await;
@@ -406,8 +468,8 @@ pub async fn run_agent_supervisor_with_interval(
 /// Spawns the auto-trust agent on a background thread with its own tokio runtime and connection.
 ///
 /// # Errors
-/// Returns an error string if the background thread cannot be spawned.
-pub fn spawn_auto_trust(mode: AgentCapabilityMode) -> Result<AutoTrustShutdown, String> {
+/// Returns an [`AgentError`] if the background thread cannot be spawned.
+pub fn spawn_auto_trust(mode: AgentCapabilityMode) -> Result<AutoTrustShutdown, AgentError> {
     spawn_auto_trust_with(mode, zbus::Connection::system)
 }
 
@@ -416,11 +478,11 @@ pub fn spawn_auto_trust(mode: AgentCapabilityMode) -> Result<AutoTrustShutdown, 
 /// Enables mockable/hermetic unit and integration testing without requiring the host system bus.
 ///
 /// # Errors
-/// Returns an error string if the background thread cannot be spawned.
+/// Returns an [`AgentError`] if the background thread cannot be spawned.
 pub fn spawn_auto_trust_with<F, Fut>(
     mode: AgentCapabilityMode,
     conn_factory: F,
-) -> Result<AutoTrustShutdown, String>
+) -> Result<AutoTrustShutdown, AgentError>
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = zbus::Result<zbus::Connection>> + Send + 'static,
@@ -457,7 +519,7 @@ where
                 }
             });
         })
-        .map_err(|e| format!("failed to spawn auto-trust agent thread: {e}"))?;
+        .map_err(AgentError::spawn)?;
 
     Ok(handle)
 }
@@ -535,19 +597,14 @@ mod tests {
     }
 
     #[test]
-    fn spawn_set_trusted_outside_tokio_runtime_does_not_panic() {
-        // Without an active tokio runtime on this thread, spawn_set_trusted logs a warning and exits cleanly
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let conn = rt.block_on(async {
-            // Build a dummy or local connection
-            zbus::Connection::session().await
-        });
-        if let Ok(conn) = conn {
-            let path = OwnedObjectPath::try_from("/org/bluez/test").unwrap();
-            spawn_set_trusted(conn, path);
-        }
+    fn agent_error_predicates_and_display() {
+        let err = AgentError::spawn(io::Error::other("thread spawn failed"));
+        assert!(err.is_spawn());
+        assert!(matches!(err.kind(), AgentErrorKind::Spawn(_)));
+        assert_eq!(
+            err.summary(),
+            "failed to spawn auto-trust agent thread: thread spawn failed"
+        );
+        assert!(std::error::Error::source(&err).is_some());
     }
 }

@@ -199,9 +199,9 @@ async fn supervisor_shuts_down_on_signal() {
 }
 
 #[test]
-fn spawn_auto_trust_shuts_down_cleanly() {
+fn spawn_auto_trust_with_custom_bus_shuts_down_cleanly() {
     let (_daemon, address) = spawn_private_bus();
-    let handle = spawn_auto_trust_with(AgentCapabilityMode::NoInputNoOutput, move || {
+    let handle = spawn_auto_trust_with(AgentCapabilityMode::DisplayYesNo, move || {
         let addr = address.clone();
         async move {
             zbus::connection::Builder::address(addr.as_str())?
@@ -215,19 +215,21 @@ fn spawn_auto_trust_shuts_down_cleanly() {
 }
 
 #[test]
-fn spawn_auto_trust_with_custom_bus() {
+fn spawn_set_trusted_outside_tokio_runtime_does_not_panic() {
     let (_daemon, address) = spawn_private_bus();
-    let handle = spawn_auto_trust_with(AgentCapabilityMode::DisplayYesNo, move || {
-        let addr = address.clone();
-        async move {
-            zbus::connection::Builder::address(addr.as_str())?
-                .build()
-                .await
-        }
-    })
-    .expect("spawn must succeed");
-    handle.shutdown();
-    std::thread::sleep(Duration::from_millis(50));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let conn = rt.block_on(async {
+        zbus::connection::Builder::address(address.as_str())
+            .expect("valid address")
+            .build()
+            .await
+            .expect("conn")
+    });
+    let path = zbus::zvariant::OwnedObjectPath::try_from("/org/bluez/test").unwrap();
+    bt_manager::agent::spawn_set_trusted(conn, path);
 }
 
 #[tokio::test]
