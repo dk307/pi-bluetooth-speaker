@@ -538,26 +538,14 @@ pub fn build_snapshots(
 
         // Determine the associated BlueZ device path:
         // Priority 1: "Device" object path property on org.bluealsa.PCM1
-        // Priority 2: Map "/org/bluealsa/hciX/dev_XX_..." -> "/org/bluez/hciX/dev_XX_..."
+        // Priority 2: Extract "/org/bluealsa/hciX/dev_XX_..." prefix -> "/org/bluez/hciX/dev_XX_..."
         let dev_path = extract_object_path(pcm_props, "Device").or_else(|| {
-            let s = path.as_str();
-            let stripped = s
-                .strip_suffix("/a2dpsnk/source")
-                .or_else(|| s.strip_suffix("/a2dpsnk/sink"))
-                .or_else(|| s.strip_suffix("/hfphf/source"))
-                .or_else(|| s.strip_suffix("/hfphf/sink"))
-                .or_else(|| s.strip_suffix("/hfp_hf/source"))
-                .or_else(|| s.strip_suffix("/hfp_hf/sink"))
-                .or_else(|| s.strip_suffix("/hsphs/source"))
-                .or_else(|| s.strip_suffix("/hsphs/sink"))
-                .or_else(|| s.strip_suffix("/hsp_hs/source"))
-                .or_else(|| s.strip_suffix("/hsp_hs/sink"))
-                .or_else(|| s.strip_suffix("/sco/source"))
-                .or_else(|| s.strip_suffix("/sco/sink"))
-                .unwrap_or(s);
-            stripped
-                .strip_prefix("/org/bluealsa/")
-                .map(|rest| format!("/org/bluez/{rest}"))
+            let s = path.as_str().strip_prefix("/org/bluealsa/")?;
+            let idx = s.find("/dev_")?;
+            let dev_suffix = &s[idx + 1..];
+            let dev_len = dev_suffix.find('/').unwrap_or(dev_suffix.len());
+            let subpath = &s[..idx + 1 + dev_len];
+            Some(format!("/org/bluez/{subpath}"))
         });
 
         let Some(dev_path) = dev_path else {
