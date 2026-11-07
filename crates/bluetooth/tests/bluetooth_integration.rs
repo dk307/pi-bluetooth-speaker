@@ -2051,25 +2051,28 @@ fn reconciler_build_snapshots_comprehensive_matrix() {
     assert_eq!(snapshots.len(), 2);
 
     let s1 = &snapshots[0];
-    assert_eq!(s1.path, dev1_path);
+    assert_eq!(s1.path.as_ref(), dev1_path);
     assert!(s1.has_bluez_transport);
     assert!(s1.has_bluealsa_pcm);
     assert!(!s1.has_voice_call_pcm);
 
     let s2 = &snapshots[1];
-    assert_eq!(s2.path, dev2_path);
+    assert_eq!(s2.path.as_ref(), dev2_path);
     assert!(!s2.has_bluez_transport);
     assert!(!s2.has_bluealsa_pcm);
     assert!(s2.has_voice_call_pcm);
 }
 
-#[test]
-fn reconciler_session_cap_and_recovery_flow() {
+#[tokio::test]
+async fn reconciler_session_cap_and_recovery_flow() {
     use speaker_bluetooth::reconciler::{
-        BluezDeviceSnapshot, DisconnectReason, ReconcileAction, reconcile_snapshots,
+        BluezDeviceSnapshot, DisconnectReason, MockReconcilerDbus, ReconcileAction,
+        execute_reconcile_actions_with_settle, reconcile_snapshots,
     };
+    use std::time::Duration;
 
-    let dev_path = "/org/bluez/hci1/dev_repeat_fail".to_string();
+    let (mock, _ctrl) = MockReconcilerDbus::new_mocked();
+    let dev_path: Box<str> = "/org/bluez/hci1/dev_repeat_fail".into();
     let mut tracked = HashMap::new();
 
     let divergent_snapshot = BluezDeviceSnapshot {
@@ -2098,6 +2101,8 @@ fn reconciler_session_cap_and_recovery_flow() {
             reason: DisconnectReason::OrphanedBluezTransport,
         }
     );
+    execute_reconcile_actions_with_settle(&mut tracked, &mock, &acts2, Duration::from_millis(1))
+        .await;
     assert_eq!(tracked.get(&dev_path).unwrap().hard_resets_attempted, 1);
 
     // Cycle 2: Tick 3 (divergence 1) -> Tick 4 (Hard reset 2)
@@ -2106,6 +2111,8 @@ fn reconciler_session_cap_and_recovery_flow() {
 
     let acts4 = reconcile_snapshots(&mut tracked, std::slice::from_ref(&divergent_snapshot));
     assert_eq!(acts4.len(), 1);
+    execute_reconcile_actions_with_settle(&mut tracked, &mock, &acts4, Duration::from_millis(1))
+        .await;
     assert_eq!(tracked.get(&dev_path).unwrap().hard_resets_attempted, 2);
 
     // After MAX_HARD_RESETS_PER_SESSION (2): Reconciler must back off
@@ -2126,27 +2133,29 @@ fn reconciler_session_cap_and_recovery_flow() {
 #[tokio::test]
 async fn reconciler_di_spawn_and_lifecycle_integration() {
     use speaker_bluetooth::reconciler::{
-        MockReconcilerDbus, ReconcileAction, TickOutcome, cycle_device_connection,
-        execute_reconcile_actions, reconciler_tick, spawn_bt_transport_reconciler_with,
+        MockReconcilerDbus, ReconcileAction, TickOutcome, cycle_device_connection_with_settle,
+        execute_reconcile_actions_with_settle, reconciler_tick,
     };
+    use speaker_bluetooth::spawn_bt_transport_reconciler_with;
     use std::time::Duration;
 
     let (mock, ctrl) = MockReconcilerDbus::new_mocked();
-    let dev_path = "/org/bluez/hci1/dev_di_test";
+    let dev_path: Box<str> = "/org/bluez/hci1/dev_di_test".into();
+    let mut tracked = std::collections::HashMap::new();
 
-    // 1. Test execute_reconcile_actions and cycle_device_connection with defaults
+    // 1. Test execute_reconcile_actions_with_settle and cycle_device_connection_with_settle
     let actions = vec![ReconcileAction::ConnectA2dpProfile {
-        device_path: dev_path.to_string(),
+        device_path: dev_path.clone(),
     }];
-    execute_reconcile_actions(&mock, &actions).await;
+    execute_reconcile_actions_with_settle(&mut tracked, &mock, &actions, Duration::from_millis(1))
+        .await;
     assert_eq!(ctrl.connect_profile_calls().len(), 1);
 
-    cycle_device_connection(&mock, dev_path).await;
-    assert_eq!(ctrl.disconnect_calls(), vec![dev_path.to_string()]);
-    assert_eq!(ctrl.connect_calls(), vec![dev_path.to_string()]);
+    assert!(cycle_device_connection_with_settle(&mock, &dev_path, Duration::from_millis(1)).await);
+    assert_eq!(ctrl.disconnect_calls(), vec![dev_path.clone()]);
+    assert_eq!(ctrl.connect_calls(), vec![dev_path]);
 
     // 2. Test tick outcome with empty state
-    let mut tracked = std::collections::HashMap::new();
     let outcome = reconciler_tick(&mock, &mut tracked, Duration::from_millis(1)).await;
     assert_eq!(outcome, TickOutcome::ActionsExecuted(0));
 
@@ -2160,4 +2169,130 @@ async fn reconciler_di_spawn_and_lifecycle_integration() {
     handle.abort();
     let join_res = handle.await;
     assert!(join_res.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn reconciler_real_dbus_wire_and_bluealsa_fallback_integration() {
+    use speaker_bluetooth::reconciler::{ReconcilerDbus, UUID_A2DP_SOURCE, fetch_bluealsa_objects};
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeDeviceCalls {
+        profiles: Arc<Mutex<Vec<String>>>,
+        disconnected: Arc<Mutex<u32>>,
+        connected: Arc<Mutex<u32>>,
+    }
+
+    struct FakeDevice1 {
+        calls: FakeDeviceCalls,
+    }
+
+    #[zbus::interface(name = "org.bluez.Device1")]
+    impl FakeDevice1 {
+        fn connect_profile(&self, uuid: &str) {
+            self.calls.profiles.lock().unwrap().push(uuid.to_string());
+        }
+        fn disconnect(&self) {
+            *self.calls.disconnected.lock().unwrap() += 1;
+        }
+        fn connect(&self) {
+            *self.calls.connected.lock().unwrap() += 1;
+        }
+    }
+
+    let mut daemon = Command::new("dbus-daemon")
+        .args(["--session", "--nofork", "--print-address=1"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("dbus-daemon must be installed");
+    let mut address = String::new();
+    BufReader::new(daemon.stdout.take().expect("daemon stdout"))
+        .read_line(&mut address)
+        .expect("read bus address");
+    let address = address.trim().to_string();
+    let _guard = KillOnDrop(daemon);
+
+    let calls = FakeDeviceCalls::default();
+    let dev_path = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF";
+
+    // 1. Export org.bluez with ObjectManager at "/" and FakeDevice1 at dev_path
+    let _bluez_conn = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .name("org.bluez")
+        .unwrap()
+        .serve_at("/", zbus::fdo::ObjectManager)
+        .unwrap()
+        .serve_at(
+            dev_path,
+            FakeDevice1 {
+                calls: calls.clone(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    // 2. Export org.bluealsa with ObjectManager ONLY at "/" (NOT at "/org/bluealsa")
+    // to exercise the /org/bluealsa -> UnknownObject -> "/" fallback path!
+    let bluealsa_conn = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .name("org.bluealsa")
+        .unwrap()
+        .serve_at("/", zbus::fdo::ObjectManager)
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let client_conn = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    // Exercise ReconcilerDbus for zbus::Connection:
+    // fetch_bluez_objects
+    let bluez_objs = client_conn.fetch_bluez_objects().await.unwrap();
+    assert!(bluez_objs.contains_key(&OwnedObjectPath::try_from(dev_path).unwrap()));
+
+    // fetch_bluealsa_objects fallback from /org/bluealsa to /
+    let bluealsa_objs = client_conn.fetch_bluealsa_objects().await.unwrap();
+    assert!(bluealsa_objs.is_empty());
+    let direct_objs = fetch_bluealsa_objects(&client_conn).await.unwrap();
+    assert!(direct_objs.is_empty());
+
+    // Now also mount ObjectManager at /org/bluealsa and verify primary path succeeds
+    bluealsa_conn
+        .object_server()
+        .at("/org/bluealsa", zbus::fdo::ObjectManager)
+        .await
+        .unwrap();
+    let primary_objs = client_conn.fetch_bluealsa_objects().await.unwrap();
+    assert!(primary_objs.is_empty());
+
+    // Exercise connect_profile, disconnect, connect over the wire
+    client_conn
+        .connect_profile(dev_path, UUID_A2DP_SOURCE)
+        .await
+        .unwrap();
+    client_conn.disconnect(dev_path).await.unwrap();
+    client_conn.connect(dev_path).await.unwrap();
+
+    assert_eq!(
+        *calls.profiles.lock().unwrap(),
+        vec![UUID_A2DP_SOURCE.to_string()]
+    );
+    assert_eq!(*calls.disconnected.lock().unwrap(), 1);
+    assert_eq!(*calls.connected.lock().unwrap(), 1);
 }
