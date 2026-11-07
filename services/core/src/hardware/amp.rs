@@ -678,6 +678,29 @@ pub struct AmpStatus {
     pub latched_errors: AmpErrorFlags,
 }
 
+impl AmpStatus {
+    /// Decodes a 6-byte register snapshot read from
+    /// `[REG_ERROR_LIVE, REG_ERROR_ACC, REG_POWER_MODE, REG_DCU_MON0, REG_DCU_MON1, REG_AUDIO_IN]`.
+    #[must_use]
+    pub const fn from_raw_registers(regs: [u8; 6]) -> Self {
+        let [live_err, acc_err, pwr_mode, dcu0, dcu1, audio_in] = regs;
+        Self {
+            power_mode: PowerModeProfile::from_raw(pwr_mode),
+            audio_in: AudioInConfig::from_raw(audio_in),
+            dcu_monitor: DcuMonitor::from_raw(dcu0, dcu1),
+            live_errors: AmpErrorFlags::from_bits(live_err),
+            latched_errors: AmpErrorFlags::from_bits(acc_err),
+        }
+    }
+
+    /// Computes the three-step rising-edge register value sequence (`low -> high -> low`)
+    /// on bit 2 (`0x04`) of `REG_EH_CLEAR` (register `0x2D`) required to clear latched faults.
+    #[must_use]
+    pub const fn eh_clear_pulse_sequence(cur: u8) -> [u8; 3] {
+        [cur & !0x04, cur | 0x04, cur & !0x04]
+    }
+}
+
 impl Display for AmpStatus {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         writeln!(f, "Power Mode Profile    : {}", self.power_mode)?;
@@ -1085,30 +1108,35 @@ impl HardwareDevice {
         Ok(())
     }
 
-    fn read_status(&mut self) -> Result<AmpStatus, AmpError> {
-        let live_err = self.read_reg(REG_ERROR_LIVE)?;
-        let acc_err = self.read_reg(REG_ERROR_ACC)?;
-        let pwr_mode = self.read_reg(REG_POWER_MODE)?;
-        let dcu0 = self.read_reg(REG_DCU_MON0)?;
-        let dcu1 = self.read_reg(REG_DCU_MON1)?;
-        let audio_in = self.read_reg(REG_AUDIO_IN)?;
+    fn read_regs<const N: usize>(&mut self, regs: [u8; N]) -> Result<[u8; N], AmpError> {
+        let mut out = [0u8; N];
+        for (slot, reg) in out.iter_mut().zip(regs) {
+            *slot = self.read_reg(reg)?;
+        }
+        Ok(out)
+    }
 
-        Ok(AmpStatus {
-            power_mode: PowerModeProfile::from_raw(pwr_mode),
-            audio_in: AudioInConfig::from_raw(audio_in),
-            dcu_monitor: DcuMonitor::from_raw(dcu0, dcu1),
-            live_errors: AmpErrorFlags::from_bits(live_err),
-            latched_errors: AmpErrorFlags::from_bits(acc_err),
-        })
+    fn read_status(&mut self) -> Result<AmpStatus, AmpError> {
+        const STATUS_REGISTERS: [u8; 6] = [
+            REG_ERROR_LIVE,
+            REG_ERROR_ACC,
+            REG_POWER_MODE,
+            REG_DCU_MON0,
+            REG_DCU_MON1,
+            REG_AUDIO_IN,
+        ];
+        Ok(AmpStatus::from_raw_registers(
+            self.read_regs(STATUS_REGISTERS)?,
+        ))
     }
 
     fn clear_latched_errors(&mut self) -> Result<(), AmpError> {
         let cur = self.read_reg(REG_EH_CLEAR)?;
         // Drive clear bit low first, then high, then low to guarantee a rising edge transition
         // regardless of initial bit state.
-        self.write_reg(REG_EH_CLEAR, cur & !0x04)?;
-        self.write_reg(REG_EH_CLEAR, cur | 0x04)?;
-        self.write_reg(REG_EH_CLEAR, cur & !0x04)?;
+        for val in AmpStatus::eh_clear_pulse_sequence(cur) {
+            self.write_reg(REG_EH_CLEAR, val)?;
+        }
         Ok(())
     }
 

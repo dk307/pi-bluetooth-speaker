@@ -262,6 +262,46 @@ pub fn run_ui_display_on_path(
     }
 }
 
+/// Unblanks the display (logging a warning on failure) and initializes the
+/// Slint software platform window on `fb`.
+#[cfg(feature = "ui")]
+fn unblank_and_init_platform(fb: &mut Framebuffer) -> Option<Rc<MinimalSoftwareWindow>> {
+    if let Err(e) = fb.unblank() {
+        report_display(tracing::Level::WARN, "Failed to unblank display", &e);
+    }
+    match fb.init_platform() {
+        Ok(win) => Some(win),
+        Err(e) => {
+            report_display(tracing::Level::ERROR, "Failed to initialize platform", &e);
+            None
+        }
+    }
+}
+
+/// Renders the initial frame of `window` to `fb`, logging the outcome and returning
+/// `true` on success or `false` if the framebuffer blit failed.
+#[cfg(feature = "ui")]
+fn render_initial_frame(
+    fb: &mut Framebuffer,
+    window: &Rc<MinimalSoftwareWindow>,
+    label: &str,
+) -> bool {
+    match fb.render_frame(window) {
+        Ok(true) => {
+            tracing::info!("{label} rendered to /dev/fb0 successfully");
+            true
+        }
+        Ok(false) => {
+            tracing::debug!("Screen buffer already current");
+            true
+        }
+        Err(e) => {
+            report_display(tracing::Level::ERROR, "Failed to render frame", &e);
+            false
+        }
+    }
+}
+
 /// Runs the common UI component lifecycle on an opened framebuffer backend.
 #[cfg(feature = "ui")]
 pub fn run_ui_lifecycle<C, F>(
@@ -272,16 +312,8 @@ pub fn run_ui_lifecycle<C, F>(
 ) where
     F: FnOnce() -> Result<C, Box<dyn std::error::Error>>,
 {
-    if let Err(e) = fb.unblank() {
-        report_display(tracing::Level::WARN, "Failed to unblank display", &e);
-    }
-
-    let window = match fb.init_platform() {
-        Ok(win) => win,
-        Err(e) => {
-            report_display(tracing::Level::ERROR, "Failed to initialize platform", &e);
-            return;
-        }
+    let Some(window) = unblank_and_init_platform(fb) else {
+        return;
     };
 
     let _component = match setup() {
@@ -296,17 +328,8 @@ pub fn run_ui_lifecycle<C, F>(
         }
     };
 
-    match fb.render_frame(&window) {
-        Ok(true) => {
-            tracing::info!("{label} rendered to /dev/fb0 successfully");
-        }
-        Ok(false) => {
-            tracing::debug!("Screen buffer already current");
-        }
-        Err(e) => {
-            report_display(tracing::Level::ERROR, "Failed to render frame", &e);
-            return;
-        }
+    if !render_initial_frame(fb, &window, label) {
+        return;
     }
 
     let start = Instant::now();
@@ -340,6 +363,97 @@ fn apply_check_update(splash: &SplashScreen, update: &BootCheckUpdate) {
 /// appliance boot indefinitely.
 const MAX_SPLASH_WAIT: Duration = Duration::from_secs(30);
 
+/// Initializes and shows the [`SplashScreen`], applying an optional startup theme.
+#[cfg(feature = "ui")]
+fn init_splash_screen(theme: Option<crate::ui::ThemePreset>) -> Option<SplashScreen> {
+    let splash = match SplashScreen::new() {
+        Ok(splash) => splash,
+        Err(e) => {
+            report_display(
+                tracing::Level::ERROR,
+                "Failed to initialize Boot splash screen",
+                &e,
+            );
+            return None;
+        }
+    };
+    if let Some(t) = theme {
+        t.apply_splash(&splash);
+    }
+    if let Err(e) = splash.show() {
+        report_display(
+            tracing::Level::WARN,
+            "Failed to show Boot splash screen",
+            &e,
+        );
+        return None;
+    }
+    Some(splash)
+}
+
+/// Drains all currently queued boot-check updates from `rx` into `splash`,
+/// returning `true` once the sender has disconnected (all checks settled).
+#[cfg(feature = "ui")]
+fn drain_boot_updates(
+    splash: &SplashScreen,
+    rx: &std::sync::mpsc::Receiver<BootCheckUpdate>,
+) -> bool {
+    loop {
+        match rx.try_recv() {
+            Ok(update) => apply_check_update(splash, &update),
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => return true,
+        }
+    }
+}
+
+/// Pumps splash frames until all boot checks finish, `deadline` expires, or rendering fails.
+#[cfg(feature = "ui")]
+fn pump_splash_frames(
+    fb: &mut Framebuffer,
+    window: &Rc<MinimalSoftwareWindow>,
+    splash: &SplashScreen,
+    rx: &std::sync::mpsc::Receiver<BootCheckUpdate>,
+    deadline: Duration,
+    mut checks_done: bool,
+) -> bool {
+    if !render_initial_frame(fb, window, "Boot splash screen") {
+        return checks_done;
+    }
+
+    let start = Instant::now();
+    tracing::info!("Running UI render loop");
+
+    loop {
+        checks_done |= drain_boot_updates(splash, rx);
+        slint::platform::update_timers_and_animations();
+        if let Err(e) = fb.render_frame(window) {
+            report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
+            break;
+        }
+        if checks_done || start.elapsed() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    checks_done
+}
+
+/// Joins the `boot-checks` worker when `checks_done` is true (re-raising any worker
+/// panic via `resume_unwind`), or logs a warning and abandons a hung worker.
+#[cfg(feature = "ui")]
+fn finish_boot_worker(checks: Option<std::thread::JoinHandle<()>>, checks_done: bool) {
+    if checks_done {
+        if let Some(handle) = checks {
+            if let Err(err) = handle.join() {
+                std::panic::resume_unwind(err);
+            }
+        }
+    } else {
+        tracing::warn!("Boot checks did not finish within the splash window; abandoning worker");
+    }
+}
+
 /// Runs the splash lifecycle against an opened framebuffer backend.
 ///
 /// Boot checks run on a background thread; the render loop drains their
@@ -359,40 +473,12 @@ pub fn run_splash_on(
     preview_secs: Option<u64>,
     theme: Option<crate::ui::ThemePreset>,
 ) {
-    if let Err(e) = fb.unblank() {
-        report_display(tracing::Level::WARN, "Failed to unblank display", &e);
-    }
-
-    let window = match fb.init_platform() {
-        Ok(win) => win,
-        Err(e) => {
-            report_display(tracing::Level::ERROR, "Failed to initialize platform", &e);
-            return;
-        }
-    };
-
-    let splash = match SplashScreen::new() {
-        Ok(splash) => splash,
-        Err(e) => {
-            report_display(
-                tracing::Level::ERROR,
-                "Failed to initialize Boot splash screen",
-                &e,
-            );
-            return;
-        }
-    };
-    if let Some(t) = theme {
-        t.apply_splash(&splash);
-    }
-    if let Err(e) = splash.show() {
-        report_display(
-            tracing::Level::WARN,
-            "Failed to show Boot splash screen",
-            &e,
-        );
+    let Some(window) = unblank_and_init_platform(fb) else {
         return;
-    }
+    };
+    let Some(splash) = init_splash_screen(theme) else {
+        return;
+    };
 
     let (tx, rx) = std::sync::mpsc::channel::<BootCheckUpdate>();
     // Graceful degradation instead of a panic (M-PANIC-IS-STOP): if the worker
@@ -408,63 +494,11 @@ pub fn run_splash_on(
             None
         }
     };
-    let mut checks_done = checks.is_none();
-
-    'render: {
-        match fb.render_frame(&window) {
-            Ok(true) => {
-                tracing::info!("Boot splash screen rendered to /dev/fb0 successfully");
-            }
-            Ok(false) => {
-                tracing::debug!("Screen buffer already current");
-            }
-            Err(e) => {
-                report_display(tracing::Level::ERROR, "Failed to render frame", &e);
-                break 'render;
-            }
-        }
-
-        let start = Instant::now();
-        // Hard upper bound: without a preview window the splash may still not
-        // wait forever on a hung hardware probe (blocking D-Bus/I2C calls).
-        let deadline = preview_secs.map_or(MAX_SPLASH_WAIT, Duration::from_secs);
-        tracing::info!("Running UI render loop");
-
-        loop {
-            loop {
-                match rx.try_recv() {
-                    Ok(update) => apply_check_update(&splash, &update),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        checks_done = true;
-                        break;
-                    }
-                }
-            }
-
-            slint::platform::update_timers_and_animations();
-            if let Err(e) = fb.render_frame(&window) {
-                report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
-                break;
-            }
-
-            if checks_done || start.elapsed() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(16));
-        }
-    }
-
-    if checks_done {
-        if let Some(handle) = checks {
-            if let Err(err) = handle.join() {
-                std::panic::resume_unwind(err);
-            }
-        }
-    } else {
-        tracing::warn!("Boot checks did not finish within the splash window; abandoning worker");
-    }
-
+    // Hard upper bound: without a preview window the splash may still not
+    // wait forever on a hung hardware probe (blocking D-Bus/I2C calls).
+    let deadline = preview_secs.map_or(MAX_SPLASH_WAIT, Duration::from_secs);
+    let checks_done = pump_splash_frames(fb, &window, &splash, &rx, deadline, checks.is_none());
+    finish_boot_worker(checks, checks_done);
     tracing::info!("Splash render loop finished");
 }
 
@@ -782,31 +816,31 @@ pub fn publish_playback_state(
     }
 }
 
-/// Runs on the dedicated `bt-monitor` thread until `running` is cleared.
-/// Panics here are re-raised by the render loop's `join()` so a dead monitor
-/// fails the daemon instead of leaving the playback UI silently stale.
+/// Signal-driven keep-alive interval when idle or paused.
 #[cfg(feature = "ui")]
-fn bt_monitor_loop(
-    bt: &crate::hardware::BluetoothDevice,
-    shared: &Mutex<BtSharedUpdate>,
-    commands: &crate::hardware::TransportCommandQueue,
-    running: &AtomicBool,
-) {
-    // Signal-driven wait with a keep-alive fallback: PropertiesChanged
-    // signals wake the loop immediately (via the shared ChangeFlag); the
-    // deadline guarantees periodic re-poll even if the D-Bus listener
-    // thread dies. Slices cap command latency while waiting.
-    const BT_KEEP_ALIVE: Duration = Duration::from_secs(1);
-    /// Refresh cadence while playing, matching the old adaptive poll interval.
-    const BT_PLAYING_POLL: Duration = Duration::from_millis(250);
-    const BT_WAIT_SLICE: Duration = Duration::from_millis(100);
-    let mut last_pb: Option<crate::hardware::BtPlaybackState> = None;
-    let mut last_pcms: Option<Box<[crate::hardware::BlueAlsaPcm]>> = None;
-    let mut cover = CoverState::default();
-    let mut settle: Option<SettleWindow> = None;
+const BT_KEEP_ALIVE: Duration = Duration::from_secs(1);
+/// Refresh cadence while playing, matching the old adaptive poll interval.
+#[cfg(feature = "ui")]
+const BT_PLAYING_POLL: Duration = Duration::from_millis(250);
+/// Maximum wait slice per signal poll so queued transport commands are drained promptly.
+#[cfg(feature = "ui")]
+const BT_WAIT_SLICE: Duration = Duration::from_millis(100);
 
-    while running.load(Ordering::Relaxed) {
-        let drained = commands.drain();
+/// Host-testable state machine for the `bt-monitor` worker loop.
+#[cfg(feature = "ui")]
+#[derive(Debug, Default)]
+struct BtMonitorState {
+    last_pb: Option<crate::hardware::BtPlaybackState>,
+    last_pcms: Option<Box<[crate::hardware::BlueAlsaPcm]>>,
+    cover: CoverState,
+    settle: Option<SettleWindow>,
+}
+
+#[cfg(feature = "ui")]
+impl BtMonitorState {
+    /// Arms the optimistic-UI [`SettleWindow`] when a command batch contains a
+    /// `TogglePlayPause` or `Seek` command.
+    fn arm_settle_for_batch(&mut self, drained: &[crate::hardware::TransportCommand]) {
         // Play/pause flips the shell's status indicator and seek scrubs the
         // progress bar, both optimistically ahead of peer confirmation. A
         // snapshot fetched immediately after either command can still carry
@@ -824,7 +858,7 @@ fn bt_monitor_loop(
         if toggle || seek.is_some() {
             // A toggle arm wins when both land in one batch: the status flip is
             // the more visible artifact, and a same-batch seek is rare.
-            settle = last_pb.as_ref().map(|pre| SettleWindow {
+            self.settle = self.last_pb.as_ref().map(|pre| SettleWindow {
                 kind: if toggle {
                     SettleKind::Toggle {
                         pre_playing: pre.is_playing(),
@@ -837,55 +871,54 @@ fn bt_monitor_loop(
                 started: Instant::now(),
             });
         }
-        for command in drained {
-            // A failed command is logged (never silently dropped) so operators can
-            // diagnose why the authoritative state failed to reconcile the
-            // optimistic UI flip; the next authoritative publish corrects the UI.
-            if let Err(e) = match command {
-                crate::hardware::TransportCommand::TogglePlayPause => {
-                    bt.player_toggle().map(|_| ())
-                }
-                crate::hardware::TransportCommand::NextTrack => bt.player_next(),
-                crate::hardware::TransportCommand::PreviousTrack => bt.player_previous(),
-                crate::hardware::TransportCommand::Seek(pos) => bt.player_seek(pos),
-            } {
-                tracing::warn!(error = %e, "Bluetooth transport command failed");
-            }
+    }
+
+    /// Executes a single [`crate::hardware::TransportCommand`] against `bt`,
+    /// logging a warning on failure.
+    fn execute_command(
+        bt: &crate::hardware::BluetoothDevice,
+        command: crate::hardware::TransportCommand,
+    ) {
+        // A failed command is logged (never silently dropped) so operators can
+        // diagnose why the authoritative state failed to reconcile the
+        // optimistic UI flip; the next authoritative publish corrects the UI.
+        if let Err(e) = match command {
+            crate::hardware::TransportCommand::TogglePlayPause => bt.player_toggle().map(|_| ()),
+            crate::hardware::TransportCommand::NextTrack => bt.player_next(),
+            crate::hardware::TransportCommand::PreviousTrack => bt.player_previous(),
+            crate::hardware::TransportCommand::Seek(pos) => bt.player_seek(pos),
+        } {
+            tracing::warn!(error = %e, "Bluetooth transport command failed");
         }
+    }
 
-        // A command queued between the drain and the snapshot query would make
-        // the query execute a stale pre-command publish; skip the query so the
-        // fresh command is executed first and the next tick reads post-command
-        // state.
-        if !commands.is_empty() {
-            continue;
-        }
-
-        let mut update = BtSharedUpdate::default();
-
-        // Publish the authoritative state; transient D-Bus errors keep the last
-        // published state instead of flashing the placeholder over live playback.
-        publish_playback_state(bt, &mut update, &mut last_pb, &mut cover, &mut settle);
+    /// Queries `bt.audio_pcms()` and stages any PCM change into `update`.
+    fn publish_audio_pcms(
+        &mut self,
+        bt: &crate::hardware::BluetoothDevice,
+        update: &mut BtSharedUpdate,
+    ) {
         if let Ok(ref pcms) = bt.audio_pcms() {
-            if last_pcms.as_ref() != Some(pcms) {
+            if self.last_pcms.as_ref() != Some(pcms) {
                 if let Some(active) = pcms.iter().find(|p| p.running).or_else(|| pcms.first()) {
                     update.pcm = Some(active.clone());
                 }
-                last_pcms = Some(pcms.clone());
+                self.last_pcms = Some(pcms.clone());
             }
         }
+    }
 
-        // A command that landed while the blocking snapshot query ran must not
-        // merge a pre-command snapshot. The query already advanced the dedup
-        // state, so it is reset here to force a full re-publish on the next
-        // tick (after the fresh commands are executed).
-        if !commands.is_empty() {
-            last_pb = None;
-            cover.path = None;
-            last_pcms = None;
-            continue;
-        }
+    /// Resets dedup state when a new command arrives mid-query so the next tick
+    /// performs a full authoritative publish after executing the fresh command.
+    fn reset_dedup(&mut self) {
+        self.last_pb = None;
+        self.cover.path = None;
+        self.last_pcms = None;
+    }
 
+    /// Merges non-empty delta fields from `update` into `shared`, recovering from
+    /// a poisoned mutex guard.
+    fn commit_update(shared: &Mutex<BtSharedUpdate>, update: BtSharedUpdate) {
         if update.playback.is_some() || update.pcm.is_some() || update.cover.is_some() {
             // A poisoned mutex is recovered (not silently dropped): the snapshot
             // was already computed and the dedup state advanced, so losing it
@@ -904,19 +937,91 @@ fn bt_monitor_loop(
                 lock.cover = update.cover;
             }
         }
+    }
 
+    /// Runs one command-drain + state-query + shared-publish cycle, returning
+    /// `true` if a full snapshot poll completed or `false` if a newly queued
+    /// command interrupted the tick and should be drained immediately.
+    fn poll_tick(
+        &mut self,
+        bt: &crate::hardware::BluetoothDevice,
+        shared: &Mutex<BtSharedUpdate>,
+        commands: &crate::hardware::TransportCommandQueue,
+    ) -> bool {
+        let drained = commands.drain();
+        self.arm_settle_for_batch(&drained);
+        for command in drained {
+            Self::execute_command(bt, command);
+        }
+
+        // A command queued between the drain and the snapshot query would make
+        // the query execute a stale pre-command publish; skip the query so the
+        // fresh command is executed first and the next tick reads post-command
+        // state.
+        if !commands.is_empty() {
+            return false;
+        }
+
+        let mut update = BtSharedUpdate::default();
+        // Publish the authoritative state; transient D-Bus errors keep the last
+        // published state instead of flashing the placeholder over live playback.
+        publish_playback_state(
+            bt,
+            &mut update,
+            &mut self.last_pb,
+            &mut self.cover,
+            &mut self.settle,
+        );
+        self.publish_audio_pcms(bt, &mut update);
+
+        // A command that landed while the blocking snapshot query ran must not
+        // merge a pre-command snapshot. The query already advanced the dedup
+        // state, so it is reset here to force a full re-publish on the next
+        // tick (after the fresh commands are executed).
+        if !commands.is_empty() {
+            self.reset_dedup();
+            return false;
+        }
+
+        Self::commit_update(shared, update);
+        true
+    }
+
+    /// Returns the adaptive keep-alive poll cadence based on whether playback is active.
+    fn keep_alive_interval(&self) -> Duration {
         // BlueZ does not reliably re-emit AVRCP Position during playback, so the
         // keep-alive doubles as the progress refresh: shorten it while playing
         // so the position bar advances in ~250 ms steps instead of 1 s jumps.
-        let keep_alive = if last_pb
+        if self
+            .last_pb
             .as_ref()
             .is_some_and(crate::hardware::BtPlaybackState::is_playing)
         {
             BT_PLAYING_POLL
         } else {
             BT_KEEP_ALIVE
-        };
-        let deadline = Instant::now() + keep_alive;
+        }
+    }
+}
+
+/// Runs on the dedicated `bt-monitor` thread until `running` is cleared.
+/// Panics here are re-raised by the render loop's `join()` so a dead monitor
+/// fails the daemon instead of leaving the playback UI silently stale.
+#[cfg(feature = "ui")]
+fn bt_monitor_loop(
+    bt: &crate::hardware::BluetoothDevice,
+    shared: &Mutex<BtSharedUpdate>,
+    commands: &crate::hardware::TransportCommandQueue,
+    running: &AtomicBool,
+) {
+    let mut state = BtMonitorState::default();
+
+    while running.load(Ordering::Relaxed) {
+        if !state.poll_tick(bt, shared, commands) {
+            continue;
+        }
+
+        let deadline = Instant::now() + state.keep_alive_interval();
         while running.load(Ordering::Relaxed) && Instant::now() < deadline {
             let slice = deadline
                 .saturating_duration_since(Instant::now())
@@ -924,8 +1029,7 @@ fn bt_monitor_loop(
             // A `true` return means a PropertiesChanged signal arrived: breaking
             // out re-polls immediately so track/status/position changes surface
             // without waiting for the remaining keep-alive window.
-            let signaled = bt.wait_for_property_change(slice);
-            if signaled || !commands.is_empty() {
+            if bt.wait_for_property_change(slice) || !commands.is_empty() {
                 break;
             }
         }
@@ -1185,16 +1289,8 @@ pub fn run_shell_on(
     tab: Option<i32>,
     marquee_fps: u32,
 ) {
-    if let Err(e) = fb.unblank() {
-        report_display(tracing::Level::WARN, "Failed to unblank display", &e);
-    }
-
-    let window = match fb.init_platform() {
-        Ok(win) => win,
-        Err(e) => {
-            report_display(tracing::Level::ERROR, "Failed to initialize platform", &e);
-            return;
-        }
+    let Some(window) = unblank_and_init_platform(fb) else {
+        return;
     };
 
     let main_window = match MainWindow::new() {
@@ -1229,11 +1325,9 @@ pub fn run_shell_on(
         return;
     }
 
-    if let Err(e) = fb.render_frame(&window) {
-        report_display(tracing::Level::ERROR, "Failed to render frame", &e);
+    if !render_initial_frame(fb, &window, "UI Shell") {
         return;
     }
-    tracing::info!("UI Shell rendered to /dev/fb0 successfully");
 
     run_render_loop(fb, &window, &shell, bt.as_ref(), &commands, preview_secs);
 }
@@ -1483,5 +1577,91 @@ mod tests {
             "cover must clear on disconnect"
         );
         assert!(cover.path.is_none());
+    }
+
+    #[test]
+    fn bt_monitor_state_commands_settle_and_commit() {
+        use crate::hardware::{TransportCommand, TransportCommandQueue};
+
+        let (bt, mock) = BluetoothDevice::new_mocked();
+        let shared = Mutex::new(BtSharedUpdate::default());
+        let commands = TransportCommandQueue::new();
+        let mut state = BtMonitorState::default();
+
+        // Initial tick populates last_pb, last_pcms, and shared state.
+        assert!(state.poll_tick(&bt, &shared, &commands));
+        assert!(state.last_pb.is_some());
+        assert_eq!(state.keep_alive_interval(), BT_PLAYING_POLL);
+        assert!(shared.lock().unwrap().playback.is_some());
+        assert!(shared.lock().unwrap().pcm.is_some());
+
+        // Arm seek settle window, then toggle settle window, and exercise all commands.
+        commands.push(TransportCommand::Seek(45_000));
+        assert!(state.poll_tick(&bt, &shared, &commands));
+        assert!(matches!(
+            state.settle.as_ref().map(|s| &s.kind),
+            Some(SettleKind::Seek { target_ms: 45_000 })
+        ));
+
+        commands.push(TransportCommand::TogglePlayPause);
+        commands.push(TransportCommand::NextTrack);
+        commands.push(TransportCommand::PreviousTrack);
+        assert!(state.poll_tick(&bt, &shared, &commands));
+        assert!(matches!(
+            state.settle.as_ref().map(|s| &s.kind),
+            Some(SettleKind::Toggle { .. })
+        ));
+        assert_eq!(state.keep_alive_interval(), BT_KEEP_ALIVE);
+
+        // Fault injection on transport commands logs warning without panicking.
+        mock.set_fault(Some("dbus transport fault".into()));
+        commands.push(TransportCommand::NextTrack);
+        assert!(state.poll_tick(&bt, &shared, &commands));
+        mock.set_fault(None);
+
+        // Reset dedup helper clears cached snapshots.
+        state.reset_dedup();
+        assert!(state.last_pb.is_none());
+        assert!(state.last_pcms.is_none());
+        assert!(state.cover.path.is_none());
+
+        // Poisoned mutex recovery in commit_update.
+        let poisoned = Arc::new(Mutex::new(BtSharedUpdate::default()));
+        let p_clone = Arc::clone(&poisoned);
+        let _ = std::thread::spawn(move || {
+            let _guard = p_clone.lock().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+        BtMonitorState::commit_update(
+            &poisoned,
+            BtSharedUpdate {
+                playback: Some(playback(None, false)),
+                pcm: None,
+                cover: Some(None),
+            },
+        );
+        let recovered = poisoned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(recovered.playback.is_some());
+        assert!(recovered.cover.is_some());
+    }
+
+    #[test]
+    fn finish_boot_worker_abandons_or_joins() {
+        // Hung / unfinished worker path (`checks_done == false`).
+        finish_boot_worker(None, false);
+
+        // Normal worker completion path (`checks_done == true`).
+        let ok_handle = std::thread::spawn(|| {});
+        finish_boot_worker(Some(ok_handle), true);
+
+        // Worker panic propagation path (`M-PANIC-ON-BUG`).
+        let panic_handle = std::thread::spawn(|| panic!("boot worker panic"));
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            finish_boot_worker(Some(panic_handle), true);
+        }));
+        assert!(res.is_err(), "worker panic must be re-raised");
     }
 }

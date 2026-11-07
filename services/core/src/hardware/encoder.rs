@@ -781,28 +781,16 @@ impl HardwareDevice {
     fn new() -> Result<Self, EncoderError> {
         let claim = HardwareClaim::acquire()?;
         let gpio = Gpio::new()?;
+        Self::init_peripherals(claim, &gpio)
+    }
 
-        let mut led_red = gpio.get(ENCODER_LED_RED_BCM_GPIO_PIN)?.into_output();
-        let mut led_green = gpio.get(ENCODER_LED_GREEN_BCM_GPIO_PIN)?.into_output();
-        let mut led_blue = gpio.get(ENCODER_LED_BLUE_BCM_GPIO_PIN)?.into_output();
-
-        // Common-anode ring: logic HIGH drives all channels OFF at construction.
-        led_red.set_high();
-        led_green.set_high();
-        led_blue.set_high();
-
-        let led = CommonAnodeLED::new(
-            HalOutputPinAdapter(led_red),
-            HalOutputPinAdapter(led_green),
-            HalOutputPinAdapter(led_blue),
-        );
-
+    fn init_peripherals(claim: HardwareClaim, gpio: &Gpio) -> Result<Self, EncoderError> {
+        let led = Self::init_led(gpio)?;
         let shared = install_or_reuse_shared(Arc::new(SharedEncoderState::default()));
-
         let quadrature_decoder = QuadratureDecoder::new(
             "ec12",
             None,
-            &gpio,
+            gpio,
             EncoderConfig::new(
                 ENCODER_PHASE_A_BCM_GPIO_PIN,
                 ENCODER_PHASE_B_BCM_GPIO_PIN,
@@ -810,7 +798,40 @@ impl HardwareDevice {
             ),
             rotation_interrupt_callback,
         )?;
+        let push_switch = Self::init_push_switch(gpio, &shared)?;
 
+        Ok(Self {
+            shared,
+            _push_switch: push_switch,
+            led,
+            led_color: RgbColor::OFF,
+            _quadrature_decoder: quadrature_decoder,
+            _claim: claim,
+        })
+    }
+
+    fn init_high_output(
+        gpio: &Gpio,
+        pin: u8,
+    ) -> Result<HalOutputPinAdapter<OutputPin>, EncoderError> {
+        let mut out = gpio.get(pin)?.into_output();
+        // Common-anode ring: logic HIGH drives channel OFF at construction.
+        out.set_high();
+        Ok(HalOutputPinAdapter(out))
+    }
+
+    fn init_led(gpio: &Gpio) -> Result<RgbIndicatorLed, EncoderError> {
+        Ok(CommonAnodeLED::new(
+            Self::init_high_output(gpio, ENCODER_LED_RED_BCM_GPIO_PIN)?,
+            Self::init_high_output(gpio, ENCODER_LED_GREEN_BCM_GPIO_PIN)?,
+            Self::init_high_output(gpio, ENCODER_LED_BLUE_BCM_GPIO_PIN)?,
+        ))
+    }
+
+    fn init_push_switch(
+        gpio: &Gpio,
+        shared: &Arc<SharedEncoderState>,
+    ) -> Result<InputPin, EncoderError> {
         let mut push_switch = gpio
             .get(ENCODER_PUSH_SW_BCM_GPIO_PIN)?
             .into_input_pulldown();
@@ -821,7 +842,7 @@ impl HardwareDevice {
         // release edge would dedupe against the stale seeded level).
         // apply_switch_level dedupes, so a callback event that lands before
         // the seed makes the seed a harmless no-op.
-        let switch_shared = Arc::clone(&shared);
+        let switch_shared = Arc::clone(shared);
         push_switch.set_async_interrupt(
             Trigger::Both,
             Some(SWITCH_DEBOUNCE),
@@ -833,16 +854,8 @@ impl HardwareDevice {
         // Seed the initial switch level through the transition counter so a
         // switch held at initialization records a matching press_count instead
         // of leaving the cumulative press/release totals offset by one.
-        apply_switch_level(&shared, push_switch.is_high());
-
-        Ok(Self {
-            shared,
-            _push_switch: push_switch,
-            led,
-            led_color: RgbColor::OFF,
-            _quadrature_decoder: quadrature_decoder,
-            _claim: claim,
-        })
+        apply_switch_level(shared, push_switch.is_high());
+        Ok(push_switch)
     }
 
     #[expect(
