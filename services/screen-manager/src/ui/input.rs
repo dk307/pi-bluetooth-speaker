@@ -578,6 +578,15 @@ impl Default for TouchCalibration {
 }
 
 impl TouchCalibration {
+    /// Returns true if all axis limit coordinates are finite numbers.
+    #[must_use]
+    pub fn is_finite(&self) -> bool {
+        self.min_x.is_finite()
+            && self.max_x.is_finite()
+            && self.min_y.is_finite()
+            && self.max_y.is_finite()
+    }
+
     /// Normalizes raw digitizer coordinates into logical screen pixels.
     #[must_use]
     pub fn map_to_screen(
@@ -587,6 +596,10 @@ impl TouchCalibration {
         screen_w: f32,
         screen_h: f32,
     ) -> (f32, f32) {
+        if !self.is_finite() || !screen_w.is_finite() || !screen_h.is_finite() {
+            return (0.0, 0.0);
+        }
+
         let (x_in, y_in) = if self.swap_xy {
             (raw_y as f32, raw_x as f32)
         } else {
@@ -649,7 +662,9 @@ impl TouchDecoder {
 
     /// Mutably updates the calibration profile.
     pub fn set_calibration(&mut self, calibration: TouchCalibration) {
-        self.calibration = calibration;
+        if calibration.is_finite() {
+            self.calibration = calibration;
+        }
     }
 
     /// Processes a single raw Linux `libc::input_event` and emits a [`TouchAction`] if complete.
@@ -1521,6 +1536,16 @@ mod tests {
             ..Default::default()
         });
         assert!(dev.decoder.calibration().swap_xy);
+
+        // Test NaN calibration rejection
+        let nan_cal = TouchCalibration {
+            min_x: f32::NAN,
+            ..Default::default()
+        };
+        assert!(!nan_cal.is_finite());
+        assert_eq!(nan_cal.map_to_screen(100, 100, 800.0, 480.0), (0.0, 0.0));
+        dev.set_calibration(nan_cal);
+        assert!(dev.decoder.calibration().is_finite());
 
         // NativeEvdevSyscall error paths with invalid fd (-1)
         let native = NativeEvdevSyscall;
