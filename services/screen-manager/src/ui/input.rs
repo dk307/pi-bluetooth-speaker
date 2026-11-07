@@ -180,8 +180,10 @@ impl EvdevSyscall for NativeEvdevSyscall {
             flat: 0,
             resolution: 0,
         };
+        let abs_u8 = u8::try_from(abs_code)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
         // SAFETY: ioctl EVIOCGABS writes to input_absinfo struct.
-        let res = unsafe { libc::ioctl(fd, eviocgabs_ioctl(abs_code as u8), &raw mut absinfo) };
+        let res = unsafe { libc::ioctl(fd, eviocgabs_ioctl(abs_u8), &raw mut absinfo) };
         if res < 0 {
             Err(io::Error::last_os_error())
         } else {
@@ -887,7 +889,7 @@ impl Drop for TouchInputDevice {
 /// Returns true if a device name matches recognized touchscreen hardware.
 fn is_touchscreen_name(name: &str) -> bool {
     let lower = name.to_lowercase();
-    lower.contains("touch") || lower.contains("raspberrypi-ts")
+    lower.contains("touch") || lower.contains("raspberrypi-ts") || lower.contains("ft5406")
 }
 
 impl TouchInputDevice {
@@ -1479,6 +1481,19 @@ mod tests {
 
         let n = native.read(rfd, &mut buf).expect("read from pipe");
         assert_eq!(&buf[..n], data);
+
+        // abs_code > u8::MAX returns InvalidInput without unsafe ioctl call
+        let err = native.query_abs(rfd, 1000).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        // Name match helper tests including ft5406 digitizers
+        assert!(is_touchscreen_name("ft5406"));
+        assert!(is_touchscreen_name("rpi-ft5406"));
+        assert!(is_touchscreen_name("FT5406 memory based driver"));
+        assert!(is_touchscreen_name("raspberrypi-ts"));
+        assert!(is_touchscreen_name("Goodix Capacitive TouchScreen"));
+        assert!(!is_touchscreen_name("keyboard"));
+        assert!(!is_touchscreen_name("mouse"));
 
         // Close pipe fds
         native.close(rfd).expect("close rfd");
