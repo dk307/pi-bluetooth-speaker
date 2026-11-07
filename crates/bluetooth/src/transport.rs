@@ -221,11 +221,12 @@ pub fn encode_volume_bytes(channels: u8, percent: u8, muted: bool) -> Vec<u8> {
 /// Updates the mute bit (`0x80`) across an existing `BlueALSA` `Volume` byte slice
 /// while preserving each channel's 7-bit level.
 ///
-/// If `existing` is empty, falls back to [`encode_volume_bytes`] at `100%`.
+/// If `existing` is empty, falls back to [`encode_volume_bytes`] at level `0%` to avoid
+/// unintended high-volume playback on unmute.
 #[must_use]
 pub fn apply_mute_to_volume_bytes(existing: &[u8], channels: u8, muted: bool) -> Vec<u8> {
     if existing.is_empty() {
-        return encode_volume_bytes(channels, 100, muted);
+        return encode_volume_bytes(channels, 0, muted);
     }
     existing
         .iter()

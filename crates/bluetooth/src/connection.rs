@@ -1578,6 +1578,15 @@ impl DbusClient {
         Ok(pcms)
     }
 
+    fn select_active_pcm(pcms: &[BlueAlsaPcm]) -> Result<&BlueAlsaPcm, BtError> {
+        pcms.iter()
+            .find(|p| p.running)
+            .or_else(|| pcms.first())
+            .ok_or_else(|| {
+                BtError::no_active_player("no active BlueALSA PCM stream found on D-Bus")
+            })
+    }
+
     /// Selects the target `BlueALSA` PCM stream (preferring an actively `running`
     /// stream, otherwise the first available stream) and encodes its new `Volume`
     /// (`ay`) byte array for `percent` (`0..=100`, unmuted).
@@ -1589,13 +1598,7 @@ impl DbusClient {
         percent: u8,
     ) -> Result<(Box<str>, Vec<u8>), BtError> {
         let pcms = Self::parse_bluealsa_objects(objects, &[]);
-        let pcm = pcms
-            .iter()
-            .find(|p| p.running)
-            .or_else(|| pcms.first())
-            .ok_or_else(|| {
-                BtError::no_active_player("no active BlueALSA PCM stream found on D-Bus")
-            })?;
+        let pcm = Self::select_active_pcm(&pcms)?;
         let bytes = encode_volume_bytes(pcm.channels, percent, false);
         Ok((pcm.pcm_path.clone(), bytes))
     }
@@ -1611,13 +1614,7 @@ impl DbusClient {
         muted: bool,
     ) -> Result<(Box<str>, Vec<u8>), BtError> {
         let pcms = Self::parse_bluealsa_objects(objects, &[]);
-        let pcm = pcms
-            .iter()
-            .find(|p| p.running)
-            .or_else(|| pcms.first())
-            .ok_or_else(|| {
-                BtError::no_active_player("no active BlueALSA PCM stream found on D-Bus")
-            })?;
+        let pcm = Self::select_active_pcm(&pcms)?;
         let existing = objects
             .iter()
             .find(|(path, _)| path.as_str() == pcm.pcm_path.as_ref())

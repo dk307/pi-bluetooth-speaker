@@ -1980,7 +1980,7 @@ fn dbus_pcm_volume_and_mute_target_resolution_and_mock_controls() {
     );
     assert_eq!(
         apply_mute_to_volume_bytes(&[], 2, true),
-        encode_volume_bytes(2, 100, true)
+        encode_volume_bytes(2, 0, true)
     );
 
     let empty_objects: ManagedObjects = HashMap::new();

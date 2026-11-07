@@ -218,9 +218,20 @@ impl AppShell {
     ///
     /// Returns the new clamped volume percentage (`0..=100`).
     pub fn apply_volume_delta(&self, detents: i32) -> u8 {
-        let current = self.volume().round() as i32;
+        let vol = self.volume();
+        let current = if vol.is_finite() {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "clamped to 0.0..=100.0 fits in i32"
+            )]
+            {
+                vol.clamp(0.0, 100.0).round() as i32
+            }
+        } else {
+            0
+        };
         let delta = detents.saturating_mul(i32::from(self.volume_step_percent()));
-        let target = u8::try_from(current.saturating_add(delta).clamp(0, 100)).unwrap_or(100);
+        let target = u8::try_from(current.saturating_add(delta).clamp(0, 100)).unwrap_or(0);
         let target_f32 = f32::from(target);
         self.set_volume(target_f32);
         if self.is_muted() {

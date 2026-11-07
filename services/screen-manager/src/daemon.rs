@@ -1213,6 +1213,33 @@ pub fn run_render_loop_with_input(
     );
 }
 
+#[cfg(feature = "ui")]
+fn poll_encoder_input(
+    encoder_dev: Option<&speaker_hardware::EncoderDevice>,
+    encoder_tracker: &mut crate::ui::EncoderVolumeTracker,
+    shell: &AppShell,
+    window: &Rc<MinimalSoftwareWindow>,
+    encoder_warned: &mut bool,
+) {
+    let Some(enc) = encoder_dev else { return };
+    match encoder_tracker.poll_and_apply(enc, shell) {
+        Ok(changed) => {
+            *encoder_warned = false;
+            if changed {
+                window.window().request_redraw();
+            }
+        }
+        Err(e) => {
+            if *encoder_warned {
+                tracing::debug!(error = %e, "Rotary encoder poll failed (repeating)");
+            } else {
+                tracing::warn!(error = %e, "Rotary encoder poll failed");
+                *encoder_warned = true;
+            }
+        }
+    }
+}
+
 /// Runs the UI render loop with explicit touch and rotary encoder device injection.
 #[cfg(feature = "ui")]
 #[expect(
@@ -1256,6 +1283,7 @@ pub fn run_render_loop_with_devices(
     let mut loop_timing = FrameLoopTiming::default();
     let mut overlay_theme: Option<ThemePreset> = None;
     let mut encoder_tracker = crate::ui::EncoderVolumeTracker::new();
+    let mut encoder_warned = false;
     while duration.is_none_or(|d| start.elapsed() < d) {
         let frame_start = Instant::now();
 
@@ -1274,18 +1302,13 @@ pub fn run_render_loop_with_devices(
         }
 
         // Poll physical/mocked EC12 rotary encoder detents and switch presses
-        if let Some(enc) = encoder_dev {
-            match encoder_tracker.poll_and_apply(enc, shell) {
-                Ok(changed) => {
-                    if changed {
-                        window.window().request_redraw();
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Rotary encoder poll failed");
-                }
-            }
-        }
+        poll_encoder_input(
+            encoder_dev,
+            &mut encoder_tracker,
+            shell,
+            window,
+            &mut encoder_warned,
+        );
 
         if let Err(e) = sync_marquee_overlay(fb, shell, window, &mut overlay_theme) {
             report_display(tracing::Level::ERROR, "Marquee overlay sync failed", &e);
