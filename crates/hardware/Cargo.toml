@@ -1,0 +1,31 @@
+[package]
+name = "speaker-hardware"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Raspberry Pi hardware peripheral drivers (MA12070P amp, EC12 encoder, BH1750 light, DS18B20 temp)"
+
+[dependencies]
+speaker-common = { workspace = true }
+rppal = { workspace = true }
+bh1750-embedded = { workspace = true }
+rotary-switch-helper = { workspace = true }
+led = { workspace = true }
+embedded-hal = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+test-util = []
+
+[dev-dependencies]
+speaker-hardware = { path = ".", features = ["test-util"] }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

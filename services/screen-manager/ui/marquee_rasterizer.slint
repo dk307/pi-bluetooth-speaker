@@ -1,0 +1,35 @@
+// Offscreen single-line text rasterizer used to pre-render marquee strips into cached images.
+//
+// The appliance renders on a software renderer on a Raspberry Pi 3, where re-shaping and
+// re-rasterizing long marquee strings on every animation frame costs ~8 ms of CPU. This
+// component is instantiated on a throwaway offscreen window by
+// `screen_manager::ui::marquee::MarqueeStripRasterizer` and rendered exactly once per text,
+// color, or typography change; the resulting transparent-background image is then scrolled
+// by `MarqueeText` in `now_playing.slint` as a cheap per-frame pixel blit.
+export component MarqueeRasterizer inherits Window {
+    in property <string> raster_text;
+    in property <color> raster_color;
+    in property <string> raster_font_family: "Inter";
+    in property <float> raster_font_size_px: 16;
+    in property <int> raster_font_weight: 400;
+
+    background: transparent;
+
+    out property <float> text_width_px: raster_text_item.preferred-width / 1px;
+    out property <float> text_height_px: raster_text_item.preferred-height / 1px;
+
+    raster_text_item := Text {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        text: root.raster_text;
+        color: root.raster_color;
+        font-family: root.raster_font_family;
+        font-size: root.raster_font_size_px * 1px;
+        font-weight: root.raster_font_weight;
+        wrap: no-wrap;
+        vertical-alignment: center;
+    }
+}
+

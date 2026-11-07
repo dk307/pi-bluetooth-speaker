@@ -1,0 +1,736 @@
+//! End-to-end tests for the cover-art D-Bus publisher (`CoverArtIface`) served
+//! on a private `dbus-daemon`, verifying exactly the contract a future core
+//! daemon will consume: empty-state properties, `GetImage` rejection, and a
+//! full publish/query/clear lifecycle.
+//!
+//! Follows the repository integration-test pattern: private session bus,
+//! distinct MAC per test, daemon killed on drop, loud failure when
+//! `dbus-daemon` is missing.
+
+use bt_manager::cover_provider::{CoverArtIface, SharedCoverState};
+use speaker_bluetooth::BtPlaybackState;
+use speaker_bluetooth::{BtAddress, resolve_cover_art_with};
+use speaker_common::diag::ScopedTempDir;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, Command, Stdio};
+use zbus::blocking::Proxy;
+
+/// A minimal but complete JPEG fixture: >= 100 bytes (the `is_complete_jpeg`
+/// minimum) and terminated with the EOI marker.
+fn jpeg_fixture() -> Vec<u8> {
+    let mut bytes = vec![0xFF, 0xD8];
+    bytes.resize(140, 0x00);
+    bytes[100..136].copy_from_slice(&[0xAB; 36]);
+    bytes.push(0xFF);
+    bytes.push(0xD9);
+    bytes
+}
+
+/// Private bus daemon serving `CoverArtIface`; killed on drop.
+struct Harness {
+    // Kept alive for the harness lifetime; `KillOnDrop` reaps the daemon.
+    _daemon: KillOnDrop,
+    server: zbus::blocking::Connection,
+    state: SharedCoverState,
+    proxy: Proxy<'static>,
+    dir: ScopedTempDir,
+}
+
+impl Harness {
+    fn new() -> Self {
+        let (kill, address) = spawn_private_bus();
+
+        let state = SharedCoverState::new();
+        let server = zbus::blocking::connection::Builder::address(address.as_str())
+            .unwrap()
+            .name("org.speaker.CoverArt")
+            .unwrap()
+            .serve_at("/org/speaker/coverart", CoverArtIface::new(state.clone()))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let client = zbus::blocking::connection::Builder::address(address.as_str())
+            .unwrap()
+            .build()
+            .unwrap();
+        let proxy = Proxy::new_owned(
+            client,
+            "org.speaker.CoverArt",
+            "/org/speaker/coverart",
+            "org.speaker.CoverArt1",
+        )
+        .unwrap();
+
+        Self {
+            _daemon: kill,
+            server,
+            state,
+            proxy,
+            dir: ScopedTempDir::new("cover_provider_dbus"),
+        }
+    }
+
+    /// Publishes the fixture image for `mac`/`handle` into the shared state.
+    fn publish_fixture(&self, mac: &str, handle: &str) -> Vec<u8> {
+        let bytes = jpeg_fixture();
+        let path = self.dir.path().join(format!(
+            "speaker-cover-{mac_us}-{handle}.jpg",
+            mac_us = mac.replace(':', "_")
+        ));
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+        self.state.publish(
+            mac.into(),
+            handle.into(),
+            path.to_string_lossy().into_owned().into(),
+            0,
+        );
+        bytes
+    }
+
+    /// Reads a property. zbus pascal-cases member names, so the D-Bus
+    /// property backing `device` is `Device`.
+    fn property(&self, name: &str) -> String {
+        let dbus_name = format!("{}{}", name[..1].to_uppercase(), &name[1..]);
+        self.proxy.get_property::<String>(&dbus_name).unwrap()
+    }
+
+    fn get_image(&self) -> Result<Vec<u8>, zbus::Error> {
+        let reply = self.proxy.call_method("GetImage", &())?;
+        reply.body().deserialize::<Vec<u8>>()
+    }
+
+    fn get_image_error_message(&self) -> String {
+        match self.get_image() {
+            Ok(bytes) => panic!("GetImage unexpectedly returned {} bytes", bytes.len()),
+            Err(zbus::Error::MethodError(_, message, _)) => {
+                message.unwrap_or_else(|| "<no message>".into())
+            }
+            Err(e) => panic!("unexpected GetImage error class: {e}"),
+        }
+    }
+}
+
+// `KillOnDrop` inside `Harness` reaps the daemon; no manual `Drop` needed.
+
+#[test]
+fn empty_state_exposes_no_image() {
+    let h = Harness::new();
+
+    assert_eq!(h.property("device"), "");
+    assert_eq!(h.property("handle"), "");
+    assert_eq!(h.property("path"), "");
+
+    let message = h.get_image_error_message();
+    assert!(
+        message.contains("no cover art published"),
+        "unexpected rejection message: {message}"
+    );
+}
+
+#[test]
+fn published_image_is_queryable_over_dbus() {
+    let h = Harness::new();
+    let expected = h.publish_fixture("AA:BB:CC:DD:EE:F1", "5630701");
+
+    assert_eq!(h.property("device"), "AA:BB:CC:DD:EE:F1");
+    assert_eq!(h.property("handle"), "5630701");
+    assert!(
+        h.property("path")
+            .ends_with("speaker-cover-AA_BB_CC_DD_EE_F1-5630701.jpg"),
+        "unexpected path property {}",
+        h.property("path")
+    );
+
+    assert_eq!(h.get_image().unwrap(), expected);
+}
+
+#[test]
+fn cleared_state_rejects_get_image_again() {
+    let h = Harness::new();
+    h.publish_fixture("AA:BB:CC:DD:EE:F2", "5630702");
+    let _cleared = h.state.clear();
+
+    assert_eq!(h.property("device"), "");
+    assert_eq!(h.property("handle"), "");
+    assert_eq!(h.property("path"), "");
+    assert!(
+        h.get_image_error_message()
+            .contains("no cover art published"),
+        "cleared state must reject GetImage"
+    );
+}
+
+/// Kills the private `dbus-daemon` when the test ends.
+struct KillOnDrop(Child);
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Spawns a private session bus and returns its `KillOnDrop` guard plus the
+/// bus address. Fails loudly when `dbus-daemon` is missing.
+fn spawn_private_bus() -> (KillOnDrop, String) {
+    let mut daemon = Command::new("dbus-daemon")
+        .args(["--session", "--nofork", "--print-address=1"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("dbus-daemon must be installed to run cover-provider integration tests");
+    let mut address = String::new();
+    BufReader::new(daemon.stdout.take().unwrap())
+        .read_line(&mut address)
+        .unwrap();
+    let address = address.trim().to_string();
+    assert!(!address.is_empty(), "dbus-daemon printed no bus address");
+    (KillOnDrop(daemon), address)
+}
+
+/// A `Track` `PropertiesChanged` on `org.bluez.MediaPlayer1` must wake the
+/// worker; other property changes must not. Exercises the real match-rule
+/// subscription on a private `dbus-daemon` (the emitter owns `org.bluez` so
+/// the sender filter matches, exactly like the real phone stack).
+#[tokio::test]
+async fn track_signal_listener_wakes_only_on_track_changes() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::Notify;
+    use zbus::zvariant::Value;
+
+    let (_kill, address) = spawn_private_bus();
+
+    // The listener's match rule filters `sender=org.bluez`; owning that name
+    // on the fake server makes the filter pass, like the real BlueZ daemon.
+    let server = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .name("org.bluez")
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let listener_conn = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let wake = Arc::new(Notify::new());
+    bt_manager::cover_provider::track_signal_listener(listener_conn, Arc::clone(&wake));
+    // The subscription now happens inside the spawned task; give it time to
+    // register the match rule before the test emits any signals.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let emitter = zbus::object_server::SignalEmitter::new(
+        &server,
+        "/org/bluez/hci0/dev_30_E0_44_67_38_A2/player0",
+    )
+    .unwrap()
+    .to_owned();
+
+    // A non-Track property change must NOT wake the worker.
+    let mut status = HashMap::new();
+    status.insert(
+        "Status".to_string(),
+        Value::Value(Box::new(Value::Str("playing".into()))),
+    );
+    emitter
+        .emit(
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+            &(
+                "org.bluez.MediaPlayer1".to_string(),
+                status,
+                Vec::<String>::new(),
+            ),
+        )
+        .await
+        .unwrap();
+    let quiet = tokio::time::timeout(Duration::from_millis(300), wake.notified()).await;
+    assert!(quiet.is_err(), "non-Track change must not wake the worker");
+
+    // A malformed PropertiesChanged body must not kill the stream: the
+    // listener logs and keeps working.
+    emitter
+        .emit(
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+            &"not a properties-changed tuple",
+        )
+        .await
+        .unwrap();
+
+    // A Track change must wake the worker.
+    let mut track = HashMap::new();
+    track.insert("Track".to_string(), Value::Value(Box::new(Value::U32(0))));
+    emitter
+        .emit(
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+            &(
+                "org.bluez.MediaPlayer1".to_string(),
+                track,
+                Vec::<String>::new(),
+            ),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), wake.notified())
+        .await
+        .expect("Track change must wake the worker");
+}
+
+/// `query_snapshot` (the `core` consumer path) reads the published snapshot
+/// through a real D-Bus round-trip on the private bus.
+#[test]
+fn query_snapshot_reads_published_snapshot() {
+    let h = Harness::new();
+    h.publish_fixture("AA:BB:CC:DD:EE:F1", "5630701");
+
+    let snapshot = speaker_bluetooth::cover_service::query_snapshot(&h.server)
+        .expect("published snapshot must be readable");
+    assert_eq!(snapshot.device.as_ref(), "AA:BB:CC:DD:EE:F1");
+    assert_eq!(snapshot.handle.as_ref(), "5630701");
+    assert!(
+        snapshot
+            .path
+            .as_ref()
+            .contains("AA_BB_CC_DD_EE_F1-5630701.jpg")
+    );
+}
+
+/// With an inactive published state (empty handle), the consumer gets `None`.
+#[test]
+fn query_snapshot_returns_none_for_inactive_state() {
+    let h = Harness::new();
+    let snapshot = speaker_bluetooth::cover_service::query_snapshot(&h.server);
+    assert!(
+        snapshot.is_none(),
+        "empty published state must read as None"
+    );
+}
+
+/// With the cover-art service absent entirely (fresh bus without the
+/// provider), the consumer degrades to `None` instead of erroring.
+#[test]
+fn query_snapshot_returns_none_when_service_absent() {
+    let (_kill, address) = spawn_private_bus();
+
+    let conn = zbus::blocking::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .unwrap();
+    let snapshot = speaker_bluetooth::cover_service::query_snapshot(&conn);
+    assert!(
+        snapshot.is_none(),
+        "absent service must degrade to None (ServiceUnknown path)"
+    );
+}
+
+/// The consumer fast path (disk cache) and slow path (D-Bus snapshot) both
+/// resolve `cover_art_path` for the active track.
+#[test]
+fn resolve_cover_art_resolves_from_cache_and_service() {
+    let h = Harness::new();
+    let addr = BtAddress::parse_str("AA:BB:CC:DD:EE:F1").expect("valid MAC");
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630701".into()),
+        ..BtPlaybackState::default()
+    });
+
+    // Slow path: no cache file; the service publishes handle 5630701.
+    h.publish_fixture("AA:BB:CC:DD:EE:F1", "5630701");
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback
+            .as_ref()
+            .expect("playback")
+            .cover_art_path
+            .as_deref(),
+        Some(h.property("path").as_str()),
+        "service snapshot must resolve cover_art_path"
+    );
+
+    // Fast path: the cache file for the (MAC, handle) pair exists now.
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630701".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback
+            .as_ref()
+            .expect("playback")
+            .cover_art_path
+            .as_deref(),
+        Some(h.property("path").as_str()),
+        "disk-cache fast path must resolve cover_art_path"
+    );
+}
+
+/// Handle mismatch between the track and the published snapshot must NOT
+/// resolve (the consumer waits for the provider to catch up).
+#[test]
+fn resolve_cover_art_ignores_mismatched_snapshot() {
+    let h = Harness::new();
+    h.publish_fixture("AA:BB:CC:DD:EE:F1", "5630701");
+    let addr = BtAddress::parse_str("AA:BB:CC:DD:EE:F1").expect("valid MAC");
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630702".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        None,
+        "mismatched published handle must not resolve"
+    );
+}
+
+/// The disk cache must not bypass a mismatched published snapshot: after a
+/// BIP re-registration a colliding handle's stale file must not be served
+/// while the provider is still catching up.
+#[test]
+fn resolve_cover_art_does_not_trust_cache_over_stale_snapshot() {
+    let h = Harness::new();
+    let addr = BtAddress::parse_str("AA:BB:CC:DD:EE:F1").expect("valid MAC");
+    // A stale cache file exists for the CURRENT track's handle (colliding
+    // value from the previous BIP session), but the provider's published
+    // snapshot still names the OLD handle.
+    h.publish_fixture("AA:BB:CC:DD:EE:F1", "5630701");
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630702".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        None,
+        "a colliding disk-cache file must not be served over a mismatched snapshot"
+    );
+}
+
+/// Early-return guards in `resolve_cover_art_with` (no device address, no
+/// image handle) leave the playback state untouched.
+#[test]
+fn resolve_cover_art_ignores_unresolvable_playback() {
+    let h = Harness::new();
+    h.publish_fixture("AA:BB:CC:DD:EE:F1", "5630701");
+
+    // No device address: nothing to key the cache on.
+    let mut playback = Some(BtPlaybackState {
+        image_handle: Some("5630701".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        None,
+        "no device address must not resolve"
+    );
+
+    // No ImgHandle on the track: nothing to look up.
+    let addr = BtAddress::parse_str("AA:BB:CC:DD:EE:F1").expect("valid MAC");
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        None,
+        "no ImgHandle must not resolve"
+    );
+}
+
+/// A `Properties.GetAll` reply whose properties carry non-string values must
+/// degrade to `None` (logged, not panicking) — the fake provider serves the
+/// real interface with `u32` properties where the consumer expects strings.
+#[test]
+fn query_snapshot_degrades_on_malformed_getall_body() {
+    use zbus::interface;
+
+    let (_kill, address) = spawn_private_bus();
+    let server_address = address.clone();
+    // The server connection's executor lives on this thread's runtime, so
+    // the thread must stay parked for the whole test (detached; the test
+    // process exit reaps it).
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                struct WrongTypes {
+                    device: u32,
+                    handle: u32,
+                    path: u32,
+                }
+                #[interface(name = "org.speaker.CoverArt1")]
+                impl WrongTypes {
+                    #[zbus(property)]
+                    fn device(&self) -> u32 {
+                        self.device
+                    }
+                    #[zbus(property)]
+                    fn handle(&self) -> u32 {
+                        self.handle
+                    }
+                    #[zbus(property)]
+                    fn path(&self) -> u32 {
+                        self.path
+                    }
+                }
+                let _server = zbus::connection::Builder::address(server_address.as_str())
+                    .unwrap()
+                    .name("org.speaker.CoverArt")
+                    .unwrap()
+                    .serve_at(
+                        "/org/speaker/coverart",
+                        WrongTypes {
+                            device: 1,
+                            handle: 2,
+                            path: 3,
+                        },
+                    )
+                    .unwrap()
+                    .build()
+                    .await
+                    .unwrap();
+                std::future::pending::<()>().await;
+                unreachable!("parked server thread");
+            })
+    });
+    let conn = zbus::blocking::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .unwrap();
+    // `query_snapshot` is a blocking call; run it off the async runtime.
+    let snapshot =
+        std::thread::spawn(move || speaker_bluetooth::cover_service::query_snapshot(&conn))
+            .join()
+            .expect("query thread must not panic");
+    assert!(
+        snapshot.is_none(),
+        "malformed GetAll body must degrade to None"
+    );
+}
+
+/// When the track signal stream dies with the bus, the listener's reconnect
+/// loop must keep the task alive (error arms) instead of panicking or
+/// exiting — after the daemon is killed the task retries against the dead
+/// connection under escalating backoff.
+#[tokio::test(flavor = "multi_thread")]
+async fn track_signal_listener_survives_dead_bus() {
+    let (kill, address) = spawn_private_bus();
+    let listener_conn = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+    bt_manager::cover_provider::track_signal_listener(listener_conn, std::sync::Arc::clone(&wake));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Kill the bus: the stream ends and the reconnect loop must keep
+    // retrying (warn per escalated backoff), never panicking or exiting.
+    drop(kill);
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    // Reaching here without a panic means the task is still looping; a
+    // notify permit stays coalescable for the eventual reconnect.
+    wake.notify_one();
+}
+
+/// With the provider absent, the consumer falls back to the bare disk cache
+/// (the only information available without a published snapshot).
+#[test]
+fn resolve_cover_art_falls_back_to_disk_cache_when_provider_absent() {
+    let (_kill, address) = spawn_private_bus();
+    let conn = zbus::blocking::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .unwrap();
+    let dir = speaker_common::diag::ScopedTempDir::new("cover-fallback-cache");
+    let bytes = jpeg_fixture();
+    let path = dir
+        .path()
+        .join("speaker-cover-11_22_33_44_55_66-5630701.jpg");
+    std::fs::File::create(&path)
+        .unwrap()
+        .write_all(&bytes)
+        .unwrap();
+    let addr = BtAddress::parse_str("11:22:33:44:55:66").expect("valid MAC");
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630701".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&conn, dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        Some(path.to_string_lossy().into_owned().into()),
+        "provider absent: the disk cache resolves"
+    );
+}
+
+/// A `Properties.GetAll` error that is not the absent-service class (here:
+/// the served interface does not exist) must log a failure and return None.
+#[test]
+fn query_snapshot_reports_non_absent_getall_errors() {
+    use zbus::interface;
+
+    struct Unrelated;
+    #[interface(name = "org.other.Unrelated")]
+    impl Unrelated {
+        #[zbus(property)]
+        fn answer(&self) -> u32 {
+            let _ = self;
+            42
+        }
+    }
+
+    let (_kill, address) = spawn_private_bus();
+    // The server connection's executor lives on this thread's runtime, so
+    // the thread stays parked for the whole test (reaped at process exit).
+    let server_address = address.clone();
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let _server = zbus::connection::Builder::address(server_address.as_str())
+                    .unwrap()
+                    .name("org.speaker.CoverArt")
+                    .unwrap()
+                    .serve_at("/org/speaker/coverart", Unrelated)
+                    .unwrap()
+                    .build()
+                    .await
+                    .unwrap();
+                std::future::pending::<()>().await;
+                unreachable!("parked server thread");
+            })
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let conn = zbus::blocking::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .unwrap();
+    // GetAll for an interface the object does not serve errors out.
+    let snapshot =
+        std::thread::spawn(move || speaker_bluetooth::cover_service::query_snapshot(&conn))
+            .join()
+            .expect("query thread must not panic");
+    assert!(snapshot.is_none(), "GetAll error must degrade to None");
+}
+
+/// The real `CoverArtIface` service publishes on a caller-provided builder:
+/// the private-bus variant is the host-testable form of the production
+/// system-bus bootstrap (name registration, object serving, emitter).
+#[test]
+fn cover_art_service_publishes_on_injected_builder() {
+    let (_kill, address) = spawn_private_bus();
+    let conn_address = address.clone();
+    let setup = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let builder = zbus::connection::Builder::address(address.as_str()).unwrap();
+                let (_connection, _emitter) =
+                    bt_manager::cover_provider::build_cover_art_server_on(
+                        builder,
+                        SharedCoverState::new(),
+                    )
+                    .await
+                    .expect("service publishes on the private bus");
+                std::future::pending::<()>().await;
+                unreachable!("parked service thread");
+            })
+    });
+    // Give the name time to register, then read it through a consumer.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let conn = zbus::blocking::connection::Builder::address(conn_address.as_str())
+        .unwrap()
+        .build()
+        .unwrap();
+    // The consumer can reach the real service through a normal snapshot
+    // query (the state is empty, so it degrades to None without erroring).
+    let snapshot =
+        std::thread::spawn(move || speaker_bluetooth::cover_service::query_snapshot(&conn))
+            .join()
+            .expect("query thread must not panic");
+    assert!(
+        snapshot.is_none(),
+        "an empty published state reads as None through the real service"
+    );
+    drop(setup); // the parked service thread is reaped at process exit
+}
+
+/// The provider's cleared state must never be substituted with a cache file:
+/// the previous track's artwork is deliberately gone.
+#[test]
+fn resolve_cover_art_never_serves_cache_over_cleared_state() {
+    let h = Harness::new();
+    let addr = BtAddress::parse_str("AA:BB:CC:DD:EE:F1").expect("valid MAC");
+    // A stale cache file exists for the current handle, but the provider is
+    // running with an actively cleared (inactive) state.
+    let bytes = jpeg_fixture();
+    let path = h
+        .dir
+        .path()
+        .join("speaker-cover-AA_BB_CC_DD_EE_F1-5630701.jpg");
+    std::fs::File::create(&path)
+        .unwrap()
+        .write_all(&bytes)
+        .unwrap();
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630701".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        None,
+        "cleared published state must not fall back to the bare cache"
+    );
+}
+
+/// The provider actively clearing must not overwrite the consumer's last
+/// known state (the cleared artwork is deliberate; cache files stay off).
+#[test]
+fn resolve_cover_art_keeps_state_on_snapshot_fault() {
+    let h = Harness::new();
+    let addr = BtAddress::parse_str("AA:BB:CC:DD:EE:F1").expect("valid MAC");
+    let bytes = jpeg_fixture();
+    let path = h
+        .dir
+        .path()
+        .join("speaker-cover-AA_BB_CC_DD_EE_F1-5630702.jpg");
+    std::fs::File::create(&path)
+        .unwrap()
+        .write_all(&bytes)
+        .unwrap();
+    let mut playback = Some(BtPlaybackState {
+        device_address: Some(addr),
+        image_handle: Some("5630702".into()),
+        cover_art_path: Some("/last/known-good.jpg".into()),
+        ..BtPlaybackState::default()
+    });
+    resolve_cover_art_with(&h.server, h.dir.path(), &mut playback);
+    assert_eq!(
+        playback.as_ref().expect("playback").cover_art_path,
+        Some("/last/known-good.jpg".into()),
+        "a cleared state must keep the last known state, not serve the cache"
+    );
+}

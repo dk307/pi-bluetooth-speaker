@@ -48,6 +48,8 @@ Repository: [https://github.com/dk307/pi-bluetooth-speaker](https://github.com/d
 
 ```text
 pi-bluetooth-speaker/
+├── .cargo/
+│   └── config.toml           # Cortex-A53 NEON vectorization & cross-compile tuning
 ├── AGENTS.md                 # Agent instructions & guidelines (root)
 ├── Cargo.toml                # Root Cargo workspace manifest
 ├── rust-toolchain.toml       # Pinned Rust toolchain (rustc 1.99.1)
@@ -60,23 +62,18 @@ pi-bluetooth-speaker/
 │   ├── boot/                 # Firmware config and custom Merus Amp DTBO
 │   ├── etc/                  # ALSA, BlueALSA, CamillaDSP, and Systemd unit files
 │   └── scripts/              # Hardware diagnostic and test scripts
-├── docs/                     # Architectural documentation & technical reports
-│   ├── README.md             # Documentation index
-│   ├── rpi_audio_bluetooth_report.md # Comprehensive system and hardware audit report
-│   ├── ui_architecture_plan_rust.md  # Rust & Slint UI architecture plan
-│   ├── ui_architecture_plan_python.md# Python & pygame-ce reference architecture
-│   └── requirements-python-ui.txt    # Pinned Python requirements for reference UI
-└── services/                 # Microservices powering the appliance
-    ├── README.md             # Service architecture and roadmap
-    └── core/                 # Central Speaker Logic, Appliance UI & Hardware Console
-        ├── .cargo/
-        │   └── config.toml   # Cortex-A53 NEON vectorization & cross-compile tuning
-        ├── Cargo.toml        # speaker-core package manifest (binary: core)
-        ├── README.md         # Service documentation
-        ├── AGENTS.md         # Agent instructions & guidelines
-        ├── build.rs          # Slint AOT build script
-        ├── src/main.rs       # Entrypoint & Tokio actor runtime
-        └── ui/               # Declarative 800x480 UI components (appwindow, now_playing, splash, viewport, etc.)
+├── crates/                   # Shared libraries
+│   ├── common/               # Shared logging, runtime, systemd, and diagnostics (speaker-common)
+│   ├── hardware/             # Peripheral drivers: Amp, Encoder, Light, Temp (speaker-hardware)
+│   ├── dsp/                  # CamillaDSP client & level meter telemetry (speaker-dsp)
+│   └── bluetooth/            # Bluez, BlueALSA, BIP cover art protocol (speaker-bluetooth)
+├── services/                 # Appliance background daemons
+│   ├── README.md             # Service architecture and roadmap
+│   ├── screen-manager/       # Touchscreen Appliance Console & UI (screen-manager.service)
+│   └── bt-manager/           # Bluetooth Manager daemon & BIP cover art service (bt-manager.service)
+├── tools/                    # Hardware diagnostic utilities
+│   └── diagnostics/          # CLI probes: amp-info, bt-info, dsp-info, encoder-read, light-read, temp-read
+└── docs/                     # Architectural documentation & technical reports
 ```
 
 ---
@@ -107,12 +104,12 @@ cd baseline
 ./verify.sh
 ```
 
-### Building the Speaker Core Service
+### Building the Appliance Binaries
 
 ```bash
-# Build release binary optimized for Cortex-A53
-cargo build --release -p speaker-core
+# Build release binaries optimized for Cortex-A53
+cargo build --target aarch64-unknown-linux-gnu --release --bins
 
 # Run interactive desktop simulator on workstation
-cargo run -p speaker-core --features simulator
+cargo run -p screen-manager --features simulator
 ```

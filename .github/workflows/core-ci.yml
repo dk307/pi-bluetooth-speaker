@@ -51,7 +51,7 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Check Formatting
-        run: cargo fmt --manifest-path services/core/Cargo.toml --all -- --check
+        run: cargo fmt --all -- --check
 
       - name: Configure Target Linker
         run: |
@@ -61,7 +61,7 @@ jobs:
 
       - name: Run Speaker Core Test Suite with Code Coverage
         run: |
-          cargo llvm-cov --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --fail-under-lines 85 --fail-under-functions 85 --lcov --output-path lcov.info
+          cargo llvm-cov --workspace --target aarch64-unknown-linux-gnu --fail-under-lines 85 --fail-under-functions 85 --lcov --output-path lcov.info
           rm -f target/llvm-cov-target/*.profraw target/llvm-cov-target/*.profdata target/llvm-cov-target/*profraw-list
 
       - name: Upload Coverage to Codecov
@@ -107,42 +107,41 @@ jobs:
           shared-key: "rpi3-build"
           cache-on-failure: "true"
 
-      - name: Clippy Lints (deny warnings)
-        # Native aarch64 lints cover the cfg paths the coverage gate executes.
-        run: cargo clippy --manifest-path services/core/Cargo.toml --all-targets -- -D warnings
-
       - name: Configure Target Linker
         run: |
           if ! command -v aarch64-linux-gnu-gcc &>/dev/null; then
             sudo ln -sf "$(command -v gcc)" /usr/local/bin/aarch64-linux-gnu-gcc
           fi
 
-      - name: Build Speaker Core & Utilities (Release for RPi 3)
-        # Cargo discovers `.cargo/config.toml` from the working directory, not from
-        # `--manifest-path`; pass it explicitly so Cortex-A53 / NEON rustflags apply.
-        run: cargo build --config services/core/.cargo/config.toml --manifest-path services/core/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins
+      - name: Clippy Lints (deny warnings)
+        # Native aarch64 lints cover the cfg paths the coverage gate executes.
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build Speaker Binaries & Utilities (Release for RPi 3)
+        # Workspace root .cargo/config.toml applies Cortex-A53 / NEON flags automatically.
+        run: cargo build --workspace --target aarch64-unknown-linux-gnu --release --bins
 
       - name: Verify Binary Architecture & Compatibility
         run: |
-          file target/aarch64-unknown-linux-gnu/release/core
-          file target/aarch64-unknown-linux-gnu/release/bt-manager
-          file target/aarch64-unknown-linux-gnu/release/temp-read
-          file target/aarch64-unknown-linux-gnu/release/light-read
-          readelf -h target/aarch64-unknown-linux-gnu/release/core
-          readelf -h target/aarch64-unknown-linux-gnu/release/bt-manager
-          readelf -h target/aarch64-unknown-linux-gnu/release/temp-read
-          readelf -h target/aarch64-unknown-linux-gnu/release/light-read
-          ls -lh target/aarch64-unknown-linux-gnu/release/core target/aarch64-unknown-linux-gnu/release/bt-manager target/aarch64-unknown-linux-gnu/release/temp-read target/aarch64-unknown-linux-gnu/release/light-read
+          for bin in screen-manager bt-manager amp-info bt-info dsp-info encoder-read light-read temp-read; do
+            file "target/aarch64-unknown-linux-gnu/release/$bin"
+            readelf -h "target/aarch64-unknown-linux-gnu/release/$bin"
+            ls -lh "target/aarch64-unknown-linux-gnu/release/$bin"
+          done
 
       - name: Upload Binary Artifacts
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: core-binaries-aarch64-rpi3
           path: |
-            target/aarch64-unknown-linux-gnu/release/core
+            target/aarch64-unknown-linux-gnu/release/screen-manager
             target/aarch64-unknown-linux-gnu/release/bt-manager
-            target/aarch64-unknown-linux-gnu/release/temp-read
+            target/aarch64-unknown-linux-gnu/release/amp-info
+            target/aarch64-unknown-linux-gnu/release/bt-info
+            target/aarch64-unknown-linux-gnu/release/dsp-info
+            target/aarch64-unknown-linux-gnu/release/encoder-read
             target/aarch64-unknown-linux-gnu/release/light-read
+            target/aarch64-unknown-linux-gnu/release/temp-read
           if-no-files-found: error
 
   lint-x86-gated:
@@ -177,7 +176,7 @@ jobs:
           cache-on-failure: "true"
 
       - name: Clippy Lints (deny warnings)
-        run: cargo clippy --manifest-path services/core/Cargo.toml --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
+        run: cargo clippy --workspace --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
 
   cargo-crap:
     name: CRAP Score & Regression Gate (cargo-crap)

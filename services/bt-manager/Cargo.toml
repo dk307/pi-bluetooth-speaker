@@ -1,0 +1,33 @@
+[package]
+name = "bt-manager"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "DietPi Bluetooth Manager & Cover Art Service"
+default-run = "bt-manager"
+
+[[bin]]
+name = "bt-manager"
+path = "src/main.rs"
+
+[dependencies]
+speaker-common = { workspace = true }
+speaker-bluetooth = { workspace = true }
+bluer = { workspace = true }
+obex-protocol = { workspace = true }
+bluesdp = { workspace = true }
+zbus = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+ctrlc = { workspace = true }
+libc = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+speaker-bluetooth = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

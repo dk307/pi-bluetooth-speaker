@@ -1,0 +1,31 @@
+# ==============================================================================
+# Cargo Build Configuration for Raspberry Pi 3 (ARM Cortex-A53 / aarch64)
+# ==============================================================================
+
+[env]
+# Slint >= 1.14 software-renderer systemfonts links fontconfig via pkg-config.
+# Multiarch arm64 packages install into the root filesystem, so the cross
+# pkg-config needs an explicit sysroot/libdir for the aarch64 target.
+PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu = "/"
+PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu = "/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+rustflags = [
+    # 1. Target the exact in-order dual-issue pipeline of the BCM2837 Cortex-A53
+    "-C", "target-cpu=cortex-a53",
+
+    # 2. Enable ARM NEON 128-bit vectorization & hardware floating point.
+    # Note: Broadcom BCM2837 omits the optional ARMv8 Crypto Extension (no hardware AES/SHA-1/SHA-2).
+    # LLVM's generic cortex-a53 model enables them by default; explicitly disable -aes,-sha2 to prevent SIGILL.
+    "-C", "target-feature=+neon,-aes,-sha2",
+
+    # 3. LLVM vectorizer passes for pixel blitting, Slint rasterization & meter math
+    "-C", "llvm-args=-vectorize-loops",
+    "-C", "llvm-args=-vectorize-slp",
+
+    # 4. Linker optimizations: strip unused sections & garbage collect dead code
+    "-C", "link-arg=-Wl,--as-needed",
+    "-C", "link-arg=-Wl,--gc-sections",
+    "-C", "link-arg=-Wl,-O1",
+]
