@@ -126,9 +126,16 @@ impl VolumeStepPercent {
     /// Production default step (`2%`).
     pub const DEFAULT: Self = Self::new(DEFAULT_VOLUME_STEP_PERCENT);
 
-    /// Unchecked const constructor for compile-time constants.
+    /// Const constructor validated against `1..=25`.
+    ///
+    /// # Panics
+    /// Panics if `step` is not in the range `1..=25`.
     #[must_use]
     pub const fn new(step: u8) -> Self {
+        assert!(
+            step >= MIN_VOLUME_STEP_PERCENT && step <= MAX_VOLUME_STEP_PERCENT,
+            "volume_step_percent out of range 1..=25"
+        );
         Self(step)
     }
 
@@ -171,12 +178,19 @@ impl From<VolumeStepPercent> for u8 {
 pub struct VolumeHudTimeoutMs(u32);
 
 impl VolumeHudTimeoutMs {
-    /// Production default timeout (`2500` ms).
+    /// Production default timeout (`4000` ms).
     pub const DEFAULT: Self = Self::new(DEFAULT_VOLUME_HUD_TIMEOUT_MS);
 
-    /// Unchecked const constructor for compile-time constants.
+    /// Const constructor validated against `250..=30_000`.
+    ///
+    /// # Panics
+    /// Panics if `ms` is not in the range `250..=30_000`.
     #[must_use]
     pub const fn new(ms: u32) -> Self {
+        assert!(
+            ms >= MIN_VOLUME_HUD_TIMEOUT_MS && ms <= MAX_VOLUME_HUD_TIMEOUT_MS,
+            "volume_hud_timeout_ms out of range 250..=30000"
+        );
         Self(ms)
     }
 
@@ -222,9 +236,16 @@ impl VolumeHudFadeMs {
     /// Production default fade duration (`200` ms).
     pub const DEFAULT: Self = Self::new(DEFAULT_VOLUME_HUD_FADE_MS);
 
-    /// Unchecked const constructor for compile-time constants.
+    /// Const constructor validated against `0..=2_000`.
+    ///
+    /// # Panics
+    /// Panics if `ms` exceeds `2_000`.
     #[must_use]
     pub const fn new(ms: u32) -> Self {
+        assert!(
+            ms <= MAX_VOLUME_HUD_FADE_MS,
+            "volume_hud_fade_ms out of range 0..=2000"
+        );
         Self(ms)
     }
 
@@ -277,7 +298,7 @@ pub struct CoreConfig {
     pub marquee_fps: MarqueeFps,
     /// Rotary encoder volume step percentage per detent (`1..=25`, default `2`).
     pub volume_step_percent: VolumeStepPercent,
-    /// Volume HUD auto-dismiss timeout in milliseconds (`250..=30000`, default `2500`).
+    /// Volume HUD auto-dismiss timeout in milliseconds (`250..=30000`, default `4000`).
     pub volume_hud_timeout_ms: VolumeHudTimeoutMs,
     /// Volume HUD fade-out duration in milliseconds (`0..=2000`, default `200`).
     pub volume_hud_fade_ms: VolumeHudFadeMs,
@@ -789,6 +810,36 @@ mod tests {
             assert!(err.is_invalid_value());
             assert!(err.summary().contains("invalid volume_hud_fade_ms"));
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "volume_step_percent out of range 1..=25")]
+    fn volume_step_percent_new_rejects_zero() {
+        let _ = VolumeStepPercent::new(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "volume_step_percent out of range 1..=25")]
+    fn volume_step_percent_new_rejects_overflow() {
+        let _ = VolumeStepPercent::new(26);
+    }
+
+    #[test]
+    #[should_panic(expected = "volume_hud_timeout_ms out of range 250..=30000")]
+    fn volume_hud_timeout_ms_new_rejects_underflow() {
+        let _ = VolumeHudTimeoutMs::new(249);
+    }
+
+    #[test]
+    #[should_panic(expected = "volume_hud_timeout_ms out of range 250..=30000")]
+    fn volume_hud_timeout_ms_new_rejects_overflow() {
+        let _ = VolumeHudTimeoutMs::new(30_001);
+    }
+
+    #[test]
+    #[should_panic(expected = "volume_hud_fade_ms out of range 0..=2000")]
+    fn volume_hud_fade_ms_new_rejects_overflow() {
+        let _ = VolumeHudFadeMs::new(2_001);
     }
 
     #[test]
