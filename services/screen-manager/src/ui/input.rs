@@ -664,6 +664,8 @@ impl TouchDecoder {
     pub fn set_calibration(&mut self, calibration: TouchCalibration) {
         if calibration.is_finite() {
             self.calibration = calibration;
+        } else {
+            tracing::warn!(?calibration, "Rejected non-finite touch calibration");
         }
     }
 
