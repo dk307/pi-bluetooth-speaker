@@ -2308,7 +2308,7 @@ impl BluetoothDeviceMock {
         }
         let pcm = Self::active_mock_pcm_mut(&mut state.pcms)
             .ok_or_else(|| BtError::no_active_player("no active mock PCM"))?;
-        let pct = pcm.volume_percent.unwrap_or(100);
+        let pct = pcm.volume_percent.unwrap_or(0);
         Self::apply_mock_pcm_volume(pcm, pct, muted);
         self.change_flag.notify();
         Ok(())

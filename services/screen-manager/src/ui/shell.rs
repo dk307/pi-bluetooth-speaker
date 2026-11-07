@@ -9,6 +9,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::fmt::{self, Debug, Formatter};
+use std::rc::Rc;
 
 use slint::ComponentHandle;
 
@@ -108,6 +109,7 @@ pub struct AppShell {
     strips: RefCell<MarqueeStripCache>,
     volume_step_percent: Cell<u8>,
     has_initial_pcm_seed: Cell<bool>,
+    transport_commands: Rc<RefCell<Option<speaker_bluetooth::TransportCommandQueue>>>,
 }
 
 impl Debug for AppShell {
@@ -128,6 +130,7 @@ impl AppShell {
             strips: RefCell::new(MarqueeStripCache::default()),
             volume_step_percent: Cell::new(DEFAULT_VOLUME_STEP_PERCENT),
             has_initial_pcm_seed: Cell::new(false),
+            transport_commands: Rc::new(RefCell::new(None)),
         };
 
         shell.set_volume_hud_timeout_ms(DEFAULT_VOLUME_HUD_TIMEOUT_MS);
@@ -696,63 +699,15 @@ impl AppShell {
     /// executes the blocking D-Bus round-trips off the render thread and publishes
     /// authoritative state back through the shared worker update channel.
     pub fn wire_bluetooth_transport(&self, commands: &speaker_bluetooth::TransportCommandQueue) {
-        let commands_toggle = commands.clone();
-        let win = self.window.as_weak();
-        self.window.on_toggle_play_pause(move || {
-            if let Some(w) = win.upgrade() {
-                // Optimistic local toggle: the worker's next authoritative publish
-                // (within one monitor tick) reconciles the real player state.
-                commands_toggle.push(speaker_bluetooth::TransportCommand::TogglePlayPause);
-                w.set_is_playing(!w.get_is_playing());
-            }
-        });
-
-        let commands_next = commands.clone();
-        self.window.on_next_track(move || {
-            commands_next.push(speaker_bluetooth::TransportCommand::NextTrack);
-        });
-
-        let commands_prev = commands.clone();
-        self.window.on_previous_track(move || {
-            commands_prev.push(speaker_bluetooth::TransportCommand::PreviousTrack);
-        });
-
-        let commands_vol = commands.clone();
-        let win = self.window.as_weak();
-        self.window.on_volume_changed(move |val| {
-            if let Some(w) = win.upgrade() {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "clamped 0.0..=100.0 fits in u8"
-                )]
-                let clamped = if val.is_finite() {
-                    val.round().clamp(0.0, 100.0) as u8
-                } else {
-                    0
-                };
-                w.set_volume_value(f32::from(clamped));
-                if w.get_is_muted() {
-                    w.set_is_muted(false);
-                }
-                w.invoke_show_volume_hud();
-                commands_vol.push(speaker_bluetooth::TransportCommand::SetVolume(clamped));
-            }
-        });
-
-        let commands_mute = commands.clone();
-        let win = self.window.as_weak();
-        self.window.on_toggle_mute(move || {
-            if let Some(w) = win.upgrade() {
-                let next_muted = !w.get_is_muted();
-                w.set_is_muted(next_muted);
-                w.invoke_show_volume_hud();
-                commands_mute.push(speaker_bluetooth::TransportCommand::SetMute(next_muted));
-            }
-        });
+        *self.transport_commands.borrow_mut() = Some(commands.clone());
     }
 
     fn setup_callbacks(&self) {
+        self.setup_navigation_callbacks();
+        self.setup_transport_callbacks();
+    }
+
+    fn setup_navigation_callbacks(&self) {
         let win = self.window.as_weak();
         self.window.on_tab_selected(move |idx| {
             if let Some(w) = win.upgrade() {
@@ -781,30 +736,8 @@ impl AppShell {
             }
         });
 
-        self.window.on_toggle_play_pause(|| {
-            tracing::debug!("Play/Pause requested (no audio transport wired)");
-        });
-
-        let win = self.window.as_weak();
-        self.window.on_toggle_mute(move || {
-            if let Some(w) = win.upgrade() {
-                let next_muted = !w.get_is_muted();
-                w.set_is_muted(next_muted);
-                w.invoke_show_volume_hud();
-                tracing::debug!("Mute toggled to {next_muted}");
-            }
-        });
-
         self.window.on_volume_clicked(|| {
             tracing::debug!("Top bar volume indicator clicked; showing Volume HUD");
-        });
-
-        self.window.on_next_track(|| {
-            tracing::info!("Next track requested");
-        });
-
-        self.window.on_previous_track(|| {
-            tracing::info!("Previous track requested");
         });
 
         self.window.on_stream_pill_clicked(|| {
@@ -818,20 +751,76 @@ impl AppShell {
         self.window.on_night_mode_clicked(|| {
             tracing::info!("Night mode clicked");
         });
+    }
 
+    fn setup_transport_callbacks(&self) {
+        let transport_play = Rc::clone(&self.transport_commands);
+        let win = self.window.as_weak();
+        self.window.on_toggle_play_pause(move || {
+            if let Some(w) = win.upgrade() {
+                if let Some(cmds) = transport_play.borrow().as_ref() {
+                    cmds.push(speaker_bluetooth::TransportCommand::TogglePlayPause);
+                    w.set_is_playing(!w.get_is_playing());
+                } else {
+                    tracing::debug!("Play/Pause requested (no audio transport wired)");
+                }
+            }
+        });
+
+        let transport_mute = Rc::clone(&self.transport_commands);
+        let win = self.window.as_weak();
+        self.window.on_toggle_mute(move || {
+            if let Some(w) = win.upgrade() {
+                let next_muted = !w.get_is_muted();
+                w.set_is_muted(next_muted);
+                w.invoke_show_volume_hud();
+                if let Some(cmds) = transport_mute.borrow().as_ref() {
+                    cmds.push(speaker_bluetooth::TransportCommand::SetMute(next_muted));
+                }
+                tracing::debug!("Mute toggled to {next_muted}");
+            }
+        });
+
+        let transport_next = Rc::clone(&self.transport_commands);
+        self.window.on_next_track(move || {
+            if let Some(cmds) = transport_next.borrow().as_ref() {
+                cmds.push(speaker_bluetooth::TransportCommand::NextTrack);
+            } else {
+                tracing::info!("Next track requested");
+            }
+        });
+
+        let transport_prev = Rc::clone(&self.transport_commands);
+        self.window.on_previous_track(move || {
+            if let Some(cmds) = transport_prev.borrow().as_ref() {
+                cmds.push(speaker_bluetooth::TransportCommand::PreviousTrack);
+            } else {
+                tracing::info!("Previous track requested");
+            }
+        });
+
+        let transport_vol = Rc::clone(&self.transport_commands);
         let win = self.window.as_weak();
         self.window.on_volume_changed(move |val| {
             if let Some(w) = win.upgrade() {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "clamped 0.0..=100.0 fits in u8"
+                )]
                 let clamped = if val.is_finite() {
-                    val.clamp(0.0, 100.0)
+                    val.round().clamp(0.0, 100.0) as u8
                 } else {
-                    0.0
+                    0
                 };
-                w.set_volume_value(clamped);
+                w.set_volume_value(f32::from(clamped));
                 if w.get_is_muted() {
                     w.set_is_muted(false);
                 }
                 w.invoke_show_volume_hud();
+                if let Some(cmds) = transport_vol.borrow().as_ref() {
+                    cmds.push(speaker_bluetooth::TransportCommand::SetVolume(clamped));
+                }
                 tracing::debug!("Volume changed to {clamped}%");
             }
         });

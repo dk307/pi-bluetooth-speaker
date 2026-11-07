@@ -956,20 +956,25 @@ impl BtMonitorState {
             });
         }
 
-        let last_vol = drained.iter().rev().find_map(|c| match c {
-            speaker_bluetooth::TransportCommand::SetVolume(pct) => Some(*pct),
-            _ => None,
-        });
-        let last_mute = drained.iter().rev().find_map(|c| match c {
-            speaker_bluetooth::TransportCommand::SetMute(muted) => Some(*muted),
-            _ => None,
-        });
-        if last_vol.is_some() || last_mute.is_some() {
-            let target_muted = last_mute.unwrap_or(false);
+        let mut target_pct = None;
+        let mut target_muted = None;
+        for c in drained {
+            match c {
+                speaker_bluetooth::TransportCommand::SetVolume(pct) => {
+                    target_pct = Some(*pct);
+                    target_muted = Some(false);
+                }
+                speaker_bluetooth::TransportCommand::SetMute(muted) => {
+                    target_muted = Some(*muted);
+                }
+                _ => {}
+            }
+        }
+        if target_pct.is_some() || target_muted.is_some() {
             self.pcm_settle = Some(SettleWindow {
                 kind: SettleKind::Volume {
-                    target_pct: last_vol,
-                    target_muted,
+                    target_pct,
+                    target_muted: target_muted.unwrap_or(false),
                 },
                 started: Instant::now(),
             });
