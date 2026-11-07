@@ -561,6 +561,10 @@ pub fn build_snapshots(
         });
 
         let Some(dev_path) = dev_path else {
+            tracing::warn!(
+                pcm_path = %path.as_str(),
+                "Failed to resolve device path from BlueALSA PCM object"
+            );
             continue;
         };
 
