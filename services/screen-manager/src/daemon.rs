@@ -1272,17 +1272,19 @@ fn idle_sleep(touch_fd: Option<RawFd>) {
                 revents: 0,
             };
             // SAFETY: poll with 1 descriptor and bounded timeout is safe.
-            let ret = unsafe {
+            let (ret, last_err) = unsafe {
                 #[expect(
                     clippy::cast_possible_truncation,
                     reason = "bounded 10..=50 ms fits in c_int"
                 )]
-                libc::poll(&raw mut pfd, 1, timeout.as_millis() as libc::c_int)
+                let r = libc::poll(&raw mut pfd, 1, timeout.as_millis() as libc::c_int);
+                let err = (r < 0).then(std::io::Error::last_os_error);
+                (r, err)
             };
             // Sleep on unrecoverable poll errors (ret < 0, excluding EINTR) or if hangup/error revents are signaled
             // without readable data, preventing a 100% CPU busy-spin while preserving pending touch events and prompt EINTR retry.
             // When poll times out (ret == 0), poll has already blocked for the full duration, avoiding double-sleep.
-            (ret < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR))
+            (ret < 0 && last_err.as_ref().and_then(std::io::Error::raw_os_error) != Some(libc::EINTR))
                 || ((pfd.revents & libc::POLLIN) == 0
                     && (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0))
         }
@@ -1747,7 +1749,7 @@ mod tests {
         // 1. None fd (always sleeps timeout)
         idle_sleep(None);
 
-        // 2. Closed / invalid fd (poll fails with POLLNVAL / error, sleeps safely without panic)
+        // 2. Negative fd (POSIX specifies negative fds are ignored and revents=0, times out safely)
         idle_sleep(Some(-1));
 
         // 3. Pipe fd with no data (poll times out, sleeps safely)
@@ -1768,7 +1770,7 @@ mod tests {
         // SAFETY: close test pipe descriptors.
         unsafe {
             libc::close(rfd);
-            libc::close(wfd);
+            libc::close(wfd)
         };
 
         // 5. Pipe fd with write end closed (poll immediately wakes with POLLHUP, sleeps to avoid busy-spin)
@@ -1782,5 +1784,8 @@ mod tests {
         idle_sleep(Some(rfd2));
         // SAFETY: clean up test reader.
         unsafe { libc::close(rfd2) };
+
+        // 6. Closed positive fd (poll returns POLLNVAL on Linux/POSIX, sleeps to avoid busy-spin)
+        idle_sleep(Some(rfd2));
     }
 }
