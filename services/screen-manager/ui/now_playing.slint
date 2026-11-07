@@ -171,7 +171,6 @@ export component NowPlayingView inherits Rectangle {
     in property <bool> has_cover_art: false;
     in property <image> cover_image;
     in property <bool> transport_available: root.duration_ms > 0 || root.is_playing || (root.track_title != "" && root.track_title != "Waiting for Bluetooth Connection...");
-    property <float> last_toggle_t: -1000.0;
     // Marquee scroll rate in ticks per second (30 or 60; default 60). One shared
     // 16.65 ms timer advances `marquee_clock` by one scroll step every
     // `step_frames` triggers, so both marquees scroll in lockstep and the render
@@ -455,11 +454,7 @@ export component NowPlayingView inherits Rectangle {
                         touch_play := TouchArea {
                             enabled: root.transport_available;
                             clicked => {
-                                let now = animation-tick() / 1ms;
-                                if (now - root.last_toggle_t >= 250.0 || root.last_toggle_t < 0.0) {
-                                    root.last_toggle_t = now;
-                                    root.toggle_play_pause();
-                                }
+                                root.toggle_play_pause();
                             }
                         }
                     }

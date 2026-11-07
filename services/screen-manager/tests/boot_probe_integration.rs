@@ -62,3 +62,10 @@ fn check_ids_map_to_dense_row_indexes() {
     assert_eq!(BootCheckId::Display as usize, 0);
     assert_eq!(BootCheckId::Sensors as usize, 4);
 }
+
+#[test]
+fn boot_probe_real_constructor_and_debug_format() {
+    let probe = BootProbe::real();
+    let debug_str = format!("{probe:?}");
+    assert!(debug_str.contains("probe_count: 5"));
+}
