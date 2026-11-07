@@ -56,6 +56,9 @@ pub const DEFAULT_CONFIG_PATH: &str = "/etc/screen-manager/config.json";
 /// Legacy fallback on-disk JSON configuration path for the core appliance service.
 pub const FALLBACK_CONFIG_PATH: &str = "/etc/speaker-core/config.json";
 
+/// Default on-disk JSON configuration path for the Bluetooth manager appliance service.
+pub const DEFAULT_BT_CONFIG_PATH: &str = "/etc/bt-manager/config.json";
+
 /// Output formatting mode for CLI diagnostic utilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {

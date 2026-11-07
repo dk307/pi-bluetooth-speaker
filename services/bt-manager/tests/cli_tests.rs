@@ -35,6 +35,7 @@ fn bt_manager_help_display() {
         assert!(status.success(), "expected success for 'bt-manager {flag}'");
         assert!(stdout.contains("DietPi Bluetooth Manager Service"));
         assert!(stdout.contains("--interval"));
+        assert!(stdout.contains("--config"));
     }
 }
 
@@ -57,6 +58,7 @@ fn bt_manager_cli_argument_validation() {
         bin_path,
         &[
             (&["--invalid-flag"], "unknown option '--invalid-flag'"),
+            (&["--config"], "missing value for --config"),
             (&["--interval"], "missing value for --interval"),
             (
                 &["--interval", "not-a-number"],

@@ -13,6 +13,9 @@ fn defaults_match_documented_values() {
     let opts = BtManagerOptions::default();
     assert_eq!(opts.interval, Duration::from_secs(5));
     assert_eq!(opts.max_ticks, None);
+    assert!(opts.cover_art);
+    assert_eq!(opts.config, None);
+    assert!(!opts.explicit_interval);
 }
 
 #[test]
@@ -88,6 +91,7 @@ fn run_app_terminates_on_tick_cap_with_mock() {
         interval: Duration::from_millis(1),
         max_ticks: Some(3),
         cover_art: false,
+        ..Default::default()
     };
     assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
 }
@@ -105,4 +109,33 @@ fn run_tick_surfaces_status_from_mock() {
     let status = run_tick(&bt).expect("mock status");
     // The mock initializes with one default connected peer.
     assert_eq!(status.connected_count(), 1);
+}
+
+#[test]
+fn cli_parses_config_path() {
+    let args = ["-c", "/tmp/custom.json", "-i", "3"];
+    let parsed = parse_cli_args_from(args.iter().map(ToString::to_string)).expect("valid");
+    let opts = match parsed {
+        CliParse::Options(opts) => opts,
+        other => panic!("expected options, got {other:?}"),
+    };
+    assert_eq!(
+        opts.config,
+        Some(std::path::PathBuf::from("/tmp/custom.json"))
+    );
+    assert_eq!(opts.interval, Duration::from_secs(3));
+    assert!(opts.explicit_interval);
+}
+
+#[test]
+fn run_app_fails_on_malformed_config() {
+    let (bt, _mock) = BluetoothDevice::new_mocked();
+    let dir = speaker_common::diag::ScopedTempDir::new("bt_app_malformed");
+    let path = dir.path().join("config.json");
+    std::fs::write(&path, "{bad-json").expect("write");
+    let opts = BtManagerOptions {
+        config: Some(path),
+        ..Default::default()
+    };
+    assert_eq!(run_app(&bt, &opts), ExitCode::FAILURE);
 }

@@ -19,11 +19,11 @@
 //! ```rust
 //! use speaker_hardware::pins::{BcmPin, PhysicalPin};
 //!
-//! let bcm = BcmPin::new(23).expect("valid BCM pin");
-//! assert_eq!(bcm.get(), 23);
+//! let bcm = BcmPin::from_u8(23).expect("valid BCM pin");
+//! assert_eq!(bcm.as_u8(), 23);
 //!
-//! let phys = PhysicalPin::new(16).expect("valid header pin");
-//! assert_eq!(phys.get(), 16);
+//! let phys = PhysicalPin::from_u8(16).expect("valid header pin");
+//! assert_eq!(phys.as_u8(), 16);
 //! ```
 
 use std::backtrace::{Backtrace, BacktraceStatus};

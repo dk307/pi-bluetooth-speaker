@@ -6,13 +6,17 @@
 //! and (by default) hosts the direct-BIP cover-art provider that publishes
 //! the active track's artwork on the system D-Bus for future consumers.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::config::BtManagerConfig;
 use speaker_bluetooth::{BluetoothDevice, BluetoothStatus, BtError};
-use speaker_common::diag::{CliParse, env_args, next_arg_value, resolve_cli_opts, run_poll_loop};
+use speaker_common::diag::{
+    CliParse, DEFAULT_BT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts, run_poll_loop,
+};
 
 /// Default status poll interval (5 seconds).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -27,6 +31,10 @@ pub struct BtManagerOptions {
     /// Hosts the D-Bus cover-art provider alongside the monitor loop
     /// (default `true`; host tests disable it so no D-Bus/hardware is touched).
     pub cover_art: bool,
+    /// JSON configuration file override path (`None` uses default /etc/bt-manager/config.json).
+    pub config: Option<PathBuf>,
+    /// Whether `--interval` was explicitly specified on the command line.
+    pub explicit_interval: bool,
 }
 
 impl Default for BtManagerOptions {
@@ -35,6 +43,8 @@ impl Default for BtManagerOptions {
             interval: DEFAULT_POLL_INTERVAL,
             max_ticks: None,
             cover_art: true,
+            config: None,
+            explicit_interval: false,
         }
     }
 }
@@ -46,6 +56,7 @@ pub fn print_usage(bin_name: &str) {
     println!("Usage: {bin_name} [OPTIONS]");
     println!();
     println!("Options:");
+    println!("  -c, --config <PATH>         JSON config file (default: {DEFAULT_BT_CONFIG_PATH})");
     println!(
         "  -i, --interval <SECS>       Status poll interval in seconds (default: {})",
         DEFAULT_POLL_INTERVAL.as_secs()
@@ -99,6 +110,10 @@ where
         match arg.as_str() {
             "-h" | "--help" => return Ok(CliParse::Help),
             "-V" | "--version" => return Ok(CliParse::Version),
+            "-c" | "--config" => {
+                let val = next_arg_value(&mut iter, "--config")?;
+                opts.config = Some(PathBuf::from(val));
+            }
             "-i" | "--interval" => {
                 let val = next_arg_value(&mut iter, "--interval")?;
                 let secs = parse_interval_secs(&val)?;
@@ -109,6 +124,7 @@ where
                     );
                 }
                 opts.interval = Duration::from_secs(secs);
+                opts.explicit_interval = true;
             }
             "-n" | "--ticks" => {
                 let val = next_arg_value(&mut iter, "--ticks")?;
@@ -161,8 +177,26 @@ pub fn run_tick(bt: &BluetoothDevice) -> Result<BluetoothStatus, BtError> {
 /// (which indicates a fundamental problem with the process environment).
 #[must_use]
 pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
+    let path = BtManagerConfig::resolve_path(opts.config.as_deref());
+    let cfg = match BtManagerConfig::load(&path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to load config {}", path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let effective_interval = if opts.explicit_interval {
+        opts.interval
+    } else if cfg.interval_secs.as_duration() != DEFAULT_POLL_INTERVAL {
+        cfg.interval_secs.as_duration()
+    } else {
+        opts.interval
+    };
+    let enable_cover_art = opts.cover_art && cfg.cover_art;
+
     tracing::info!(
-        interval_secs = opts.interval.as_secs(),
+        interval_secs = effective_interval.as_secs(),
         "Bluetooth Manager Service running on Raspberry Pi 3 (aarch64)"
     );
 
@@ -175,7 +209,7 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
     .expect("failed to set signal handler");
 
     let mut cover_art_shutdown = None;
-    if opts.cover_art {
+    if enable_cover_art {
         match crate::cover_provider::spawn_production(
             speaker_bluetooth::COVER_ART_CACHE_DIR.into(),
             bt,
@@ -189,7 +223,7 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
 
     let mut ticks: u64 = 0;
     let mut last_status: Option<(usize, bool)> = None;
-    run_poll_loop(opts.interval, |_timestamp| {
+    run_poll_loop(effective_interval, |_timestamp| {
         if shutdown_requested.load(Ordering::SeqCst) {
             tracing::info!("shutdown requested, stopping monitor loop");
             return true;
@@ -254,6 +288,19 @@ mod tests {
         assert_eq!(opts.interval, Duration::from_secs(5));
         assert_eq!(opts.max_ticks, None);
         assert!(opts.cover_art, "cover-art provider enabled by default");
+        assert_eq!(opts.config, None);
+        assert!(!opts.explicit_interval);
+    }
+
+    #[test]
+    fn cli_parses_config_path() {
+        let args = ["-c", "/tmp/custom-config.json"];
+        let parsed = parse_cli_args_from(args.iter().map(ToString::to_string)).expect("valid");
+        let opts = match parsed {
+            CliParse::Options(opts) => opts,
+            other => panic!("expected options, got {other:?}"),
+        };
+        assert_eq!(opts.config, Some(PathBuf::from("/tmp/custom-config.json")));
     }
 
     #[test]
@@ -347,5 +394,18 @@ mod tests {
         let status = run_tick(&bt).expect("mock status");
         // The mock initializes with one default connected peer.
         assert_eq!(status.connected_count(), 1);
+    }
+
+    #[test]
+    fn run_app_fails_on_invalid_config() {
+        let (bt, _mock) = BluetoothDevice::new_mocked();
+        let dir = speaker_common::diag::ScopedTempDir::new("bt_daemon_invalid_cfg");
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{not-json").expect("write");
+        let opts = BtManagerOptions {
+            config: Some(path),
+            ..Default::default()
+        };
+        assert_eq!(run_app(&bt, &opts), ExitCode::FAILURE);
     }
 }
