@@ -2122,3 +2122,42 @@ fn reconciler_session_cap_and_recovery_flow() {
     assert_eq!(tracked.get(&dev_path).unwrap().hard_resets_attempted, 0);
     assert_eq!(tracked.get(&dev_path).unwrap().divergence_ticks, 0);
 }
+
+#[tokio::test]
+async fn reconciler_di_spawn_and_lifecycle_integration() {
+    use speaker_bluetooth::reconciler::{
+        MockReconcilerDbus, ReconcileAction, TickOutcome, cycle_device_connection,
+        execute_reconcile_actions, reconciler_tick, spawn_bt_transport_reconciler_with,
+    };
+    use std::time::Duration;
+
+    let mock = MockReconcilerDbus::new();
+    let dev_path = "/org/bluez/hci1/dev_di_test";
+
+    // 1. Test execute_reconcile_actions and cycle_device_connection with defaults
+    let actions = vec![ReconcileAction::ConnectA2dpProfile {
+        device_path: dev_path.to_string(),
+    }];
+    execute_reconcile_actions(&mock, &actions).await;
+    assert_eq!(mock.connect_profile_calls().len(), 1);
+
+    cycle_device_connection(&mock, dev_path).await;
+    assert_eq!(mock.disconnect_calls(), vec![dev_path.to_string()]);
+    assert_eq!(mock.connect_calls(), vec![dev_path.to_string()]);
+
+    // 2. Test tick outcome with empty state
+    let mut tracked = std::collections::HashMap::new();
+    let outcome = reconciler_tick(&mock, &mut tracked, Duration::from_millis(1)).await;
+    assert_eq!(outcome, TickOutcome::ActionsExecuted(0));
+
+    // 3. Test background task spawn and graceful abort
+    let handle = spawn_bt_transport_reconciler_with(
+        mock.clone(),
+        Duration::from_millis(10),
+        Duration::from_millis(1),
+    );
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    handle.abort();
+    let join_res = handle.await;
+    assert!(join_res.unwrap_err().is_cancelled());
+}

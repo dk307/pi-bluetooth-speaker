@@ -18,35 +18,38 @@
 //!
 //! ## Case A: Orphaned `MediaTransport1` (e.g. `bluealsad` restart / crash)
 //! When `bluealsad` restarts (e.g. crash, OOM, service restart, or configuration change),
-//! its active D-Bus registrations vanish. However, `BlueZ` retains the allocated
-//! `MediaTransport1` object (e.g. `/org/bluez/hci0/dev_XX_.../fd1`) because the underlying
-//! ACL connection to the phone remains intact.
+//! it drops its registered `MediaEndpoint` and loses all existing PCM devices. However,
+//! `BlueZ` continues to hold the open ACL connection and the active `MediaTransport1`
+//! object (`/org/bluez/hciX/dev_XX_XX_XX_XX_XX_XX/fd*`).
 //!
-//! Calling `ConnectProfile("0000110a-0000-1000-8000-00805f9b34fb")` in this state is a **no-op**
-//! because `BlueZ` believes the A2DP profile and transport are already active. Remote mobile
-//! operating systems (iOS, Android) show "Connected (Audio)", yet no ALSA PCM exists and no audio
-//! can play.
+//! When the remote phone attempts to resume playback, `BlueZ` believes the transport is
+//! already established and never negotiates a new endpoint with `bluealsad`. Calling
+//! `ConnectProfile(A2DP_SOURCE)` on `org.bluez.Device1` is an effective **no-op** in this
+//! state because `BlueZ` sees `MediaTransport1` already active.
 //!
-//! **Remedy**: The only reliable recovery is an explicit baseband ACL reset:
-//! calling `Device1.Disconnect()`, waiting for the kernel and `BlueZ` to tear down the stale `fd*`
-//! transport (`RECONNECT_SETTLE_DELAY`), and calling `Device1.Connect()` to initiate a fresh
-//! handshake.
+//! **Recovery:** The reconciler detects `has_bluez_transport == true && has_bluealsa_pcm == false`
+//! persisting across $\ge 2$ polling ticks, and executes an atomic baseband cycle:
+//! `Disconnect()` $\to$ settle delay $\to$ `Connect()`. This purges the orphaned `fd*`
+//! transport in `BlueZ` and forces a fresh A2DP endpoint handshake with `bluealsad`.
 //!
-//! ## Case B: ACL Half-Reconnect (Phone connects ACL, but A2DP fails to negotiate)
-//! When a mobile device reconnects (or comes back in range), `Connected` flips to `true`,
-//! but neither `BlueZ` creates an `fd*` transport nor does `bluealsad` expose a PCM.
+//! ## Case B: ACL Half-Reconnect (Phone reconnects baseband but skips A2DP)
+//! When a phone reconnects after leaving and re-entering radio range, `BlueZ` frequently
+//! completes the baseband ACL connection (`Connected == true`, `ServicesResolved == true`),
+//! but neither `BlueZ` acquires a `MediaTransport1` nor does `bluealsad` expose a PCM.
+//! The phone displays "Connected", but no audio routing exists.
 //!
-//! **Remedy**: A two-stage recovery:
-//! - **Stage 1 (6 seconds)**: Non-disruptive nudge by calling `Device1.ConnectProfile(A2DP_SOURCE)`.
-//! - **Stage 2 (12 seconds fallback)**: If Stage 1 fails to create a transport, cycle
-//!   the ACL connection via `Disconnect` -> settle -> `Connect`.
+//! **Recovery:**
+//! - **Stage 1 (Debounced to tick 2 / 6s):** Calls `org.bluez.Device1.ConnectProfile(A2DP_SOURCE)`
+//!   non-disruptively without interrupting existing baseband or AVRCP channels.
+//! - **Stage 2 (Escalation at tick 4 / 12s):** If `ConnectProfile` failed to establish both
+//!   `MediaTransport1` and the `BlueALSA` PCM within two additional ticks, cycles the baseband
+//!   connection (`Disconnect()` $\to$ settle delay $\to$ `Connect()`).
 //!
-//! # Defensive Invariants & Third-Party Edge Cases
+//! # Architecture & Third-Party Audit Guardrails
 //!
-//! 1. **`ObjectManager` Path Ambiguity (`/org/bluealsa` vs `/`)**:
-//!    In `bluez-alsa` 4.x and 5.0.0, `bluealsad` serves `org.freedesktop.DBus.ObjectManager`
-//!    on `/org/bluealsa`. However, standard GIO implementations may mount at `/`. This reconciler
-//!    queries `/org/bluealsa` first. If and only if `bluealsad` returns `UnknownObject` or
+//! 1. **`bluez-alsa` v5.0.0 `ObjectManager` Root Path (`/org/bluealsa` vs `/`)**:
+//!    `bluez-alsa` 4.x/5.x exposes standard `org.freedesktop.DBus.ObjectManager` on `/org/bluealsa`.
+//!    The reconciler queries `/org/bluealsa` first. If `bluealsad` returns `UnknownObject` or
 //!    `UnknownMethod`, it falls back to `/`.
 //! 2. **`zbus` v5 Deserialization Safety**:
 //!    In `zbus` v5 (`zvariant` v5), casting `Vec::<String>::try_from(owned_value)` on a D-Bus
@@ -64,9 +67,13 @@
 //!    A maximum of [`MAX_HARD_RESETS_PER_SESSION`] (2) hard connection cycles is permitted per
 //!    ACL session. If a device continues to fail after 2 hard resets, the reconciler backs off
 //!    to avoid thrashing the phone battery.
+//! 6. **Full Dependency Injection (`ReconcilerDbus`)**:
+//!    All D-Bus interactions are abstracted behind the [`ReconcilerDbus`] trait, allowing
+//!    100% hermetic unit and integration testing without a running D-Bus system bus.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::time::{sleep, timeout};
@@ -83,59 +90,260 @@ pub const UUID_A2DP_SOURCE: &str = "0000110a-0000-1000-8000-00805f9b34fb";
 /// State polling and evaluation interval between reconciler ticks.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Maximum timeout permitted for any single D-Bus query or method invocation.
+/// Bounded timeout for individual D-Bus queries or method calls to prevent async task stalls.
 pub const DBUS_CALL_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Settling delay between `Disconnect()` and `Connect()` during an ACL hard reset.
-///
-/// `BlueZ` requires ~1.5s to cleanly tear down the kernel L2CAP channels and release
-/// the internal `MediaTransport1` file descriptor before accepting a new connection.
+/// Settling delay after `Disconnect()` before calling `Connect()` to let `BlueZ` clean up ACL state.
 pub const RECONNECT_SETTLE_DELAY: Duration = Duration::from_millis(1500);
 
-/// Maximum number of `Disconnect -> Connect` hard cycles permitted per ACL session
-/// before backing off to prevent endless connection loops.
+/// Maximum hard connection resets (`Disconnect -> Connect`) allowed per ACL session before backing off.
 pub const MAX_HARD_RESETS_PER_SESSION: u8 = 2;
 
-/// Tracking state maintained for each connected Bluetooth device.
+/// Abstract interface for D-Bus operations performed by the Bluetooth audio reconciler.
+///
+/// Permits dependency injection so the complete reconciler lifecycle, timeout handling,
+/// error fallbacks, and recovery actions can be tested hermetically without a live D-Bus daemon.
+pub trait ReconcilerDbus: Send + Sync {
+    /// Queries `org.bluez` at `/` for all managed objects.
+    fn fetch_bluez_objects(&self) -> impl Future<Output = zbus::Result<ManagedObjects>> + Send;
+
+    /// Queries `org.bluealsa` for managed objects.
+    fn fetch_bluealsa_objects(&self) -> impl Future<Output = zbus::Result<ManagedObjects>> + Send;
+
+    /// Calls `ConnectProfile(UUID)` on the specified `org.bluez.Device1` object path.
+    fn connect_profile(
+        &self,
+        device_path: &str,
+        uuid: &str,
+    ) -> impl Future<Output = zbus::Result<()>> + Send;
+
+    /// Calls `Disconnect()` on the specified `org.bluez.Device1` object path.
+    fn disconnect(&self, device_path: &str) -> impl Future<Output = zbus::Result<()>> + Send;
+
+    /// Calls `Connect()` on the specified `org.bluez.Device1` object path.
+    fn connect(&self, device_path: &str) -> impl Future<Output = zbus::Result<()>> + Send;
+}
+
+impl ReconcilerDbus for Connection {
+    async fn fetch_bluez_objects(&self) -> zbus::Result<ManagedObjects> {
+        let bluez_mgr = ObjectManagerProxy::builder(self)
+            .destination("org.bluez")?
+            .path("/")?
+            .build()
+            .await?;
+        bluez_mgr.get_managed_objects().await.map_err(Into::into)
+    }
+
+    async fn fetch_bluealsa_objects(&self) -> zbus::Result<ManagedObjects> {
+        fetch_bluealsa_objects(self).await
+    }
+
+    async fn connect_profile(&self, device_path: &str, uuid: &str) -> zbus::Result<()> {
+        call_device_method(self, device_path, "ConnectProfile", &(uuid,)).await
+    }
+
+    async fn disconnect(&self, device_path: &str) -> zbus::Result<()> {
+        call_device_method(self, device_path, "Disconnect", &()).await
+    }
+
+    async fn connect(&self, device_path: &str) -> zbus::Result<()> {
+        call_device_method(self, device_path, "Connect", &()).await
+    }
+}
+
+impl<T: ReconcilerDbus + Sync> ReconcilerDbus for &T {
+    fn fetch_bluez_objects(&self) -> impl Future<Output = zbus::Result<ManagedObjects>> + Send {
+        (**self).fetch_bluez_objects()
+    }
+
+    fn fetch_bluealsa_objects(&self) -> impl Future<Output = zbus::Result<ManagedObjects>> + Send {
+        (**self).fetch_bluealsa_objects()
+    }
+
+    fn connect_profile(
+        &self,
+        device_path: &str,
+        uuid: &str,
+    ) -> impl Future<Output = zbus::Result<()>> + Send {
+        (**self).connect_profile(device_path, uuid)
+    }
+
+    fn disconnect(&self, device_path: &str) -> impl Future<Output = zbus::Result<()>> + Send {
+        (**self).disconnect(device_path)
+    }
+
+    fn connect(&self, device_path: &str) -> impl Future<Output = zbus::Result<()>> + Send {
+        (**self).connect(device_path)
+    }
+}
+
+/// Hermetic mock implementation of [`ReconcilerDbus`] for deterministic testing.
+#[derive(Debug, Default, Clone)]
+pub struct MockReconcilerDbus {
+    bluez_result: Arc<Mutex<Option<zbus::Result<ManagedObjects>>>>,
+    bluealsa_result: Arc<Mutex<Option<zbus::Result<ManagedObjects>>>>,
+    connect_profile_result: Arc<Mutex<Option<zbus::Result<()>>>>,
+    disconnect_result: Arc<Mutex<Option<zbus::Result<()>>>>,
+    connect_result: Arc<Mutex<Option<zbus::Result<()>>>>,
+    connect_profile_calls: Arc<Mutex<Vec<(String, String)>>>,
+    disconnect_calls: Arc<Mutex<Vec<String>>>,
+    connect_calls: Arc<Mutex<Vec<String>>>,
+}
+
+#[expect(clippy::missing_panics_doc, reason = "Internal mutex locks in mock")]
+impl MockReconcilerDbus {
+    /// Creates a new empty mock reconciler.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the managed objects to return on the next `fetch_bluez_objects` call.
+    pub fn set_bluez_objects(&self, objs: ManagedObjects) {
+        *self.bluez_result.lock().unwrap() = Some(Ok(objs));
+    }
+
+    /// Sets the error to return on the next `fetch_bluez_objects` call.
+    pub fn set_bluez_error(&self, err: zbus::Error) {
+        *self.bluez_result.lock().unwrap() = Some(Err(err));
+    }
+
+    /// Sets the managed objects to return on the next `fetch_bluealsa_objects` call.
+    pub fn set_bluealsa_objects(&self, objs: ManagedObjects) {
+        *self.bluealsa_result.lock().unwrap() = Some(Ok(objs));
+    }
+
+    /// Sets the error to return on the next `fetch_bluealsa_objects` call.
+    pub fn set_bluealsa_error(&self, err: zbus::Error) {
+        *self.bluealsa_result.lock().unwrap() = Some(Err(err));
+    }
+
+    /// Sets the result to return on subsequent `connect_profile` calls.
+    pub fn set_connect_profile_result(&self, res: zbus::Result<()>) {
+        *self.connect_profile_result.lock().unwrap() = Some(res);
+    }
+
+    /// Sets the result to return on subsequent `disconnect` calls.
+    pub fn set_disconnect_result(&self, res: zbus::Result<()>) {
+        *self.disconnect_result.lock().unwrap() = Some(res);
+    }
+
+    /// Sets the result to return on subsequent `connect` calls.
+    pub fn set_connect_result(&self, res: zbus::Result<()>) {
+        *self.connect_result.lock().unwrap() = Some(res);
+    }
+
+    /// Returns all recorded `(device_path, uuid)` arguments passed to `connect_profile`.
+    #[must_use]
+    pub fn connect_profile_calls(&self) -> Vec<(String, String)> {
+        self.connect_profile_calls.lock().unwrap().clone()
+    }
+
+    /// Returns all recorded `device_path` arguments passed to `disconnect`.
+    #[must_use]
+    pub fn disconnect_calls(&self) -> Vec<String> {
+        self.disconnect_calls.lock().unwrap().clone()
+    }
+
+    /// Returns all recorded `device_path` arguments passed to `connect`.
+    #[must_use]
+    pub fn connect_calls(&self) -> Vec<String> {
+        self.connect_calls.lock().unwrap().clone()
+    }
+}
+
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "Mock satisfies async trait without await"
+)]
+impl ReconcilerDbus for MockReconcilerDbus {
+    async fn fetch_bluez_objects(&self) -> zbus::Result<ManagedObjects> {
+        let mut guard = self.bluez_result.lock().unwrap();
+        guard.take().unwrap_or_else(|| Ok(ManagedObjects::new()))
+    }
+
+    async fn fetch_bluealsa_objects(&self) -> zbus::Result<ManagedObjects> {
+        let mut guard = self.bluealsa_result.lock().unwrap();
+        guard.take().unwrap_or_else(|| Ok(ManagedObjects::new()))
+    }
+
+    async fn connect_profile(&self, device_path: &str, uuid: &str) -> zbus::Result<()> {
+        self.connect_profile_calls
+            .lock()
+            .unwrap()
+            .push((device_path.to_string(), uuid.to_string()));
+        let guard = self.connect_profile_result.lock().unwrap();
+        match &*guard {
+            Some(Ok(())) | None => Ok(()),
+            Some(Err(e)) => Err(zbus::Error::Failure(e.to_string())),
+        }
+    }
+
+    async fn disconnect(&self, device_path: &str) -> zbus::Result<()> {
+        self.disconnect_calls
+            .lock()
+            .unwrap()
+            .push(device_path.to_string());
+        let guard = self.disconnect_result.lock().unwrap();
+        match &*guard {
+            Some(Ok(())) | None => Ok(()),
+            Some(Err(e)) => Err(zbus::Error::Failure(e.to_string())),
+        }
+    }
+
+    async fn connect(&self, device_path: &str) -> zbus::Result<()> {
+        self.connect_calls
+            .lock()
+            .unwrap()
+            .push(device_path.to_string());
+        let guard = self.connect_result.lock().unwrap();
+        match &*guard {
+            Some(Ok(())) | None => Ok(()),
+            Some(Err(e)) => Err(zbus::Error::Failure(e.to_string())),
+        }
+    }
+}
+
+/// Divergence tracking state for an individual paired Bluetooth device.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct DeviceWatchState {
-    /// Number of consecutive 3-second ticks during which audio transport divergence persisted.
+    /// Number of consecutive polling ticks this device has exhibited transport divergence.
     pub divergence_ticks: u32,
-    /// Number of `Disconnect -> Connect` hard resets attempted during the current ACL connection.
+    /// Number of `Disconnect -> Connect` hard cycles attempted during this connection session.
     pub hard_resets_attempted: u8,
 }
 
-/// Snapshot of `BlueZ` device properties and associated transport/PCM state.
+/// Reconciler device snapshot evaluated at a single polling tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "direct reflection of BlueZ Device1 properties and transport state"
+    reason = "Hardware state snapshot flags"
 )]
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BluezDeviceSnapshot {
-    /// `BlueZ` D-Bus object path (e.g. `/org/bluez/hci0/dev_30_E0_44_67_38_A2`).
+    /// D-Bus object path of the `org.bluez.Device1` (e.g. `/org/bluez/hci1/dev_30_E0_44_67_38_A2`).
     pub path: String,
-    /// Whether baseband ACL connection is established (`org.bluez.Device1.Connected`).
+    /// Baseband ACL connection state from `org.bluez.Device1.Connected`.
     pub connected: bool,
-    /// Whether the device has completed pairing (`org.bluez.Device1.Paired`).
+    /// Pairing state from `org.bluez.Device1.Paired`.
     pub paired: bool,
-    /// Whether the link key is stored in long-term bonding (`org.bluez.Device1.Bonded`).
+    /// Bonded state from `org.bluez.Device1.Bonded`.
     pub bonded: bool,
-    /// Whether `BlueZ` has completed GATT/SDP service discovery (`ServicesResolved`).
+    /// GATT/SDP service resolution state from `org.bluez.Device1.ServicesResolved`.
     pub services_resolved: bool,
-    /// Whether the device advertises A2DP Source capability in its UUID list.
+    /// True if the device advertises the standard A2DP Audio Source UUID.
     pub supports_a2dp_source: bool,
-    /// Whether `BlueZ` currently holds an active streaming transport (`/org/bluez/.../fd*`).
+    /// True if `BlueZ` currently holds an active streaming transport (`/org/bluez/hciX/dev_XX/fd*`).
     pub has_bluez_transport: bool,
-    /// Whether `bluealsad` exposes an active A2DP sink PCM for this device (`/a2dpsnk/source`).
+    /// True if `bluez-alsa` exposes an active `org.bluealsa.PCM1` for this device.
     pub has_bluealsa_pcm: bool,
-    /// Whether `bluealsad` exposes an active voice call PCM (HFP/HSP/SCO).
+    /// True if the device is currently in an active HFP/HSP/SCO phone call PCM.
     pub has_voice_call_pcm: bool,
 }
 
-/// Action determined by the deterministic reconciler state machine.
+/// Action decided by the reconciler to heal transport state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReconcileAction {
-    /// Nudge `BlueZ` to establish the A2DP profile without dropping the baseband connection.
+    /// Request non-disruptive A2DP profile connection via `org.bluez.Device1.ConnectProfile`.
     ConnectA2dpProfile {
         /// `BlueZ` device object path.
         device_path: String,
@@ -158,6 +366,17 @@ pub enum DisconnectReason {
     AclHalfReconnect,
 }
 
+/// Result of a single reconciler tick execution.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TickOutcome {
+    /// Divergence or health evaluation completed; actions executed.
+    ActionsExecuted(usize),
+    /// Tick skipped due to D-Bus query error.
+    SkippedQueryError(String),
+    /// Tick skipped due to D-Bus call timeout.
+    SkippedTimeout,
+}
+
 /// Spawns the verified `BlueZ 5.82` ↔ `bluez-alsa v5.0.0` state reconciler task.
 ///
 /// Runs continuously in the background, polling D-Bus every [`POLL_INTERVAL`] (3s).
@@ -170,41 +389,70 @@ pub enum DisconnectReason {
 /// cannot be authoritatively queried.
 #[must_use]
 pub fn spawn_bt_transport_reconciler(conn: Connection) -> tokio::task::JoinHandle<()> {
+    spawn_bt_transport_reconciler_with(conn, POLL_INTERVAL, RECONNECT_SETTLE_DELAY)
+}
+
+/// Spawns the reconciler with custom intervals and any [`ReconcilerDbus`] implementation.
+#[must_use]
+pub fn spawn_bt_transport_reconciler_with<D: ReconcilerDbus + 'static>(
+    dbus: D,
+    poll_interval: Duration,
+    settle_delay: Duration,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run_reconciler_loop(conn).await;
+        run_reconciler_loop_with(dbus, poll_interval, settle_delay).await;
     })
 }
 
-/// Core asynchronous reconciler loop.
+/// Core asynchronous reconciler loop backed by a live D-Bus connection.
 pub async fn run_reconciler_loop(conn: Connection) {
+    run_reconciler_loop_with(conn, POLL_INTERVAL, RECONNECT_SETTLE_DELAY).await;
+}
+
+/// Parameterized reconciler loop supporting dependency injection for testing.
+pub async fn run_reconciler_loop_with<D: ReconcilerDbus>(
+    dbus: D,
+    poll_interval: Duration,
+    settle_delay: Duration,
+) {
     let mut tracked: HashMap<String, DeviceWatchState> = HashMap::new();
     tracing::info!(
         "Bluetooth transport state reconciler started (BlueZ 5.82 <-> bluez-alsa v5.0.0)"
     );
 
     loop {
-        sleep(POLL_INTERVAL).await;
-
-        let snapshots = match timeout(DBUS_CALL_TIMEOUT, collect_snapshots(&conn)).await {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                // CRITICAL SAFETY GUARD: If org.bluealsa or org.bluez failed to respond
-                // (e.g. daemon restarting or D-Bus AccessDenied), DO NOT run recovery
-                // or we would falsely disconnect healthy streams.
-                tracing::warn!(error = %e, "BT transport reconciler skipped tick (D-Bus query error)");
-                continue;
-            }
-            Err(_elapsed) => {
-                tracing::warn!(
-                    "BT transport reconciler skipped tick (D-Bus call timed out after {DBUS_CALL_TIMEOUT:?})"
-                );
-                continue;
-            }
-        };
-
-        let actions = reconcile_snapshots(&mut tracked, &snapshots);
-        execute_reconcile_actions(&conn, &actions).await;
+        sleep(poll_interval).await;
+        let _ = reconciler_tick(&dbus, &mut tracked, settle_delay).await;
     }
+}
+
+/// Executes a single tick of the transport state reconciler.
+///
+/// Queries snapshots, reconciles divergence tracking, executes decided actions,
+/// and returns the [`TickOutcome`].
+pub async fn reconciler_tick<D: ReconcilerDbus, S: BuildHasher>(
+    dbus: &D,
+    tracked: &mut HashMap<String, DeviceWatchState, S>,
+    settle_delay: Duration,
+) -> TickOutcome {
+    let snapshots = match timeout(DBUS_CALL_TIMEOUT, collect_snapshots(dbus)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "BT transport reconciler skipped tick (D-Bus query error)");
+            return TickOutcome::SkippedQueryError(e.to_string());
+        }
+        Err(_elapsed) => {
+            tracing::warn!(
+                "BT transport reconciler skipped tick (D-Bus call timed out after {DBUS_CALL_TIMEOUT:?})"
+            );
+            return TickOutcome::SkippedTimeout;
+        }
+    };
+
+    let actions = reconcile_snapshots(tracked, &snapshots);
+    let count = actions.len();
+    execute_reconcile_actions_with_settle(dbus, &actions, settle_delay).await;
+    TickOutcome::ActionsExecuted(count)
 }
 
 /// Queries `BlueZ` and `BlueALSA` over D-Bus to construct per-device snapshots.
@@ -213,13 +461,10 @@ pub async fn run_reconciler_loop(conn: Connection) {
 /// Returns a [`zbus::Error`] if either D-Bus daemon fails to respond or denies access.
 /// Propagates errors via `?`: if either daemon fails to respond or denies access,
 /// the tick aborts so recovery is not triggered on partial or ambiguous information.
-pub async fn collect_snapshots(conn: &Connection) -> zbus::Result<Vec<BluezDeviceSnapshot>> {
-    let bluez_mgr = ObjectManagerProxy::builder(conn)
-        .destination("org.bluez")?
-        .path("/")?
-        .build()
-        .await?;
-    let bluez_objs: ManagedObjects = bluez_mgr.get_managed_objects().await?;
+pub async fn collect_snapshots<D: ReconcilerDbus>(
+    dbus: &D,
+) -> zbus::Result<Vec<BluezDeviceSnapshot>> {
+    let bluez_objs = dbus.fetch_bluez_objects().await?;
 
     // Fast path: if there are no connected devices in BlueZ, skip querying org.bluealsa.
     let has_connected_device = bluez_objs.values().any(|ifaces| {
@@ -229,7 +474,7 @@ pub async fn collect_snapshots(conn: &Connection) -> zbus::Result<Vec<BluezDevic
     });
 
     let bluealsa_objs = if has_connected_device {
-        fetch_bluealsa_objects(conn).await?
+        dbus.fetch_bluealsa_objects().await?
     } else {
         ManagedObjects::new()
     };
@@ -457,15 +702,24 @@ pub fn reconcile_snapshots<S: BuildHasher>(
     actions
 }
 
-/// Executes decided actions against `BlueZ` over D-Bus with explicit timeouts.
-pub async fn execute_reconcile_actions(conn: &Connection, actions: &[ReconcileAction]) {
+/// Executes decided actions against `BlueZ` using the default settle delay.
+pub async fn execute_reconcile_actions<D: ReconcilerDbus>(dbus: &D, actions: &[ReconcileAction]) {
+    execute_reconcile_actions_with_settle(dbus, actions, RECONNECT_SETTLE_DELAY).await;
+}
+
+/// Executes decided actions with a specified settle delay.
+pub async fn execute_reconcile_actions_with_settle<D: ReconcilerDbus>(
+    dbus: &D,
+    actions: &[ReconcileAction],
+    settle_delay: Duration,
+) {
     for action in actions {
         match action {
             ReconcileAction::ConnectA2dpProfile { device_path } => {
                 tracing::info!(device = %device_path, "Calling ConnectProfile(A2DP_SOURCE)");
                 match timeout(
                     DBUS_CALL_TIMEOUT,
-                    call_device_method(conn, device_path, "ConnectProfile", &(UUID_A2DP_SOURCE,)),
+                    dbus.connect_profile(device_path, UUID_A2DP_SOURCE),
                 )
                 .await
                 {
@@ -489,7 +743,7 @@ pub async fn execute_reconcile_actions(conn: &Connection, actions: &[ReconcileAc
                     reason = ?reason,
                     "Executing connection cycle (Disconnect -> Settle -> Connect)"
                 );
-                cycle_device_connection(conn, device_path).await;
+                cycle_device_connection_with_settle(dbus, device_path, settle_delay).await;
             }
         }
     }
@@ -578,7 +832,7 @@ pub fn extract_object_path<S: BuildHasher>(
     })
 }
 
-/// Safely extracts a D-Bus `as` (array of strings) across zbus v4 and v5 without failing on `Value::Array`.
+/// Extracts a string array safely handling both `zvariant::Array` and nested vectors.
 #[must_use]
 pub fn extract_string_array<S: BuildHasher>(
     props: &HashMap<String, OwnedValue, S>,
@@ -587,10 +841,11 @@ pub fn extract_string_array<S: BuildHasher>(
     let Some(val) = props.get(key) else {
         return Vec::new();
     };
+
     if let Ok(vec) = Vec::<String>::try_from(val.clone()) {
         return vec;
     }
-    if let Value::Array(arr) = &**val {
+    if let Ok(arr) = Array::try_from(val.clone()) {
         return arr
             .iter()
             .filter_map(|item| match item {
@@ -613,13 +868,17 @@ pub fn extract_string_array<S: BuildHasher>(
 
 /// Cycles a Bluetooth connection by invoking `Disconnect()`, sleeping for
 /// [`RECONNECT_SETTLE_DELAY`], and invoking `Connect()`.
-pub async fn cycle_device_connection(conn: &Connection, device_path: &str) {
-    match timeout(
-        DBUS_CALL_TIMEOUT,
-        call_device_method(conn, device_path, "Disconnect", &()),
-    )
-    .await
-    {
+pub async fn cycle_device_connection<D: ReconcilerDbus>(dbus: &D, device_path: &str) {
+    cycle_device_connection_with_settle(dbus, device_path, RECONNECT_SETTLE_DELAY).await;
+}
+
+/// Cycles a Bluetooth connection with a specified settle delay.
+pub async fn cycle_device_connection_with_settle<D: ReconcilerDbus>(
+    dbus: &D,
+    device_path: &str,
+    settle_delay: Duration,
+) {
+    match timeout(DBUS_CALL_TIMEOUT, dbus.disconnect(device_path)).await {
         Ok(Ok(())) => {
             tracing::info!(device = %device_path, "Disconnect call succeeded");
         }
@@ -631,14 +890,9 @@ pub async fn cycle_device_connection(conn: &Connection, device_path: &str) {
         }
     }
 
-    sleep(RECONNECT_SETTLE_DELAY).await;
+    sleep(settle_delay).await;
 
-    match timeout(
-        DBUS_CALL_TIMEOUT,
-        call_device_method(conn, device_path, "Connect", &()),
-    )
-    .await
-    {
+    match timeout(DBUS_CALL_TIMEOUT, dbus.connect(device_path)).await {
         Ok(Ok(())) => {
             tracing::info!(device = %device_path, "Connect call succeeded");
         }
@@ -704,6 +958,29 @@ mod tests {
     }
 
     #[test]
+    fn extract_str_and_object_path_coverage() {
+        let mut props = HashMap::new();
+        props.insert("Name".to_string(), to_val("Pixel"));
+        props.insert("DevPath".to_string(), to_val(owned_path("/dev/test")));
+        props.insert("NonStr".to_string(), to_val(42i32));
+
+        assert_eq!(extract_str(&props, "Name"), Some("Pixel"));
+        assert_eq!(extract_str(&props, "NonStr"), None);
+        assert_eq!(extract_str(&props, "Missing"), None);
+
+        assert_eq!(
+            extract_object_path(&props, "DevPath"),
+            Some("/dev/test".to_string())
+        );
+        assert_eq!(
+            extract_object_path(&props, "Name"),
+            Some("Pixel".to_string())
+        );
+        assert_eq!(extract_object_path(&props, "NonStr"), None);
+        assert_eq!(extract_object_path(&props, "Missing"), None);
+    }
+
+    #[test]
     fn extract_string_array_handles_vec_and_array() {
         let mut props = HashMap::new();
         let list = vec!["item1".to_string(), "item2".to_string()];
@@ -749,11 +1026,8 @@ mod tests {
         let mut bluealsa_objs = ManagedObjects::new();
         let pcm_path = "/org/bluealsa/hci1/dev_30_E0_44_67_38_A2/a2dpsnk/source";
         let mut pcm_props = HashMap::new();
-        pcm_props.insert(
-            "Device".to_string(),
-            to_val(zbus::zvariant::ObjectPath::try_from(dev_path).unwrap()),
-        );
         pcm_props.insert("Transport".to_string(), to_val("A2DP-sink"));
+        pcm_props.insert("Device".to_string(), to_val(owned_path(dev_path)));
         let mut pcm_ifaces = HashMap::new();
         pcm_ifaces.insert(owned_iface("org.bluealsa.PCM1"), pcm_props);
         bluealsa_objs.insert(owned_path(pcm_path), pcm_ifaces);
@@ -765,6 +1039,7 @@ mod tests {
         assert!(s.connected);
         assert!(s.paired);
         assert!(s.bonded);
+        assert!(s.services_resolved);
         assert!(s.supports_a2dp_source);
         assert!(s.has_bluez_transport);
         assert!(s.has_bluealsa_pcm);
@@ -773,7 +1048,7 @@ mod tests {
 
     #[test]
     fn reconcile_snapshots_case_a_orphaned_transport() {
-        let dev_path = "/org/bluez/hci1/dev_30_E0_44_67_38_A2".to_string();
+        let dev_path = "/org/bluez/hci1/dev_orphan".to_string();
         let mut tracked = HashMap::new();
 
         let snapshot = BluezDeviceSnapshot {
@@ -783,18 +1058,17 @@ mod tests {
             bonded: true,
             services_resolved: true,
             supports_a2dp_source: true,
-            has_bluez_transport: true, // fd* exists in BlueZ
-            has_bluealsa_pcm: false,   // bluealsad has NO PCM!
+            has_bluez_transport: true,
+            has_bluealsa_pcm: false, // orphaned fd1 in BlueZ
             has_voice_call_pcm: false,
         };
 
-        // Tick 1: detects divergence, no action yet
+        // Tick 1: observed divergence, tick counter advances to 1, no action yet (debounce)
         let actions = reconcile_snapshots(&mut tracked, std::slice::from_ref(&snapshot));
         assert_eq!(actions, []);
         assert_eq!(tracked.get(&dev_path).unwrap().divergence_ticks, 1);
-        assert_eq!(tracked.get(&dev_path).unwrap().hard_resets_attempted, 0);
 
-        // Tick 2: divergence_ticks >= 2, triggers Disconnect -> Connect cycle
+        // Tick 2: divergence persists, triggers CycleConnection
         let actions = reconcile_snapshots(&mut tracked, std::slice::from_ref(&snapshot));
         assert_eq!(actions.len(), 1);
         assert_eq!(
@@ -810,7 +1084,7 @@ mod tests {
 
     #[test]
     fn reconcile_snapshots_case_b_acl_half_reconnect() {
-        let dev_path = "/org/bluez/hci1/dev_30_E0_44_67_38_A2".to_string();
+        let dev_path = "/org/bluez/hci1/dev_half_conn".to_string();
         let mut tracked = HashMap::new();
 
         let snapshot = BluezDeviceSnapshot {
@@ -820,16 +1094,16 @@ mod tests {
             bonded: true,
             services_resolved: true,
             supports_a2dp_source: true,
-            has_bluez_transport: false, // No transport in BlueZ
-            has_bluealsa_pcm: false,    // No PCM in bluealsad
+            has_bluez_transport: false, // no transport
+            has_bluealsa_pcm: false,    // no PCM
             has_voice_call_pcm: false,
         };
 
-        // Tick 1: initial detection
+        // Tick 1 (3s): debounce
         let actions = reconcile_snapshots(&mut tracked, std::slice::from_ref(&snapshot));
         assert_eq!(actions, []);
 
-        // Tick 2: Stage 1 soft recovery (ConnectProfile)
+        // Tick 2 (6s): Stage 1 - non-disruptive ConnectProfile(A2DP_SOURCE)
         let actions = reconcile_snapshots(&mut tracked, std::slice::from_ref(&snapshot));
         assert_eq!(actions.len(), 1);
         assert_eq!(
@@ -840,12 +1114,12 @@ mod tests {
         );
         assert_eq!(tracked.get(&dev_path).unwrap().divergence_ticks, 2);
 
-        // Tick 3: still divergent
+        // Tick 3 (9s): debounce wait for transport to appear
         let actions = reconcile_snapshots(&mut tracked, std::slice::from_ref(&snapshot));
         assert_eq!(actions, []);
         assert_eq!(tracked.get(&dev_path).unwrap().divergence_ticks, 3);
 
-        // Tick 4: Stage 2 hard recovery (CycleConnection)
+        // Tick 4 (12s): Stage 2 - escalation to Disconnect -> Connect cycle
         let actions = reconcile_snapshots(&mut tracked, std::slice::from_ref(&snapshot));
         assert_eq!(actions.len(), 1);
         assert_eq!(
@@ -954,5 +1228,133 @@ mod tests {
         assert!(is_unknown_object_or_method(&err2));
         assert!(is_unknown_object_or_method(&err3));
         assert!(!is_unknown_object_or_method(&err4));
+    }
+
+    #[tokio::test]
+    async fn mock_dbus_collect_snapshots_fast_path_and_errors() {
+        let mock = MockReconcilerDbus::new();
+
+        // 1. BlueZ query fails with D-Bus error
+        mock.set_bluez_error(zbus::Error::Address("unreachable bus".into()));
+        let res = collect_snapshots(&mock).await;
+        let _ = res.unwrap_err();
+
+        // 2. Fast-path: BlueZ has only disconnected devices -> skips BlueALSA query
+        let mut bluez_objs = ManagedObjects::new();
+        let mut dev_props = HashMap::new();
+        dev_props.insert("Connected".to_string(), to_val(false));
+        dev_props.insert("Paired".to_string(), to_val(true));
+        let mut dev_ifaces = HashMap::new();
+        dev_ifaces.insert(owned_iface("org.bluez.Device1"), dev_props);
+        bluez_objs.insert(owned_path("/org/bluez/hci0/dev_1"), dev_ifaces);
+
+        mock.set_bluez_objects(bluez_objs.clone());
+        mock.set_bluealsa_error(zbus::Error::Failure("must not be called".into()));
+        let snapshots = collect_snapshots(&mock).await.expect("fast path succeeds");
+        assert_eq!(snapshots.len(), 1);
+        assert!(!snapshots[0].connected);
+
+        // 3. Connected device triggers BlueALSA query; BlueALSA failure aborts tick
+        let mut connected_dev_props = HashMap::new();
+        connected_dev_props.insert("Connected".to_string(), to_val(true));
+        connected_dev_props.insert("Paired".to_string(), to_val(true));
+        let mut connected_ifaces = HashMap::new();
+        connected_ifaces.insert(owned_iface("org.bluez.Device1"), connected_dev_props);
+        let mut connected_bluez = ManagedObjects::new();
+        connected_bluez.insert(owned_path("/org/bluez/hci0/dev_2"), connected_ifaces);
+
+        mock.set_bluez_objects(connected_bluez);
+        mock.set_bluealsa_error(zbus::Error::Failure("bluealsa down".into()));
+        let err_res = collect_snapshots(&mock).await;
+        let _ = err_res.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn mock_dbus_execute_actions_and_cycle_connection() {
+        let mock = MockReconcilerDbus::new();
+        let dev_path = "/org/bluez/hci0/dev_action_test";
+
+        // Successful ConnectProfile
+        let action1 = ReconcileAction::ConnectA2dpProfile {
+            device_path: dev_path.to_string(),
+        };
+        execute_reconcile_actions_with_settle(&mock, &[action1], Duration::from_millis(1)).await;
+        assert_eq!(
+            mock.connect_profile_calls(),
+            vec![(dev_path.to_string(), UUID_A2DP_SOURCE.to_string())]
+        );
+
+        // Failing ConnectProfile (handles error branch cleanly)
+        mock.set_connect_profile_result(Err(zbus::Error::Failure("profile rejected".into())));
+        let action2 = ReconcileAction::ConnectA2dpProfile {
+            device_path: dev_path.to_string(),
+        };
+        execute_reconcile_actions_with_settle(&mock, &[action2], Duration::from_millis(1)).await;
+
+        // Successful connection cycle (Disconnect -> Settle -> Connect)
+        let action3 = ReconcileAction::CycleConnection {
+            device_path: dev_path.to_string(),
+            reason: DisconnectReason::OrphanedBluezTransport,
+        };
+        execute_reconcile_actions_with_settle(&mock, &[action3], Duration::from_millis(1)).await;
+        assert_eq!(mock.disconnect_calls(), vec![dev_path.to_string()]);
+        assert_eq!(mock.connect_calls(), vec![dev_path.to_string()]);
+
+        // Failing Disconnect and Connect
+        mock.set_disconnect_result(Err(zbus::Error::Failure("disconnect failed".into())));
+        mock.set_connect_result(Err(zbus::Error::Failure("connect failed".into())));
+        cycle_device_connection_with_settle(&mock, dev_path, Duration::from_millis(1)).await;
+        assert_eq!(mock.disconnect_calls().len(), 2);
+        assert_eq!(mock.connect_calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn mock_dbus_reconciler_tick_outcomes() {
+        let mock = MockReconcilerDbus::new();
+        let mut tracked = HashMap::new();
+
+        // 1. Query error outcome
+        mock.set_bluez_error(zbus::Error::Failure("service absent".into()));
+        let outcome1 = reconciler_tick(&mock, &mut tracked, Duration::from_millis(1)).await;
+        assert!(matches!(outcome1, TickOutcome::SkippedQueryError(_)));
+
+        // 2. Normal tick with no actions needed (empty devices)
+        mock.set_bluez_objects(ManagedObjects::new());
+        let outcome2 = reconciler_tick(&mock, &mut tracked, Duration::from_millis(1)).await;
+        assert_eq!(outcome2, TickOutcome::ActionsExecuted(0));
+
+        // 3. Normal tick with recovery action executed
+        let dev_path = "/org/bluez/hci0/dev_tick_test";
+        let mut dev_props = HashMap::new();
+        dev_props.insert("Connected".to_string(), to_val(true));
+        dev_props.insert("Paired".to_string(), to_val(true));
+        dev_props.insert("Bonded".to_string(), to_val(true));
+        dev_props.insert("ServicesResolved".to_string(), to_val(true));
+        dev_props.insert("UUIDs".to_string(), to_val(vec![UUID_A2DP_SOURCE]));
+        let mut dev_ifaces = HashMap::new();
+        dev_ifaces.insert(owned_iface("org.bluez.Device1"), dev_props);
+        let mut bluez_objs = ManagedObjects::new();
+        bluez_objs.insert(owned_path(dev_path), dev_ifaces);
+
+        // Orphaned transport: BlueZ has /fd0, BlueALSA has no PCMs
+        let mut fd_ifaces = HashMap::new();
+        fd_ifaces.insert(owned_iface("org.bluez.MediaTransport1"), HashMap::new());
+        bluez_objs.insert(owned_path(&format!("{dev_path}/fd0")), fd_ifaces);
+
+        mock.set_bluez_objects(bluez_objs.clone());
+        mock.set_bluealsa_objects(ManagedObjects::new());
+
+        // Tick 1 (debounce): 0 actions executed
+        let outcome3 = reconciler_tick(&mock, &mut tracked, Duration::from_millis(1)).await;
+        assert_eq!(outcome3, TickOutcome::ActionsExecuted(0));
+        assert_eq!(tracked.get(dev_path).unwrap().divergence_ticks, 1);
+
+        // Tick 2 (escalate): 1 action executed (CycleConnection)
+        mock.set_bluez_objects(bluez_objs);
+        mock.set_bluealsa_objects(ManagedObjects::new());
+        let outcome4 = reconciler_tick(&mock, &mut tracked, Duration::from_millis(1)).await;
+        assert_eq!(outcome4, TickOutcome::ActionsExecuted(1));
+        assert_eq!(tracked.get(dev_path).unwrap().divergence_ticks, 0);
+        assert_eq!(tracked.get(dev_path).unwrap().hard_resets_attempted, 1);
     }
 }
