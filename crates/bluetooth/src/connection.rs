@@ -2335,7 +2335,10 @@ impl BluetoothDeviceMock {
     }
 
     fn link_snapshot(&self) -> Result<LinkSnapshot, BtError> {
-        let state = self.state.read().expect("mock lock poisoned");
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(ref fault) = state.fault {
             return Err(BtError::mock_fault(fault.clone()));
         }
