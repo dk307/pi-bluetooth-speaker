@@ -24,7 +24,7 @@
 //! assert_eq!(split.reason, BreakReason::BeforeBracket);
 //! ```
 
-pub mod title_breaker;
+pub(crate) mod title_breaker;
 
 #[doc(inline)]
 pub use title_breaker::{
