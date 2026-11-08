@@ -312,6 +312,11 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
                         "Bluetooth status changed"
                     );
                     last_status = Some(signature);
+                    if signature.0 > 0
+                        && let Some(cover_art) = &cover_art_shutdown
+                    {
+                        cover_art.wake();
+                    }
                 }
             }
             Err(e) => tracing::warn!(error = %e, "Bluetooth status poll failed"),

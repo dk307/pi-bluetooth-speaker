@@ -1455,6 +1455,78 @@ fn parse_bluez_all_with_media_player() {
 }
 
 #[test]
+fn parse_bluez_playback_resolves_image_handle_from_media_item() {
+    let mut objects: ManagedObjects = HashMap::new();
+
+    // Adapter hci0
+    let adapter_path = OwnedObjectPath::try_from("/org/bluez/hci0").unwrap();
+    let mut adapter_ifaces = HashMap::new();
+    let mut adapter_props = HashMap::new();
+    adapter_props.insert("Address".to_string(), to_val("DC:A6:32:11:22:33"));
+    adapter_props.insert("Alias".to_string(), to_val("Raspberry Pi 3"));
+    adapter_props.insert("Powered".to_string(), to_val(true));
+    adapter_props.insert("Discoverable".to_string(), to_val(false));
+    adapter_props.insert("Pairable".to_string(), to_val(true));
+    adapter_ifaces.insert(iface("org.bluez.Adapter1"), adapter_props);
+    objects.insert(adapter_path, adapter_ifaces);
+
+    // Device
+    let dev_path = OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF").unwrap();
+    let mut dev_ifaces = HashMap::new();
+    let mut dev_props = HashMap::new();
+    dev_props.insert("Address".to_string(), to_val("AA:BB:CC:DD:EE:FF"));
+    dev_props.insert("Alias".to_string(), to_val("Deepak's Phone"));
+    dev_props.insert("Connected".to_string(), to_val(true));
+    dev_props.insert("Adapter".to_string(), to_val(dev_path.clone()));
+    dev_ifaces.insert(iface("org.bluez.Device1"), dev_props);
+    objects.insert(dev_path, dev_ifaces);
+
+    // MediaPlayer1 without ImgHandle in Track
+    let player_path =
+        OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0").unwrap();
+    let mut player_ifaces = HashMap::new();
+    let mut player_props = HashMap::new();
+    player_props.insert(
+        "Device".to_string(),
+        to_val("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"),
+    );
+    player_props.insert("Status".to_string(), to_val("playing"));
+    let sig_s = zbus::zvariant::Signature::try_from("s").unwrap();
+    let sig_v = zbus::zvariant::Signature::try_from("v").unwrap();
+    let mut track_dict = zbus::zvariant::Dict::new(&sig_s, &sig_v);
+    track_dict
+        .append(
+            Value::from("Title"),
+            Value::Value(Box::new(Value::from("Initial Track"))),
+        )
+        .unwrap();
+    player_props.insert("Track".to_string(), to_val(Value::Dict(track_dict)));
+    player_props.insert("ObexPort".to_string(), to_val(Value::from(4097u16)));
+    player_ifaces.insert(iface("org.bluez.MediaPlayer1"), player_props);
+    objects.insert(player_path, player_ifaces);
+
+    // MediaItem1 child object with ImgHandle in Metadata
+    let item_path =
+        OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0/item0").unwrap();
+    let mut item_ifaces = HashMap::new();
+    let mut item_props = HashMap::new();
+    let mut meta_dict = zbus::zvariant::Dict::new(&sig_s, &sig_v);
+    meta_dict
+        .append(
+            Value::from("ImgHandle"),
+            Value::Value(Box::new(Value::from("9876543"))),
+        )
+        .unwrap();
+    item_props.insert("Metadata".to_string(), to_val(Value::Dict(meta_dict)));
+    item_ifaces.insert(iface("org.bluez.MediaItem1"), item_props);
+    objects.insert(item_path, item_ifaces);
+
+    let (_, _, playback) = DbusClient::parse_bluez_all(&objects, Some("hci0")).unwrap();
+    let pb = playback.expect("playback parsed");
+    assert_eq!(pb.image_handle.as_deref(), Some("9876543"));
+}
+
+#[test]
 fn parse_bluez_all_adapter_filtering_and_fallback() {
     let mut objects: ManagedObjects = HashMap::new();
 
