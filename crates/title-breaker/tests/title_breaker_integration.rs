@@ -353,6 +353,36 @@ fn word_adjacent_single_quotes_are_apostrophes_by_spec_heuristic() {
 }
 
 #[test]
+fn right_curly_quote_can_close_its_own_span() {
+    // Regression (PR #49 review): a right curly ” used as both opener and
+    // closer (naive smart-quote conversion of every `"`) previously opened
+    // quote state but could never close it, suppressing every candidate
+    // after it. The span must now close and a balanced break must win.
+    let split = split_song_title("Song ”Alpha Beta” Gamma Delta Epsilon Zeta");
+    assert_eq!(split.line1, "Song ”Alpha Beta” Gamma");
+    assert_eq!(split.line2, "Delta Epsilon Zeta");
+
+    // Same for standalone right single curly ’ tokens.
+    let split = split_song_title("Song ’ Alpha Beta ’ Gamma Delta Epsilon Zeta");
+    assert_eq!(split.line1, "Song ’ Alpha Beta ’");
+    assert_eq!(split.line2, "Gamma Delta Epsilon Zeta");
+}
+
+#[test]
+fn clean_line2_strips_leading_delimiter_as_pinned_spec_behavior() {
+    // Pinned spec behavior (PR #49 review): when a plain-space split lands
+    // immediately before an attached delimiter token (`-Remix`, no space
+    // after the hyphen, so no Tier-1 candidate exists), the line-2 cleaner
+    // strips the leading separator. This is intentional per the spec's
+    // "strip leading redundant separators" rule, even though it means
+    // line1 + line2 do not byte-reconstruct the input in this narrow case.
+    let split = split_song_title("Aaaa Bbbb Cccc Dddd -Remix Eeee Ffff");
+    assert_eq!(split.line1, "Aaaa Bbbb Cccc Dddd");
+    assert_eq!(split.line2, "Remix Eeee Ffff");
+    assert_eq!(split.reason, BreakReason::TopLevelSpace);
+}
+
+#[test]
 fn unbalanced_bracket_still_breaks_before_it() {
     let split = split_song_title("Alpha Beta Gamma Delta (Epsilon Zeta Eta Theta");
     assert!(split.line2.starts_with('('), "line2: {}", split.line2);

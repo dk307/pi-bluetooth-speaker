@@ -60,7 +60,9 @@ pub struct TitleSplit {
     pub line2: String,
     /// Semantic reason the winning breakpoint was selected.
     pub reason: BreakReason,
-    /// Net score of the winning candidate (finite; 100.0 for single line).
+    /// Net score of the winning candidate (finite; 100.0 when the title
+    /// fits on one line, 0.0 in the defensive fallback where no candidate
+    /// yields two non-empty lines).
     pub score: f64,
 }
 
@@ -140,7 +142,9 @@ fn compute_enclosure_depths(title: &str) -> Vec<(usize, bool)> {
     let mut byte_pos = 0_usize;
     for (i, &ch) in chars.iter().enumerate() {
         if matches!(ch, '"' | '“' | '”') {
-            if in_quote && matches!(quote_char, Some('"' | '“')) {
+            // Any double-quote family member closes a double-quote span,
+            // including a right curly ” that itself opened the span.
+            if in_quote && matches!(quote_char, Some('"' | '“' | '”')) {
                 in_quote = false;
                 quote_char = None;
             } else if !in_quote {
@@ -148,7 +152,7 @@ fn compute_enclosure_depths(title: &str) -> Vec<(usize, bool)> {
                 quote_char = Some(ch);
             }
         } else if matches!(ch, '\'' | '‘' | '’') && !is_apostrophe(&chars, i) {
-            if in_quote && matches!(quote_char, Some('\'' | '‘')) {
+            if in_quote && matches!(quote_char, Some('\'' | '‘' | '’')) {
                 in_quote = false;
                 quote_char = None;
             } else if !in_quote {
