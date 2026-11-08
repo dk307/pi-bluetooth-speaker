@@ -320,16 +320,36 @@ fn apostrophe_disambiguation_prevents_false_quote_tracking() {
 }
 
 #[test]
-fn single_quoted_span_is_tracked_as_enclosure() {
-    // Spaces inside a genuine single-quoted span are not top-level.
-    let split = split_song_title("Alpha 'Beta Gamma Delta' Epsilon Zeta Eta Theta");
-    assert!(!split.line1.contains("Gamma Delta' Epsilon") || split.line1.ends_with("Delta'"));
-    assert!(split.score.is_finite());
-    // The in-quote hyphen of a quoted film title must never be a candidate:
-    // breaking inside the quotes would produce a line ending in "(From".
+fn standalone_single_quote_tokens_toggle_enclosure() {
+    // A `'` token flanked by whitespace on both sides is neither a
+    // contraction (rule 1), an elision (rule 2), nor an aphesis (rule 3),
+    // so it toggles quote state: spaces inside the span are not top-level
+    // and no candidate is generated inside it.
+    let split = split_song_title("Alpha Beta ' Gamma Delta Epsilon ' Zeta Eta Theta Iota");
+    assert_eq!(split.line1, "Alpha Beta ' Gamma Delta Epsilon '");
+    assert_eq!(split.line2, "Zeta Eta Theta Iota");
+    assert_eq!(split.reason, BreakReason::TopLevelSpace);
+
+    // The in-quote hyphen of a double-quoted film title must never be a
+    // candidate: breaking inside would leave a line ending in "(From".
     let split = split_song_title("Oo Antava Mava..Oo Oo Antava (From \"Pushpa - The Rise\")");
     assert!(!split.line1.ends_with("(From"));
     assert!(!split.line1.ends_with("(From \"Pushpa"));
+}
+
+#[test]
+fn word_adjacent_single_quotes_are_apostrophes_by_spec_heuristic() {
+    // Documented tradeoff of the spec's apostrophe rules (see PR #49 review):
+    // a `'` preceded by whitespace and followed by an alphanumeric is always
+    // classified as aphesis (rule 3), so a word-adjacent single-quoted span
+    // such as `'Beta - Gamma'` does NOT toggle enclosure and the hyphen
+    // inside it remains a candidate. Narrowing the heuristic here would
+    // break the benchmark cases it exists for ("Taylor's", "Believin'",
+    // "Don't"), so the behavior is pinned, not silently changed.
+    let split = split_song_title("Alpha 'Beta - Gamma' Delta Epsilon Zeta");
+    assert_eq!(split.line1, "Alpha 'Beta");
+    assert_eq!(split.line2, "Gamma' Delta Epsilon Zeta");
+    assert_eq!(split.reason, BreakReason::SpacedHyphen);
 }
 
 #[test]
