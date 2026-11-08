@@ -479,7 +479,7 @@ fn pump_splash_frames(
 /// Joins the `boot-checks` worker when `checks_done` is true (re-raising any worker
 /// panic via `resume_unwind`), or logs a warning and abandons a hung worker.
 #[cfg(feature = "ui")]
-fn finish_boot_worker(checks: Option<std::thread::JoinHandle<()>>, checks_done: bool) {
+pub fn finish_boot_worker(checks: Option<std::thread::JoinHandle<()>>, checks_done: bool) {
     if checks_done {
         if let Some(handle) = checks
             && let Err(err) = handle.join()
@@ -923,10 +923,10 @@ pub fn publish_playback_state(
 
 /// Signal-driven keep-alive interval when idle or paused.
 #[cfg(feature = "ui")]
-const BT_KEEP_ALIVE: Duration = Duration::from_secs(1);
+pub const BT_KEEP_ALIVE: Duration = Duration::from_secs(1);
 /// Refresh cadence while playing, matching the old adaptive poll interval.
 #[cfg(feature = "ui")]
-const BT_PLAYING_POLL: Duration = Duration::from_millis(250);
+pub const BT_PLAYING_POLL: Duration = Duration::from_millis(250);
 /// Maximum wait slice per signal poll so queued transport commands are drained promptly.
 #[cfg(feature = "ui")]
 const BT_WAIT_SLICE: Duration = Duration::from_millis(100);
@@ -934,13 +934,13 @@ const BT_WAIT_SLICE: Duration = Duration::from_millis(100);
 /// Host-testable state machine for the `bt-monitor` worker loop.
 #[cfg(feature = "ui")]
 #[derive(Debug, Default)]
-struct BtMonitorState {
-    last_pb: Option<speaker_bluetooth::BtPlaybackState>,
-    last_pcms: Option<Box<[speaker_bluetooth::BlueAlsaPcm]>>,
-    last_details: Option<crate::ui::BtLinkDetails>,
-    cover: CoverState,
-    settle: Option<SettleWindow>,
-    pcm_settle: Option<SettleWindow>,
+pub struct BtMonitorState {
+    pub last_pb: Option<speaker_bluetooth::BtPlaybackState>,
+    pub last_pcms: Option<Box<[speaker_bluetooth::BlueAlsaPcm]>>,
+    pub last_details: Option<crate::ui::BtLinkDetails>,
+    pub cover: CoverState,
+    pub settle: Option<SettleWindow>,
+    pub pcm_settle: Option<SettleWindow>,
 }
 
 #[cfg(feature = "ui")]
@@ -1006,7 +1006,7 @@ impl BtMonitorState {
 
     /// Executes a single [`speaker_bluetooth::TransportCommand`] against `bt`,
     /// logging a warning on failure.
-    fn execute_command(
+    pub fn execute_command(
         bt: &speaker_bluetooth::BluetoothDevice,
         command: speaker_bluetooth::TransportCommand,
     ) {
@@ -1027,7 +1027,7 @@ impl BtMonitorState {
 
     /// Queries one lightweight link snapshot and stages PCM and connection-detail
     /// changes into `update`.
-    fn publish_link_state(
+    pub fn publish_link_state(
         &mut self,
         bt: &speaker_bluetooth::BluetoothDevice,
         update: &mut BtSharedUpdate,
@@ -1071,7 +1071,7 @@ impl BtMonitorState {
 
     /// Resets dedup state when a new command arrives mid-query so the next tick
     /// performs a full authoritative publish after executing the fresh command.
-    fn reset_dedup(&mut self) {
+    pub fn reset_dedup(&mut self) {
         self.last_pb = None;
         self.cover.path = None;
         self.last_pcms = None;
@@ -1080,7 +1080,7 @@ impl BtMonitorState {
 
     /// Merges non-empty delta fields from `update` into `shared`, recovering from
     /// a poisoned mutex guard.
-    fn commit_update(shared: &Mutex<BtSharedUpdate>, update: BtSharedUpdate) {
+    pub fn commit_update(shared: &Mutex<BtSharedUpdate>, update: BtSharedUpdate) {
         if update.playback.is_some()
             || update.pcm.is_some()
             || update.details.is_some()
@@ -1111,7 +1111,7 @@ impl BtMonitorState {
     /// Runs one command-drain + state-query + shared-publish cycle, returning
     /// `true` if a full snapshot poll completed or `false` if a newly queued
     /// command interrupted the tick and should be drained immediately.
-    fn poll_tick(
+    pub fn poll_tick(
         &mut self,
         bt: &speaker_bluetooth::BluetoothDevice,
         shared: &Mutex<BtSharedUpdate>,
@@ -1157,7 +1157,8 @@ impl BtMonitorState {
     }
 
     /// Returns the adaptive keep-alive poll cadence based on whether playback is active.
-    fn keep_alive_interval(&self) -> Duration {
+    #[must_use]
+    pub fn keep_alive_interval(&self) -> Duration {
         // BlueZ does not reliably re-emit AVRCP Position during playback, so the
         // keep-alive doubles as the progress refresh: shorten it while playing
         // so the position bar advances in ~250 ms steps instead of 1 s jumps.
@@ -1516,7 +1517,7 @@ fn sync_marquee_overlay(
 /// If a touch device file descriptor is present, polls it with a bounded timeout
 /// so physical touches wake the render loop immediately (<20 ms) rather than sleeping.
 #[cfg(feature = "ui")]
-fn idle_sleep(touch_fd: Option<RawFd>) {
+pub fn idle_sleep(touch_fd: Option<RawFd>) {
     let timeout = slint::platform::duration_until_next_timer_update()
         .unwrap_or(Duration::from_millis(50))
         .clamp(Duration::from_millis(10), Duration::from_millis(50));
@@ -1723,403 +1724,5 @@ pub fn main() -> ExitCode {
     ) {
         Ok(opts) => run_app(&opts),
         Err(exit_code) => exit_code,
-    }
-}
-#[cfg(all(test, feature = "ui"))]
-mod tests {
-    use super::*;
-    use speaker_bluetooth::BluetoothDevice;
-    use speaker_common::diag::ScopedTempDir;
-
-    fn sample_png(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-        let path = dir.join(name);
-        image::DynamicImage::new_rgb8(64, 64)
-            .save_with_format(&path, image::ImageFormat::Png)
-            .expect("sample png write");
-        path
-    }
-
-    fn playback(
-        cover: Option<&std::path::Path>,
-        playing: bool,
-    ) -> speaker_bluetooth::BtPlaybackState {
-        speaker_bluetooth::BtPlaybackState {
-            cover_art_path: cover.map(|p| p.display().to_string().into_boxed_str()),
-            status: if playing {
-                "playing".into()
-            } else {
-                "paused".into()
-            },
-            ..speaker_bluetooth::BtPlaybackState::default()
-        }
-    }
-
-    #[test]
-    fn decode_cover_buffer_upscales_and_caches() {
-        let dir = ScopedTempDir::try_new("cover_decode_up").expect("temp dir");
-        let src = sample_png(dir.path(), "art.png");
-        let buffer = decode_cover_buffer(src.to_str().expect("utf8")).expect("decoded");
-        assert_eq!(buffer.width(), TARGET_COVER_SIZE);
-        let cache = dir.path().join("art.png.480.jpg");
-        assert!(cache.is_file(), "cache file should be written");
-        // Second call serves from the cache and still decodes.
-        assert!(decode_cover_buffer(src.to_str().expect("utf8")).is_some());
-        let _ = buffer;
-    }
-
-    #[test]
-    fn decode_cover_buffer_missing_file_is_none() {
-        assert!(decode_cover_buffer("/nonexistent/cover/art.png").is_none());
-    }
-
-    #[test]
-    fn decode_cover_buffer_regenerates_corrupt_cache() {
-        let dir = ScopedTempDir::try_new("cover_decode_corrupt").expect("temp dir");
-        let src = sample_png(dir.path(), "art.png");
-        let cache = dir.path().join("art.png.480.jpg");
-        std::fs::write(&cache, b"truncated-jpeg-garbage").expect("cache write");
-        assert!(
-            decode_cover_buffer(src.to_str().expect("utf8")).is_some(),
-            "corrupt cache must be regenerated from the source"
-        );
-        assert!(image::open(&cache).is_ok(), "cache must be valid again");
-    }
-
-    #[test]
-    fn settle_window_suppresses_stale_seek_position() {
-        // A snapshot still carrying the pre-seek AVRCP position (far from the
-        // scrub target) is suppressed so the optimistic scrubber is not
-        // snapped back; once the peer reports near the target it publishes.
-        let fresh = Instant::now();
-        let stale = SettleWindow {
-            kind: SettleKind::Seek { target_ms: 120_000 },
-            started: fresh,
-        };
-        let mut far = playback(None, true);
-        far.position_ms = 1_000;
-        assert!(stale.suppresses(&far), "pre-seek position is stale");
-        let mut near = playback(None, true);
-        near.position_ms = 120_400;
-        assert!(!stale.suppresses(&near), "caught-up position publishes");
-    }
-
-    #[test]
-    fn settle_window_releases_on_expiry() {
-        let mut pb = playback(None, true);
-        pb.position_ms = 1_000;
-        let mut w = SettleWindow {
-            kind: SettleKind::Seek { target_ms: 120_000 },
-            started: Instant::now(),
-        };
-        assert!(w.suppresses(&pb));
-        w.started = Instant::now()
-            .checked_sub(BT_COMMAND_SETTLE + Duration::from_secs(1))
-            .expect("monotonic instant before start");
-        assert!(!w.suppresses(&pb), "expired window never suppresses");
-    }
-
-    #[test]
-    fn publish_suppresses_matching_settle_snapshot() {
-        let (bt, mock) = BluetoothDevice::new_mocked();
-        // The mocked snapshot must differ from `last_pb` (advanced position,
-        // exactly what happens while playing) while `is_playing` still matches
-        // `pre_playing`; otherwise the test passes even with suppression deleted.
-        let mut ticking = playback(None, true);
-        ticking.position_ms = 1000;
-        mock.set_playback(Some(ticking));
-        let mut update = BtSharedUpdate::default();
-        let mut last_pb = Some(playback(None, true));
-        let mut cover = CoverState::default();
-        let mut settle = Some(SettleWindow {
-            kind: SettleKind::Toggle { pre_playing: true },
-            started: Instant::now(),
-        });
-        publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
-        assert!(update.playback.is_none(), "settling must suppress publish");
-        assert!(settle.is_some(), "settle window stays armed during window");
-    }
-
-    #[test]
-    fn publish_after_settle_expiry_publishes() {
-        let (bt, mock) = BluetoothDevice::new_mocked();
-        mock.set_playback(Some(playback(None, true)));
-        let started = Instant::now()
-            .checked_sub(BT_COMMAND_SETTLE + Duration::from_secs(1))
-            .expect("monotonic instant before start");
-        let mut settle = Some(SettleWindow {
-            kind: SettleKind::Toggle { pre_playing: true },
-            started,
-        });
-        let mut last_pb: Option<speaker_bluetooth::BtPlaybackState> = None;
-        let mut update = BtSharedUpdate::default();
-        let mut cover = CoverState::default();
-        publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
-        assert!(update.playback.is_some(), "expiry must force a publish");
-        assert!(settle.is_none(), "window must be disarmed after expiry");
-    }
-
-    #[test]
-    fn publish_failed_cover_retry_after_backoff() {
-        let (bt, mock) = BluetoothDevice::new_mocked();
-        let missing = "/nonexistent/cover/missing.png";
-        let pb = speaker_bluetooth::BtPlaybackState {
-            cover_art_path: Some(missing.into()),
-            ..speaker_bluetooth::BtPlaybackState::default()
-        };
-        mock.set_playback(Some(pb.clone()));
-        let mut last_pb: Option<speaker_bluetooth::BtPlaybackState> = None;
-        let mut cover = CoverState::default();
-        let mut settle = None;
-        let mut update = BtSharedUpdate::default();
-        publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
-        assert_eq!(cover.path.as_deref(), Some(missing));
-        assert!(cover.failed_since.is_some());
-        assert!(update.cover.is_none(), "failed decode keeps prior art");
-        // Rewind the failure timestamp past the backoff and confirm the retry
-        // is attempted (and re-fails, since the path does not exist).
-        cover.failed_since = Some(
-            Instant::now()
-                .checked_sub(COVER_DECODE_RETRY + Duration::from_secs(1))
-                .expect("monotonic instant before start"),
-        );
-        update = BtSharedUpdate::default();
-        publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
-        assert!(
-            cover.failed_since.is_some(),
-            "retry must be re-attempted after the backoff"
-        );
-    }
-
-    #[test]
-    fn publish_device_gone_clears_cover() {
-        let (bt, mock) = BluetoothDevice::new_mocked();
-        // The mock initializes with a default playback present; clear it so
-        // `playback_state()` really returns `Ok(None)` and the disconnect
-        // placeholder branch is exercised.
-        mock.set_playback(None);
-        let mut last_pb = Some(playback(None, true));
-        let mut cover = CoverState {
-            path: Some("/gone.png".into()),
-            failed_since: None,
-        };
-        let mut update = BtSharedUpdate::default();
-        let mut settle = None;
-        publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
-        assert!(
-            update.playback.is_some(),
-            "placeholder must publish on Ok(None)"
-        );
-        assert!(
-            update.cover.is_some_and(|c| c.is_none()),
-            "cover must clear on disconnect"
-        );
-        assert!(cover.path.is_none());
-    }
-
-    #[test]
-    fn bt_monitor_state_commands_settle_and_commit() {
-        use speaker_bluetooth::{TransportCommand, TransportCommandQueue};
-
-        let (bt, mock) = BluetoothDevice::new_mocked();
-        let shared = Mutex::new(BtSharedUpdate::default());
-        let commands = TransportCommandQueue::new();
-        let mut state = BtMonitorState::default();
-
-        // Initial tick populates last_pb, last_pcms, and shared state.
-        assert!(state.poll_tick(&bt, &shared, &commands));
-        assert!(state.last_pb.is_some());
-        assert_eq!(state.keep_alive_interval(), BT_PLAYING_POLL);
-        assert!(shared.lock().unwrap().playback.is_some());
-        assert!(shared.lock().unwrap().pcm.is_some());
-
-        // Arm seek settle window, then toggle settle window, and exercise all commands.
-        commands.push(TransportCommand::Seek(45_000));
-        assert!(state.poll_tick(&bt, &shared, &commands));
-        assert!(matches!(
-            state.settle.as_ref().map(|s| &s.kind),
-            Some(SettleKind::Seek { target_ms: 45_000 })
-        ));
-
-        commands.push(TransportCommand::TogglePlayPause);
-        commands.push(TransportCommand::NextTrack);
-        commands.push(TransportCommand::PreviousTrack);
-        assert!(state.poll_tick(&bt, &shared, &commands));
-        assert!(matches!(
-            state.settle.as_ref().map(|s| &s.kind),
-            Some(SettleKind::Toggle { .. })
-        ));
-        assert_eq!(state.keep_alive_interval(), BT_KEEP_ALIVE);
-
-        // Volume and Mute commands arm pcm_settle and update mock PCM state.
-        commands.push(TransportCommand::SetVolume(64));
-        assert!(state.poll_tick(&bt, &shared, &commands));
-        assert_eq!(bt.audio_pcms().unwrap()[0].volume_percent, Some(64));
-
-        commands.push(TransportCommand::SetMute(true));
-        assert!(state.poll_tick(&bt, &shared, &commands));
-        assert!(bt.audio_pcms().unwrap()[0].muted);
-
-        // Verify SettleKind::Volume suppresses mismatched PCM volume/mute until caught up or expired.
-        let vol_settle = SettleWindow {
-            kind: SettleKind::Volume {
-                target_pct: Some(80),
-                target_muted: false,
-            },
-            started: Instant::now(),
-        };
-        let stale_pcm = &bt.audio_pcms().unwrap()[0];
-        assert!(vol_settle.suppresses_pcm(stale_pcm));
-        mock.set_pcm_volume_state(80, false);
-        let caught_up_pcm = &bt.audio_pcms().unwrap()[0];
-        assert!(!vol_settle.suppresses_pcm(caught_up_pcm));
-
-        // Fault injection on transport commands logs warning without panicking.
-        mock.set_fault(Some("dbus transport fault".into()));
-        commands.push(TransportCommand::NextTrack);
-        assert!(state.poll_tick(&bt, &shared, &commands));
-        mock.set_fault(None);
-
-        // Reset dedup helper clears cached snapshots.
-        state.reset_dedup();
-        assert!(state.last_pb.is_none());
-        assert!(state.last_pcms.is_none());
-        assert!(state.cover.path.is_none());
-
-        // Poisoned mutex recovery in commit_update.
-        let poisoned = Arc::new(Mutex::new(BtSharedUpdate::default()));
-        let p_clone = Arc::clone(&poisoned);
-        let _ = std::thread::spawn(move || {
-            let _guard = p_clone.lock().unwrap();
-            panic!("intentional poison");
-        })
-        .join();
-        BtMonitorState::commit_update(
-            &poisoned,
-            BtSharedUpdate {
-                playback: Some(playback(None, false)),
-                pcm: None,
-                details: Some(crate::ui::BtLinkDetails::default()),
-                cover: Some(None),
-            },
-        );
-        let recovered = poisoned
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(recovered.playback.is_some());
-        assert!(recovered.cover.is_some());
-        assert!(recovered.details.is_some());
-    }
-
-    #[test]
-    fn publish_link_state_stages_details_once_and_resets() {
-        let (bt, _mock) = BluetoothDevice::new_mocked();
-        let mut state = BtMonitorState::default();
-
-        let mut first = BtSharedUpdate::default();
-        state.publish_link_state(&bt, &mut first);
-        let details = first.details.expect("first tick publishes details");
-        assert!(details.device.is_some());
-        assert!(details.pcm.is_some());
-        assert!(first.pcm.is_some());
-
-        // Unchanged snapshot is deduplicated.
-        let mut second = BtSharedUpdate::default();
-        state.publish_link_state(&bt, &mut second);
-        assert!(second.details.is_none());
-        assert!(second.pcm.is_none());
-
-        // A dedup reset forces a full republish.
-        state.reset_dedup();
-        let mut third = BtSharedUpdate::default();
-        state.publish_link_state(&bt, &mut third);
-        assert!(third.details.is_some());
-    }
-
-    #[test]
-    fn publish_link_state_keeps_state_on_query_fault() {
-        let (bt, mock) = BluetoothDevice::new_mocked();
-        mock.set_fault(Some("link fault".into()));
-        let mut state = BtMonitorState::default();
-        let mut update = BtSharedUpdate::default();
-        state.publish_link_state(&bt, &mut update);
-        assert!(update.details.is_none());
-        assert!(state.last_details.is_none());
-    }
-
-    #[test]
-    fn publish_link_state_clears_details_on_disconnect() {
-        let (bt, mock) = BluetoothDevice::new_mocked();
-        let mut state = BtMonitorState::default();
-        state.publish_link_state(&bt, &mut BtSharedUpdate::default());
-
-        mock.clear_devices();
-        mock.clear_pcms();
-        let mut update = BtSharedUpdate::default();
-        state.publish_link_state(&bt, &mut update);
-        let details = update.details.expect("disconnect republishes details");
-        assert!(details.device.is_none());
-        assert!(details.pcm.is_none());
-    }
-
-    #[test]
-    fn finish_boot_worker_abandons_or_joins() {
-        // Hung / unfinished worker path (`checks_done == false`).
-        finish_boot_worker(None, false);
-
-        // Normal worker completion path (`checks_done == true`).
-        let ok_handle = std::thread::spawn(|| {});
-        finish_boot_worker(Some(ok_handle), true);
-
-        // Worker panic propagation path (`M-PANIC-ON-BUG`).
-        let panic_handle = std::thread::spawn(|| panic!("boot worker panic"));
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            finish_boot_worker(Some(panic_handle), true);
-        }));
-        assert!(res.is_err(), "worker panic must be re-raised");
-    }
-
-    #[test]
-    fn idle_sleep_various_fd_conditions() {
-        // 1. None fd (always sleeps timeout)
-        idle_sleep(None);
-
-        // 2. Negative fd (POSIX specifies negative fds are ignored and revents=0, times out safely)
-        idle_sleep(Some(-1));
-
-        // 3. Pipe fd with no data (poll times out, sleeps safely)
-        let mut fds = [0; 2];
-        // SAFETY: pipe creates 2 valid descriptors.
-        let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        assert_eq!(ret, 0);
-        let [rfd, wfd] = fds;
-
-        idle_sleep(Some(rfd));
-
-        // 4. Pipe fd with pending data (poll wakes immediately)
-        let data = b"touch";
-        // SAFETY: writing test bytes into valid pipe.
-        let _ = unsafe { libc::write(wfd, data.as_ptr().cast::<libc::c_void>(), data.len()) };
-        idle_sleep(Some(rfd));
-
-        // SAFETY: close test pipe descriptors.
-        unsafe {
-            libc::close(rfd);
-            libc::close(wfd)
-        };
-
-        // 5. Pipe fd with write end closed (poll immediately wakes with POLLHUP, sleeps to avoid busy-spin)
-        let mut fds2 = [0; 2];
-        // SAFETY: pipe creates 2 valid descriptors.
-        let ret2 = unsafe { libc::pipe(fds2.as_mut_ptr()) };
-        assert_eq!(ret2, 0);
-        let [rfd2, wfd2] = fds2;
-        // SAFETY: closing writer triggers POLLHUP on reader without pending data.
-        unsafe { libc::close(wfd2) };
-        idle_sleep(Some(rfd2));
-        // SAFETY: clean up test reader.
-        unsafe { libc::close(rfd2) };
-
-        // 6. Closed positive fd (poll returns POLLNVAL on Linux/POSIX, sleeps to avoid busy-spin)
-        idle_sleep(Some(rfd2));
     }
 }

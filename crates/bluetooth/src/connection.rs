@@ -351,14 +351,19 @@ impl BluetoothControllerInfo {
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn probe_timeout() -> Duration {
-    if cfg!(test) {
+    if cfg!(any(test, feature = "test-util")) {
         Duration::from_millis(150)
     } else {
         PROBE_TIMEOUT
     }
 }
 
-fn run_probe_command(program: &str, args: &[&str]) -> Result<String, std::io::Error> {
+/// Spawns an external command with a deadline timeout and returns its stdout.
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] if the program fails to spawn, times out, or exits with a non-zero status.
+pub fn run_probe_command(program: &str, args: &[&str]) -> Result<String, std::io::Error> {
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
     let mut child = Command::new(program)
@@ -2937,6 +2942,7 @@ pub mod test_helpers {
     pub use super::{
         DbusClient, ManagedObjects, is_no_such_unit_error, is_service_absent_error,
         is_service_absent_fdo_error, is_unknown_method_error, parse_hciconfig_version,
+        run_probe_command,
     };
     pub use crate::transport::format_volume_bytes;
     use speaker_common::runtime::FromJoinError;
@@ -3060,86 +3066,5 @@ pub fn resolve_cover_art_with(
                 pb.cover_art_path = Some(path);
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Builds a `MethodError` the way zbus surfaces remote method failures.
-    fn method_error(name: &str) -> zbus::Error {
-        let message = zbus::message::Message::method_call("/org/example", "Call")
-            .expect("valid method call")
-            .build(&())
-            .expect("buildable message");
-        zbus::Error::MethodError(name.try_into().expect("valid error name"), None, message)
-    }
-
-    #[test]
-    fn is_unknown_method_error_matches_error_names() {
-        assert!(is_unknown_method_error(&method_error(
-            "org.freedesktop.DBus.Error.UnknownMethod"
-        )));
-        assert!(is_unknown_method_error(&method_error(
-            "org.freedesktop.DBus.Error.UnknownObject"
-        )));
-    }
-
-    #[test]
-    fn is_unknown_method_error_rejects_other_names() {
-        assert!(!is_unknown_method_error(&method_error(
-            "org.freedesktop.DBus.Error.AccessDenied"
-        )));
-        assert!(!is_unknown_method_error(&method_error(
-            "org.freedesktop.DBus.Error.ServiceUnknown"
-        )));
-    }
-
-    #[test]
-    fn is_unknown_method_error_matches_fdo_typed_variants() {
-        assert!(is_unknown_method_error(&zbus::Error::FDO(Box::new(
-            zbus::fdo::Error::UnknownMethod("method".into())
-        ))));
-        assert!(is_unknown_method_error(&zbus::Error::FDO(Box::new(
-            zbus::fdo::Error::UnknownObject("object".into())
-        ))));
-        assert!(!is_unknown_method_error(&zbus::Error::FDO(Box::new(
-            zbus::fdo::Error::AccessDenied("denied".into())
-        ))));
-    }
-
-    #[test]
-    fn run_probe_command_captures_stdout() {
-        let out = run_probe_command("sh", &["-c", "printf hello"]).expect("probe must succeed");
-        assert_eq!(out, "hello");
-    }
-
-    #[test]
-    fn run_probe_command_rejects_non_success_status() {
-        let error = run_probe_command("sh", &["-c", "exit 3"])
-            .expect_err("non-zero exit must surface as an error");
-        assert!(error.to_string().contains("non-success status"));
-    }
-
-    #[test]
-    fn run_probe_command_rejects_missing_binary() {
-        let error = run_probe_command("/nonexistent/speaker-probe", &[])
-            .expect_err("missing binary must surface as an error");
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-    }
-
-    #[test]
-    fn run_probe_command_kills_on_timeout() {
-        let error = run_probe_command("sh", &["-c", "sleep 5"])
-            .expect_err("an unresponsive probe must time out");
-        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-    }
-
-    #[test]
-    fn is_unknown_method_error_rejects_transport_faults() {
-        assert!(!is_unknown_method_error(&zbus::Error::InputOutput(
-            std::sync::Arc::new(std::io::Error::other("broken pipe"))
-        )));
     }
 }

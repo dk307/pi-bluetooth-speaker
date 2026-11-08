@@ -1,4 +1,4 @@
-use super::*;
+use bt_manager::bip_direct::*;
 use obex_protocol::packet::{Request, Response};
 use obex_protocol::srm::SingleResponseMode;
 use obex_protocol::tokio::{Object, Server};
@@ -47,9 +47,9 @@ impl obex_protocol::tokio::Handler for StubCoverArtServer {
     ) -> impl Future<Output = std::result::Result<Object, Response>> + Send {
         let handle = request.headers.iter().find_map(|h| match h {
             Header::Other {
-                id: IMG_HANDLE_HEADER_ID,
+                id,
                 value: HeaderValue::Unicode(name),
-            } => Some(name),
+            } if *id == IMG_HANDLE_HEADER_ID => Some(name),
             _ => None,
         });
         let name = request.headers.iter().find_map(|h| match h {

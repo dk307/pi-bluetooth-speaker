@@ -290,7 +290,9 @@ async fn get_bluez_owner(connection: &zbus::Connection) -> BlueZOwnerState {
     }
 }
 
-fn is_already_exists(err: &zbus::Error) -> bool {
+/// Returns `true` if `err` represents an `org.bluez.Error.AlreadyExists` error.
+#[must_use]
+pub fn is_already_exists(err: &zbus::Error) -> bool {
     match err {
         zbus::Error::MethodError(name, _, _) => name.as_str() == "org.bluez.Error.AlreadyExists",
         _ => err.to_string().contains("AlreadyExists"),
@@ -600,97 +602,4 @@ where
         .map_err(AgentError::spawn)?;
 
     Ok(handle)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn capability_mode_as_str_and_display() {
-        assert_eq!(
-            AgentCapabilityMode::DisplayYesNo.as_capability_str(),
-            "DisplayYesNo"
-        );
-        assert_eq!(
-            AgentCapabilityMode::NoInputNoOutput.as_capability_str(),
-            "NoInputNoOutput"
-        );
-        assert_eq!(AgentCapabilityMode::DisplayYesNo.as_str(), "display-yes-no");
-        assert_eq!(
-            AgentCapabilityMode::NoInputNoOutput.as_str(),
-            "no-input-no-output"
-        );
-        assert_eq!(
-            format!("{}", AgentCapabilityMode::DisplayYesNo),
-            "display-yes-no"
-        );
-        assert_eq!(
-            format!("{}", AgentCapabilityMode::NoInputNoOutput),
-            "no-input-no-output"
-        );
-    }
-
-    #[test]
-    fn capability_mode_from_str() {
-        assert_eq!(
-            "display-yes-no".parse::<AgentCapabilityMode>().unwrap(),
-            AgentCapabilityMode::DisplayYesNo
-        );
-        assert_eq!(
-            "displayyesno".parse::<AgentCapabilityMode>().unwrap(),
-            AgentCapabilityMode::DisplayYesNo
-        );
-        assert_eq!(
-            "auto".parse::<AgentCapabilityMode>().unwrap(),
-            AgentCapabilityMode::DisplayYesNo
-        );
-        assert_eq!(
-            "no-input-no-output".parse::<AgentCapabilityMode>().unwrap(),
-            AgentCapabilityMode::NoInputNoOutput
-        );
-        assert_eq!(
-            "strict".parse::<AgentCapabilityMode>().unwrap(),
-            AgentCapabilityMode::NoInputNoOutput
-        );
-        let _ = "invalid-mode".parse::<AgentCapabilityMode>().unwrap_err();
-    }
-
-    #[test]
-    fn capability_mode_serde() {
-        let json = serde_json::to_string(&AgentCapabilityMode::DisplayYesNo).unwrap();
-        assert_eq!(json, "\"display-yes-no\"");
-        let parsed: AgentCapabilityMode = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, AgentCapabilityMode::DisplayYesNo);
-
-        let json = serde_json::to_string(&AgentCapabilityMode::NoInputNoOutput).unwrap();
-        assert_eq!(json, "\"no-input-no-output\"");
-        let parsed: AgentCapabilityMode = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, AgentCapabilityMode::NoInputNoOutput);
-    }
-
-    #[test]
-    fn default_agent_path_is_valid() {
-        assert_eq!(default_agent_path().as_str(), DEFAULT_AGENT_PATH);
-    }
-
-    #[test]
-    fn agent_error_predicates_and_display() {
-        let err = AgentError::spawn(io::Error::other("thread spawn failed"));
-        assert!(err.is_spawn());
-        assert_eq!(
-            err.summary(),
-            "failed to spawn auto-trust agent thread: thread spawn failed"
-        );
-        assert!(std::error::Error::source(&err).is_some());
-    }
-
-    #[test]
-    fn already_exists_detection() {
-        let err_already = zbus::Error::Address("org.bluez.Error.AlreadyExists".into());
-        assert!(is_already_exists(&err_already));
-
-        let other_err = zbus::Error::Address("other error".into());
-        assert!(!is_already_exists(&other_err));
-    }
 }

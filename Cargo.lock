@@ -584,6 +584,7 @@ dependencies = [
  "async-trait",
  "bluer",
  "bluesdp",
+ "bt-manager",
  "config",
  "ctrlc",
  "futures-util",
