@@ -208,14 +208,15 @@ fn touch_viewport_golden_hit_testing_play_pause_and_skip() {
 
     // 1. Hit Play/Pause hero button center.
     // In the 800x480 layout:
-    // Top status bar is 42px. Viewport is 42..422. Bottom dock is 422..480.
-    // The transport controls row is centered horizontally around X: 570, Y: 355.
+    // Top status bar is 60px. Viewport is 60..480.
+    // The transport controls row is centered horizontally around X: 592, Y: 200.
+    let test_y = 200.0;
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(570.0, 355.0),
+        position: LogicalPosition::new(592.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(570.0, 355.0),
+        position: LogicalPosition::new(592.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
@@ -234,11 +235,11 @@ fn touch_viewport_golden_hit_testing_play_pause_and_skip() {
 
     // 2. Rapid tap debounce: tapping again immediately (<300ms) should be ignored
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(570.0, 355.0),
+        position: LogicalPosition::new(592.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(570.0, 355.0),
+        position: LogicalPosition::new(592.0, test_y),
         button: PointerEventButton::Left,
     });
     assert!(
@@ -246,26 +247,26 @@ fn touch_viewport_golden_hit_testing_play_pause_and_skip() {
         "Rapid tap within 300ms debounce interval must be ignored"
     );
 
-    // 3. Hit Previous Track button (approx X: 462, Y: 355)
+    // 3. Hit Previous Track button (approx X: 477, Y: 200)
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(462.0, 355.0),
+        position: LogicalPosition::new(477.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(462.0, 355.0),
+        position: LogicalPosition::new(477.0, test_y),
         button: PointerEventButton::Left,
     });
     let drained_prev = commands.drain();
     assert_eq!(drained_prev.len(), 1);
     assert_eq!(drained_prev[0], TransportCommand::PreviousTrack);
 
-    // 4. Hit Next Track button (approx X: 678, Y: 355)
+    // 4. Hit Next Track button (approx X: 707, Y: 200)
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(678.0, 355.0),
+        position: LogicalPosition::new(707.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(678.0, 355.0),
+        position: LogicalPosition::new(707.0, test_y),
         button: PointerEventButton::Left,
     });
     let drained_next = commands.drain();
@@ -348,24 +349,24 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
     );
     let _ = fb.render_frame(&window).expect("Render HUD open");
 
-    // 2. Touch and drag the big-circle slider in the Volume HUD (centered at Y: ~300, X: 112..688)
+    // 2. Touch and drag the big-circle slider in the Volume HUD (centered at Y: ~348, X: 112..688)
     // Tap near the left end of the track (X: 112 -> 0%) and drag to center (X: 400 -> 50%) and right (X: 688 -> 100%)
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(112.0, 295.0),
+        position: LogicalPosition::new(112.0, 348.0),
         button: PointerEventButton::Left,
     });
     assert_eq!(shell.volume(), 0.0);
 
     window.dispatch_event(WindowEvent::PointerMoved {
-        position: LogicalPosition::new(400.0, 295.0),
+        position: LogicalPosition::new(400.0, 348.0),
     });
     assert_eq!(shell.volume(), 50.0);
 
     window.dispatch_event(WindowEvent::PointerMoved {
-        position: LogicalPosition::new(688.0, 295.0),
+        position: LogicalPosition::new(688.0, 348.0),
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(688.0, 295.0),
+        position: LogicalPosition::new(688.0, 348.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
@@ -375,14 +376,14 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
     let drained = commands.drain();
     assert_eq!(drained, vec![TransportCommand::SetVolume(100)]);
 
-    // 3. Click the dedicated MUTE / UNMUTE button at the bottom of the Volume HUD (X: 400, Y: 378)
+    // 3. Click the dedicated MUTE / UNMUTE button at the bottom of the Volume HUD (X: 400, Y: 439)
     assert!(!shell.is_muted());
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(400.0, 378.0),
+        position: LogicalPosition::new(400.0, 439.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(400.0, 378.0),
+        position: LogicalPosition::new(400.0, 439.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
@@ -395,11 +396,11 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
 
     // Click UNMUTE button again
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(400.0, 378.0),
+        position: LogicalPosition::new(400.0, 439.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(400.0, 378.0),
+        position: LogicalPosition::new(400.0, 439.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
@@ -850,4 +851,51 @@ fn production_wrappers_and_calibration_setters() {
     let _ = native.query_abs(-1, ABS_X).unwrap_err();
     let _ = native.query_name(-1).unwrap_err();
     let _ = native.close(-1).unwrap_err();
+}
+
+#[test]
+fn touch_viewport_settings_button_opens_settings_screen_and_navigates() {
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+    shell.window().show().expect("Failed to show MainWindow");
+
+    assert_eq!(shell.current_tab(), 0, "Default screen must be Now Playing");
+    let _ = fb.render_frame(&window).expect("Render initial frame");
+
+    // 1. Click right-bottom Settings button on Now Playing (X: 758, Y: 440)
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: LogicalPosition::new(758.0, 440.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: LogicalPosition::new(758.0, 440.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+
+    assert_eq!(
+        shell.current_tab(),
+        5,
+        "Clicking right-bottom Settings button must navigate to Settings screen"
+    );
+    let _ = fb.render_frame(&window).expect("Render Settings screen");
+
+    // 2. Click "Back" button on Settings screen (top-right header, approx X: 733, Y: 92)
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: LogicalPosition::new(733.0, 92.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: LogicalPosition::new(733.0, 92.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+
+    assert_eq!(
+        shell.current_tab(),
+        0,
+        "Clicking Back button on Settings screen must return to Now Playing"
+    );
 }

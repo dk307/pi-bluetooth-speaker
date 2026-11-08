@@ -94,7 +94,7 @@ All input audio streams feed directly into the ALSA `default` PCM plug, flowing 
 
 ## 3. UI Shell & Global Layout (800x480 Screen)
 
-The display is divided into three functional zones:
+The display is organized into two primary functional zones, maximizing screen real estate for playback and visualization by eliminating the bottom dock:
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -102,36 +102,37 @@ The display is divided into three functional zones:
 ├──────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │                                                                              │
-│                         MAIN SCREEN VIEWPORT (360px)                         │
-│                    (Displays active screen: 0 to 4)                          │
+│                         MAIN SCREEN VIEWPORT (420px)                         │
+│                    (Expanded to occupy entire bottom space)                  │
 │                                                                              │
+│  [Now Playing (Default): Cover Art | Title/Artist | Scrubber |               │
+│   Transport Controls                        (⚙ Settings Button Right-Bottom)]│
 │                                                                              │
-├──────────────────────────────────────────────────────────────────────────────┤
-│ [Bottom Dock (60px)]:  [Player]  [VU Meter]  [Bluetooth]  [DSP & Tone]  [Settings]   │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 1. **Top Status Bar (Height: 60px):**
-   - **Symmetrical 60px Baseline:** Matches the 60px height of the bottom navigation dock for perfect vertical balance on the 800×480 screen.
    - **Streamlined Audio-Centric Design:** Clean, distraction-free audiophile aesthetic.
-   - **Active Source Pill (Top-Left):** Vertically centered 42px pill with high-contrast centered Bluetooth rune icon (`bluetooth-rune.svg`) and active source label (`Bluetooth`).
+   - **Active Source Pill (Top-Left):** Vertically centered 42px pill with high-contrast centered Bluetooth rune icon (`bluetooth-rune.svg`) and active source label (`Bluetooth`). Tapping opens Bluetooth details.
    - **Connected Client / Quick Info:** Shows connected device name (e.g., `Pixel 10 Pro XL`) with automated elision.
    - **Streamlined Status Badges (Top-Right):** Clean, distraction-free typographic pills without nested icons:
-     - **Codec Badge:** Active Bluetooth codec (`aptX-HD`, `SBC`, `AAC`, `LDAC`) in primary accent gold (height 40px, font-size 16px).
+     - **Codec Badge:** Active Bluetooth codec (`aptX-HD`, `SBC`, `AAC`, `LDAC`) in primary accent gold (height 40px, font-size 16px). Tapping opens Bluetooth connection telemetry.
      - **Dynamic Stream Spec Badges:** Sample rate (`48 kHz`, `96 kHz`) and bit depth (`16-bit`, `24-bit`) badges in warm amber gold (`secondary_accent`) displayed only for variable/scalable codecs (`LDAC`, `aptX Adaptive`, `LHDC`, `SSC`, `SBC`, `AAC`, `LC3`), and automatically hidden for fixed-spec codecs (`aptX-HD`, `aptX`, `aptX-LL`) to eliminate spec redundancy.
-     - **Volume Control:** Real-time volume level and mute indicator linked directly to live BlueALSA / ALSA amplifier mixer controls.
+     - **Volume Control:** Real-time volume level and mute indicator linked directly to live BlueALSA / ALSA amplifier mixer controls. Tapping opens full-screen Volume HUD overlay.
      - **Hardware DIM Mode:** Dedicated one-tap hardware backlight dimming button (`DIM`).
 
-2. **Main Viewport (Height: 360px):**
-   - Displays the active screen. Supports smooth transitions and reactive view switching.
-
-3. **Bottom Navigation Dock (Height: 60px):**
-   - Touch-friendly icon bar showing enabled services (minimum touch target > 48px):
-     - `Player` (Now Playing & Transport)
-     - `VU Meter` (PeppyMeter Dual Visualizer)
-     - `Bluetooth` (Device Manager & Pairing)
-     - `DSP & Tone` (CamillaDSP Levels & Presets)
-     - `Settings` (Preferences, Hardware Health & Thermals)
+2. **Main Viewport (Height: 420px):**
+   - Expanded to occupy all remaining vertical space ($480\text{px} - 60\text{px} = 420\text{px}$).
+   - **Default Screen — Now Playing (`Tab 0`):** Features enlarged 360×360px cover art / vinyl disc box, dual-marquee track title, artist typography, read-only scrubber bar, large transport touch controls (Previous, Play/Pause hero button, Next), and a dedicated circular **Settings button (`config.svg`)** anchored in the right-bottom corner.
+   - **Settings Hub Screen (`Tab 5`):** Navigated to via the right-bottom Settings button. Features:
+     - Header with "APPLIANCE SETTINGS" title and "← Back" button returning to Now Playing.
+     - Subsystem icon navigation cards:
+       - **Bluetooth (`bluetooth.svg`):** Links to Tab 2 (device link, signal, battery, codec formats).
+       - **VU Meter (`peppymeter.svg`):** Links to Tab 1 (full-screen PeppyMeter analog needles).
+       - **DSP & Tone (`equalizer.svg`):** Links to Tab 4 (CamillaDSP active crossover & filters).
+       - **CD Player (`disk.svg`):** Links to Tab 3 (USB optical drive playback, shown when `cd_enabled`).
+     - Integrated **Theme Preferences Card:** Direct 1-tap switching across 5 global palettes (McIntosh Blue, Marantz Amber, Cyberpunk Neon, Studio Dark, PeppyMeter Gold) plus Cycle Next Theme button.
+   - **Sub-Screen Back Navigation:** Every non-default screen includes a prominent "← Back" button to smoothly return to Settings or Now Playing.
 
 ---
 

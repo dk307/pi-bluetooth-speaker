@@ -2,8 +2,7 @@
 //!
 //! Orchestrates the 800x480 appliance user interface:
 //! - Top status bar ([`TopStatusBar`])
-//! - Central active viewport ([`MainViewport`])
-//! - Bottom navigation dock ([`NavDock`])
+//! - Expanded main screen viewport ([`MainViewport`]) with Settings hub navigation
 //!
 //! Follows Microsoft Pragmatic Rust Guidelines (`M-SERVICES-CLONE`, `M-STRONG-TYPES`).
 
@@ -413,7 +412,7 @@ impl AppShell {
         ThemePreset::from_index(self.window.global::<Theme>().get_active_preset())
     }
 
-    /// Returns the currently active navigation dock tab index (0 to 5).
+    /// Returns the currently active screen tab index (0 to 5).
     #[must_use]
     pub fn current_tab(&self) -> i32 {
         self.window.get_active_tab()
@@ -544,7 +543,7 @@ impl AppShell {
         }
     }
 
-    /// Switches the active navigation dock tab.
+    /// Switches the active screen tab.
     ///
     /// If `tab` is 3 (CD Player) but CD Player is not enabled, falls back to tab 0.
     pub fn set_tab(&self, tab: i32) {

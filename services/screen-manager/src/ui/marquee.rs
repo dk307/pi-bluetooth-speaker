@@ -29,7 +29,7 @@ pub struct MarqueeTypography;
 
 impl MarqueeTypography {
     /// Track title strip font size in pixels.
-    pub const TITLE_FONT_SIZE_PX: u32 = 30;
+    pub const TITLE_FONT_SIZE_PX: u32 = 32;
     /// Track title strip font weight (extra bold).
     pub const TITLE_FONT_WEIGHT: i32 = 800;
     /// Artist/album strip font size in pixels.
