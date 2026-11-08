@@ -343,6 +343,8 @@ struct CoverArtWorker {
     suppress_retry: Option<(Box<str>, Instant)>,
     /// Session-scoped handle cache; purged on every session generation change.
     session_cache: SessionCoverCache,
+    /// Last observed (title, artist) to reset retry budget on track changes.
+    last_track: Option<(Box<str>, Box<str>)>,
     /// Fast retry counter for initial connection handle resolution.
     missing_handle_retries: u32,
     /// Pending deadline for fast handle retry.
@@ -372,6 +374,7 @@ impl CoverArtWorker {
             track_change_at: None,
             suppress_retry: None,
             session_cache: SessionCoverCache::new(),
+            last_track: None,
             missing_handle_retries: 0,
             pending_retry: None,
             shutdown_rx,
@@ -426,43 +429,64 @@ impl CoverArtWorker {
         }
     }
 
-    async fn process_playback(&mut self, playback: BtPlaybackState) {
-        let Some(address) = playback.device_address else {
-            self.deactivate("playback has no device address").await;
-            return;
-        };
-        // No ObexPort: fall back to SDP discovery of the BIP RFCOMM channel,
-        // mirroring obexd, which queries SDP when the phone publishes no PSM.
-        let transport = classify_obex_port(playback.obex_port);
+    /// Ensures the active BIP session for `address`, purging session cache on epoch changes
+    /// and re-querying playback status if the handle was initially missing.
+    async fn ensure_bip_session(
+        &mut self,
+        address: &BtAddress,
+        transport: &BipTransport,
+        playback: &mut BtPlaybackState,
+    ) -> Option<u64> {
         let prev_epoch = self.keeper.epoch();
-        if let Err(e) = self.keeper.ensure(&address, &transport).await {
+        if let Err(e) = self.keeper.ensure(address, transport).await {
             tracing::warn!(
                 error = e.summary(),
                 address = %address.to_string(),
                 "BIP session ensure failed; retrying next tick"
             );
-            return;
+            return None;
         }
-        // A session change invalidates every cached handle (handles are only
-        // unique within one OBEX session, per AVRCP ESR10).
         let epoch = self.keeper.epoch();
         if epoch != self.session_cache.epoch {
             self.session_cache.purge(epoch);
             tracing::debug!(epoch, "cover-art session cache purged after session change");
         }
         if self.keepalive_deadline.is_none() {
-            // The establish itself is OBEX traffic; start the idle timer.
             self.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
         }
-        let mut playback = playback;
         if epoch != prev_epoch && playback.image_handle.is_none() {
-            // A new BIP session was just established. Re-query playback snapshot
-            // immediately in case BlueZ or the peer populated the ImgHandle now that
-            // the OBEX connection is active.
-            if let Ok(Some(refreshed)) = self.source.status().await {
-                playback = refreshed;
+            match self.source.status().await {
+                Ok(Some(refreshed)) => *playback = refreshed,
+                Ok(None) => tracing::debug!("playback disappeared during post-session re-query"),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "failed to re-query playback status after BIP session establishment"
+                ),
             }
         }
+        Some(epoch)
+    }
+
+    async fn process_playback(&mut self, playback: BtPlaybackState) {
+        let Some(address) = playback.device_address else {
+            self.deactivate("playback has no device address").await;
+            return;
+        };
+        let current_track = (playback.title.clone(), playback.artist.clone());
+        if self.last_track.as_ref() != Some(&current_track) {
+            self.last_track = Some(current_track);
+            self.missing_handle_retries = 0;
+            self.pending_retry = None;
+        }
+
+        let transport = classify_obex_port(playback.obex_port);
+        let mut playback = playback;
+        let Some(epoch) = self
+            .ensure_bip_session(&address, &transport, &mut playback)
+            .await
+        else {
+            return;
+        };
         let Some(handle) = playback.image_handle else {
             self.handle_missing_image_handle().await;
             return;
@@ -682,6 +706,7 @@ impl CoverArtWorker {
         self.keeper.release();
         self.session_cache.purge(self.keeper.epoch());
         self.keepalive_deadline = None;
+        self.last_track = None;
         self.missing_handle_retries = 0;
         self.pending_retry = None;
         self.clear_published(reason).await;
@@ -2035,5 +2060,36 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(100), wake.notified())
             .await
             .expect("wake() must notify wake");
+    }
+
+    #[tokio::test]
+    async fn track_change_resets_missing_handle_retries_budget() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        let mut track1 = test_playback(None);
+        track1.title = "Track 1".into();
+        let mut track2 = test_playback(None);
+        track2.title = "Track 2".into();
+
+        // Script 1 & 2: initial poll plus immediate post-session re-query
+        harness.script(Ok(Some(track1.clone())));
+        harness.script(Ok(Some(track1.clone())));
+        // Script 3: second poll for Track 1
+        harness.script(Ok(Some(track1.clone())));
+        // Script 4: Track 2 arrives
+        harness.script(Ok(Some(track2.clone())));
+        let mut worker = harness.worker(None);
+
+        // First poll: initial connection, arms retry attempt 1
+        worker.poll_once().await;
+        assert_eq!(worker.missing_handle_retries, 1);
+
+        // Second poll (Track 1 still): retry attempt 2
+        worker.poll_once().await;
+        assert_eq!(worker.missing_handle_retries, 2);
+
+        // Third poll (Track 2 arrives): retry budget is reset to 0, then attempt 1 for Track 2
+        worker.poll_once().await;
+        assert_eq!(worker.missing_handle_retries, 1);
+        assert_eq!(worker.last_track, Some(("Track 2".into(), track2.artist)));
     }
 }

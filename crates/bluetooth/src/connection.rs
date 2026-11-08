@@ -909,12 +909,33 @@ fn get_track_prop_u32(val: &OwnedValue, key: &str) -> Option<u32> {
 
 /// Inspects managed objects for any `org.bluez.MediaItem1` under `player_path`
 /// that advertises an `ImgHandle` in its `Metadata` dictionary (e.g. from `/NowPlaying`).
+///
+/// Queries `/NowPlaying` first for deterministic selection, then falls back to any
+/// child item path under `player_path` with strict path boundary validation.
 fn find_item_image_handle(
     objects: &HashMap<OwnedObjectPath, HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>>,
     player_path: &str,
 ) -> Option<Box<str>> {
+    let now_playing_suffix = "/NowPlaying";
+    // Check canonical /NowPlaying child item first for deterministic selection.
     for (obj_path, ifaces) in objects {
-        if obj_path.as_str().starts_with(player_path)
+        let path_str = obj_path.as_str();
+        if path_str.strip_prefix(player_path) == Some(now_playing_suffix)
+            && let Some(item_props) = find_iface(ifaces, "org.bluez.MediaItem1")
+            && let Some(metadata) = item_props.get("Metadata")
+            && let Some(handle) = get_track_prop_str(metadata, "ImgHandle")
+            && !handle.is_empty()
+        {
+            return Some(handle);
+        }
+    }
+
+    // Fall back to any child item with strict path boundary check.
+    for (obj_path, ifaces) in objects {
+        let path_str = obj_path.as_str();
+        if path_str
+            .strip_prefix(player_path)
+            .is_some_and(|rem| rem.starts_with('/'))
             && let Some(item_props) = find_iface(ifaces, "org.bluez.MediaItem1")
             && let Some(metadata) = item_props.get("Metadata")
             && let Some(handle) = get_track_prop_str(metadata, "ImgHandle")
