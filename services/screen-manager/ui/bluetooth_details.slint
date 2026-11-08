@@ -1,0 +1,163 @@
+import { OutlinedCard, MaterialText, Horizontal, Vertical, MaterialStyleMetrics } from "@material/material.slint";
+import { MaterialPalette } from "@material/material.slint";
+import { MaterialTypography } from "@material/material.slint";
+
+// Custom Back button with +1 font size (17px) - matches Settings Back button
+component BackButton inherits Rectangle {
+    in property <string> text: "Back";
+    in property <length> btn_width: 120px;
+    width: root.btn_width;
+    height: 42px;
+    border-radius: self.height / 2;
+    background: MaterialPalette.primary;
+    opacity: touch.pressed ? 0.8 : 1.0;
+    animate opacity { duration: 80ms; easing: ease-out; }
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.text;
+        color: MaterialPalette.on_primary;
+        font-size: 17px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+    callback clicked();
+}
+
+component DetailCard inherits OutlinedCard {
+    in property <string> title;
+    callback back_clicked();
+
+    clickable: false;
+    horizontal-stretch: 1;
+
+    VerticalLayout {
+        padding: MaterialStyleMetrics.padding_16;
+        spacing: MaterialStyleMetrics.spacing_6;
+
+        MaterialText {
+            text: root.title;
+            style: MaterialTypography.title_medium;  // 16px, medium
+            color: MaterialPalette.primary;
+        }
+
+        @children  // DetailRow items inserted here
+    }
+}
+
+component DetailRow inherits Horizontal {
+    in property <string> label;
+    in property <string> value;
+
+    spacing: MaterialStyleMetrics.spacing_8;
+    height: 24px;
+
+    MaterialText {
+        text: root.label;
+        style: MaterialTypography.label_medium;  // 12px, medium
+        color: MaterialPalette.on_surface_variant;
+        font-weight: 800;
+        width: 76px;
+        vertical-alignment: center;
+    }
+
+    MaterialText {
+        text: root.value;
+        style: MaterialTypography.body_medium;  // 14px, regular
+        color: MaterialPalette.on_surface;
+        horizontal-stretch: 1;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+export component BluetoothDetails inherits VerticalLayout {
+    in property <bool> bt_connected: false;
+    in property <string> track_or_device: "Waiting for Connection...";
+    in property <string> bt_device_address: "—";
+    in property <string> bt_link_text: "Waiting for connection";
+    in property <string> bt_rssi_text: "";
+    in property <string> bt_battery_text: "";
+    in property <string> bt_stream_format: "—";
+    in property <string> bt_delay_text: "—";
+    in property <string> bt_adapter_name: "—";
+    in property <string> bt_adapter_address: "—";
+    in property <bool> is_playing: false;
+    in property <float> volume_value: 75.0;
+    in property <bool> is_muted: false;
+    in property <string> stream_codec: "aptX-HD";
+
+    callback bluetooth_back_clicked();
+
+    padding: MaterialStyleMetrics.padding_16;
+    spacing: MaterialStyleMetrics.spacing_12;
+
+    // Header: title, live link state pill, back button
+    HorizontalLayout {
+        height: 48px;
+        spacing: MaterialStyleMetrics.spacing_12;
+
+        MaterialText {
+            text: "BLUETOOTH CONNECTION";
+            style: MaterialTypography.title_large;  // 18px (+1 from title_medium)
+            color: MaterialPalette.primary;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        // Status pill: use a Rectangle with Material styling
+        Rectangle {
+            width: 150px;
+            height: 36px;
+            border-radius: MaterialStyleMetrics.border_radius_8;
+            border-width: 1px;
+            border-color: MaterialPalette.outline_variant;
+            background: MaterialPalette.surface_container_low;
+
+            MaterialText {
+                text: root.is_playing ? "STREAMING" : (root.bt_connected ? "CONNECTED" : "WAITING");
+                style: MaterialTypography.label_large;  // 14px, medium
+                color: root.is_playing ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        // Back button - custom with 17px font (+1), matches Settings
+        BackButton {
+            text: "Back";
+            btn_width: 120px;
+            clicked => { root.bluetooth_back_clicked(); }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: MaterialStyleMetrics.spacing_16;
+
+        // Left card: connected source (org.bluez.Device1)
+        DetailCard {
+            title: "CONNECTED SOURCE";
+
+            DetailRow { label: "DEVICE"; value: root.track_or_device; }
+            DetailRow { label: "ADDRESS"; value: root.bt_device_address; }
+            DetailRow { label: "LINK"; value: root.bt_link_text; }
+            DetailRow { label: "PROFILE"; value: "A2DP Sink • AVRCP"; }
+            if root.bt_rssi_text != "" : DetailRow { label: "SIGNAL"; value: root.bt_rssi_text; }
+            if root.bt_battery_text != "" : DetailRow { label: "BATTERY"; value: root.bt_battery_text; }
+        }
+
+        // Right card: audio stream (BlueALSA PCM) and local controller (org.bluez.Adapter1)
+        DetailCard {
+            title: "AUDIO STREAM";
+
+            DetailRow { label: "CODEC"; value: root.stream_codec; }
+            DetailRow { label: "FORMAT"; value: root.bt_stream_format; }
+            DetailRow { label: "LATENCY"; value: root.bt_delay_text; }
+            DetailRow { label: "VOLUME"; value: root.is_muted ? "Muted" : (Math.round(root.volume_value) + "%"); }
+            DetailRow { label: "SPEAKER"; value: root.bt_adapter_name; }
+            DetailRow { label: "ADAPTER"; value: root.bt_adapter_address; }
+        }
+    }
+}

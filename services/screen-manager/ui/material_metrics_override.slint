@@ -1,0 +1,90 @@
+// Copyright © Audio Appliance Team
+// SPDX-License-Identifier: Apache-2.0
+
+import { MaterialStyleMetrics } from "@material/material.slint";
+
+/**
+ * Override Material Design 3 metrics for 800×480 appliance panel.
+ * Material defaults assume ≥600px height (mobile/desktop); we compact
+ * spacing, enlarge touch targets, and scale icons for readability.
+ */
+export global MaterialStyleMetrics {
+    // ========== ICON SIZES ==========
+    // Base 24px → 32px for legibility at 800px width
+    in-out property <length> icon_size_18: 24px;
+    in-out property <length> icon_size_24: 32px;
+    in-out property <length> icon_size_36: 48px;
+    in-out property <length> icon_size_90: 56px;  // Settings button, FAB
+
+    // ========== TOUCH TARGETS ==========
+    // 48px minimum per Material a11y; keep 56px for primary actions
+    in-out property <length> size_48: 48px;
+    in-out property <length> size_56: 56px;
+
+    // ========== SPACING (compact) ==========
+    in-out property <length> spacing_2: 2px;
+    in-out property <length> spacing_4: 4px;
+    in-out property <length> spacing_6: 6px;
+    in-out property <length> spacing_8: 8px;
+    in-out property <length> spacing_12: 12px;
+    in-out property <length> spacing_16: 16px;
+    in-out property <length> spacing_40: 24px;  // Reduced from 40px
+    in-out property <length> spacing_52: 32px;  // Reduced from 52px
+
+    // ========== PADDING (compact) ==========
+    in-out property <length> padding_4: 4px;
+    in-out property <length> padding_6: 6px;
+    in-out property <length> padding_8: 8px;
+    in-out property <length> padding_10: 10px;
+    in-out property <length> padding_12: 12px;
+    in-out property <length> padding_14: 14px;
+    in-out property <length> padding_16: 16px;
+    in-out property <length> padding_20: 16px;  // Reduced
+    in-out property <length> padding_24: 20px;  // Reduced
+    in-out property <length> padding_28: 24px;  // Reduced
+    in-out property <length> padding_30: 24px;  // Reduced
+    in-out property <length> padding_44: 32px;  // Reduced
+    in-out property <length> padding_56: 40px;  // Reduced
+
+    // ========== BORDER RADIUS (unchanged) ==========
+    in-out property <length> border_radius_2: 2px;
+    in-out property <length> border_radius_4: 4px;
+    in-out property <length> border_radius_8: 8px;
+    in-out property <length> border_radius_10: 10px;
+    in-out property <length> border_radius_12: 12px;
+    in-out property <length> border_radius_16: 16px;
+    in-out property <length> border_radius_28: 28px;
+
+    // ========== COMPONENT SIZES (adjusted) ==========
+    in-out property <length> size_14: 14px;
+    in-out property <length> size_16: 16px;
+    in-out property <length> size_20: 20px;
+    in-out property <length> size_30: 28px;    // Reduced from 30
+    in-out property <length> size_32: 32px;
+    in-out property <length> size_38: 36px;    // Reduced from 38
+    in-out property <length> size_40: 40px;
+    in-out property <length> size_64: 56px;    // Reduced from 64
+    in-out property <length> size_72: 64px;    // Reduced from 72
+    in-out property <length> size_80: 72px;    // Reduced from 80
+    in-out property <length> size_90: 80px;    // Reduced from 96
+    in-out property <length> size_200: 160px;  // Reduced
+    in-out property <length> size_256: 200px;  // Reduced
+    in-out property <length> size_344: 280px;  // Reduced
+    in-out property <length> size_360: 300px;  // Reduced
+    in-out property <length> size_572: 480px;  // Reduced
+    in-out property <length> size_640: 520px;  // Reduced
+
+    // ========== REMAINING METRICS (pass through defaults) ==========
+    in-out property <length> size_1: 1px;
+    in-out property <length> size_2: 2px;
+    in-out property <length> size_3: 3px;
+    in-out property <length> size_4: 4px;
+    in-out property <length> size_6: 6px;
+    in-out property <length> size_8: 8px;
+    in-out property <length> size_18: 18px;
+    in-out property <length> size_24: 24px;
+    in-out property <length> size_36: 36px;
+    in-out property <length> size_49: 49px;
+    in-out property <length> size_400: 400px;
+    in-out property <length> size_480: 480px;
+}

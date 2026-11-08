@@ -1,4 +1,5 @@
 import { Theme } from "theme.slint";
+import { MaterialStyleMetrics } from "material_metrics_override.slint";
 
 export component TopStatusBar inherits Rectangle {
     height: 60px;
@@ -36,6 +37,9 @@ export component TopStatusBar inherits Rectangle {
         (volume_value <= 50.0 ? 2 :
         (volume_value <= 75.0 ? 3 : 4)));
 
+    // DIM toggle state (driven externally; reflects current night mode setting)
+    in property <bool> dim_active: false;
+
     callback source_clicked();
     callback night_mode_clicked();
     callback volume_clicked();
@@ -43,8 +47,8 @@ export component TopStatusBar inherits Rectangle {
     callback protocol_clicked();
 
     HorizontalLayout {
-        padding-left: 0px;
-        padding-right: 18px;
+        padding-left: MaterialStyleMetrics.padding_24;
+        padding-right: MaterialStyleMetrics.padding_24;
         alignment: space-between;
 
         // Left: Bluetooth Source (icon + label, no pill badge; vertically centered)
@@ -71,13 +75,13 @@ export component TopStatusBar inherits Rectangle {
             }
         }
 
-        // Right: Audio Codec, Sample Rate, Bit Depth Badges + Volume + DIM Toggle (Vertically centered)
+        // Right: Codec Badge + Volume + DIM Toggle (Vertically centered)
         VerticalLayout {
             alignment: center;
             HorizontalLayout {
                 spacing: 10px;
 
-                // 1. Codec Badge (aptX-HD / AAC / SBC / LDAC)
+                // 1. Codec Badge (aptX-HD / AAC / SBC / LDAC) - original style with Material colors
                 VerticalLayout {
                     alignment: center;
                     Rectangle {
@@ -110,7 +114,7 @@ export component TopStatusBar inherits Rectangle {
                     }
                 }
 
-                // 4. Volume / Mute Control (Takes whole vertical space of top row)
+                // 2. Volume / Mute Control (kept custom - specialized SVG icons)
                 VerticalLayout {
                     alignment: center;
                     Rectangle {
@@ -166,7 +170,7 @@ export component TopStatusBar inherits Rectangle {
 
                             if root.is_muted : Image {
                                 source: @image-url("../../../assets/icons/volume-mute.svg");
-                                colorize: #EF4444;
+                                colorize: Theme.active.needle_peak;
                                 width: 44px;
                                 image-fit: contain;
                             }
@@ -180,7 +184,7 @@ export component TopStatusBar inherits Rectangle {
                     }
                 }
 
-                // 5. DIM Toggle Button
+                // 3. DIM Toggle Button - original style with Material colors
                 VerticalLayout {
                     alignment: center;
                     Rectangle {
@@ -195,7 +199,7 @@ export component TopStatusBar inherits Rectangle {
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
                             source: @image-url("../../../assets/icons/brightness.svg");
-                            colorize: Theme.active.text_muted;
+                            colorize: root.dim_active ? Theme.active.primary_accent : Theme.active.secondary_accent;
                             width: 24px;
                             height: 24px;
                             image-fit: contain;

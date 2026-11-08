@@ -1,56 +1,117 @@
+import { ElevatedCard, OutlinedCard, FilledButton, Icon, MaterialText, Horizontal, Vertical } from "@material/material.slint";
+import { MaterialPalette } from "@material/material.slint";
+import { MaterialTypography } from "@material/material.slint";
+import { MaterialStyleMetrics } from "material_metrics_override.slint";
 import { Theme } from "theme.slint";
 
-component AppIcon inherits Rectangle {
-    in property <image> icon;
-    in property <string> label;
+// Theme preset card using Rectangle with Material styling (defined first for use in SettingsView)
+component ThemePresetCard inherits Rectangle {
+    in property <int> index;
+    in property <string> name;
+    in property <string> accent_name;
+    in property <color> primary_color;
+    in property <color> secondary_color;
+    in property <bool> selected;
     callback clicked();
 
-    width: 120px;
-    height: 120px;
-    background: transparent;
+    width: 136px;
+    height: 54px;
+    border-radius: MaterialStyleMetrics.border_radius_10;
+    border-width: root.selected ? 2px : 0px;
+    border-color: root.primary_color;
+    background: root.selected ? transparent : MaterialPalette.surface;
 
     VerticalLayout {
         alignment: center;
-        spacing: 12px;
+        spacing: MaterialStyleMetrics.spacing_2;
 
-        // Squircle Icon Card (Android style)
-        Rectangle {
-            x: (parent.width - self.width) / 2;
-            width: 76px;
-            height: 76px;
-            border-radius: 22px;
-            background: Theme.active.card_surface;
-            border-width: 1px;
-            border-color: Theme.active.card_border;
+        MaterialText {
+            text: root.name;
+            style: MaterialTypography.label_medium;  // 12px
+            color: root.primary_color;
+            horizontal-alignment: center;
+        }
+        MaterialText {
+            text: root.accent_name;
+            style: MaterialTypography.label_small;  // 11px
+            color: root.secondary_color;
+            horizontal-alignment: center;
+        }
+    }
 
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// Custom Back button with +1 font size (17px) - Material FilledButton text style is fixed at label_large 14px
+component BackButton inherits Rectangle {
+    in property <string> text: "Back";
+    in property <length> btn_width: 100px;
+    width: root.btn_width;
+    height: 42px;
+    border-radius: self.height / 2;
+    background: MaterialPalette.primary;
+    opacity: touch.pressed ? 0.8 : 1.0;
+    animate opacity { duration: 80ms; easing: ease-out; }
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.text;
+        color: MaterialPalette.on_primary;
+        font-size: 17px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+    callback clicked();
+}
+
+// Android-style icon button for settings grid (custom component like TransportButton)
+component SettingsIconButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> enabled: true;
+
+    width: 120px;
+    height: 120px;
+    border-radius: MaterialStyleMetrics.border_radius_16;  // 16px rounded
+    background: root.enabled ? MaterialPalette.secondary_container : MaterialPalette.surface_container_highest;
+    opacity: root.enabled ? (touch.pressed ? 0.8 : 1.0) : 0.6;
+    animate opacity { duration: 80ms; easing: ease-out; }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: MaterialStyleMetrics.spacing_12;
+
+        HorizontalLayout {
+            alignment: center;
             Image {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
                 source: root.icon;
-                colorize: Theme.active.primary_accent;
-                width: 38px;
-                height: 38px;
+                colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
+                width: MaterialStyleMetrics.icon_size_36;  // 48px
+                height: MaterialStyleMetrics.icon_size_36;
                 image-fit: contain;
             }
         }
 
-        // App Label (1 size bigger)
-        Text {
+        MaterialText {
             text: root.label;
-            color: Theme.active.text_primary;
-            font-size: 18px;
-            font-weight: 700;
+            style: MaterialTypography.title_medium;  // 16px (+1 from title_small)
+            color: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
             horizontal-alignment: center;
-            overflow: elide;
         }
     }
 
     touch := TouchArea {
-        clicked => { root.clicked(); }
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
     }
 
-    opacity: touch.pressed ? 0.7 : 1.0;
-    animate opacity { duration: 80ms; easing: ease-out; }
+    callback clicked();
 }
 
 export component SettingsView inherits VerticalLayout {
@@ -65,84 +126,70 @@ export component SettingsView inherits VerticalLayout {
     callback select_theme(int);
     callback cycle_theme();
 
-    padding: 14px;
-    spacing: 16px;
+    padding: MaterialStyleMetrics.padding_16;  // 16px
+    spacing: MaterialStyleMetrics.spacing_16;
 
     // Header: Title & Back Button
     HorizontalLayout {
-        height: 40px;
-        spacing: 12px;
+        height: 48px;
+        spacing: MaterialStyleMetrics.spacing_12;
 
-        Text {
+        MaterialText {
             text: root.show_themes ? "THEME PREFERENCES" : "SETTINGS";
-            color: Theme.active.primary_accent;
-            font-size: 18px;
-            font-weight: 800;
+            style: MaterialTypography.title_large;  // 18px (+1 from title_medium)
+            color: MaterialPalette.primary;
             vertical-alignment: center;
             horizontal-stretch: 1;
         }
 
-        Rectangle {
-            width: 120px;
-            height: 42px;
-            background: Theme.active.primary_accent;
-            border-radius: 12px;
-
-            Text {
-                text: "Back";
-                color: Theme.active.dock_active_text;
-                font-size: 18px;
-                font-weight: 800;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-
-            TouchArea {
-                clicked => {
-                    if (root.show_themes) {
-                        root.show_themes = false;
-                    } else {
-                        root.back_clicked();
-                    }
+        // Back button - custom with 17px font (+1 from Material label_large 14px)
+        BackButton {
+            text: "Back";
+            btn_width: 100px;
+            clicked => {
+                if (root.show_themes) {
+                    root.show_themes = false;
+                } else {
+                    root.back_clicked();
                 }
             }
         }
     }
 
-    // View 1: Android-style Apps Grid of Icons
+    // View 1: Android-style icon button grid
     if !root.show_themes : VerticalLayout {
         vertical-stretch: 1;
         alignment: center;
 
         HorizontalLayout {
             alignment: center;
-            spacing: 24px;
+            spacing: MaterialStyleMetrics.spacing_16;
 
-            AppIcon {
+            SettingsIconButton {
                 icon: @image-url("../../../assets/icons/bluetooth.svg");
                 label: "Bluetooth";
                 clicked => { root.bluetooth_clicked(); }
             }
 
-            AppIcon {
+            SettingsIconButton {
                 icon: @image-url("../../../assets/icons/peppymeter.svg");
                 label: "VU Meter";
                 clicked => { root.vu_meter_clicked(); }
             }
 
-            AppIcon {
+            SettingsIconButton {
                 icon: @image-url("../../../assets/icons/equalizer.svg");
                 label: "DSP & EQ";
                 clicked => { root.dsp_clicked(); }
             }
 
-            AppIcon {
+            SettingsIconButton {
                 icon: @image-url("../../../assets/icons/config.svg");
                 label: "Themes";
                 clicked => { root.show_themes = true; }
             }
 
-            if root.cd_enabled : AppIcon {
+            if root.cd_enabled : SettingsIconButton {
                 icon: @image-url("../../../assets/icons/disk.svg");
                 label: "CD Player";
                 clicked => { root.cd_clicked(); }
@@ -150,230 +197,89 @@ export component SettingsView inherits VerticalLayout {
         }
     }
 
-    // View 2: Theme Preferences Screen (opened via Themes app icon)
-    if root.show_themes : Rectangle {
-        background: Theme.active.card_surface;
-        border-radius: 14px;
-        border-width: 1px;
-        border-color: Theme.active.card_border;
-        vertical-stretch: 1;
-
+    // View 2: Theme Preferences Screen
+    if root.show_themes : OutlinedCard {
         VerticalLayout {
             alignment: space-around;
-            padding: 16px;
-            spacing: 12px;
+            padding: MaterialStyleMetrics.padding_16;
+            spacing: MaterialStyleMetrics.spacing_12;
 
-            Text {
+            MaterialText {
                 text: "Select Global Appliance Palette:";
-                color: Theme.active.secondary_accent;
-                font-size: 14px;
-                font-weight: 800;
+                style: MaterialTypography.label_large;  // 14px
+                color: MaterialPalette.on_surface_variant;
                 horizontal-alignment: center;
             }
 
             // 5 Theme preset buttons
             HorizontalLayout {
                 alignment: center;
-                spacing: 8px;
+                spacing: MaterialStyleMetrics.spacing_8;
 
                 // 1. McIntosh Blue
-                Rectangle {
-                    width: 136px;
-                    height: 54px;
-                    background: #090D12;
-                    border-radius: 10px;
-                    border-width: Theme.active_preset == 0 ? 2px : 1px;
-                    border-color: #00C8FF;
-
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 2px;
-                        Text {
-                            text: "1. McIntosh";
-                            color: #00C8FF;
-                            font-size: 12px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                        }
-                        Text {
-                            text: "Electric Cyan";
-                            color: #70E1FF;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                        }
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.select_theme(0);
-                        }
-                    }
+                ThemePresetCard {
+                    index: 0;
+                    name: "1. McIntosh";
+                    accent_name: "Electric Cyan";
+                    primary_color: #00C8FF;
+                    secondary_color: #70E1FF;
+                    selected: Theme.active_preset == 0;
+                    clicked => { root.select_theme(0); }
                 }
 
                 // 2. Marantz Amber
-                Rectangle {
-                    width: 136px;
-                    height: 54px;
-                    background: #12100D;
-                    border-radius: 10px;
-                    border-width: Theme.active_preset == 1 ? 2px : 1px;
-                    border-color: #E5A93C;
-
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 2px;
-                        Text {
-                            text: "2. Marantz";
-                            color: #E5A93C;
-                            font-size: 12px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                        }
-                        Text {
-                            text: "Warm Amber";
-                            color: #FFD166;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                        }
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.select_theme(1);
-                        }
-                    }
+                ThemePresetCard {
+                    index: 1;
+                    name: "2. Marantz";
+                    accent_name: "Warm Amber";
+                    primary_color: #E5A93C;
+                    secondary_color: #FFD166;
+                    selected: Theme.active_preset == 1;
+                    clicked => { root.select_theme(1); }
                 }
 
                 // 3. Cyberpunk Neon
-                Rectangle {
-                    width: 136px;
-                    height: 54px;
-                    background: #0D0B18;
-                    border-radius: 10px;
-                    border-width: Theme.active_preset == 2 ? 2px : 1px;
-                    border-color: #00F0FF;
-
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 2px;
-                        Text {
-                            text: "3. Cyberpunk";
-                            color: #00F0FF;
-                            font-size: 12px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                        }
-                        Text {
-                            text: "Synthwave Pink";
-                            color: #FF007F;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                        }
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.select_theme(2);
-                        }
-                    }
+                ThemePresetCard {
+                    index: 2;
+                    name: "3. Cyberpunk";
+                    accent_name: "Synthwave Pink";
+                    primary_color: #00F0FF;
+                    secondary_color: #FF007F;
+                    selected: Theme.active_preset == 2;
+                    clicked => { root.select_theme(2); }
                 }
 
                 // 4. Studio Dark
-                Rectangle {
-                    width: 136px;
-                    height: 54px;
-                    background: #121212;
-                    border-radius: 10px;
-                    border-width: Theme.active_preset == 3 ? 2px : 1px;
-                    border-color: #F0F0F0;
-
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 2px;
-                        Text {
-                            text: "4. Studio Dark";
-                            color: #F0F0F0;
-                            font-size: 12px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                        }
-                        Text {
-                            text: "Precision Mono";
-                            color: #A0A0A0;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                        }
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.select_theme(3);
-                        }
-                    }
+                ThemePresetCard {
+                    index: 3;
+                    name: "4. Studio Dark";
+                    accent_name: "Precision Mono";
+                    primary_color: #F0F0F0;
+                    secondary_color: #A0A0A0;
+                    selected: Theme.active_preset == 3;
+                    clicked => { root.select_theme(3); }
                 }
 
                 // 5. PeppyMeter Gold
-                Rectangle {
-                    width: 136px;
-                    height: 54px;
-                    background: #14110D;
-                    border-radius: 10px;
-                    border-width: Theme.active_preset == 4 ? 2px : 1px;
-                    border-color: #F5B83D;
-
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 2px;
-                        Text {
-                            text: "5. PeppyMeter";
-                            color: #F5B83D;
-                            font-size: 12px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                        }
-                        Text {
-                            text: "Vintage Gold";
-                            color: #FFDF85;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                        }
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.select_theme(4);
-                        }
-                    }
+                ThemePresetCard {
+                    index: 4;
+                    name: "5. PeppyMeter";
+                    accent_name: "Vintage Gold";
+                    primary_color: #F5B83D;
+                    secondary_color: #FFDF85;
+                    selected: Theme.active_preset == 4;
+                    clicked => { root.select_theme(4); }
                 }
             }
 
             // Cycle Theme Button
             HorizontalLayout {
                 alignment: center;
-                Rectangle {
+                FilledButton {
+                    text: "Cycle Next Theme";
                     width: 220px;
-                    height: 40px;
-                    background: Theme.active.primary_accent;
-                    border-radius: 10px;
-
-                    HorizontalLayout {
-                        alignment: center;
-                        spacing: 8px;
-
-                        Text {
-                            text: "Cycle Next Theme";
-                            color: Theme.active.dock_active_text;
-                            font-size: 13px;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.cycle_theme();
-                        }
-                    }
+                    height: 48px;
+                    clicked => { root.cycle_theme(); }
                 }
             }
         }

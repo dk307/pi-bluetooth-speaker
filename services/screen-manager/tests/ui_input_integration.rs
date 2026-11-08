@@ -208,15 +208,18 @@ fn touch_viewport_golden_hit_testing_play_pause_and_skip() {
 
     // 1. Hit Play/Pause hero button center.
     // In the 800x480 layout:
-    // Top status bar is 60px. Viewport is 60..480.
-    // The transport controls row is centered horizontally around X: 592, Y: 200.
-    let test_y = 200.0;
+    // Top status bar is 60px. Viewport is 60..480 (420px tall).
+    // Cover art top at y=90 (30px margin from viewport top). Title starts at y=90.
+    // Right Column: padding-top=30, metadata (title~40 + 16 + artist~28 = 84),
+    // progress+transport VerticalLayout starts at y=30+84=114 from viewport top.
+    // Equal stretch spacers distribute remaining space; probed transport center at y=337 window top.
+    let test_y = 337.0;
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(592.0, test_y),
+        position: LogicalPosition::new(588.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(592.0, test_y),
+        position: LogicalPosition::new(588.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
@@ -235,11 +238,11 @@ fn touch_viewport_golden_hit_testing_play_pause_and_skip() {
 
     // 2. Rapid tap debounce: tapping again immediately (<300ms) should be ignored
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(592.0, test_y),
+        position: LogicalPosition::new(588.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(592.0, test_y),
+        position: LogicalPosition::new(588.0, test_y),
         button: PointerEventButton::Left,
     });
     assert!(
@@ -247,26 +250,26 @@ fn touch_viewport_golden_hit_testing_play_pause_and_skip() {
         "Rapid tap within 300ms debounce interval must be ignored"
     );
 
-    // 3. Hit Previous Track button (approx X: 477, Y: 200)
+    // 3. Hit Previous Track button (approx X: 473, Y: 337) - center 588 - 151 offset for 36px spacing
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(477.0, test_y),
+        position: LogicalPosition::new(473.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(477.0, test_y),
+        position: LogicalPosition::new(473.0, test_y),
         button: PointerEventButton::Left,
     });
     let drained_prev = commands.drain();
     assert_eq!(drained_prev.len(), 1);
     assert_eq!(drained_prev[0], TransportCommand::PreviousTrack);
 
-    // 4. Hit Next Track button (approx X: 707, Y: 200)
+    // 4. Hit Next Track button (approx X: 703, Y: 337) - center 588 + 151 offset for 36px spacing
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(707.0, test_y),
+        position: LogicalPosition::new(703.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(707.0, test_y),
+        position: LogicalPosition::new(703.0, test_y),
         button: PointerEventButton::Left,
     });
     let drained_next = commands.drain();
@@ -290,21 +293,21 @@ fn touch_viewport_progress_bar_is_read_only() {
     shell.set_track_metadata("Sultans of Swing", "Dire Straits", "Dire Straits");
     shell.set_playback_state(true, 10_000, 200_000);
 
-    // Progress bar center is approx Y: 245 in the right column (X spans ~440 to ~720)
-    // 1. Pointer Down at 50% along the progress track (X: 580, Y: 245)
+    // Progress bar center is approx Y: 210 in the right column (X spans ~440 to ~720)
+    // 1. Pointer Down at 50% along the progress track (X: 580, Y: 210)
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(580.0, 245.0),
+        position: LogicalPosition::new(580.0, 210.0),
         button: PointerEventButton::Left,
     });
 
     // 2. Drag finger along the progress track to 75% position
     window.dispatch_event(WindowEvent::PointerMoved {
-        position: LogicalPosition::new(650.0, 245.0),
+        position: LogicalPosition::new(650.0, 210.0),
     });
 
     // 3. Pointer Up (Release)
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(650.0, 245.0),
+        position: LogicalPosition::new(650.0, 210.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
