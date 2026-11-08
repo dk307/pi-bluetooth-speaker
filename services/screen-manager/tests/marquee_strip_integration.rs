@@ -157,7 +157,7 @@ fn marquee_rasterizer_debug_renders_summary() {
 
 #[test]
 fn marquee_typography_constants_match_appliance_design() {
-    assert_eq!(MarqueeTypography::TITLE_FONT_SIZE_PX, 30);
+    assert_eq!(MarqueeTypography::TITLE_FONT_SIZE_PX, 32);
     assert_eq!(MarqueeTypography::TITLE_FONT_WEIGHT, 800);
     assert_eq!(MarqueeTypography::ARTIST_FONT_SIZE_PX, 22);
     assert_eq!(MarqueeTypography::ARTIST_FONT_WEIGHT, 700);

@@ -1,6 +1,7 @@
 import { Theme } from "theme.slint";
 import { NowPlayingView } from "now_playing.slint";
 import { VolumeHudOverlay } from "volume_hud.slint";
+import { SettingsView } from "settings_view.slint";
 
 // One label / value line in the Bluetooth details cards.
 component DetailRow inherits Rectangle {
@@ -36,6 +37,7 @@ export component MainViewport inherits Rectangle {
     background: Theme.active.chassis;
 
     in-out property <int> active_tab: 0;
+    in property <bool> cd_enabled: false;
     in-out property <string> track_title: "Waiting for Bluetooth Connection...";
     in-out property <string> track_artist: "";
     in-out property <string> track_album: "";
@@ -67,6 +69,12 @@ export component MainViewport inherits Rectangle {
     in property <string> bt_adapter_address: "—";
 
     callback bluetooth_back_clicked();
+    callback settings_clicked();
+    callback settings_back_clicked();
+    callback select_tab(int);
+    callback vu_meter_back_clicked();
+    callback cd_back_clicked();
+    callback dsp_back_clicked();
     callback toggle_play_pause();
     callback next_track();
     callback previous_track();
@@ -106,6 +114,7 @@ export component MainViewport inherits Rectangle {
                 toggle_play_pause => { root.toggle_play_pause(); }
                 next_track => { root.next_track(); }
                 previous_track => { root.previous_track(); }
+                settings_clicked => { root.settings_clicked(); }
             }
         }
     }
@@ -130,6 +139,31 @@ export component MainViewport inherits Rectangle {
                         Theme.active_preset == 3 ? @image-url("../../../assets/skins/800x480/black-white-bgr.png") :
                         @image-url("../../../assets/skins/800x480/vintage-bgr.png");
                 image-fit: contain;
+            }
+
+            // Top-right Back button overlay
+            Rectangle {
+                x: parent.width - self.width - 16px;
+                y: 16px;
+                width: 110px;
+                height: 42px;
+                background: Theme.active.card_surface;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: Theme.active.card_border;
+
+                Text {
+                    text: "Back";
+                    color: Theme.active.primary_accent;
+                    font-size: 18px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    clicked => { root.vu_meter_back_clicked(); }
+                }
             }
         }
     }
@@ -171,14 +205,15 @@ export component MainViewport inherits Rectangle {
             }
 
             Rectangle {
-                width: 110px;
+                width: 120px;
+                height: 42px;
                 background: Theme.active.primary_accent;
-                border-radius: 10px;
+                border-radius: 12px;
 
                 Text {
                     text: "Back";
                     color: Theme.active.dock_active_text;
-                    font-size: 15px;
+                    font-size: 18px;
                     font-weight: 800;
                     horizontal-alignment: center;
                     vertical-alignment: center;
@@ -251,30 +286,58 @@ export component MainViewport inherits Rectangle {
 
     // Tab 3: CD Player
     if root.active_tab == 3 : VerticalLayout {
-        padding: 20px;
+        padding: 14px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            height: 40px;
+            spacing: 12px;
+
+            Text {
+                text: "OPTICAL CD PLAYER";
+                color: Theme.active.primary_accent;
+                font-size: 18px;
+                font-weight: 800;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+
+            Rectangle {
+                width: 120px;
+                height: 42px;
+                background: Theme.active.primary_accent;
+                border-radius: 12px;
+
+                Text {
+                    text: "Back";
+                    color: Theme.active.dock_active_text;
+                    font-size: 18px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    clicked => { root.cd_back_clicked(); }
+                }
+            }
+        }
 
         Rectangle {
             background: Theme.active.card_surface;
             border-radius: 16px;
             border-width: 1px;
             border-color: Theme.active.card_border;
+            vertical-stretch: 1;
 
             VerticalLayout {
                 alignment: center;
                 spacing: 10px;
 
                 Text {
-                    text: "OPTICAL CD PLAYER";
-                    color: Theme.active.primary_accent;
-                    font-size: 20px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                }
-
-                Text {
                     text: "USB Optical Drive Subsystem (cdda://)";
                     color: Theme.active.secondary_accent;
-                    font-size: 14px;
+                    font-size: 16px;
                     font-weight: 600;
                     horizontal-alignment: center;
                 }
@@ -284,30 +347,58 @@ export component MainViewport inherits Rectangle {
 
     // Tab 4: DSP & Tone Control
     if root.active_tab == 4 : VerticalLayout {
-        padding: 20px;
+        padding: 14px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            height: 40px;
+            spacing: 12px;
+
+            Text {
+                text: "CAMILLADSP ACTIVE CROSSOVER";
+                color: Theme.active.primary_accent;
+                font-size: 18px;
+                font-weight: 800;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+
+            Rectangle {
+                width: 120px;
+                height: 42px;
+                background: Theme.active.primary_accent;
+                border-radius: 12px;
+
+                Text {
+                    text: "Back";
+                    color: Theme.active.dock_active_text;
+                    font-size: 18px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    clicked => { root.dsp_back_clicked(); }
+                }
+            }
+        }
 
         Rectangle {
             background: Theme.active.card_surface;
             border-radius: 16px;
             border-width: 1px;
             border-color: Theme.active.card_border;
+            vertical-stretch: 1;
 
             VerticalLayout {
                 alignment: center;
                 spacing: 10px;
 
                 Text {
-                    text: "CAMILLADSP ACTIVE CROSSOVER";
-                    color: Theme.active.primary_accent;
-                    font-size: 20px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                }
-
-                Text {
                     text: "48kHz / 32-bit LE Processing Pipeline";
                     color: Theme.active.secondary_accent;
-                    font-size: 14px;
+                    font-size: 16px;
                     font-weight: 600;
                     horizontal-alignment: center;
                 }
@@ -317,237 +408,17 @@ export component MainViewport inherits Rectangle {
 
     // Tab 5: Settings & Theme Switcher
     if root.active_tab == 5 : VerticalLayout {
-        padding: 16px;
+        padding: 0px;
 
-        Rectangle {
-            background: Theme.active.card_surface;
-            border-radius: 16px;
-            border-width: 1px;
-            border-color: Theme.active.card_border;
-
-            VerticalLayout {
-                alignment: center;
-                spacing: 14px;
-                padding: 16px;
-
-                Text {
-                    text: "APPLIANCE THEME & PREFERENCES";
-                    color: Theme.active.primary_accent;
-                    font-size: 18px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                }
-
-                Text {
-                    text: "Unified Global Theme Palette (Section 3.1):";
-                    color: Theme.active.text_muted;
-                    font-size: 13px;
-                    horizontal-alignment: center;
-                }
-
-                // 5 Theme preset buttons
-                HorizontalLayout {
-                    alignment: center;
-                    spacing: 8px;
-
-                    // 1. McIntosh Blue
-                    Rectangle {
-                        width: 136px;
-                        height: 52px;
-                        background: #090D12;
-                        border-radius: 10px;
-                        border-width: Theme.active_preset == 0 ? 2px : 1px;
-                        border-color: #00C8FF;
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 2px;
-                            Text {
-                                text: "1. McIntosh";
-                                color: #00C8FF;
-                                font-size: 12px;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                            }
-                            Text {
-                                text: "Electric Cyan";
-                                color: #70E1FF;
-                                font-size: 10px;
-                                horizontal-alignment: center;
-                            }
-                        }
-
-                        TouchArea {
-                            clicked => {
-                                root.select_theme(0);
-                            }
-                        }
-                    }
-
-                    // 2. Marantz Amber
-                    Rectangle {
-                        width: 136px;
-                        height: 52px;
-                        background: #12100D;
-                        border-radius: 10px;
-                        border-width: Theme.active_preset == 1 ? 2px : 1px;
-                        border-color: #E5A93C;
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 2px;
-                            Text {
-                                text: "2. Marantz";
-                                color: #E5A93C;
-                                font-size: 12px;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                            }
-                            Text {
-                                text: "Warm Amber";
-                                color: #FFD166;
-                                font-size: 10px;
-                                horizontal-alignment: center;
-                            }
-                        }
-
-                        TouchArea {
-                            clicked => {
-                                root.select_theme(1);
-                            }
-                        }
-                    }
-
-                    // 3. Cyberpunk Neon
-                    Rectangle {
-                        width: 136px;
-                        height: 52px;
-                        background: #0D0B18;
-                        border-radius: 10px;
-                        border-width: Theme.active_preset == 2 ? 2px : 1px;
-                        border-color: #00F0FF;
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 2px;
-                            Text {
-                                text: "3. Cyberpunk";
-                                color: #00F0FF;
-                                font-size: 12px;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                            }
-                            Text {
-                                text: "Synthwave Pink";
-                                color: #FF007F;
-                                font-size: 10px;
-                                horizontal-alignment: center;
-                            }
-                        }
-
-                        TouchArea {
-                            clicked => {
-                                root.select_theme(2);
-                            }
-                        }
-                    }
-
-                    // 4. Studio Dark
-                    Rectangle {
-                        width: 136px;
-                        height: 52px;
-                        background: #121212;
-                        border-radius: 10px;
-                        border-width: Theme.active_preset == 3 ? 2px : 1px;
-                        border-color: #F0F0F0;
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 2px;
-                            Text {
-                                text: "4. Studio Dark";
-                                color: #F0F0F0;
-                                font-size: 12px;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                            }
-                            Text {
-                                text: "Precision Mono";
-                                color: #A0A0A0;
-                                font-size: 10px;
-                                horizontal-alignment: center;
-                            }
-                        }
-
-                        TouchArea {
-                            clicked => {
-                                root.select_theme(3);
-                            }
-                        }
-                    }
-
-                    // 5. PeppyMeter Gold
-                    Rectangle {
-                        width: 136px;
-                        height: 52px;
-                        background: #14110D;
-                        border-radius: 10px;
-                        border-width: Theme.active_preset == 4 ? 2px : 1px;
-                        border-color: #F5B83D;
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 2px;
-                            Text {
-                                text: "5. PeppyMeter";
-                                color: #F5B83D;
-                                font-size: 12px;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                            }
-                            Text {
-                                text: "Vintage Gold";
-                                color: #FFDF85;
-                                font-size: 10px;
-                                horizontal-alignment: center;
-                            }
-                        }
-
-                        TouchArea {
-                            clicked => {
-                                root.select_theme(4);
-                            }
-                        }
-                    }
-                }
-
-                // Cycle Theme Button
-                Rectangle {
-                    width: 220px;
-                    height: 40px;
-                    background: Theme.active.primary_accent;
-                    border-radius: 10px;
-
-                    HorizontalLayout {
-                        alignment: center;
-                        spacing: 8px;
-
-                        Text {
-                            text: "Cycle Next Theme";
-                            color: Theme.active.dock_active_text;
-                            font-size: 13px;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.cycle_theme();
-                        }
-                    }
-                }
-            }
+        SettingsView {
+            cd_enabled: root.cd_enabled;
+            back_clicked => { root.settings_back_clicked(); }
+            bluetooth_clicked => { root.select_tab(2); }
+            vu_meter_clicked => { root.select_tab(1); }
+            dsp_clicked => { root.select_tab(4); }
+            cd_clicked => { root.select_tab(3); }
+            select_theme(idx) => { root.select_theme(idx); }
+            cycle_theme => { root.cycle_theme(); }
         }
     }
 

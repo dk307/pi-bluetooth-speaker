@@ -223,22 +223,25 @@ export component NowPlayingView inherits Rectangle {
     callback toggle_play_pause();
     callback next_track();
     callback previous_track();
+    callback settings_clicked();
 
     HorizontalLayout {
-        padding: 16px;
+        padding-top: 0px;
+        padding-bottom: 0px;
+        padding-left: 20px;
+        padding-right: 20px;
         spacing: 24px;
 
-        // Left Column: square cover art / vinyl disc box centered in a fixed-width
-        // column, sized to the largest square that fits the column height so the
-        // top and bottom card margins stay symmetric.
+        // Left Column: square cover art / vinyl disc box vertically centered
+        // so margins from top status bar and bottom of screen are perfectly equal (30px each).
         Rectangle {
-            width: 340px;
+            width: 360px;
 
             Rectangle {
-                x: (parent.width - self.width) / 2;
+                x: 0px;
                 y: (parent.height - self.height) / 2;
-                width: Math.min(parent.width, parent.height);
-                height: self.width;
+                width: 360px;
+                height: 360px;
                 border-radius: 16px;
                 clip: true;
                 background: @linear-gradient(145deg, Theme.active.card_surface 0%, Theme.active.chassis 100%);
@@ -282,14 +285,14 @@ export component NowPlayingView inherits Rectangle {
 
         // Right Column: Track Info, Scrubber & Transport
         VerticalLayout {
-            alignment: space-around;
-            padding-top: 4px;
-            padding-bottom: 4px;
-            spacing: 14px;
+            alignment: start;
+            padding-top: 28px;
+            padding-bottom: 0px;
+            spacing: 0px;
 
             // Track metadata & live playback wave
             VerticalLayout {
-                spacing: 6px;
+                spacing: 8px;
 
                 title_marquee := MarqueeText {
                     strip: root.title_marquee_strip;
@@ -321,8 +324,14 @@ export component NowPlayingView inherits Rectangle {
                 }
             }
 
+            // More gap between the singer and position bar
+            Rectangle {
+                height: 48px;
+            }
+
             // Playback progress bar (Read-only, sleek audiophile pill)
             HorizontalLayout {
+                height: 24px;
                 spacing: 16px;
 
                 Text {
@@ -370,6 +379,11 @@ export component NowPlayingView inherits Rectangle {
                     width: 58px;
                     horizontal-alignment: left;
                 }
+            }
+
+            // Spacing to position the transport buttons half way between position bar and setting button
+            Rectangle {
+                height: 44px;
             }
 
             // Transport controls row (Larger touch targets & Peppy graphics)
@@ -499,5 +513,36 @@ export component NowPlayingView inherits Rectangle {
                 }
             }
         }
+    }
+
+    // Dedicated Settings button anchored to the right-bottom corner (15% larger, 56px)
+    settings_btn := Rectangle {
+        x: parent.width - self.width - 16px;
+        y: parent.height - self.height - 16px;
+        width: 56px;
+        height: 56px;
+        border-radius: 28px;
+        background: Theme.active.card_surface;
+        border-width: 1px;
+        border-color: Theme.active.card_border;
+
+        Image {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            source: @image-url("../../../assets/icons/config.svg");
+            colorize: Theme.active.primary_accent;
+            width: 28px;
+            height: 28px;
+            image-fit: contain;
+        }
+
+        touch_settings := TouchArea {
+            clicked => {
+                root.settings_clicked();
+            }
+        }
+
+        opacity: touch_settings.pressed ? 0.7 : 1.0;
+        animate opacity { duration: 80ms; easing: ease-out; }
     }
 }
