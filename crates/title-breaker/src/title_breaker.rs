@@ -524,11 +524,15 @@ fn collect_word_candidates(
         }
         if w_idx + 1 < words.len() && is_top_level(depths, w_end) {
             let next_start = words[w_idx + 1].1;
+            // "the" and "me" are deliberately excluded: they are English
+            // homographs (article/pronoun) that is_bad_line1_ending forbids
+            // as line-1 endings. Keeping them here would let an exempted
+            // AfterIndicClause candidate strand a dangling English "the"/"me".
             let after_score = match lower_no_dot.as_str() {
                 "toh" => Some(68.0),
-                "se" | "mein" | "me" => Some(64.0),
-                "hai" | "hain" | "tha" | "thi" | "the" | "hoga" | "hogi" | "gaye" | "gayi"
-                | "diya" | "diye" => Some(60.0),
+                "se" | "mein" => Some(64.0),
+                "hai" | "hain" | "tha" | "thi" | "hoga" | "hogi" | "gaye" | "gayi" | "diya"
+                | "diye" => Some(60.0),
                 _ => None,
             };
             if let Some(score) = after_score {
@@ -597,6 +601,9 @@ fn score_candidates(
             - orphan_penalty
             - end_penalty
             - overflow_penalty;
+        // Score inputs are all finite (lengths, char counts, config), so a
+        // non-finite score here would be a logic bug, never user input.
+        debug_assert!(total_score.is_finite());
         if best.as_ref().is_none_or(|b| total_score > b.score) {
             best = Some(TitleSplit {
                 line1: l1.to_string(),

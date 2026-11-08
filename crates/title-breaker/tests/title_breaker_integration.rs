@@ -477,14 +477,33 @@ fn max_line1_chars_forces_earlier_syntactic_break() {
 
 #[test]
 fn dangling_particle_is_avoided_as_line1_ending() {
-    // ("the" is deliberately avoided here: it is an Indic clause-final verb
-    // in the scoring model, so breaking after it is intentional, not dangling.)
     let split = split_song_title("Alpha Beta Gamma Delta of Epsilon Zeta Eta Theta Iota");
     assert!(
         !split.line1.to_lowercase().ends_with(" of"),
         "line1 ends with preposition: {}",
         split.line1
     );
+}
+
+#[test]
+fn english_the_and_me_are_not_indic_clause_markers() {
+    // Regression (PR #49 review): "the"/"me" were listed as Indic
+    // clause-final markers (break-after, exempt from the dangling penalty)
+    // while also being prohibited English line-1 endings. An English title
+    // therefore stranded a dangling article/pronoun. They are no longer
+    // Indic markers; benchmark-critical se/mein/hai/toh are unaffected.
+    for (title, ending) in [
+        ("Alpha Beta the Gamma Delta Epsilon Zeta Iota", " the"),
+        ("Alpha Beta Gamma Delta me Epsilon Zeta Eta Theta", " me"),
+    ] {
+        let split = split_song_title(title);
+        assert!(
+            !split.line1.to_lowercase().ends_with(ending),
+            "line1 ends with {ending:?}: {}",
+            split.line1
+        );
+        assert!(split.score.is_finite());
+    }
 }
 
 #[test]
