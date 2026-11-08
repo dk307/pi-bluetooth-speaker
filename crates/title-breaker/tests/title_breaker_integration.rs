@@ -412,6 +412,25 @@ fn single_long_word_hard_wraps_at_mid_char_without_panic() {
 }
 
 #[test]
+fn degenerate_config_single_char_title_stays_single_line() {
+    // Regression (PR #49 review): with min_wrap_chars: 0 and a one-char
+    // title, the HardWrap midpoint is char 0, which would have produced
+    // an empty line1. A single char must stay on one line.
+    let config = BreakerConfig {
+        min_wrap_chars: 0,
+        max_line1_chars: None,
+    };
+    let split = split_song_title_with_config("A", &config);
+    assert_eq!(split.line1, "A");
+    assert_eq!(split.line2, "");
+    assert_eq!(split.reason, BreakReason::SingleLine);
+    // Empty title under the same config also stays single-line.
+    let split = split_song_title_with_config("", &config);
+    assert_eq!(split.reason, BreakReason::SingleLine);
+    assert_eq!(split.line1, "");
+}
+
+#[test]
 fn unicode_titles_never_panic_and_respect_char_boundaries() {
     let titles = [
         "αβγ δευ ζην θικ λμν ξοπ ρστυ φχψ ωαβγ",

@@ -241,6 +241,11 @@ fn normalize_word(word: &str) -> (String, String) {
 }
 
 /// Splits a song title into two lines using the default configuration.
+///
+/// # Panics
+///
+/// Never panics: all slicing uses char-boundary indices derived from
+/// `char_indices`/word spans, and degenerate inputs return `SingleLine`.
 #[must_use]
 pub fn split_song_title(title: &str) -> TitleSplit {
     split_song_title_with_config(title, &BreakerConfig::default())
@@ -248,6 +253,11 @@ pub fn split_song_title(title: &str) -> TitleSplit {
 
 /// Splits a song title into two semantically balanced lines according to
 /// `config`.
+///
+/// # Panics
+///
+/// Never panics: all slicing uses char-boundary indices derived from
+/// `char_indices`/word spans, and degenerate inputs return `SingleLine`.
 #[must_use]
 pub fn split_song_title_with_config(title: &str, config: &BreakerConfig) -> TitleSplit {
     let trimmed = title.trim();
@@ -279,6 +289,17 @@ pub fn split_song_title_with_config(title: &str, config: &BreakerConfig) -> Titl
 
     // Emergency fallback: hard wrap a single continuous word at mid-char.
     if candidates.is_empty() {
+        if total_chars <= 1 {
+            // A single char cannot be split into two non-empty lines
+            // (possible with min_wrap_chars: 0); keep it on one line so
+            // line1 is never empty for a non-empty title.
+            return TitleSplit {
+                line1: trimmed.to_string(),
+                line2: String::new(),
+                reason: BreakReason::SingleLine,
+                score: 100.0,
+            };
+        }
         let mid_char = total_chars / 2;
         let mid_byte = trimmed
             .char_indices()
