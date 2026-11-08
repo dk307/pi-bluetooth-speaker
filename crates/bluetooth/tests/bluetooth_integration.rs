@@ -2030,3 +2030,99 @@ fn dbus_player_path_toggle_and_seek_helpers_coverage() {
     assert_eq!(cur_ms, 2_000);
     assert_eq!(offset_us, 3_500_000);
 }
+
+#[test]
+fn dbus_pcm_volume_and_mute_target_resolution_and_mock_controls() {
+    use speaker_bluetooth::{
+        apply_mute_to_volume_bytes, encode_volume_bytes, percent_to_bluealsa_level,
+    };
+
+    assert_eq!(percent_to_bluealsa_level(0), 0);
+    assert_eq!(percent_to_bluealsa_level(100), 127);
+    assert_eq!(percent_to_bluealsa_level(255), 127);
+    assert_eq!(encode_volume_bytes(2, 100, false), vec![0x7F, 0x7F]);
+    assert_eq!(encode_volume_bytes(1, 100, true), vec![0xFF]);
+    assert_eq!(
+        apply_mute_to_volume_bytes(&[0x40, 0x40], 2, true),
+        vec![0xC0, 0xC0]
+    );
+    assert_eq!(
+        apply_mute_to_volume_bytes(&[0xC0, 0xC0], 2, false),
+        vec![0x40, 0x40]
+    );
+    assert_eq!(
+        apply_mute_to_volume_bytes(&[], 2, true),
+        encode_volume_bytes(2, 0, true)
+    );
+
+    let empty_objects: ManagedObjects = HashMap::new();
+    assert!(
+        DbusClient::resolve_pcm_volume_target(&empty_objects, 50)
+            .unwrap_err()
+            .is_no_active_player()
+    );
+    assert!(
+        DbusClient::resolve_pcm_mute_target(&empty_objects, true)
+            .unwrap_err()
+            .is_no_active_player()
+    );
+
+    let mut bluealsa_objects: ManagedObjects = HashMap::new();
+    let mut pcm_ifaces = HashMap::new();
+    let mut pcm_props = HashMap::new();
+    pcm_props.insert(
+        "Device".to_string(),
+        to_val(OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF").unwrap()),
+    );
+    pcm_props.insert("Transport".to_string(), to_val("A2DP-sink"));
+    pcm_props.insert("Mode".to_string(), to_val("source"));
+    pcm_props.insert("Running".to_string(), to_val(true));
+    pcm_props.insert("Channels".to_string(), to_val(2u8));
+    pcm_props.insert("Sampling".to_string(), to_val(48000u32));
+    pcm_props.insert("Volume".to_string(), to_val(vec![0x7Fu8, 0x7Fu8]));
+    pcm_ifaces.insert(iface("org.bluealsa.PCM1"), pcm_props);
+    bluealsa_objects.insert(
+        OwnedObjectPath::try_from("/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/hfpag/source").unwrap(),
+        pcm_ifaces,
+    );
+
+    let (path, bytes) = DbusClient::resolve_pcm_volume_target(&bluealsa_objects, 100).unwrap();
+    assert!(path.contains("dev_AA_BB_CC_DD_EE_FF"));
+    assert_eq!(bytes, vec![0x7F, 0x7F]);
+
+    let (mute_path, mute_bytes) =
+        DbusClient::resolve_pcm_mute_target(&bluealsa_objects, true).unwrap();
+    assert_eq!(mute_path, path);
+    assert_eq!(mute_bytes, vec![0xFF, 0xFF]);
+
+    let (device, mock) = BluetoothDevice::new_mocked();
+    // Exercise set_volume and set_mute on BluetoothDevice + mock
+    device.set_volume(42).unwrap();
+    let updated_pcm = &device.audio_pcms().unwrap()[0];
+    assert_eq!(updated_pcm.volume_percent, Some(42));
+    assert!(!updated_pcm.muted);
+
+    device.set_mute(true).unwrap();
+    let muted_pcm = &device.audio_pcms().unwrap()[0];
+    assert!(muted_pcm.muted);
+
+    device.set_mute(false).unwrap();
+    let unmuted_pcm = &device.audio_pcms().unwrap()[0];
+    assert!(!unmuted_pcm.muted);
+
+    mock.set_pcm_volume_state(80, true);
+    let state_pcm = &device.audio_pcms().unwrap()[0];
+    assert_eq!(state_pcm.volume_percent, Some(80));
+    assert!(state_pcm.muted);
+
+    // Fault injection
+    mock.set_fault(Some("simulated volume fault".into()));
+    assert!(device.set_volume(50).unwrap_err().is_mock_fault());
+    assert!(device.set_mute(true).unwrap_err().is_mock_fault());
+    mock.set_fault(None);
+
+    // Empty PCMs error path
+    mock.clear_pcms();
+    assert!(device.set_volume(50).unwrap_err().is_no_active_player());
+    assert!(device.set_mute(true).unwrap_err().is_no_active_player());
+}

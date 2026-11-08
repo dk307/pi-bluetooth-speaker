@@ -7,20 +7,252 @@
 //!
 //! Follows Microsoft Pragmatic Rust Guidelines (`M-SERVICES-CLONE`, `M-STRONG-TYPES`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt::{self, Debug, Formatter};
+use std::rc::Rc;
 
 use slint::ComponentHandle;
+
+use crate::config::{
+    CoreConfig, DEFAULT_VOLUME_HUD_FADE_MS, DEFAULT_VOLUME_HUD_TIMEOUT_MS,
+    DEFAULT_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT, MIN_VOLUME_STEP_PERCENT,
+};
 
 use super::framebuffer::MarqueeRowSpec;
 use super::generated::{MainWindow, MarqueeCompose, Theme};
 use super::marquee::{MarqueeStripCache, MarqueeTypography, StripRequest};
 use super::theme::ThemePreset;
 
+/// Tracks cumulative [`speaker_hardware::EncoderStatus`] counters and translates
+/// quadrature detents and push-switch presses into UI volume and mute actions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EncoderVolumeTracker {
+    clockwise: u64,
+    counter_clockwise: u64,
+    presses: u64,
+}
+
+impl EncoderVolumeTracker {
+    /// Creates a new tracker initialized at zero counts.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            clockwise: 0,
+            counter_clockwise: 0,
+            presses: 0,
+        }
+    }
+
+    /// Creates a tracker pre-seeded from an initial [`speaker_hardware::EncoderStatus`] snapshot.
+    #[must_use]
+    pub const fn seeded(status: &speaker_hardware::EncoderStatus) -> Self {
+        Self {
+            clockwise: status.cw_count,
+            counter_clockwise: status.ccw_count,
+            presses: status.press_count,
+        }
+    }
+
+    /// Applies any delta between the previous counters and `status` to `shell`.
+    ///
+    /// Returns `true` if any rotary detent or switch press occurred.
+    pub fn apply_status(
+        &mut self,
+        status: &speaker_hardware::EncoderStatus,
+        shell: &AppShell,
+    ) -> bool {
+        let up_steps = status.cw_count.saturating_sub(self.clockwise);
+        let down_steps = status.ccw_count.saturating_sub(self.counter_clockwise);
+        let press_delta = status.press_count.saturating_sub(self.presses);
+        self.clockwise = status.cw_count;
+        self.counter_clockwise = status.ccw_count;
+        self.presses = status.press_count;
+
+        let up_detents = i32::try_from(up_steps).unwrap_or(i32::MAX);
+        let down_detents = i32::try_from(down_steps).unwrap_or(i32::MAX);
+        let net_detents = up_detents.saturating_sub(down_detents);
+
+        if net_detents != 0 {
+            let _ = shell.apply_volume_delta(net_detents);
+        } else if up_steps > 0 {
+            shell.show_volume_hud();
+        }
+
+        if press_delta > 0 {
+            if press_delta % 2 == 1 {
+                let _ = shell.toggle_mute_and_show_hud();
+            } else {
+                shell.show_volume_hud();
+            }
+        }
+
+        up_steps > 0 || down_steps > 0 || press_delta > 0
+    }
+
+    /// Polls `encoder` and applies any counter deltas to `shell`.
+    ///
+    /// # Errors
+    /// Propagates [`speaker_hardware::EncoderError`] if reading the encoder status fails.
+    pub fn poll_and_apply(
+        &mut self,
+        encoder: &speaker_hardware::EncoderDevice,
+        shell: &AppShell,
+    ) -> Result<bool, speaker_hardware::EncoderError> {
+        let status = encoder.read_status()?;
+        Ok(self.apply_status(&status, shell))
+    }
+}
+
+/// Placeholder shown for details that are unknown or not applicable.
+const NO_DETAIL: &str = "—";
+
+/// Point-in-time Bluetooth connection details shown on the details screen.
+///
+/// Built off the render thread from a [`speaker_bluetooth::LinkSnapshot`] and applied
+/// by [`AppShell::apply_bt_link_details`]; `None` fields clear the matching text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BtLinkDetails {
+    /// Connected remote device, if any.
+    pub device: Option<speaker_bluetooth::BtDevice>,
+    /// Local controller adapter, if detected.
+    pub adapter: Option<speaker_bluetooth::BtAdapter>,
+    /// Audio stream negotiated with the connected device, if any.
+    pub pcm: Option<speaker_bluetooth::BlueAlsaPcm>,
+}
+
+impl BtLinkDetails {
+    /// Selects the connected device (preferring `preferred`) and its audio stream.
+    #[must_use]
+    pub fn select(
+        snapshot: &speaker_bluetooth::LinkSnapshot,
+        preferred: Option<speaker_bluetooth::BtAddress>,
+    ) -> Self {
+        let device = preferred
+            .and_then(|addr| {
+                snapshot
+                    .devices
+                    .iter()
+                    .find(|d| d.connected && d.address == addr)
+            })
+            .or_else(|| snapshot.devices.iter().find(|d| d.connected))
+            .cloned();
+        let pcm = device.as_ref().and_then(|d| {
+            snapshot
+                .pcms
+                .iter()
+                .find(|p| p.device_address == d.address)
+                .cloned()
+        });
+        Self {
+            device,
+            adapter: snapshot.adapter.clone(),
+            pcm,
+        }
+    }
+
+    fn address_text(&self) -> String {
+        self.device
+            .as_ref()
+            .map_or_else(|| NO_DETAIL.into(), |d| d.address.to_string())
+    }
+
+    fn link_text(&self) -> String {
+        let Some(device) = &self.device else {
+            return "Waiting for connection".into();
+        };
+        let mut parts = vec![if self.pcm.as_ref().is_some_and(|p| p.running) {
+            "Streaming"
+        } else {
+            "Connected"
+        }];
+        if device.paired {
+            parts.push("Paired");
+        }
+        if device.trusted {
+            parts.push("Trusted");
+        }
+        parts.join(" • ")
+    }
+
+    fn rssi_text(&self) -> String {
+        self.device
+            .as_ref()
+            .and_then(|d| d.rssi)
+            .map_or_else(String::new, |rssi| format!("{rssi} dBm"))
+    }
+
+    fn battery_text(&self) -> String {
+        self.device
+            .as_ref()
+            .and_then(|d| d.battery_percentage)
+            .map_or_else(String::new, |pct| format!("{pct}%"))
+    }
+
+    fn stream_format_text(&self) -> String {
+        let Some(pcm) = &self.pcm else {
+            return NO_DETAIL.into();
+        };
+        let rate = if pcm.sampling_rate % 1000 == 0 {
+            format!("{} kHz", pcm.sampling_rate / 1000)
+        } else {
+            format!("{:.1} kHz", f64::from(pcm.sampling_rate) / 1000.0)
+        };
+        let channels = match pcm.channels {
+            1 => "Mono".to_string(),
+            2 => "Stereo".to_string(),
+            n => format!("{n} ch"),
+        };
+        format!("{rate} • {} • {channels}", pcm_bit_depth(&pcm.format))
+    }
+
+    fn delay_text(&self) -> String {
+        self.pcm
+            .as_ref()
+            .and_then(|p| p.delay.as_deref())
+            .unwrap_or(NO_DETAIL)
+            .into()
+    }
+
+    fn adapter_name_text(&self) -> String {
+        self.adapter.as_ref().map_or_else(
+            || NO_DETAIL.into(),
+            |a| {
+                if a.alias.is_empty() {
+                    a.name.to_string()
+                } else {
+                    a.alias.to_string()
+                }
+            },
+        )
+    }
+
+    fn adapter_address_text(&self) -> String {
+        self.adapter
+            .as_ref()
+            .map_or_else(|| NO_DETAIL.into(), |a| a.address.to_string())
+    }
+}
+
+/// Maps a `BlueALSA` PCM sample-format identifier to a bit-depth label.
+fn pcm_bit_depth(format: &str) -> &'static str {
+    match format {
+        "S16_LE" | "S16_BE" => "16-bit",
+        "S24_LE" | "S24_BE" | "S24_3LE" => "24-bit",
+        "S32_LE" | "S32_BE" => "32-bit",
+        other if other.contains("24") => "24-bit",
+        other if other.contains("32") => "32-bit",
+        _ => "16-bit",
+    }
+}
+
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
     strips: RefCell<MarqueeStripCache>,
+    volume_step_percent: Cell<u8>,
+    has_initial_pcm_seed: Cell<bool>,
+    transport_commands: Rc<RefCell<Option<speaker_bluetooth::TransportCommandQueue>>>,
+    last_toggle: Rc<Cell<std::time::Instant>>,
 }
 
 impl Debug for AppShell {
@@ -39,11 +271,134 @@ impl AppShell {
         let shell = Self {
             window,
             strips: RefCell::new(MarqueeStripCache::default()),
+            volume_step_percent: Cell::new(DEFAULT_VOLUME_STEP_PERCENT),
+            has_initial_pcm_seed: Cell::new(false),
+            transport_commands: Rc::new(RefCell::new(None)),
+            last_toggle: Rc::new(Cell::new(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(1))
+                    .unwrap_or_else(std::time::Instant::now),
+            )),
         };
 
+        shell.set_volume_hud_timeout_ms(DEFAULT_VOLUME_HUD_TIMEOUT_MS);
+        shell.set_volume_hud_fade_ms(DEFAULT_VOLUME_HUD_FADE_MS);
         shell.setup_callbacks();
         shell.apply_theme(ThemePreset::default());
         shell
+    }
+
+    /// Applies runtime parameters from [`CoreConfig`] (theme, marquee fps, volume step,
+    /// and Volume HUD timeout/fade durations) to this shell.
+    pub fn apply_config(&self, config: &CoreConfig) {
+        self.set_marquee_fps(config.marquee_fps.value());
+        self.set_volume_step_percent(config.volume_step_percent.value());
+        self.set_volume_hud_timeout_ms(config.volume_hud_timeout_ms.value());
+        self.set_volume_hud_fade_ms(config.volume_hud_fade_ms.value());
+        if let Some(theme) = config.theme {
+            self.apply_theme(theme);
+        }
+    }
+
+    /// Returns the configured volume step percentage per rotary encoder detent (`1..=25`).
+    #[must_use]
+    pub fn volume_step_percent(&self) -> u8 {
+        self.volume_step_percent.get()
+    }
+
+    /// Sets the volume step percentage per rotary encoder detent (clamped to `1..=25`).
+    pub fn set_volume_step_percent(&self, step: u8) {
+        self.volume_step_percent
+            .set(step.clamp(MIN_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT));
+    }
+
+    /// Returns the Volume HUD auto-dismiss timeout in milliseconds.
+    #[must_use]
+    pub fn volume_hud_timeout_ms(&self) -> u32 {
+        u32::try_from(self.window.get_volume_hud_timeout_ms())
+            .unwrap_or(DEFAULT_VOLUME_HUD_TIMEOUT_MS)
+    }
+
+    /// Sets the Volume HUD auto-dismiss timeout in milliseconds.
+    pub fn set_volume_hud_timeout_ms(&self, timeout_ms: u32) {
+        self.window
+            .set_volume_hud_timeout_ms(i32::try_from(timeout_ms).unwrap_or(i32::MAX));
+    }
+
+    /// Returns the Volume HUD fade-out duration in milliseconds.
+    #[must_use]
+    pub fn volume_hud_fade_ms(&self) -> u32 {
+        u32::try_from(self.window.get_volume_hud_fade_ms()).unwrap_or(DEFAULT_VOLUME_HUD_FADE_MS)
+    }
+
+    /// Sets the Volume HUD fade-out duration in milliseconds.
+    pub fn set_volume_hud_fade_ms(&self, fade_ms: u32) {
+        self.window
+            .set_volume_hud_fade_ms(i32::try_from(fade_ms).unwrap_or(i32::MAX));
+    }
+
+    /// Returns whether the Volume HUD overlay is currently in its active hold state.
+    #[must_use]
+    pub fn is_volume_hud_visible(&self) -> bool {
+        self.window.get_volume_hud_visible()
+    }
+
+    /// Returns the current opacity (`0.0..=1.0`) of the Volume HUD overlay.
+    #[must_use]
+    pub fn volume_hud_opacity(&self) -> f32 {
+        self.window.get_volume_hud_opacity()
+    }
+
+    /// Returns `true` while the Volume HUD is visible or actively fading out (`opacity > 0.01`).
+    #[must_use]
+    pub fn is_volume_hud_active(&self) -> bool {
+        self.is_volume_hud_visible() || self.volume_hud_opacity() > 0.01
+    }
+
+    /// Opens the Volume HUD overlay and resets its auto-dismiss countdown timer.
+    pub fn show_volume_hud(&self) {
+        self.window.invoke_show_volume_hud();
+    }
+
+    /// Immediately begins dismissing (fading out) the Volume HUD overlay.
+    pub fn dismiss_volume_hud(&self) {
+        self.window.invoke_dismiss_volume_hud();
+    }
+
+    /// Adjusts volume by `detents * volume_step_percent`, unmutes, opens/refreshes the
+    /// Volume HUD, and fires the `volume_changed` callback.
+    ///
+    /// Returns the new clamped volume percentage (`0..=100`).
+    pub fn apply_volume_delta(&self, detents: i32) -> u8 {
+        let vol = self.volume();
+        let current = if vol.is_finite() {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "clamped to 0.0..=100.0 fits in i32"
+            )]
+            {
+                vol.clamp(0.0, 100.0).round() as i32
+            }
+        } else {
+            0
+        };
+        let delta = detents.saturating_mul(i32::from(self.volume_step_percent()));
+        let target = u8::try_from(current.saturating_add(delta).clamp(0, 100)).unwrap_or(0);
+        let target_f32 = f32::from(target);
+        self.set_volume(target_f32);
+        if self.is_muted() {
+            self.set_muted(false);
+        }
+        self.show_volume_hud();
+        self.window.invoke_volume_changed(target_f32);
+        target
+    }
+
+    /// Toggles the mute state, opens/refreshes the Volume HUD, and returns the new mute state.
+    pub fn toggle_mute_and_show_hud(&self) -> bool {
+        self.window.invoke_toggle_mute();
+        self.show_volume_hud();
+        self.is_muted()
     }
 
     /// Returns a reference to the underlying Slint [`MainWindow`] handle.
@@ -113,6 +468,13 @@ impl AppShell {
         vec![rect(g.get_title_origin(), g.get_title_w(), g.get_title_h())]
     }
 
+    /// Returns whether the raw marquee overlay should be suppressed
+    /// (e.g. when not on the Now Playing tab or when the Volume HUD is active).
+    #[must_use]
+    pub fn should_suppress_marquee(&self) -> bool {
+        self.current_tab() != 0 || self.is_volume_hud_active()
+    }
+
     /// Builds [`MarqueeRowSpec`]s for the Rust-side composer from the shared global and
     /// the cached strip pixels; rows are omitted when the text does not overflow.
     ///
@@ -122,7 +484,9 @@ impl AppShell {
     #[must_use]
     pub fn marquee_row_specs(&self) -> Vec<MarqueeRowSpec> {
         let g = self.window.global::<MarqueeCompose>();
-        if !g.get_compose_in_rust() {
+        // Suppress Rust-side marquee composition whenever the Now Playing tab is not
+        // visible or while the Volume HUD overlay covers the middle viewport.
+        if !g.get_compose_in_rust() || self.should_suppress_marquee() {
             return Vec::new();
         }
         let px = |v: f32, max: f32| u32::try_from(v.round().clamp(0.0, max) as i64).unwrap_or(0);
@@ -323,33 +687,25 @@ impl AppShell {
             self.set_stream_sample_rate(rate_khz);
         }
 
-        let bit_depth = match pcm.format.as_ref() {
-            "S16_LE" | "S16_BE" => "16-bit",
-            "S24_LE" | "S24_BE" | "S24_3LE" => "24-bit",
-            "S32_LE" | "S32_BE" => "32-bit",
-            other => {
-                if other.contains("16") {
-                    "16-bit"
-                } else if other.contains("24") {
-                    "24-bit"
-                } else if other.contains("32") {
-                    "32-bit"
-                } else {
-                    "16-bit"
-                }
-            }
-        };
+        let bit_depth = pcm_bit_depth(pcm.format.as_ref());
         if self.window.get_stream_bit_depth().as_str() != bit_depth {
             self.set_stream_bit_depth(bit_depth);
         }
+        let was_seeded = self.has_initial_pcm_seed.replace(true);
+        let mut volume_or_mute_changed = false;
         if self.window.get_is_muted() != pcm.muted {
             self.window.set_is_muted(pcm.muted);
+            volume_or_mute_changed = true;
         }
         if let Some(pct) = pcm.volume_percent {
             let volume = f32::from(pct);
-            if (self.window.get_volume_value() - volume).abs() > f32::EPSILON {
+            if (self.window.get_volume_value() - volume).abs() >= 0.5 {
                 self.set_volume(volume);
+                volume_or_mute_changed = true;
             }
+        }
+        if was_seeded && volume_or_mute_changed {
+            self.show_volume_hud();
         }
     }
 
@@ -433,6 +789,51 @@ impl AppShell {
         // explicit device-disconnect delta clears the displayed cover.
     }
 
+    /// Applies Bluetooth connection details to the details screen (change-guarded).
+    pub fn apply_bt_link_details(&self, details: &BtLinkDetails) {
+        let w = &self.window;
+        let connected = details.device.is_some();
+        if w.get_bt_connected() != connected {
+            w.set_bt_connected(connected);
+        }
+        macro_rules! guarded {
+            ($get:ident, $set:ident, $text:expr) => {
+                let text = $text;
+                if w.$get().as_str() != text.as_str() {
+                    w.$set(text.into());
+                }
+            };
+        }
+        guarded!(
+            get_bt_device_address,
+            set_bt_device_address,
+            details.address_text()
+        );
+        guarded!(get_bt_link_text, set_bt_link_text, details.link_text());
+        guarded!(get_bt_rssi_text, set_bt_rssi_text, details.rssi_text());
+        guarded!(
+            get_bt_battery_text,
+            set_bt_battery_text,
+            details.battery_text()
+        );
+        guarded!(
+            get_bt_stream_format,
+            set_bt_stream_format,
+            details.stream_format_text()
+        );
+        guarded!(get_bt_delay_text, set_bt_delay_text, details.delay_text());
+        guarded!(
+            get_bt_adapter_name,
+            set_bt_adapter_name,
+            details.adapter_name_text()
+        );
+        guarded!(
+            get_bt_adapter_address,
+            set_bt_adapter_address,
+            details.adapter_address_text()
+        );
+    }
+
     /// Applies a theme preset to the UI shell.
     pub fn apply_theme(&self, preset: ThemePreset) {
         preset.apply(&self.window);
@@ -484,44 +885,20 @@ impl AppShell {
     /// executes the blocking D-Bus round-trips off the render thread and publishes
     /// authoritative state back through the shared worker update channel.
     pub fn wire_bluetooth_transport(&self, commands: &speaker_bluetooth::TransportCommandQueue) {
-        let commands_toggle = commands.clone();
-        let win = self.window.as_weak();
-        let last_toggle = std::sync::Arc::new(std::sync::Mutex::new(
+        *self.transport_commands.borrow_mut() = Some(commands.clone());
+        self.last_toggle.set(
             std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(1))
                 .unwrap_or_else(std::time::Instant::now),
-        ));
-        self.window.on_toggle_play_pause(move || {
-            let mut last = match last_toggle.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            let now = std::time::Instant::now();
-            if now.duration_since(*last) < std::time::Duration::from_millis(300) {
-                return;
-            }
-            *last = now;
-            drop(last);
-            if let Some(w) = win.upgrade() {
-                // Optimistic local toggle: the worker's next authoritative publish
-                // (within one monitor tick) reconciles the real player state.
-                commands_toggle.push(speaker_bluetooth::TransportCommand::TogglePlayPause);
-                w.set_is_playing(!w.get_is_playing());
-            }
-        });
-
-        let commands_next = commands.clone();
-        self.window.on_next_track(move || {
-            commands_next.push(speaker_bluetooth::TransportCommand::NextTrack);
-        });
-
-        let commands_prev = commands.clone();
-        self.window.on_previous_track(move || {
-            commands_prev.push(speaker_bluetooth::TransportCommand::PreviousTrack);
-        });
+        );
     }
 
     fn setup_callbacks(&self) {
+        self.setup_navigation_callbacks();
+        self.setup_transport_callbacks();
+    }
+
+    fn setup_navigation_callbacks(&self) {
         let win = self.window.as_weak();
         self.window.on_tab_selected(move |idx| {
             if let Some(w) = win.upgrade() {
@@ -550,25 +927,8 @@ impl AppShell {
             }
         });
 
-        self.window.on_toggle_play_pause(|| {
-            tracing::debug!("Play/Pause requested (no audio transport wired)");
-        });
-
-        let win = self.window.as_weak();
-        self.window.on_toggle_mute(move || {
-            if let Some(w) = win.upgrade() {
-                let current = w.get_is_muted();
-                w.set_is_muted(!current);
-                tracing::debug!("Mute toggled to {}", !current);
-            }
-        });
-
-        self.window.on_next_track(|| {
-            tracing::info!("Next track requested");
-        });
-
-        self.window.on_previous_track(|| {
-            tracing::info!("Previous track requested");
+        self.window.on_volume_clicked(|| {
+            tracing::debug!("Top bar volume indicator clicked; showing Volume HUD");
         });
 
         self.window.on_stream_pill_clicked(|| {
@@ -582,9 +942,84 @@ impl AppShell {
         self.window.on_night_mode_clicked(|| {
             tracing::info!("Night mode clicked");
         });
+    }
 
-        self.window.on_volume_changed(|val| {
-            tracing::debug!("Volume changed to {val}%");
+    fn setup_transport_callbacks(&self) {
+        let last_toggle = Rc::clone(&self.last_toggle);
+        let transport_play = Rc::clone(&self.transport_commands);
+        let win = self.window.as_weak();
+        self.window.on_toggle_play_pause(move || {
+            let now = std::time::Instant::now();
+            if now.duration_since(last_toggle.get()) < std::time::Duration::from_millis(300) {
+                return;
+            }
+            last_toggle.set(now);
+            if let Some(w) = win.upgrade() {
+                if let Some(cmds) = transport_play.borrow().as_ref() {
+                    cmds.push(speaker_bluetooth::TransportCommand::TogglePlayPause);
+                    w.set_is_playing(!w.get_is_playing());
+                } else {
+                    tracing::debug!("Play/Pause requested (no audio transport wired)");
+                }
+            }
+        });
+
+        let transport_mute = Rc::clone(&self.transport_commands);
+        let win = self.window.as_weak();
+        self.window.on_toggle_mute(move || {
+            if let Some(w) = win.upgrade() {
+                let next_muted = !w.get_is_muted();
+                w.set_is_muted(next_muted);
+                w.invoke_show_volume_hud();
+                if let Some(cmds) = transport_mute.borrow().as_ref() {
+                    cmds.push(speaker_bluetooth::TransportCommand::SetMute(next_muted));
+                }
+                tracing::debug!("Mute toggled to {next_muted}");
+            }
+        });
+
+        let transport_next = Rc::clone(&self.transport_commands);
+        self.window.on_next_track(move || {
+            if let Some(cmds) = transport_next.borrow().as_ref() {
+                cmds.push(speaker_bluetooth::TransportCommand::NextTrack);
+            } else {
+                tracing::info!("Next track requested");
+            }
+        });
+
+        let transport_prev = Rc::clone(&self.transport_commands);
+        self.window.on_previous_track(move || {
+            if let Some(cmds) = transport_prev.borrow().as_ref() {
+                cmds.push(speaker_bluetooth::TransportCommand::PreviousTrack);
+            } else {
+                tracing::info!("Previous track requested");
+            }
+        });
+
+        let transport_vol = Rc::clone(&self.transport_commands);
+        let win = self.window.as_weak();
+        self.window.on_volume_changed(move |val| {
+            if let Some(w) = win.upgrade() {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "clamped 0.0..=100.0 fits in u8"
+                )]
+                let clamped = if val.is_finite() {
+                    val.round().clamp(0.0, 100.0) as u8
+                } else {
+                    0
+                };
+                w.set_volume_value(f32::from(clamped));
+                if w.get_is_muted() {
+                    w.set_is_muted(false);
+                }
+                w.invoke_show_volume_hud();
+                if let Some(cmds) = transport_vol.borrow().as_ref() {
+                    cmds.push(speaker_bluetooth::TransportCommand::SetVolume(clamped));
+                }
+                tracing::debug!("Volume changed to {clamped}%");
+            }
         });
     }
 }

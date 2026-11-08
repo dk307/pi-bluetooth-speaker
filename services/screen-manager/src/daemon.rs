@@ -190,6 +190,15 @@ pub fn report_display(level: tracing::Level, context: &str, err: impl std::fmt::
     }
 }
 
+#[cfg(feature = "ui")]
+fn legacy_config(theme: Option<crate::ui::ThemePreset>, marquee_fps: u32) -> CoreConfig {
+    CoreConfig {
+        theme,
+        marquee_fps: crate::config::MarqueeFps::try_from(marquee_fps).unwrap_or_default(),
+        ..CoreConfig::default()
+    }
+}
+
 /// Runs the UI display loop on the default `/dev/fb0` device path.
 #[cfg(feature = "ui")]
 pub fn run_ui_display(
@@ -199,17 +208,28 @@ pub fn run_ui_display(
     tab: Option<i32>,
     marquee_fps: u32,
 ) {
+    let config = legacy_config(theme, marquee_fps);
+    run_ui_display_with_config(screen, preview_secs, tab, &config);
+}
+
+/// Runs the requested screen applying the full [`CoreConfig`] parameters.
+#[cfg(feature = "ui")]
+pub fn run_ui_display_with_config(
+    screen: ScreenTarget,
+    preview_secs: Option<u64>,
+    tab: Option<i32>,
+    config: &CoreConfig,
+) {
     if headless_requested() {
         tracing::info!("Headless mode requested via SPEAKER_CORE_HEADLESS=1");
         return;
     }
-    run_ui_display_on_path(
+    run_ui_display_on_path_with_config(
         Path::new(Framebuffer::DEFAULT_FB_PATH),
         screen,
         preview_secs,
-        theme,
         tab,
-        marquee_fps,
+        config,
     );
 }
 
@@ -229,6 +249,19 @@ pub fn run_ui_display_on_path(
     theme: Option<crate::ui::ThemePreset>,
     tab: Option<i32>,
     marquee_fps: u32,
+) {
+    let config = legacy_config(theme, marquee_fps);
+    run_ui_display_on_path_with_config(fb_path, screen, preview_secs, tab, &config);
+}
+
+/// Runs the requested screen against a specific framebuffer device path using [`CoreConfig`].
+#[cfg(feature = "ui")]
+pub fn run_ui_display_on_path_with_config(
+    fb_path: &Path,
+    screen: ScreenTarget,
+    preview_secs: Option<u64>,
+    tab: Option<i32>,
+    config: &CoreConfig,
 ) {
     if !fb_path.exists() {
         tracing::info!("Headless/simulated environment (no /dev/fb0 detected)");
@@ -252,16 +285,16 @@ pub fn run_ui_display_on_path(
             // (no artificial minimum display time), then the main UI shell
             // (now-playing) until stopped.
             let splash_start = Instant::now();
-            run_splash_on(&mut fb, BootProbe::real(), preview_secs, theme);
+            run_splash_on(&mut fb, BootProbe::real(), preview_secs, config.theme);
             let remaining_preview =
                 preview_secs.map(|p| p.saturating_sub(splash_start.elapsed().as_secs()));
-            run_shell_on(&mut fb, remaining_preview, theme, tab, marquee_fps);
+            run_shell_on_with_config(&mut fb, remaining_preview, tab, config);
         }
         ScreenTarget::Splash => {
-            run_splash_on(&mut fb, BootProbe::real(), preview_secs, theme);
+            run_splash_on(&mut fb, BootProbe::real(), preview_secs, config.theme);
         }
         ScreenTarget::Shell => {
-            run_shell_on(&mut fb, preview_secs, theme, tab, marquee_fps);
+            run_shell_on_with_config(&mut fb, preview_secs, tab, config);
         }
     }
 }
@@ -527,25 +560,31 @@ pub fn init_shell(
     tab: Option<i32>,
     marquee_fps: u32,
 ) -> ShellInit {
+    let config = legacy_config(theme, marquee_fps);
+    init_shell_with_config(main_window, mocked_device, tab, &config)
+}
+
+/// Initializes the UI shell applying all runtime parameters from [`CoreConfig`].
+#[cfg(feature = "ui")]
+#[must_use]
+pub fn init_shell_with_config(
+    main_window: MainWindow,
+    mocked_device: bool,
+    tab: Option<i32>,
+    config: &CoreConfig,
+) -> ShellInit {
     let shell = AppShell::new(main_window);
-    shell.set_marquee_fps(marquee_fps);
-    if let Some(t) = theme {
-        shell.apply_theme(t);
-    }
+    shell.apply_config(config);
     let commands = speaker_bluetooth::TransportCommandQueue::new();
     let maybe_bt = if mocked_device {
         let (mock_bt, _) = speaker_bluetooth::BluetoothDevice::new_mocked();
-        if let Ok(Some(ref pb)) = mock_bt.playback_state() {
-            shell.apply_bluetooth_playback(pb);
-        }
+        apply_initial_bt_state(&shell, &mock_bt);
         shell.wire_bluetooth_transport(&commands);
         Some(mock_bt)
     } else {
         match speaker_bluetooth::BluetoothDevice::new() {
             Ok(bt) => {
-                if let Ok(Some(ref pb)) = bt.playback_state() {
-                    shell.apply_bluetooth_playback(pb);
-                }
+                apply_initial_bt_state(&shell, &bt);
                 shell.wire_bluetooth_transport(&commands);
                 Some(bt)
             }
@@ -569,6 +608,33 @@ pub fn init_shell(
     }
 }
 
+#[cfg(feature = "ui")]
+fn apply_initial_bt_state(shell: &AppShell, bt: &speaker_bluetooth::BluetoothDevice) {
+    let preferred = match bt.playback_state() {
+        Ok(Some(pb)) => {
+            shell.apply_bluetooth_playback(&pb);
+            pb.device_address
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to query initial Bluetooth playback state");
+            None
+        }
+    };
+    match bt.link_snapshot() {
+        Ok(ref snapshot) => {
+            let details = crate::ui::BtLinkDetails::select(snapshot, preferred);
+            if let Some(ref pcm) = details.pcm {
+                shell.apply_pcm_stream(pcm);
+            }
+            shell.apply_bt_link_details(&details);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to query initial Bluetooth link snapshot");
+        }
+    }
+}
+
 /// Worker-side snapshot of Bluetooth state published to the render thread.
 ///
 /// Each field is an `Option` delta: `None` means "no change this tick", while the
@@ -581,6 +647,8 @@ pub struct BtSharedUpdate {
     pub playback: Option<speaker_bluetooth::BtPlaybackState>,
     /// Active PCM stream, if it changed since the last publish.
     pub pcm: Option<speaker_bluetooth::BlueAlsaPcm>,
+    /// Bluetooth connection details for the details screen, if they changed.
+    pub details: Option<crate::ui::BtLinkDetails>,
     /// Cover art delta: outer `Some` = cover state changed; inner `Some` = decoded
     /// pixel buffer to display, inner `None` = clear the displayed cover art.
     /// Carried as a `SharedPixelBuffer` (which is `Send + Sync`) rather than a
@@ -646,6 +714,13 @@ pub enum SettleKind {
         /// Target position (ms) the shell scrubbed the progress bar to.
         target_ms: u32,
     },
+    /// Suppress PCM snapshots that have not yet converged to the target volume or mute state.
+    Volume {
+        /// Target volume percentage (`0..=100`), if a volume change was issued.
+        target_pct: Option<u8>,
+        /// Target mute state expected after the command.
+        target_muted: bool,
+    },
 }
 
 /// A settle window during which conflicting snapshots are suppressed.
@@ -678,6 +753,32 @@ impl SettleWindow {
                 (i64::from(pb.position_ms) - i64::from(*target_ms)).abs()
                     > i64::from(BT_SEEK_STALE_TOLERANCE_MS)
             }
+            SettleKind::Volume { .. } => false,
+        }
+    }
+
+    /// Reports whether `pcm` still conflicts with an optimistic volume or mute
+    /// update protected by this settle window.
+    #[must_use]
+    pub fn suppresses_pcm(&self, pcm: &speaker_bluetooth::BlueAlsaPcm) -> bool {
+        if self.started.elapsed() >= BT_COMMAND_SETTLE {
+            return false;
+        }
+        match &self.kind {
+            SettleKind::Volume {
+                target_pct,
+                target_muted,
+            } => {
+                if pcm.muted != *target_muted {
+                    return true;
+                }
+                if let (Some(target), Some(actual)) = (target_pct, pcm.volume_percent) {
+                    actual.abs_diff(*target) > 1
+                } else {
+                    false
+                }
+            }
+            SettleKind::Toggle { .. } | SettleKind::Seek { .. } => false,
         }
     }
 }
@@ -836,14 +937,16 @@ const BT_WAIT_SLICE: Duration = Duration::from_millis(100);
 struct BtMonitorState {
     last_pb: Option<speaker_bluetooth::BtPlaybackState>,
     last_pcms: Option<Box<[speaker_bluetooth::BlueAlsaPcm]>>,
+    last_details: Option<crate::ui::BtLinkDetails>,
     cover: CoverState,
     settle: Option<SettleWindow>,
+    pcm_settle: Option<SettleWindow>,
 }
 
 #[cfg(feature = "ui")]
 impl BtMonitorState {
     /// Arms the optimistic-UI [`SettleWindow`] when a command batch contains a
-    /// `TogglePlayPause` or `Seek` command.
+    /// `TogglePlayPause`, `Seek`, `SetVolume`, or `SetMute` command.
     fn arm_settle_for_batch(&mut self, drained: &[speaker_bluetooth::TransportCommand]) {
         // Play/pause flips the shell's status indicator and seek scrubs the
         // progress bar, both optimistically ahead of peer confirmation. A
@@ -875,6 +978,30 @@ impl BtMonitorState {
                 started: Instant::now(),
             });
         }
+
+        let mut target_pct = None;
+        let mut target_muted = None;
+        for c in drained {
+            match c {
+                speaker_bluetooth::TransportCommand::SetVolume(pct) => {
+                    target_pct = Some(*pct);
+                    target_muted = Some(false);
+                }
+                speaker_bluetooth::TransportCommand::SetMute(muted) => {
+                    target_muted = Some(*muted);
+                }
+                _ => {}
+            }
+        }
+        if target_pct.is_some() || target_muted.is_some() {
+            self.pcm_settle = Some(SettleWindow {
+                kind: SettleKind::Volume {
+                    target_pct,
+                    target_muted: target_muted.unwrap_or(false),
+                },
+                started: Instant::now(),
+            });
+        }
     }
 
     /// Executes a single [`speaker_bluetooth::TransportCommand`] against `bt`,
@@ -891,24 +1018,54 @@ impl BtMonitorState {
             speaker_bluetooth::TransportCommand::NextTrack => bt.player_next(),
             speaker_bluetooth::TransportCommand::PreviousTrack => bt.player_previous(),
             speaker_bluetooth::TransportCommand::Seek(pos) => bt.player_seek(pos),
+            speaker_bluetooth::TransportCommand::SetVolume(pct) => bt.set_volume(pct),
+            speaker_bluetooth::TransportCommand::SetMute(muted) => bt.set_mute(muted),
         } {
             tracing::warn!(error = %e, "Bluetooth transport command failed");
         }
     }
 
-    /// Queries `bt.audio_pcms()` and stages any PCM change into `update`.
-    fn publish_audio_pcms(
+    /// Queries one lightweight link snapshot and stages PCM and connection-detail
+    /// changes into `update`.
+    fn publish_link_state(
         &mut self,
         bt: &speaker_bluetooth::BluetoothDevice,
         update: &mut BtSharedUpdate,
     ) {
-        if let Ok(ref pcms) = bt.audio_pcms()
-            && self.last_pcms.as_ref() != Some(pcms)
+        if self
+            .pcm_settle
+            .as_ref()
+            .is_some_and(|w| w.started.elapsed() >= BT_COMMAND_SETTLE)
         {
-            if let Some(active) = pcms.iter().find(|p| p.running).or_else(|| pcms.first()) {
-                update.pcm = Some(active.clone());
+            self.pcm_settle = None;
+            self.last_pcms = None;
+        }
+        let snapshot = match bt.link_snapshot() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to query Bluetooth link snapshot");
+                return;
             }
-            self.last_pcms = Some(pcms.clone());
+        };
+        if self.last_pcms.as_ref() != Some(&snapshot.pcms) {
+            if let Some(active) = speaker_bluetooth::select_active_pcm(&snapshot.pcms) {
+                let settling = self
+                    .pcm_settle
+                    .as_ref()
+                    .is_some_and(|w| w.suppresses_pcm(active));
+                if !settling {
+                    update.pcm = Some(active.clone());
+                    self.last_pcms = Some(snapshot.pcms.clone());
+                }
+            } else {
+                self.last_pcms = Some(snapshot.pcms.clone());
+            }
+        }
+        let preferred = self.last_pb.as_ref().and_then(|pb| pb.device_address);
+        let details = crate::ui::BtLinkDetails::select(&snapshot, preferred);
+        if self.last_details.as_ref() != Some(&details) {
+            update.details = Some(details.clone());
+            self.last_details = Some(details);
         }
     }
 
@@ -918,12 +1075,17 @@ impl BtMonitorState {
         self.last_pb = None;
         self.cover.path = None;
         self.last_pcms = None;
+        self.last_details = None;
     }
 
     /// Merges non-empty delta fields from `update` into `shared`, recovering from
     /// a poisoned mutex guard.
     fn commit_update(shared: &Mutex<BtSharedUpdate>, update: BtSharedUpdate) {
-        if update.playback.is_some() || update.pcm.is_some() || update.cover.is_some() {
+        if update.playback.is_some()
+            || update.pcm.is_some()
+            || update.details.is_some()
+            || update.cover.is_some()
+        {
             // A poisoned mutex is recovered (not silently dropped): the snapshot
             // was already computed and the dedup state advanced, so losing it
             // here would skip that state until the device changes again.
@@ -936,6 +1098,9 @@ impl BtMonitorState {
             }
             if update.pcm.is_some() {
                 lock.pcm = update.pcm;
+            }
+            if update.details.is_some() {
+                lock.details = update.details;
             }
             if update.cover.is_some() {
                 lock.cover = update.cover;
@@ -976,7 +1141,7 @@ impl BtMonitorState {
             &mut self.cover,
             &mut self.settle,
         );
-        self.publish_audio_pcms(bt, &mut update);
+        self.publish_link_state(bt, &mut update);
 
         // A command that landed while the blocking snapshot query ran must not
         // merge a pre-command snapshot. The query already advanced the dedup
@@ -1050,7 +1215,21 @@ pub fn run_render_loop(
     preview_secs: Option<u64>,
 ) {
     let touch_dev = crate::ui::TouchInputDevice::auto_discover().ok();
-    run_render_loop_with_input(
+    let encoder_dev = fb
+        .is_hardware_panel()
+        .then(|| match speaker_hardware::EncoderDevice::new() {
+            Ok(enc) => Some(enc),
+            Err(e) => {
+                report_display(
+                    tracing::Level::WARN,
+                    "Failed to initialize EC12 rotary encoder for volume control",
+                    &e,
+                );
+                None
+            }
+        })
+        .flatten();
+    run_render_loop_with_devices(
         fb,
         window,
         shell,
@@ -1058,6 +1237,7 @@ pub fn run_render_loop(
         commands,
         preview_secs,
         touch_dev,
+        encoder_dev.as_ref(),
     );
 }
 
@@ -1070,7 +1250,62 @@ pub fn run_render_loop_with_input(
     maybe_bt: Option<&speaker_bluetooth::BluetoothDevice>,
     commands: &speaker_bluetooth::TransportCommandQueue,
     preview_secs: Option<u64>,
+    touch_dev: Option<crate::ui::TouchInputDevice>,
+) {
+    run_render_loop_with_devices(
+        fb,
+        window,
+        shell,
+        maybe_bt,
+        commands,
+        preview_secs,
+        touch_dev,
+        None,
+    );
+}
+
+#[cfg(feature = "ui")]
+fn poll_encoder_input(
+    encoder_dev: Option<&speaker_hardware::EncoderDevice>,
+    encoder_tracker: &mut crate::ui::EncoderVolumeTracker,
+    shell: &AppShell,
+    window: &Rc<MinimalSoftwareWindow>,
+    encoder_warned: &mut bool,
+) {
+    let Some(enc) = encoder_dev else { return };
+    match encoder_tracker.poll_and_apply(enc, shell) {
+        Ok(changed) => {
+            *encoder_warned = false;
+            if changed {
+                window.window().request_redraw();
+            }
+        }
+        Err(e) => {
+            if *encoder_warned {
+                tracing::debug!(error = %e, "Rotary encoder poll failed (repeating)");
+            } else {
+                tracing::warn!(error = %e, "Rotary encoder poll failed");
+                *encoder_warned = true;
+            }
+        }
+    }
+}
+
+/// Runs the UI render loop with explicit touch and rotary encoder device injection.
+#[cfg(feature = "ui")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "explicit peripheral injection seam for hermetic touch + encoder integration testing"
+)]
+pub fn run_render_loop_with_devices(
+    fb: &mut Framebuffer,
+    window: &Rc<MinimalSoftwareWindow>,
+    shell: &AppShell,
+    maybe_bt: Option<&speaker_bluetooth::BluetoothDevice>,
+    commands: &speaker_bluetooth::TransportCommandQueue,
+    preview_secs: Option<u64>,
     mut touch_dev: Option<crate::ui::TouchInputDevice>,
+    encoder_dev: Option<&speaker_hardware::EncoderDevice>,
 ) {
     let start = Instant::now();
     let duration = preview_secs.map(Duration::from_secs);
@@ -1098,6 +1333,8 @@ pub fn run_render_loop_with_input(
 
     let mut loop_timing = FrameLoopTiming::default();
     let mut overlay_theme: Option<ThemePreset> = None;
+    let mut encoder_tracker = crate::ui::EncoderVolumeTracker::new();
+    let mut encoder_warned = false;
     while duration.is_none_or(|d| start.elapsed() < d) {
         let frame_start = Instant::now();
 
@@ -1114,6 +1351,15 @@ pub fn run_render_loop_with_input(
                 }
             }
         }
+
+        // Poll physical/mocked EC12 rotary encoder detents and switch presses
+        poll_encoder_input(
+            encoder_dev,
+            &mut encoder_tracker,
+            shell,
+            window,
+            &mut encoder_warned,
+        );
 
         if let Err(e) = sync_marquee_overlay(fb, shell, window, &mut overlay_theme) {
             report_display(tracing::Level::ERROR, "Marquee overlay sync failed", &e);
@@ -1198,6 +1444,9 @@ fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpda
         if let Some(pcm) = lock.pcm.take() {
             shell.apply_pcm_stream(&pcm);
         }
+        if let Some(details) = lock.details.take() {
+            shell.apply_bt_link_details(&details);
+        }
         if let Some(cover) = lock.cover.take() {
             match cover {
                 // Cheap on the render thread: just wraps the pre-decoded buffer
@@ -1225,6 +1474,14 @@ fn sync_marquee_overlay(
     window: &MinimalSoftwareWindow,
     overlay_theme: &mut Option<ThemePreset>,
 ) -> Result<(), FramebufferError> {
+    if shell.should_suppress_marquee() {
+        // Marquee rows exist on the Now Playing tab only and are suppressed while the
+        // Volume HUD overlay is visible; re-arming (capture redraw) happens when the
+        // Now Playing tab is unobstructed again.
+        fb.set_marquee_rows(Vec::new());
+        *overlay_theme = None;
+        return Ok(());
+    }
     let theme = shell.current_theme();
     if !fb.marquee_overlay_ready() || overlay_theme.as_ref() != Some(&theme) {
         shell.set_marquee_strips_visible(false);
@@ -1365,6 +1622,18 @@ pub fn run_shell_on(
     tab: Option<i32>,
     marquee_fps: u32,
 ) {
+    let config = legacy_config(theme, marquee_fps);
+    run_shell_on_with_config(fb, preview_secs, tab, &config);
+}
+
+/// Runs the UI Shell lifecycle applying the full [`CoreConfig`] parameters.
+#[cfg(feature = "ui")]
+pub fn run_shell_on_with_config(
+    fb: &mut Framebuffer,
+    preview_secs: Option<u64>,
+    tab: Option<i32>,
+    config: &CoreConfig,
+) {
     let Some(window) = unblank_and_init_platform(fb) else {
         return;
     };
@@ -1385,13 +1654,7 @@ pub fn run_shell_on(
         shell,
         bt,
         commands,
-    } = init_shell(
-        main_window,
-        !fb.is_hardware_panel(),
-        theme,
-        tab,
-        marquee_fps,
-    );
+    } = init_shell_with_config(main_window, !fb.is_hardware_panel(), tab, config);
     if let Err(e) = shell.window().show() {
         report_display(
             tracing::Level::ERROR,
@@ -1430,13 +1693,7 @@ pub fn run_app(opts: &CoreCliOptions) -> ExitCode {
                 if let Some(t) = cfg.theme {
                     tracing::info!("Configured startup theme: {t}");
                 }
-                run_ui_display(
-                    opts.screen,
-                    opts.preview_secs,
-                    cfg.theme,
-                    opts.tab,
-                    cfg.marquee_fps.value(),
-                );
+                run_ui_display_with_config(opts.screen, opts.preview_secs, opts.tab, &cfg);
             }
             Err(e) => {
                 tracing::error!(error = %e, "failed to load config {}", path.display());
@@ -1693,6 +1950,29 @@ mod tests {
         ));
         assert_eq!(state.keep_alive_interval(), BT_KEEP_ALIVE);
 
+        // Volume and Mute commands arm pcm_settle and update mock PCM state.
+        commands.push(TransportCommand::SetVolume(64));
+        assert!(state.poll_tick(&bt, &shared, &commands));
+        assert_eq!(bt.audio_pcms().unwrap()[0].volume_percent, Some(64));
+
+        commands.push(TransportCommand::SetMute(true));
+        assert!(state.poll_tick(&bt, &shared, &commands));
+        assert!(bt.audio_pcms().unwrap()[0].muted);
+
+        // Verify SettleKind::Volume suppresses mismatched PCM volume/mute until caught up or expired.
+        let vol_settle = SettleWindow {
+            kind: SettleKind::Volume {
+                target_pct: Some(80),
+                target_muted: false,
+            },
+            started: Instant::now(),
+        };
+        let stale_pcm = &bt.audio_pcms().unwrap()[0];
+        assert!(vol_settle.suppresses_pcm(stale_pcm));
+        mock.set_pcm_volume_state(80, false);
+        let caught_up_pcm = &bt.audio_pcms().unwrap()[0];
+        assert!(!vol_settle.suppresses_pcm(caught_up_pcm));
+
         // Fault injection on transport commands logs warning without panicking.
         mock.set_fault(Some("dbus transport fault".into()));
         commands.push(TransportCommand::NextTrack);
@@ -1718,6 +1998,7 @@ mod tests {
             BtSharedUpdate {
                 playback: Some(playback(None, false)),
                 pcm: None,
+                details: Some(crate::ui::BtLinkDetails::default()),
                 cover: Some(None),
             },
         );
@@ -1726,6 +2007,58 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(recovered.playback.is_some());
         assert!(recovered.cover.is_some());
+        assert!(recovered.details.is_some());
+    }
+
+    #[test]
+    fn publish_link_state_stages_details_once_and_resets() {
+        let (bt, _mock) = BluetoothDevice::new_mocked();
+        let mut state = BtMonitorState::default();
+
+        let mut first = BtSharedUpdate::default();
+        state.publish_link_state(&bt, &mut first);
+        let details = first.details.expect("first tick publishes details");
+        assert!(details.device.is_some());
+        assert!(details.pcm.is_some());
+        assert!(first.pcm.is_some());
+
+        // Unchanged snapshot is deduplicated.
+        let mut second = BtSharedUpdate::default();
+        state.publish_link_state(&bt, &mut second);
+        assert!(second.details.is_none());
+        assert!(second.pcm.is_none());
+
+        // A dedup reset forces a full republish.
+        state.reset_dedup();
+        let mut third = BtSharedUpdate::default();
+        state.publish_link_state(&bt, &mut third);
+        assert!(third.details.is_some());
+    }
+
+    #[test]
+    fn publish_link_state_keeps_state_on_query_fault() {
+        let (bt, mock) = BluetoothDevice::new_mocked();
+        mock.set_fault(Some("link fault".into()));
+        let mut state = BtMonitorState::default();
+        let mut update = BtSharedUpdate::default();
+        state.publish_link_state(&bt, &mut update);
+        assert!(update.details.is_none());
+        assert!(state.last_details.is_none());
+    }
+
+    #[test]
+    fn publish_link_state_clears_details_on_disconnect() {
+        let (bt, mock) = BluetoothDevice::new_mocked();
+        let mut state = BtMonitorState::default();
+        state.publish_link_state(&bt, &mut BtSharedUpdate::default());
+
+        mock.clear_devices();
+        mock.clear_pcms();
+        let mut update = BtSharedUpdate::default();
+        state.publish_link_state(&bt, &mut update);
+        let details = update.details.expect("disconnect republishes details");
+        assert!(details.device.is_none());
+        assert!(details.pcm.is_none());
     }
 
     #[test]

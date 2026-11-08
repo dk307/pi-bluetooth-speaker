@@ -39,6 +39,8 @@ export component TopStatusBar inherits Rectangle {
     callback source_clicked();
     callback night_mode_clicked();
     callback volume_clicked();
+    callback device_clicked();
+    callback protocol_clicked();
 
     HorizontalLayout {
         padding-left: 0px;
@@ -98,6 +100,12 @@ export component TopStatusBar inherits Rectangle {
                             horizontal-alignment: center;
                             vertical-alignment: center;
                             overflow: elide;
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.protocol_clicked();
+                            }
                         }
                     }
                 }
@@ -207,8 +215,8 @@ export component TopStatusBar inherits Rectangle {
     // Center: Track / Client Quick Info — a full-width overlay stretched across
     // the bar (out of the flow layout so space-between of side elements can't
     // shift it). HorizontalLayout { alignment: center } centers the text element
-    // horizontally on the bar; VerticalLayout centers it vertically. No
-    // TouchArea here, so clicks pass through to the side elements underneath.
+    // horizontally on the bar; VerticalLayout centers it vertically. Only the
+    // bounded name hit-box has a TouchArea; clicks elsewhere pass through.
     VerticalLayout {
         height: parent.height;
         alignment: center;
@@ -216,14 +224,27 @@ export component TopStatusBar inherits Rectangle {
         HorizontalLayout {
             alignment: center;
 
-            Text {
-                text: root.track_or_device;
-                color: Theme.active.text_primary;
-                font-size: 26px;
-                font-weight: 800;
-                vertical-alignment: center;
-                overflow: elide;
-                max-width: 320px;
+            // Touch target hugs the (elided) name so it never covers the volume / DIM controls.
+            Rectangle {
+                width: min(device_name.preferred-width, 320px);
+                height: 48px;
+
+                device_name := Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.track_or_device;
+                    color: Theme.active.text_primary;
+                    font-size: 26px;
+                    font-weight: 800;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                TouchArea {
+                    clicked => {
+                        root.device_clicked();
+                    }
+                }
             }
         }
     }

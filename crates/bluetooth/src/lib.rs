@@ -11,7 +11,7 @@ pub use connection::{
     BCM43438_FIRMWARE_PATH, BCM43438_UART_BAUD_RATE, BT_ADDRESS_OCTETS, BluetoothControllerInfo,
     BluetoothDevice, BluetoothDeviceMock, BluetoothHardwareInfo, BluetoothServices,
     BluetoothStatus, BluezSnapshot, BtAdapter, BtAddress, BtDevice, BtError, DEFAULT_BT_ADAPTER,
-    resolve_cover_art_with,
+    LinkSnapshot, resolve_cover_art_with,
 };
 
 #[cfg(feature = "test-util")]
@@ -21,8 +21,9 @@ pub use connection::test_helpers as bluetooth_test_helpers;
 #[doc(inline)]
 pub use transport::{
     BT_NO_CONNECTION_TITLE, BlueAlsaPcm, BtPlaybackState, TransportCommand, TransportCommandQueue,
-    decode_pcm_format, format_duration_ms, format_volume_bytes, playback_progress_ratio,
-    seek_offset_us,
+    apply_mute_to_volume_bytes, decode_pcm_format, encode_volume_bytes, format_duration_ms,
+    format_volume_bytes, percent_to_bluealsa_level, playback_progress_ratio, seek_offset_us,
+    select_active_pcm,
 };
 
 #[doc(inline)]
