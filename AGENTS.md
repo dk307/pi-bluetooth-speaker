@@ -8,6 +8,10 @@ This document defines the behavioral, architectural, and engineering rules for A
 
 * **Target Hardware:** **Raspberry Pi 3 Model B** (Broadcom BCM2837, quad-core ARM Cortex-A53 `aarch64`, running DietPi / Debian 13 Trixie).
 * **Primary Rust Target:** `aarch64-unknown-linux-gnu` with Cortex-A53 pipeline scheduling (`-C target-cpu=cortex-a53`) and hardware ARM NEON SIMD vectorization with crypto disabled (`-C target-feature=+neon,-aes,-sha2`), configured in [`.cargo/config.toml`](.cargo/config.toml).
+* **Workspace Build Profiles & Host Linker:**
+  * **Raspberry Pi Release Deployment (`[profile.release]`):** Tuned for maximal runtime performance on the in-order Cortex-A53 CPU with `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, and `strip = true`. Rust's `opt-level = 3` strictly preserves all memory-safety invariants and IEEE 754 float guarantees while enabling loop/SLP auto-vectorization and whole-program inlining across crate boundaries.
+  * **Development & Test Profile (`[profile.dev]`):** Configured with `debug = 1` (line tables only) to accelerate local test and coverage builds, slashing link time and disk target footprint while preserving full source-line backtraces on crashes or assertions (**M-PANIC-ON-BUG**).
+  * **Fast Host Linker (`x86_64-unknown-linux-gnu`):** Configured with `-C link-arg=-fuse-ld=lld` in [`.cargo/config.toml`](.cargo/config.toml) for multi-threaded link execution during test and coverage passes.
 * **Building for the Target Platform:**
   Always compile binaries for the Raspberry Pi 3 `aarch64-unknown-linux-gnu` target:
   ```bash
