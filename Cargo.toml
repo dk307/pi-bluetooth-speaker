@@ -5,6 +5,7 @@ members = [
     "crates/hardware",
     "crates/dsp",
     "crates/bluetooth",
+    "crates/title-breaker",
     "services/screen-manager",
     "services/bt-manager",
     "tools/diagnostics",
@@ -21,6 +22,7 @@ speaker-common = { path = "crates/common" }
 speaker-hardware = { path = "crates/hardware" }
 speaker-dsp = { path = "crates/dsp" }
 speaker-bluetooth = { path = "crates/bluetooth" }
+speaker-title-breaker = { path = "crates/title-breaker" }
 
 # Asynchronous Concurrency Runtime
 tokio = { version = "=1.53.3", features = ["full"] }

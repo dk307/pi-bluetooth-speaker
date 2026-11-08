@@ -1,0 +1,10 @@
+[package]
+name = "speaker-title-breaker"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Semantic two-line song-title breaking for constrained audio UI layouts"
+
+[lints]
+workspace = true
