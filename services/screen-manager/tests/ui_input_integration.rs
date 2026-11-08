@@ -616,7 +616,7 @@ fn evdev_open_and_ioctl_fault_injections() {
     );
     let dev = TouchInputDevice::open_with(&p_mt_fallback, Arc::clone(&syscall))
         .expect("MT fallback should succeed");
-    assert_eq!(dev.decoder.calibration().max_x, 800.0);
+    assert_eq!(dev.calibration().max_x, 800.0);
 
     // 6. query_name failure fallback
     let p_bad_name = PathBuf::from("/dev/input/bad_name");
@@ -816,7 +816,7 @@ fn production_wrappers_and_calibration_setters() {
         ..Default::default()
     })
     .expect("valid calibration should be accepted");
-    assert!(dev.decoder.calibration().swap_xy);
+    assert!(dev.calibration().swap_xy);
 
     // Test NaN and inverted/zero span calibration rejection
     let nan_cal = TouchCalibration {
@@ -827,7 +827,7 @@ fn production_wrappers_and_calibration_setters() {
     assert_eq!(nan_cal.map_to_screen(100, 100, 800.0, 480.0), (0.0, 0.0));
     let err_nan = dev.set_calibration(nan_cal).unwrap_err();
     assert!(format!("{err_nan}").contains("Invalid touch calibration"));
-    assert!(dev.decoder.calibration().is_valid());
+    assert!(dev.calibration().is_valid());
 
     let zero_span_cal = TouchCalibration {
         min_x: 100.0,
@@ -841,7 +841,7 @@ fn production_wrappers_and_calibration_setters() {
     );
     let err_zero = dev.set_calibration(zero_span_cal).unwrap_err();
     assert!(format!("{err_zero}").contains("Invalid touch calibration"));
-    assert!(dev.decoder.calibration().is_valid());
+    assert!(dev.calibration().is_valid());
 
     // NativeEvdevSyscall error paths with invalid fd (-1)
     let native = NativeEvdevSyscall;

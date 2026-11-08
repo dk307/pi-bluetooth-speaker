@@ -21,11 +21,11 @@ use std::fmt::{self, Formatter};
 use std::os::unix::io::AsRawFd;
 use std::time::Instant;
 
-pub use obex_protocol::Error as ObexError;
-pub use obex_protocol::header::{Header, HeaderValue};
-pub use obex_protocol::response::ResponseCode;
-pub use obex_protocol::tokio::Client;
-pub use tokio::io::{AsyncRead, AsyncWrite};
+use obex_protocol::Error as ObexError;
+use obex_protocol::header::{Header, HeaderValue};
+use obex_protocol::response::ResponseCode;
+use obex_protocol::tokio::Client;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 pub use speaker_bluetooth::BtAddress;
 
@@ -91,7 +91,7 @@ pub struct BipError {
 }
 
 #[derive(Debug)]
-pub enum BipErrorKind {
+enum BipErrorKind {
     SdpLookup {
         details: Box<str>,
     },
@@ -118,7 +118,7 @@ pub enum BipErrorKind {
 
 impl BipError {
     #[must_use]
-    pub fn new(kind: BipErrorKind) -> Self {
+    fn new(kind: BipErrorKind) -> Self {
         Self {
             kind,
             source: None,
@@ -184,6 +184,14 @@ impl BipError {
         Self::new(BipErrorKind::ImageRejected {
             operation,
             response_code: response_code as u8,
+        })
+    }
+
+    #[must_use]
+    pub fn image_rejected_raw(operation: &'static str, response_code: u8) -> Self {
+        Self::new(BipErrorKind::ImageRejected {
+            operation,
+            response_code,
         })
     }
 

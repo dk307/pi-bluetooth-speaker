@@ -1,9 +1,13 @@
 use bt_manager::bip_direct::*;
+use obex_protocol::Error as ObexError;
+use obex_protocol::header::{Header, HeaderValue};
 use obex_protocol::packet::{Request, Response};
+use obex_protocol::response::ResponseCode;
 use obex_protocol::srm::SingleResponseMode;
-use obex_protocol::tokio::{Object, Server};
+use obex_protocol::tokio::{Client, Object, Server};
 use std::error::Error as _;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 
 fn body_bytes(len: usize, fill: u8) -> Vec<u8> {
@@ -832,10 +836,7 @@ async fn persistent_session_reestablishes_on_transport_change() {
 async fn persistent_session_maps_connect_rejection_to_image_rejected() {
     let session = PersistentBipSession::with_channel_factory(|_| {
         Box::new(FailingChannel(std::sync::Arc::new(|| {
-            BipError::new(BipErrorKind::ImageRejected {
-                operation: "OBEX CONNECT",
-                response_code: 0x43,
-            })
+            BipError::image_rejected_raw("OBEX CONNECT", 0x43)
         }))) as Box<dyn BipChannel>
     });
     let mut session = session;

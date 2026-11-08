@@ -877,7 +877,7 @@ impl Debug for TouchBackend {
 #[derive(Debug)]
 pub struct TouchInputDevice {
     backend: TouchBackend,
-    pub decoder: TouchDecoder,
+    decoder: TouchDecoder,
     read_buffer: Vec<u8>,
 }
 
@@ -1112,6 +1112,12 @@ impl TouchInputDevice {
     /// Returns [`TouchError`] if `calibration` contains non-finite numbers or zero/inverted axis bounds.
     pub fn set_calibration(&mut self, calibration: TouchCalibration) -> Result<(), TouchError> {
         self.decoder.set_calibration(calibration)
+    }
+
+    /// Returns a reference to the active coordinate calibration profile.
+    #[must_use]
+    pub fn calibration(&self) -> &TouchCalibration {
+        self.decoder.calibration()
     }
 
     /// Reads pending touch events from hardware or mock controller.
