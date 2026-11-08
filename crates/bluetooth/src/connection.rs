@@ -917,34 +917,33 @@ fn find_item_image_handle(
     player_path: &str,
 ) -> Option<Box<str>> {
     let now_playing_suffix = "/NowPlaying";
-    // Check canonical /NowPlaying child item first for deterministic selection.
+    let mut fallback_handle: Option<Box<str>> = None;
+
+    // Single pass: return /NowPlaying immediately if found, or retain first valid child item fallback.
     for (obj_path, ifaces) in objects {
         let path_str = obj_path.as_str();
-        if path_str.strip_prefix(player_path) == Some(now_playing_suffix)
+        if path_str.strip_prefix(player_path) == Some(now_playing_suffix) {
+            if let Some(item_props) = find_iface(ifaces, "org.bluez.MediaItem1")
+                && let Some(metadata) = item_props.get("Metadata")
+                && let Some(handle) = get_track_prop_str(metadata, "ImgHandle")
+                && !handle.is_empty()
+            {
+                return Some(handle);
+            }
+        } else if fallback_handle.is_none()
+            && path_str
+                .strip_prefix(player_path)
+                .is_some_and(|rem| rem.starts_with('/'))
             && let Some(item_props) = find_iface(ifaces, "org.bluez.MediaItem1")
             && let Some(metadata) = item_props.get("Metadata")
             && let Some(handle) = get_track_prop_str(metadata, "ImgHandle")
             && !handle.is_empty()
         {
-            return Some(handle);
+            fallback_handle = Some(handle);
         }
     }
 
-    // Fall back to any child item with strict path boundary check.
-    for (obj_path, ifaces) in objects {
-        let path_str = obj_path.as_str();
-        if path_str
-            .strip_prefix(player_path)
-            .is_some_and(|rem| rem.starts_with('/'))
-            && let Some(item_props) = find_iface(ifaces, "org.bluez.MediaItem1")
-            && let Some(metadata) = item_props.get("Metadata")
-            && let Some(handle) = get_track_prop_str(metadata, "ImgHandle")
-            && !handle.is_empty()
-        {
-            return Some(handle);
-        }
-    }
-    None
+    fallback_handle
 }
 
 /// Extracts a D-Bus `ay` byte array property (e.g. `BlueALSA` `Volume`).
