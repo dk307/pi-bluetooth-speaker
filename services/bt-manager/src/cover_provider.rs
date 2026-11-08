@@ -291,8 +291,8 @@ pub const SESSION_CACHE_CAPACITY: usize = 32;
 #[derive(Debug, Default)]
 pub struct SessionCoverCache {
     /// Session generation the entries belong to.
-    pub epoch: u64,
-    pub entries: HashMap<Box<str>, Arc<Vec<u8>>>,
+    epoch: u64,
+    entries: HashMap<Box<str>, Arc<Vec<u8>>>,
 }
 
 impl SessionCoverCache {
@@ -321,39 +321,129 @@ impl SessionCoverCache {
         }
         self.entries.insert(handle.into(), bytes);
     }
+
+    /// Returns the active session generation.
+    #[must_use]
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Returns the number of cached items.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns `true` if the cache is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// The cover-art worker: event-driven fetch loop with a slow fallback poll.
 pub struct CoverArtWorker {
-    pub source: Box<dyn PlaybackSource>,
-    pub keeper: Box<dyn BipSessionKeeper>,
-    pub state: SharedCoverState,
-    pub cache_dir: PathBuf,
+    source: Box<dyn PlaybackSource>,
+    keeper: Box<dyn BipSessionKeeper>,
+    state: SharedCoverState,
+    cache_dir: PathBuf,
     /// Woken by the `BlueZ` `Track` signal listener; each permit coalesces the
     /// track changes that arrived since the last poll into one fetch cycle.
-    pub wake: Arc<Notify>,
-    pub emitter: Option<SignalEmitter<'static>>,
+    wake: Arc<Notify>,
+    emitter: Option<SignalEmitter<'static>>,
     /// When the next idle keepalive fires. Rearmed after every real OBEX
     /// activity (fetch, keepalive) and disarmed when the session is released,
     /// so a track-change signal arriving first preempts the keepalive.
-    pub keepalive_deadline: Option<Instant>,
+    keepalive_deadline: Option<Instant>,
     /// Instant when the active track's `ImgHandle` was first observed, used to
     /// report the track-change → published latency on the publish log line.
-    pub track_change_at: Option<Instant>,
+    track_change_at: Option<Instant>,
     /// Handle and retry deadline after a failed fetch/publish, so a broken
     /// cache dir or a peer returning truncated JPEGs cannot degenerate into
     /// a permanent full-image OBEX GET every [`COVER_FALLBACK_POLL`].
-    pub suppress_retry: Option<(Box<str>, Instant)>,
+    suppress_retry: Option<(Box<str>, Instant)>,
     /// Session-scoped handle cache; purged on every session generation change.
-    pub session_cache: SessionCoverCache,
+    session_cache: SessionCoverCache,
     /// Last observed (title, artist) to reset retry budget on track changes.
-    pub last_track: Option<(Box<str>, Box<str>)>,
+    last_track: Option<(Box<str>, Box<str>)>,
     /// Fast retry counter for initial connection handle resolution.
-    pub missing_handle_retries: u32,
+    missing_handle_retries: u32,
     /// Pending deadline for fast handle retry.
-    pub pending_retry: Option<Instant>,
+    pending_retry: Option<Instant>,
     /// Shutdown signal receiver.
-    pub shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+}
+
+#[cfg(feature = "test-util")]
+impl CoverArtWorker {
+    /// Returns the instant when the active track change was observed.
+    #[must_use]
+    pub const fn track_change_at(&self) -> Option<Instant> {
+        self.track_change_at
+    }
+
+    /// Returns the idle keepalive deadline.
+    #[must_use]
+    pub const fn keepalive_deadline(&self) -> Option<Instant> {
+        self.keepalive_deadline
+    }
+
+    /// Sets the idle keepalive deadline for test scenarios.
+    pub fn set_keepalive_deadline(&mut self, deadline: Option<Instant>) {
+        self.keepalive_deadline = deadline;
+    }
+
+    /// Returns `true` if a retry suppression is active.
+    #[must_use]
+    pub fn has_suppress_retry(&self) -> bool {
+        self.suppress_retry.is_some()
+    }
+
+    /// Overrides retry suppression for test scenarios.
+    pub fn set_suppress_retry(&mut self, val: Option<(Box<str>, Instant)>) {
+        self.suppress_retry = val;
+    }
+
+    /// Overrides cache dir for test scenarios.
+    pub fn set_cache_dir(&mut self, dir: PathBuf) {
+        self.cache_dir = dir;
+    }
+
+    /// Overrides wake notifier for test scenarios.
+    pub fn set_wake(&mut self, wake: Arc<Notify>) {
+        self.wake = wake;
+    }
+
+    /// Returns a reference to the session cache.
+    #[must_use]
+    pub const fn session_cache(&self) -> &SessionCoverCache {
+        &self.session_cache
+    }
+
+    /// Returns a mutable reference to the session cache.
+    pub fn session_cache_mut(&mut self) -> &mut SessionCoverCache {
+        &mut self.session_cache
+    }
+
+    /// Returns the number of missing handle retries.
+    #[must_use]
+    pub const fn missing_handle_retries(&self) -> u32 {
+        self.missing_handle_retries
+    }
+
+    /// Returns the pending retry instant.
+    #[must_use]
+    pub const fn pending_retry(&self) -> Option<Instant> {
+        self.pending_retry
+    }
+
+    /// Returns the last observed track tuple (title, artist).
+    #[must_use]
+    pub fn last_track(&self) -> Option<(&str, &str)> {
+        self.last_track
+            .as_ref()
+            .map(|(t, a)| (t.as_ref(), a.as_ref()))
+    }
 }
 
 impl std::fmt::Debug for CoverArtWorker {
@@ -981,8 +1071,8 @@ async fn spawn_track_signal_listener(wake: Arc<Notify>) {
 /// Shutdown handle for the cover-art worker.
 #[derive(Debug, Clone)]
 pub struct CoverArtShutdown {
-    pub tx: tokio::sync::watch::Sender<bool>,
-    pub wake: Arc<Notify>,
+    tx: tokio::sync::watch::Sender<bool>,
+    wake: Arc<Notify>,
 }
 
 impl CoverArtShutdown {

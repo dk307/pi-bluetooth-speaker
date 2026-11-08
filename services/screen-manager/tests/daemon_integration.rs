@@ -892,6 +892,7 @@ fn run_render_loop_with_devices_polls_rotary_encoder_and_faults_gracefully() {
     assert!(shell.is_volume_hud_visible());
 }
 
+#[cfg(feature = "ui")]
 #[test]
 fn bt_monitor_state_commands_settle_and_commit() {
     use speaker_bluetooth::{BluetoothDevice, TransportCommand, TransportCommandQueue};
@@ -903,7 +904,7 @@ fn bt_monitor_state_commands_settle_and_commit() {
 
     // Initial tick populates last_pb, last_pcms, and shared state.
     assert!(state.poll_tick(&bt, &shared, &commands));
-    assert!(state.last_pb.is_some());
+    assert!(state.has_playback());
     assert_eq!(state.keep_alive_interval(), BT_PLAYING_POLL);
     assert!(shared.lock().unwrap().playback.is_some());
     assert!(shared.lock().unwrap().pcm.is_some());
@@ -912,7 +913,7 @@ fn bt_monitor_state_commands_settle_and_commit() {
     commands.push(TransportCommand::Seek(45_000));
     assert!(state.poll_tick(&bt, &shared, &commands));
     assert!(matches!(
-        state.settle.as_ref().map(|s| &s.kind),
+        state.settle().map(|s| &s.kind),
         Some(SettleKind::Seek { target_ms: 45_000 })
     ));
 
@@ -921,7 +922,7 @@ fn bt_monitor_state_commands_settle_and_commit() {
     commands.push(TransportCommand::PreviousTrack);
     assert!(state.poll_tick(&bt, &shared, &commands));
     assert!(matches!(
-        state.settle.as_ref().map(|s| &s.kind),
+        state.settle().map(|s| &s.kind),
         Some(SettleKind::Toggle { .. })
     ));
     assert_eq!(state.keep_alive_interval(), BT_KEEP_ALIVE);
@@ -957,9 +958,9 @@ fn bt_monitor_state_commands_settle_and_commit() {
 
     // Reset dedup helper clears cached snapshots.
     state.reset_dedup();
-    assert!(state.last_pb.is_none());
-    assert!(state.last_pcms.is_none());
-    assert!(state.cover.path.is_none());
+    assert!(!state.has_playback());
+    assert!(!state.has_pcms());
+    assert!(state.cover_path().is_none());
 
     // Poisoned mutex recovery in commit_update.
     let poisoned = Arc::new(Mutex::new(BtSharedUpdate::default()));
@@ -986,6 +987,7 @@ fn bt_monitor_state_commands_settle_and_commit() {
     assert!(recovered.details.is_some());
 }
 
+#[cfg(feature = "ui")]
 #[test]
 fn publish_link_state_stages_details_once_and_resets() {
     use speaker_bluetooth::BluetoothDevice;
@@ -1013,6 +1015,7 @@ fn publish_link_state_stages_details_once_and_resets() {
     assert!(third.details.is_some());
 }
 
+#[cfg(feature = "ui")]
 #[test]
 fn publish_link_state_keeps_state_on_query_fault() {
     use speaker_bluetooth::BluetoothDevice;
@@ -1023,9 +1026,10 @@ fn publish_link_state_keeps_state_on_query_fault() {
     let mut update = BtSharedUpdate::default();
     state.publish_link_state(&bt, &mut update);
     assert!(update.details.is_none());
-    assert!(state.last_details.is_none());
+    assert!(state.last_details().is_none());
 }
 
+#[cfg(feature = "ui")]
 #[test]
 fn publish_link_state_clears_details_on_disconnect() {
     use speaker_bluetooth::BluetoothDevice;
@@ -1043,6 +1047,7 @@ fn publish_link_state_clears_details_on_disconnect() {
     assert!(details.pcm.is_none());
 }
 
+#[cfg(feature = "ui")]
 #[test]
 fn finish_boot_worker_abandons_or_joins() {
     // Hung / unfinished worker path (`checks_done == false`).
@@ -1060,6 +1065,7 @@ fn finish_boot_worker_abandons_or_joins() {
     assert!(res.is_err(), "worker panic must be re-raised");
 }
 
+#[cfg(feature = "ui")]
 #[test]
 fn idle_sleep_various_fd_conditions() {
     // 1. None fd (always sleeps timeout)

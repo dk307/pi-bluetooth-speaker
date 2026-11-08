@@ -431,9 +431,9 @@ fn open_configured_l2cap_socket() -> Result<bluer::l2cap::Socket<bluer::l2cap::S
 }
 
 pub struct RfcommBipChannel {
-    pub known_channel: Option<u8>,
+    known_channel: Option<u8>,
     /// Physical-transport core (real bluer sockets in production).
-    pub core: std::sync::Arc<dyn BipSocketCore>,
+    core: std::sync::Arc<dyn BipSocketCore>,
 }
 
 impl Default for RfcommBipChannel {
@@ -454,6 +454,11 @@ impl std::fmt::Debug for RfcommBipChannel {
 }
 
 impl RfcommBipChannel {
+    /// Returns the statically configured RFCOMM channel, if any.
+    #[must_use]
+    pub const fn known_channel(&self) -> Option<u8> {
+        self.known_channel
+    }
     /// Creates a channel that skips the SDP lookup and connects directly to
     /// the given RFCOMM channel number.
     ///
@@ -506,9 +511,9 @@ impl BipChannel for RfcommBipChannel {
 /// cover-art profile requires for flow-controlled L2CAP transports.
 pub struct L2capBipChannel {
     /// L2CAP Protocol/Service Multiplexor published by the remote device.
-    pub psm: u16,
+    psm: u16,
     /// Physical-transport core (real bluer sockets in production).
-    pub core: std::sync::Arc<dyn BipSocketCore>,
+    core: std::sync::Arc<dyn BipSocketCore>,
 }
 
 impl Default for L2capBipChannel {
@@ -529,6 +534,11 @@ impl std::fmt::Debug for L2capBipChannel {
 }
 
 impl L2capBipChannel {
+    /// Returns the L2CAP PSM.
+    #[must_use]
+    pub const fn psm(&self) -> u16 {
+        self.psm
+    }
     /// Creates a channel targeting a specific L2CAP PSM.
     #[must_use]
     pub fn new(psm: u16) -> Self {

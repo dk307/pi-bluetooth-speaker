@@ -274,7 +274,7 @@ async fn poll_once_publishes_image_and_ensures_session() {
     assert_eq!(state.device(), Some(TEST_DEVICE));
     assert_eq!(state.handle(), Some("5630701"));
     assert!(
-        worker.track_change_at.is_none(),
+        worker.track_change_at().is_none(),
         "successful publish consumes the track-change latency measurement"
     );
     let published = state.path().map_or_else(String::new, str::to_string);
@@ -384,7 +384,7 @@ async fn failed_fetch_is_backed_off_until_deadline_expires() {
     );
     // Simulate the backoff deadline expiring: a later poll retries once.
     let handle: Box<str> = "5630701".into();
-    worker.suppress_retry = Some((handle, Instant::now()));
+    worker.set_suppress_retry(Some((handle, Instant::now())));
     worker.poll_once().await;
     assert_eq!(
         harness.counters.fetches(),
@@ -402,7 +402,7 @@ async fn store_failure_is_backed_off_until_deadline_expires() {
     // Point the cache at a plain file: every write fails.
     let blocker = harness.dir.path().join("blocker");
     std::fs::write(&blocker, b"x").expect("blocker file");
-    worker.cache_dir = blocker;
+    worker.set_cache_dir(blocker);
     worker.poll_once().await;
     assert_eq!(harness.counters.fetches(), 1, "fetch was attempted");
     worker.poll_once().await;
@@ -412,7 +412,7 @@ async fn store_failure_is_backed_off_until_deadline_expires() {
         "a failed store must not re-issue the OBEX GET within the backoff"
     );
     assert!(
-        worker.suppress_retry.is_some(),
+        worker.has_suppress_retry(),
         "store failure arms the retry backoff"
     );
 }
@@ -452,7 +452,7 @@ async fn no_handle_poll_arms_idle_deadline_without_sending_keepalive() {
         "polls never send keepalive directly; the idle timer owns it"
     );
     assert!(
-        worker.keepalive_deadline.is_some(),
+        worker.keepalive_deadline().is_some(),
         "successful ensure arms the idle keepalive timer"
     );
     assert_eq!(harness.counters.fetches(), 0, "no handle means no fetch");
@@ -467,7 +467,7 @@ async fn dedup_poll_leaves_pending_idle_deadline_untouched() {
     let mut worker = harness.worker(None);
     worker.poll_once().await;
     assert_eq!(harness.counters.fetches(), 1);
-    let armed = worker.keepalive_deadline.expect("armed by first poll");
+    let armed = worker.keepalive_deadline().expect("armed by first poll");
     worker.poll_once().await;
     assert_eq!(
         harness.counters.keepalives(),
@@ -475,7 +475,7 @@ async fn dedup_poll_leaves_pending_idle_deadline_untouched() {
         "dedup poll is not OBEX traffic; keepalive stays pending"
     );
     assert_eq!(
-        worker.keepalive_deadline,
+        worker.keepalive_deadline(),
         Some(armed),
         "no-op polls must not postpone the pending idle keepalive"
     );
@@ -487,12 +487,12 @@ async fn run_loop_fires_idle_keepalive_when_deadline_expires() {
     let wake = Arc::new(Notify::new());
     let counters = Arc::clone(&harness.counters);
     let mut worker = harness.worker(None);
-    worker.wake = Arc::clone(&wake);
-    worker.keepalive_deadline = Some(
+    worker.set_wake(Arc::clone(&wake));
+    worker.set_keepalive_deadline(Some(
         Instant::now()
             .checked_sub(Duration::from_secs(1))
             .expect("backdate fits in Instant range"),
-    );
+    ));
     let task = tokio::spawn(async move { worker.run().await });
     tokio::time::timeout(Duration::from_secs(2), async {
         while counters.keepalives() == 0 {
@@ -509,11 +509,11 @@ async fn deactivate_disarms_idle_keepalive() {
     let mut harness = TestHarness::new(JPEG_BYTES);
     harness.script(Ok(None));
     let mut worker = harness.worker(None);
-    worker.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
+    worker.set_keepalive_deadline(Some(Instant::now() + KEEPALIVE_INTERVAL));
     worker.poll_once().await;
     assert_eq!(harness.counters.releases(), 1, "session released");
     assert!(
-        worker.keepalive_deadline.is_none(),
+        worker.keepalive_deadline().is_none(),
         "released session must disarm the idle keepalive"
     );
 }
@@ -577,7 +577,7 @@ async fn store_failure_discards_fetched_image() {
     // Point the cache at a plain file: every write fails.
     let blocker = harness.dir.path().join("blocker");
     std::fs::write(&blocker, b"x").expect("blocker file");
-    worker.cache_dir = blocker;
+    worker.set_cache_dir(blocker);
     worker.poll_once().await;
     assert_eq!(harness.counters.fetches(), 1, "fetch was attempted");
     assert_eq!(
@@ -639,7 +639,8 @@ async fn transport_change_purges_session_cache_and_refetches() {
         "worker must follow the re-registered transport"
     );
     assert_eq!(
-        worker.session_cache.epoch, 2,
+        worker.session_cache().epoch(),
+        2,
         "two session generations (two ensures) must be visible to the cache"
     );
 }
@@ -699,7 +700,7 @@ async fn run_loop_wakes_on_notify_and_publishes() {
     let wake = Arc::new(Notify::new());
     let state = harness.state.clone();
     let mut worker = harness.worker(None);
-    worker.wake = Arc::clone(&wake);
+    worker.set_wake(Arc::clone(&wake));
     let task = tokio::spawn(async move { worker.run().await });
     wake.notify_one();
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -739,7 +740,7 @@ async fn repeated_handle_is_restored_from_session_cache() {
     worker.poll_once().await;
     worker.poll_once().await;
     assert_eq!(harness.counters.fetches(), 2);
-    let deadline_before = worker.keepalive_deadline;
+    let deadline_before = worker.keepalive_deadline();
     worker.poll_once().await;
     assert_eq!(
         harness.counters.fetches(),
@@ -752,7 +753,8 @@ async fn repeated_handle_is_restored_from_session_cache() {
     let published = state.path().map_or_else(String::new, str::to_string);
     assert!(Path::new(&*published).exists(), "cache-hit file re-stored");
     assert_eq!(
-        worker.keepalive_deadline, deadline_before,
+        worker.keepalive_deadline(),
+        deadline_before,
         "cache hit is not OBEX traffic; idle timer untouched"
     );
 }
@@ -782,12 +784,12 @@ fn session_cache_evicts_at_aosp_capacity() {
         cache.insert(&format!("{i:07}"), Arc::new(vec![0u8]));
     }
     assert_eq!(
-        cache.entries.len(),
+        cache.len(),
         1,
         "capacity 32: insert 33 clears and keeps only the newest"
     );
     cache.purge(7);
-    assert_eq!(cache.epoch, 7);
+    assert_eq!(cache.epoch(), 7);
     assert!(cache.lookup("0000000").is_none(), "purge clears entries");
 }
 // --- injected D-Bus emitters (private bus) -----------------------------
@@ -882,7 +884,7 @@ async fn keepalive_failure_warns_and_rearms_deadline() {
     worker.keepalive().await;
     assert_eq!(harness.counters.keepalives(), 1, "keepalive attempted");
     assert!(
-        worker.keepalive_deadline.is_some(),
+        worker.keepalive_deadline().is_some(),
         "failed keepalive still rearms the idle timer"
     );
 }
@@ -898,9 +900,8 @@ async fn corrupt_session_cache_falls_back_to_fresh_fetch() {
     // Poison the cache with invalid JPEG bytes: the restore publish
     // fails (incomplete JPEG) and the worker must fetch fresh.
     worker
-        .session_cache
-        .entries
-        .insert("5630701".into(), Arc::new(TRUNCATED_JPEG.to_vec()));
+        .session_cache_mut()
+        .insert("5630701", Arc::new(TRUNCATED_JPEG.to_vec()));
     // Drop the published state so the dedup check does not short-circuit
     // (the session generation is unchanged, so the cache is not purged).
     drop(harness.state.clear());
@@ -967,14 +968,14 @@ async fn initial_connection_retries_fast_until_handle_appears() {
 
     worker.poll_once().await;
     assert_eq!(harness.state.get().handle(), None);
-    assert_eq!(worker.missing_handle_retries, 1);
-    assert!(worker.pending_retry.is_some());
+    assert_eq!(worker.missing_handle_retries(), 1);
+    assert!(worker.pending_retry().is_some());
 
     // Second poll (as if pending_retry fired)
     worker.poll_once().await;
     assert_eq!(harness.state.get().handle(), Some("7654321"));
-    assert_eq!(worker.missing_handle_retries, 0);
-    assert!(worker.pending_retry.is_none());
+    assert_eq!(worker.missing_handle_retries(), 0);
+    assert!(worker.pending_retry().is_none());
 }
 
 #[tokio::test]
@@ -991,17 +992,14 @@ async fn initial_connection_re_queries_after_new_bip_session() {
     assert_eq!(harness.state.get().handle(), Some("1234567"));
     assert_eq!(harness.counters.ensures(), 1);
     assert_eq!(harness.counters.fetches(), 1);
-    assert_eq!(worker.missing_handle_retries, 0);
+    assert_eq!(worker.missing_handle_retries(), 0);
 }
 
 #[tokio::test]
 async fn cover_art_shutdown_wake_notifies_listener() {
     let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
     let wake = Arc::new(Notify::new());
-    let handle = CoverArtShutdown {
-        tx: shutdown_tx,
-        wake: Arc::clone(&wake),
-    };
+    let handle = CoverArtShutdown::new(shutdown_tx, Arc::clone(&wake));
     handle.wake();
     tokio::time::timeout(Duration::from_millis(100), wake.notified())
         .await
@@ -1027,14 +1025,17 @@ async fn track_change_resets_missing_handle_retries_budget() {
 
     // First poll: initial connection, arms retry attempt 1
     worker.poll_once().await;
-    assert_eq!(worker.missing_handle_retries, 1);
+    assert_eq!(worker.missing_handle_retries(), 1);
 
     // Second poll (Track 1 still): retry attempt 2
     worker.poll_once().await;
-    assert_eq!(worker.missing_handle_retries, 2);
+    assert_eq!(worker.missing_handle_retries(), 2);
 
     // Third poll (Track 2 arrives): retry budget is reset to 0, then attempt 1 for Track 2
     worker.poll_once().await;
-    assert_eq!(worker.missing_handle_retries, 1);
-    assert_eq!(worker.last_track, Some(("Track 2".into(), track2.artist)));
+    assert_eq!(worker.missing_handle_retries(), 1);
+    assert_eq!(
+        worker.last_track(),
+        Some(("Track 2", track2.artist.as_ref()))
+    );
 }

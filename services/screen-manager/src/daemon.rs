@@ -935,12 +935,45 @@ const BT_WAIT_SLICE: Duration = Duration::from_millis(100);
 #[cfg(feature = "ui")]
 #[derive(Debug, Default)]
 pub struct BtMonitorState {
-    pub last_pb: Option<speaker_bluetooth::BtPlaybackState>,
-    pub last_pcms: Option<Box<[speaker_bluetooth::BlueAlsaPcm]>>,
-    pub last_details: Option<crate::ui::BtLinkDetails>,
-    pub cover: CoverState,
-    pub settle: Option<SettleWindow>,
-    pub pcm_settle: Option<SettleWindow>,
+    last_pb: Option<speaker_bluetooth::BtPlaybackState>,
+    last_pcms: Option<Box<[speaker_bluetooth::BlueAlsaPcm]>>,
+    last_details: Option<crate::ui::BtLinkDetails>,
+    cover: CoverState,
+    settle: Option<SettleWindow>,
+    pcm_settle: Option<SettleWindow>,
+}
+
+#[cfg(all(feature = "ui", feature = "test-util"))]
+impl BtMonitorState {
+    /// Returns `true` if a playback snapshot is cached.
+    #[must_use]
+    pub fn has_playback(&self) -> bool {
+        self.last_pb.is_some()
+    }
+
+    /// Returns `true` if PCM device snapshots are cached.
+    #[must_use]
+    pub fn has_pcms(&self) -> bool {
+        self.last_pcms.is_some()
+    }
+
+    /// Returns cached Bluetooth link details.
+    #[must_use]
+    pub fn last_details(&self) -> Option<&crate::ui::BtLinkDetails> {
+        self.last_details.as_ref()
+    }
+
+    /// Returns the cached cover art path.
+    #[must_use]
+    pub fn cover_path(&self) -> Option<&str> {
+        self.cover.path.as_deref()
+    }
+
+    /// Returns the active settle window, if armed.
+    #[must_use]
+    pub fn settle(&self) -> Option<&SettleWindow> {
+        self.settle.as_ref()
+    }
 }
 
 #[cfg(feature = "ui")]

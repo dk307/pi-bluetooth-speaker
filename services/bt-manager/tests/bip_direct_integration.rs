@@ -913,13 +913,13 @@ fn bip_channel_for_builds_matching_transport_impl() {
     // downcast; assert each variant against the equivalent direct constructor.
     let _ = bip_channel_for(BipTransport::SdpRfcomm);
     let rfcomm = RfcommBipChannel::default();
-    assert_eq!(rfcomm.known_channel, None);
+    assert_eq!(rfcomm.known_channel(), None);
 
     let _ = bip_channel_for(BipTransport::RfcommChannel(27));
     let rfcomm = RfcommBipChannel::with_known_channel(27);
-    assert_eq!(rfcomm.known_channel, Some(27));
+    assert_eq!(rfcomm.known_channel(), Some(27));
 
     let _ = bip_channel_for(BipTransport::L2capPsm(4097));
     let l2cap = L2capBipChannel::new(4097);
-    assert_eq!(l2cap.psm, 4097);
+    assert_eq!(l2cap.psm(), 4097);
 }
