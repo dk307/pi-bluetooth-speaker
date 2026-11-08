@@ -880,11 +880,15 @@ async fn get_times_out_when_peer_stops_responding() {
 #[tokio::test]
 async fn connect_times_out_when_peer_stops_responding() {
     let (mut client, _server) = silent_client();
-    let error = with_obex_timeout("OBEX CONNECT", OBEX_CONNECT_TIMEOUT, async {
-        client
-            .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
-            .await
-    })
+    let error = with_obex_timeout(
+        "OBEX CONNECT",
+        std::time::Duration::from_millis(100),
+        async {
+            client
+                .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
+                .await
+        },
+    )
     .await
     .expect_err("the unresponsive peer must time out");
     assert!(
@@ -896,9 +900,11 @@ async fn connect_times_out_when_peer_stops_responding() {
 #[tokio::test]
 async fn keepalive_times_out_when_peer_stops_responding() {
     let (mut client, _server) = silent_client();
-    let error = with_obex_timeout("OBEX SETPATH", OBEX_KEEPALIVE_TIMEOUT, async {
-        client.set_path_root().await
-    })
+    let error = with_obex_timeout(
+        "OBEX SETPATH",
+        std::time::Duration::from_millis(100),
+        async { client.set_path_root().await },
+    )
     .await
     .expect_err("the unresponsive peer must time out");
     assert!(

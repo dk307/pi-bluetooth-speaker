@@ -346,24 +346,35 @@ impl BluetoothControllerInfo {
 }
 
 /// Runs `hciconfig <adapter> version` with a hard deadline, capturing stdout.
-/// Hard deadline for external probe commands (production). Shrunk under
-/// `cfg(test)` so the timeout path is testable in real time.
+/// Hard deadline for external probe commands (production). The value is
+/// unconditional: host tests inject their own short deadlines via
+/// [`run_probe_command_with_deadline`], so no build (including
+/// `--features test-util`) ever sees shrunk production behavior.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn probe_timeout() -> Duration {
-    if cfg!(any(test, feature = "test-util")) {
-        Duration::from_millis(150)
-    } else {
-        PROBE_TIMEOUT
-    }
-}
-
 /// Spawns an external command with a deadline timeout and returns its stdout.
+///
+/// Uses the production [`PROBE_TIMEOUT`]; host tests that need a short,
+/// real-time deadline should call [`run_probe_command_with_deadline`].
 ///
 /// # Errors
 ///
 /// Returns [`std::io::Error`] if the program fails to spawn, times out, or exits with a non-zero status.
 pub fn run_probe_command(program: &str, args: &[&str]) -> Result<String, std::io::Error> {
+    run_probe_command_with_deadline(program, args, PROBE_TIMEOUT)
+}
+
+/// Spawns an external command with an explicit deadline timeout and returns
+/// its stdout.
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] if the program fails to spawn, times out, or exits with a non-zero status.
+pub fn run_probe_command_with_deadline(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, std::io::Error> {
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
     let mut child = Command::new(program)
@@ -371,7 +382,7 @@ pub fn run_probe_command(program: &str, args: &[&str]) -> Result<String, std::io
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    let deadline = Instant::now() + probe_timeout();
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -2942,7 +2953,7 @@ pub mod test_helpers {
     pub use super::{
         DbusClient, ManagedObjects, is_no_such_unit_error, is_service_absent_error,
         is_service_absent_fdo_error, is_unknown_method_error, parse_hciconfig_version,
-        run_probe_command,
+        run_probe_command, run_probe_command_with_deadline,
     };
     pub use crate::transport::format_volume_bytes;
     use speaker_common::runtime::FromJoinError;

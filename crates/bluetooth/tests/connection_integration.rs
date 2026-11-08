@@ -1,6 +1,8 @@
 //! Integration tests for Bluetooth connection probing and D-Bus method error classification.
 
-use speaker_bluetooth::bluetooth_test_helpers::{is_unknown_method_error, run_probe_command};
+use speaker_bluetooth::bluetooth_test_helpers::{
+    is_unknown_method_error, run_probe_command, run_probe_command_with_deadline,
+};
 
 /// Builds a `MethodError` the way zbus surfaces remote method failures.
 fn method_error(name: &str) -> zbus::Error {
@@ -66,8 +68,12 @@ fn run_probe_command_rejects_missing_binary() {
 
 #[test]
 fn run_probe_command_kills_on_timeout() {
-    let error = run_probe_command("sh", &["-c", "sleep 5"])
-        .expect_err("an unresponsive probe must time out");
+    let error = run_probe_command_with_deadline(
+        "sh",
+        &["-c", "sleep 5"],
+        std::time::Duration::from_millis(150),
+    )
+    .expect_err("an unresponsive probe must time out");
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
 }
 

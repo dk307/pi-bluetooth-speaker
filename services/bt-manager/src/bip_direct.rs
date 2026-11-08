@@ -339,31 +339,47 @@ pub trait BipChannel: Send + Sync {
 /// SDP); host tests inject a scripted core so the channel assembly logic —
 /// SDP-vs-known-channel selection, address construction, error mapping — is
 /// exercised without any Bluetooth hardware.
-#[async_trait::async_trait]
-pub trait BipSocketCore: Send + Sync {
-    /// SDP lookup of the BIP Image Pull RFCOMM channel (`None` when the
-    /// device publishes no such service record).
-    #[expect(
-        clippy::double_must_use,
-        reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
-    )]
-    async fn sdp_bip_rfcomm_channel(&self, address: &str) -> Result<Option<u8>, BipError>;
+mod bip_socket_core {
+    use super::{BipError, BipStream, BtAddress};
 
-    /// Connects an RFCOMM stream to the given server channel.
-    #[expect(
-        clippy::double_must_use,
-        reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
-    )]
-    async fn connect_rfcomm(&self, address: &BtAddress, channel: u8)
-    -> Result<BipStream, BipError>;
+    #[async_trait::async_trait]
+    pub trait BipSocketCore: Send + Sync {
+        /// SDP lookup of the BIP Image Pull RFCOMM channel (`None` when the
+        /// device publishes no such service record).
+        #[expect(
+            clippy::double_must_use,
+            reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
+        )]
+        async fn sdp_bip_rfcomm_channel(&self, address: &str) -> Result<Option<u8>, BipError>;
 
-    /// Connects an L2CAP (ERTM) stream to the given PSM.
-    #[expect(
-        clippy::double_must_use,
-        reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
-    )]
-    async fn connect_l2cap(&self, address: &BtAddress, psm: u16) -> Result<BipStream, BipError>;
+        /// Connects an RFCOMM stream to the given server channel.
+        #[expect(
+            clippy::double_must_use,
+            reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
+        )]
+        async fn connect_rfcomm(
+            &self,
+            address: &BtAddress,
+            channel: u8,
+        ) -> Result<BipStream, BipError>;
+
+        /// Connects an L2CAP (ERTM) stream to the given PSM.
+        #[expect(
+            clippy::double_must_use,
+            reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
+        )]
+        async fn connect_l2cap(&self, address: &BtAddress, psm: u16)
+        -> Result<BipStream, BipError>;
+    }
 }
+
+// Internal transport seam: `pub(crate)` in production builds; `pub` only when
+// `test-util` is enabled so the moved `tests/bip_direct_integration.rs` suite
+// can inject scripted cores without widening the public API surface.
+#[cfg(not(any(test, feature = "test-util")))]
+pub(crate) use bip_socket_core::BipSocketCore;
+#[cfg(any(test, feature = "test-util"))]
+pub use bip_socket_core::BipSocketCore;
 
 /// Production [`BipSocketCore`]: real bluer sockets and real SDP queries.
 #[derive(Debug, Default, Clone, Copy)]
@@ -659,32 +675,22 @@ const _: () = {
     assert!(OBEX_AOSP_MAX_PACKET_LENGTH >= obex_protocol::packet::MINIMUM_PACKET_LENGTH);
 };
 
-/// Builds an OBEX client tuned for the phone's AVRCP cover-art server.
-///
-/// Enables Single Response Mode (GOEP 2.0) so multi-packet GET responses
-/// stream back-to-back instead of stopping after every 0x90 Continue frame
-/// to wait for a client continuation round-trip; the obex-protocol engine
-/// falls back automatically when the responder does not latch SRM.
 /// Deadline for the OBEX CONNECT handshake. obexd's pipeline used an
 /// explicit watchdog; without one a phone that accepts the socket and then
 /// stops responding would wedge the provider worker forever (the ACL link
 /// stays alive while the A2DP stream plays, so the link layer never fires).
-#[cfg(any(test, feature = "test-util"))]
-pub const OBEX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-#[cfg(not(any(test, feature = "test-util")))]
-pub const OBEX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+///
+/// The three OBEX deadlines are unconditional production values: host tests
+/// inject their own short deadlines directly into `with_obex_timeout`, so no
+/// build (including `--features test-util`) ever sees shrunk production
+/// behavior.
+const OBEX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Deadline for a complete OBEX GET (CONNECT-for-GET through final body).
-#[cfg(any(test, feature = "test-util"))]
-pub const OBEX_GET_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-#[cfg(not(any(test, feature = "test-util")))]
-pub const OBEX_GET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const OBEX_GET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Deadline for the keepalive SETPATH round-trip.
-#[cfg(any(test, feature = "test-util"))]
-pub const OBEX_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-#[cfg(not(any(test, feature = "test-util")))]
-pub const OBEX_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const OBEX_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Bounds an OBEX request/response cycle with an application-level deadline.
 ///
@@ -725,6 +731,12 @@ where
     }
 }
 
+/// Builds an OBEX client tuned for the phone's AVRCP cover-art server.
+///
+/// Enables Single Response Mode (GOEP 2.0) so multi-packet GET responses
+/// stream back-to-back instead of stopping after every 0x90 Continue frame
+/// to wait for a client continuation round-trip; the obex-protocol engine
+/// falls back automatically when the responder does not latch SRM.
 #[must_use]
 pub fn cover_art_client<T: AsyncRead + AsyncWrite + Unpin>(stream: T) -> Client<T> {
     Client::new(stream)
