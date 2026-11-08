@@ -209,13 +209,14 @@ fn touch_viewport_golden_hit_testing_play_pause_and_skip() {
     // 1. Hit Play/Pause hero button center.
     // In the 800x480 layout:
     // Top status bar is 60px. Viewport is 60..480.
-    // The transport controls row is centered horizontally around X: 592, Y: 319.
+    // The transport controls row is centered horizontally around X: 592, Y: 200.
+    let test_y = 200.0;
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(592.0, 319.0),
+        position: LogicalPosition::new(592.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(592.0, 319.0),
+        position: LogicalPosition::new(592.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
@@ -234,11 +235,11 @@ fn touch_viewport_golden_hit_testing_play_pause_and_skip() {
 
     // 2. Rapid tap debounce: tapping again immediately (<300ms) should be ignored
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(592.0, 319.0),
+        position: LogicalPosition::new(592.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(592.0, 319.0),
+        position: LogicalPosition::new(592.0, test_y),
         button: PointerEventButton::Left,
     });
     assert!(
@@ -246,26 +247,26 @@ fn touch_viewport_golden_hit_testing_play_pause_and_skip() {
         "Rapid tap within 300ms debounce interval must be ignored"
     );
 
-    // 3. Hit Previous Track button (approx X: 477, Y: 319)
+    // 3. Hit Previous Track button (approx X: 477, Y: 200)
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(477.0, 319.0),
+        position: LogicalPosition::new(477.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(477.0, 319.0),
+        position: LogicalPosition::new(477.0, test_y),
         button: PointerEventButton::Left,
     });
     let drained_prev = commands.drain();
     assert_eq!(drained_prev.len(), 1);
     assert_eq!(drained_prev[0], TransportCommand::PreviousTrack);
 
-    // 4. Hit Next Track button (approx X: 707, Y: 319)
+    // 4. Hit Next Track button (approx X: 707, Y: 200)
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(707.0, 319.0),
+        position: LogicalPosition::new(707.0, test_y),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(707.0, 319.0),
+        position: LogicalPosition::new(707.0, test_y),
         button: PointerEventButton::Left,
     });
     let drained_next = commands.drain();

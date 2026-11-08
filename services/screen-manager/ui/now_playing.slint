@@ -286,11 +286,11 @@ export component NowPlayingView inherits Rectangle {
         // Right Column: Track Info, Scrubber & Transport
         VerticalLayout {
             alignment: start;
-            padding-top: 28px;
+            padding-top: 0px;
             padding-bottom: 0px;
             spacing: 0px;
 
-            // Track metadata & live playback wave
+            // Track metadata & live playback wave (fixed at top)
             VerticalLayout {
                 spacing: 8px;
 
@@ -324,189 +324,189 @@ export component NowPlayingView inherits Rectangle {
                 }
             }
 
-            // More gap between the singer and position bar
-            Rectangle {
-                height: 48px;
-            }
-
-            // Playback progress bar (Read-only, sleek audiophile pill)
-            HorizontalLayout {
-                height: 24px;
-                spacing: 16px;
-
-                Text {
-                    text: root.position_text;
-                    font-size: 18px;
-                    font-weight: 800;
-                    color: Theme.active.text_primary;
-                    vertical-alignment: center;
-                    width: 58px;
-                    horizontal-alignment: right;
-                }
-
-                Rectangle {
-                    horizontal-stretch: 1;
-                    height: 24px;
-                    background: transparent;
-
-                    // Background track (Vertically centered)
-                    track := Rectangle {
-                        x: 0px;
-                        y: (parent.height - self.height) / 2;
-                        width: parent.width;
-                        height: 10px;
-                        background: #1c2430;
-                        border-radius: 5px;
-                        clip: true;
-
-                        // Filled played position bar
-                        Rectangle {
-                            x: 0px;
-                            y: 0px;
-                            width: root.duration_ms > 0 ? (parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio))) : 0px;
-                            height: parent.height;
-                            background: Theme.active.primary_accent;
-                        }
-                    }
-                }
-
-                Text {
-                    text: root.duration_text;
-                    font-size: 18px;
-                    font-weight: 800;
-                    color: Theme.active.text_muted;
-                    vertical-alignment: center;
-                    width: 58px;
-                    horizontal-alignment: left;
-                }
-            }
-
-            // Spacing to position the transport buttons half way between position bar and setting button
-            Rectangle {
-                height: 44px;
-            }
-
-            // Transport controls row (Larger touch targets & Peppy graphics)
-            HorizontalLayout {
+            // Progress bar + Transport controls: centered in remaining space
+            // with progress bar in upper half, transport row in lower half.
+            // This dynamically positions transport halfway between progress bar
+            // and the bottom-right Settings button (y: parent.height - 72).
+            VerticalLayout {
+                vertical-stretch: 1;
                 alignment: center;
-                spacing: 36px;
+                spacing: 24px;
 
-                // Previous Button (72px, vertically centered with 86px hero button)
-                VerticalLayout {
-                    alignment: center;
+                // Playback progress bar (Read-only, sleek audiophile pill)
+                HorizontalLayout {
+                    height: 24px;
+                    spacing: 16px;
+
+                    Text {
+                        text: root.position_text;
+                        font-size: 18px;
+                        font-weight: 800;
+                        color: Theme.active.text_primary;
+                        vertical-alignment: center;
+                        width: 58px;
+                        horizontal-alignment: right;
+                    }
+
                     Rectangle {
-                        width: 72px;
-                        height: 72px;
-                        border-radius: 36px;
-                        background: Theme.active.card_surface;
-                        border-width: 1px;
-                        border-color: Theme.active.card_border;
-                        opacity: !root.transport_available ? 0.35 : (touch_prev.pressed ? 0.7 : 1.0);
-                        animate opacity { duration: 80ms; easing: ease-out; }
+                        horizontal-stretch: 1;
+                        height: 24px;
+                        background: transparent;
 
-                        VerticalLayout {
-                            alignment: center;
-                            HorizontalLayout {
-                                alignment: center;
+                        // Background track (Vertically centered)
+                        track := Rectangle {
+                            x: 0px;
+                            y: (parent.height - self.height) / 2;
+                            width: parent.width;
+                            height: 10px;
+                            background: #1c2430;
+                            border-radius: 5px;
+                            clip: true;
 
-                                Image {
-                                    source: @image-url("../../../assets/icons/previous.svg");
-                                    colorize: Theme.active.text_primary;
-                                    width: 24px;
-                                    height: 24px;
-                                    image-fit: contain;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-
-                        touch_prev := TouchArea {
-                            enabled: root.transport_available;
-                            clicked => {
-                                root.previous_track();
+                            // Filled played position bar
+                            Rectangle {
+                                x: 0px;
+                                y: 0px;
+                                width: root.duration_ms > 0 ? (parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio))) : 0px;
+                                height: parent.height;
+                                background: Theme.active.primary_accent;
                             }
                         }
                     }
-                }
 
-                // Play / Pause (Hero Button 86px, vertically centered)
-                VerticalLayout {
-                    alignment: center;
-                    Rectangle {
-                        width: 86px;
-                        height: 86px;
-                        border-radius: 43px;
-                        background: Theme.active.primary_accent;
-                        opacity: !root.transport_available ? 0.35 : (touch_play.pressed ? 0.8 : 1.0);
-                        animate opacity { duration: 80ms; easing: ease-out; }
-
-                        VerticalLayout {
-                            alignment: center;
-                            HorizontalLayout {
-                                alignment: center;
-
-                                if root.is_playing : Image {
-                                    source: @image-url("../../../assets/icons/pause.svg");
-                                    colorize: Theme.active.dock_active_text;
-                                    width: 24px;
-                                    height: 30px;
-                                    image-fit: contain;
-                                    vertical-alignment: center;
-                                }
-
-                                if !root.is_playing : Image {
-                                    source: @image-url("../../../assets/icons/play.svg");
-                                    colorize: Theme.active.dock_active_text;
-                                    width: 26px;
-                                    height: 30px;
-                                    image-fit: contain;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-
-                        touch_play := TouchArea {
-                            enabled: root.transport_available;
-                            clicked => {
-                                root.toggle_play_pause();
-                            }
-                        }
+                    Text {
+                        text: root.duration_text;
+                        font-size: 18px;
+                        font-weight: 800;
+                        color: Theme.active.text_muted;
+                        vertical-alignment: center;
+                        width: 58px;
+                        horizontal-alignment: left;
                     }
                 }
 
-                // Next Button (72px, vertically centered with 86px hero button)
-                VerticalLayout {
+                // Transport controls row (Larger touch targets & Peppy graphics)
+                HorizontalLayout {
                     alignment: center;
-                    Rectangle {
-                        width: 72px;
-                        height: 72px;
-                        border-radius: 36px;
-                        background: Theme.active.card_surface;
-                        border-width: 1px;
-                        border-color: Theme.active.card_border;
-                        opacity: !root.transport_available ? 0.35 : (touch_next.pressed ? 0.7 : 1.0);
-                        animate opacity { duration: 80ms; easing: ease-out; }
+                    spacing: 36px;
 
-                        VerticalLayout {
-                            alignment: center;
-                            HorizontalLayout {
+                    // Previous Button (72px, vertically centered with 86px hero button)
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 72px;
+                            height: 72px;
+                            border-radius: 36px;
+                            background: Theme.active.card_surface;
+                            border-width: 1px;
+                            border-color: Theme.active.card_border;
+                            opacity: !root.transport_available ? 0.35 : (touch_prev.pressed ? 0.7 : 1.0);
+                            animate opacity { duration: 80ms; easing: ease-out; }
+
+                            VerticalLayout {
                                 alignment: center;
+                                HorizontalLayout {
+                                    alignment: center;
 
-                                Image {
-                                    source: @image-url("../../../assets/icons/next.svg");
-                                    colorize: Theme.active.text_primary;
-                                    width: 24px;
-                                    height: 24px;
-                                    image-fit: contain;
-                                    vertical-alignment: center;
+                                    Image {
+                                        source: @image-url("../../../assets/icons/previous.svg");
+                                        colorize: Theme.active.text_primary;
+                                        width: 24px;
+                                        height: 24px;
+                                        image-fit: contain;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            touch_prev := TouchArea {
+                                enabled: root.transport_available;
+                                clicked => {
+                                    root.previous_track();
                                 }
                             }
                         }
+                    }
 
-                        touch_next := TouchArea {
-                            enabled: root.transport_available;
-                            clicked => {
-                                root.next_track();
+                    // Play / Pause (Hero Button 86px, vertically centered)
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 86px;
+                            height: 86px;
+                            border-radius: 43px;
+                            background: Theme.active.primary_accent;
+                            opacity: !root.transport_available ? 0.35 : (touch_play.pressed ? 0.8 : 1.0);
+                            animate opacity { duration: 80ms; easing: ease-out; }
+
+                            VerticalLayout {
+                                alignment: center;
+                                HorizontalLayout {
+                                    alignment: center;
+
+                                    if root.is_playing : Image {
+                                        source: @image-url("../../../assets/icons/pause.svg");
+                                        colorize: Theme.active.dock_active_text;
+                                        width: 24px;
+                                        height: 30px;
+                                        image-fit: contain;
+                                        vertical-alignment: center;
+                                    }
+
+                                    if !root.is_playing : Image {
+                                        source: @image-url("../../../assets/icons/play.svg");
+                                        colorize: Theme.active.dock_active_text;
+                                        width: 26px;
+                                        height: 30px;
+                                        image-fit: contain;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            touch_play := TouchArea {
+                                enabled: root.transport_available;
+                                clicked => {
+                                    root.toggle_play_pause();
+                                }
+                            }
+                        }
+                    }
+
+                    // Next Button (72px, vertically centered with 86px hero button)
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 72px;
+                            height: 72px;
+                            border-radius: 36px;
+                            background: Theme.active.card_surface;
+                            border-width: 1px;
+                            border-color: Theme.active.card_border;
+                            opacity: !root.transport_available ? 0.35 : (touch_next.pressed ? 0.7 : 1.0);
+                            animate opacity { duration: 80ms; easing: ease-out; }
+
+                            VerticalLayout {
+                                alignment: center;
+                                HorizontalLayout {
+                                    alignment: center;
+
+                                    Image {
+                                        source: @image-url("../../../assets/icons/next.svg");
+                                        colorize: Theme.active.text_primary;
+                                        width: 24px;
+                                        height: 24px;
+                                        image-fit: contain;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            touch_next := TouchArea {
+                                enabled: root.transport_available;
+                                clicked => {
+                                    root.next_track();
+                                }
                             }
                         }
                     }

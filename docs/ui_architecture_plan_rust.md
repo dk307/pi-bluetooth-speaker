@@ -123,7 +123,7 @@ The display is organized into two primary functional zones, maximizing screen re
 
 2. **Main Viewport (Height: 420px):**
    - Expanded to occupy all remaining vertical space ($480\text{px} - 60\text{px} = 420\text{px}$).
-   - **Default Screen — Now Playing (`Tab 0`):** Features enlarged 340×340px cover art / vinyl disc box, dual-marquee track title, artist typography, read-only scrubber bar, large transport touch controls (Previous, Play/Pause hero button, Next), and a dedicated circular **Settings button (`config.svg`)** anchored in the right-bottom corner.
+   - **Default Screen — Now Playing (`Tab 0`):** Features enlarged 360×360px cover art / vinyl disc box, dual-marquee track title, artist typography, read-only scrubber bar, large transport touch controls (Previous, Play/Pause hero button, Next), and a dedicated circular **Settings button (`config.svg`)** anchored in the right-bottom corner.
    - **Settings Hub Screen (`Tab 5`):** Navigated to via the right-bottom Settings button. Features:
      - Header with "APPLIANCE SETTINGS" title and "← Back" button returning to Now Playing.
      - Subsystem icon navigation cards:
