@@ -747,9 +747,10 @@ fn evaluate_divergent_device(
     None
 }
 
-/// Executes decided actions with a specified settle delay, incrementing `hard_resets_attempted`
-/// on `tracked` whenever a `Disconnect -> Connect` cycle is attempted (governing both successful
-/// and failing cycle attempts to prevent thrashing).
+/// Executes decided actions with a specified settle delay.
+///
+/// Increments `hard_resets_attempted` on `tracked` whenever a `Disconnect -> Connect`
+/// cycle is attempted (governing both successful and failing attempts to prevent thrashing).
 pub async fn execute_reconcile_actions_with_settle<D: ReconcilerDbus, S: BuildHasher>(
     tracked: &mut HashMap<Box<str>, DeviceWatchState, S>,
     dbus: &D,
