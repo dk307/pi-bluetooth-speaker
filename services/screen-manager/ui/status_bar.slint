@@ -81,85 +81,25 @@ export component TopStatusBar inherits Rectangle {
                 VerticalLayout {
                     alignment: center;
                     Rectangle {
+                        // Fixed size so codec name changes never shift neighbors.
+                        width: 120px;
                         height: 40px;
                         background: Theme.active.card_surface;
                         border-radius: 10px;
                         border-width: 1px;
                         border-color: Theme.active.card_border;
 
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-
-                            Text {
-                                text: root.stream_codec;
-                                color: Theme.active.primary_accent;
-                                font-size: 16px;
-                                font-weight: 800;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        TouchArea {
-                            clicked => {
-                                root.protocol_clicked();
-                            }
-                        }
-                    }
-                }
-
-                // 2. Sample Rate Badge (Displayed only for codecs where specifications can vary)
-                if root.show_stream_specs && root.stream_sample_rate != "" : VerticalLayout {
-                    alignment: center;
-                    Rectangle {
-                        height: 40px;
-                        background: Theme.active.card_surface;
-                        border-radius: 10px;
-                        border-width: 1px;
-                        border-color: Theme.active.card_border;
-
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-
-                            Text {
-                                text: root.stream_sample_rate;
-                                color: Theme.active.secondary_accent;
-                                font-size: 15px;
-                                font-weight: 800;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        TouchArea {
-                            clicked => {
-                                root.protocol_clicked();
-                            }
-                        }
-                    }
-                }
-
-                // 3. Bit Depth Badge (Displayed only for codecs where specifications can vary)
-                if root.show_stream_specs && root.stream_bit_depth != "" : VerticalLayout {
-                    alignment: center;
-                    Rectangle {
-                        height: 40px;
-                        background: Theme.active.card_surface;
-                        border-radius: 10px;
-                        border-width: 1px;
-                        border-color: Theme.active.card_border;
-
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-
-                            Text {
-                                text: root.stream_bit_depth;
-                                color: Theme.active.secondary_accent;
-                                font-size: 15px;
-                                font-weight: 800;
-                                vertical-alignment: center;
-                            }
+                        Text {
+                            width: parent.width - 12px;
+                            height: parent.height;
+                            x: (parent.width - self.width) / 2;
+                            text: root.stream_codec;
+                            color: Theme.active.primary_accent;
+                            font-size: 16px;
+                            font-weight: 800;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            overflow: elide;
                         }
 
                         TouchArea {
@@ -174,11 +114,15 @@ export component TopStatusBar inherits Rectangle {
                 VerticalLayout {
                     alignment: center;
                     Rectangle {
+                        // Fixed width (icon + spacing + 3-digit value) so the
+                        // volume readout never shifts neighbors as it changes.
+                        width: 100px;
                         height: 52px;
                         background: transparent;
 
                         HorizontalLayout {
                             spacing: 8px;
+                            alignment: start;
 
                             if !root.is_muted && root.vol_level == 0 : Image {
                                 source: @image-url("../../../assets/icons/volume-0.svg");
@@ -212,6 +156,7 @@ export component TopStatusBar inherits Rectangle {
                             }
 
                             if !root.is_muted : Text {
+                                width: 48px;
                                 text: Math.round(root.volume_value);
                                 color: Theme.active.secondary_accent;
                                 font-size: 20px;

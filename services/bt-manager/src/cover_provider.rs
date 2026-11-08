@@ -258,6 +258,14 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// CPU on tight polling.
 const COVER_FALLBACK_POLL: Duration = Duration::from_secs(15);
 
+/// Initial retry interval when a connected peer has not yet advertised an `ImgHandle`
+/// (e.g. initial connection where the BIP OBEX session was just established and `BlueZ`
+/// or the phone is populating track metadata).
+const INITIAL_HANDLE_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Maximum number of fast retries before settling back to [`COVER_FALLBACK_POLL`].
+const MAX_INITIAL_HANDLE_RETRIES: u32 = 4;
+
 /// Backoff applied after a failed cover fetch/publish for a handle.
 ///
 /// A failing attempt (unwritable or full cache dir, peer returning truncated
@@ -335,6 +343,12 @@ struct CoverArtWorker {
     suppress_retry: Option<(Box<str>, Instant)>,
     /// Session-scoped handle cache; purged on every session generation change.
     session_cache: SessionCoverCache,
+    /// Last observed (title, artist) to reset retry budget on track changes.
+    last_track: Option<(Box<str>, Box<str>)>,
+    /// Fast retry counter for initial connection handle resolution.
+    missing_handle_retries: u32,
+    /// Pending deadline for fast handle retry.
+    pending_retry: Option<Instant>,
     /// Shutdown signal receiver.
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
 }
@@ -360,6 +374,9 @@ impl CoverArtWorker {
             track_change_at: None,
             suppress_retry: None,
             session_cache: SessionCoverCache::new(),
+            last_track: None,
+            missing_handle_retries: 0,
+            pending_retry: None,
             shutdown_rx,
         }
     }
@@ -396,41 +413,86 @@ impl CoverArtWorker {
         self.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
     }
 
-    async fn process_playback(&mut self, playback: BtPlaybackState) {
-        let Some(address) = playback.device_address else {
-            self.deactivate("playback has no device address").await;
-            return;
-        };
-        // No ObexPort: fall back to SDP discovery of the BIP RFCOMM channel,
-        // mirroring obexd, which queries SDP when the phone publishes no PSM.
-        let transport = classify_obex_port(playback.obex_port);
-        if let Err(e) = self.keeper.ensure(&address, &transport).await {
+    /// Clears published artwork and arms a fast retry when a connected peer has
+    /// not yet provided an `ImgHandle` (e.g. during initial connection).
+    async fn handle_missing_image_handle(&mut self) {
+        self.clear_published("track has no ImgHandle").await;
+        if self.missing_handle_retries < MAX_INITIAL_HANDLE_RETRIES {
+            self.missing_handle_retries = self.missing_handle_retries.saturating_add(1);
+            let delay = INITIAL_HANDLE_RETRY_INTERVAL.saturating_mul(self.missing_handle_retries);
+            tracing::debug!(
+                attempt = self.missing_handle_retries,
+                delay_ms = delay.as_millis() as u64,
+                "scheduling fast retry for initial ImgHandle"
+            );
+            self.pending_retry = Some(Instant::now() + delay);
+        }
+    }
+
+    /// Ensures the active BIP session for `address`, purging session cache on epoch changes
+    /// and re-querying playback status if the handle was initially missing.
+    async fn ensure_bip_session(
+        &mut self,
+        address: &BtAddress,
+        transport: &BipTransport,
+        playback: &mut BtPlaybackState,
+    ) -> Option<u64> {
+        let prev_epoch = self.keeper.epoch();
+        if let Err(e) = self.keeper.ensure(address, transport).await {
             tracing::warn!(
                 error = e.summary(),
                 address = %address.to_string(),
                 "BIP session ensure failed; retrying next tick"
             );
-            return;
+            return None;
         }
-        // A session change invalidates every cached handle (handles are only
-        // unique within one OBEX session, per AVRCP ESR10).
         let epoch = self.keeper.epoch();
         if epoch != self.session_cache.epoch {
             self.session_cache.purge(epoch);
             tracing::debug!(epoch, "cover-art session cache purged after session change");
         }
         if self.keepalive_deadline.is_none() {
-            // The establish itself is OBEX traffic; start the idle timer.
             self.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
         }
-        let Some(handle) = playback.image_handle else {
-            // The track lost its artwork (or never had any): the published
-            // state must not keep serving the previous track's JPEG. The
-            // BIP session stays alive so the next track's handle advertises
-            // without a full re-establishment.
-            self.clear_published("track has no ImgHandle").await;
+        if epoch != prev_epoch && playback.image_handle.is_none() {
+            match self.source.status().await {
+                Ok(Some(refreshed)) => *playback = refreshed,
+                Ok(None) => tracing::debug!("no updated playback during post-session re-query"),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "failed to re-query playback status after BIP session establishment"
+                ),
+            }
+        }
+        Some(epoch)
+    }
+
+    async fn process_playback(&mut self, playback: BtPlaybackState) {
+        let Some(address) = playback.device_address else {
+            self.deactivate("playback has no device address").await;
             return;
         };
+        let current_track = (playback.title.clone(), playback.artist.clone());
+        if self.last_track.as_ref() != Some(&current_track) {
+            self.last_track = Some(current_track);
+            self.missing_handle_retries = 0;
+            self.pending_retry = None;
+        }
+
+        let transport = classify_obex_port(playback.obex_port);
+        let mut playback = playback;
+        let Some(epoch) = self
+            .ensure_bip_session(&address, &transport, &mut playback)
+            .await
+        else {
+            return;
+        };
+        let Some(handle) = playback.image_handle else {
+            self.handle_missing_image_handle().await;
+            return;
+        };
+        self.missing_handle_retries = 0;
+        self.pending_retry = None;
         // Defense in depth: AOSP handles are exactly 7 digits; anything else
         // is peer garbage and must never reach an OBEX GET (the disk write is
         // already guarded by `validate_bip_handle` inside
@@ -644,6 +706,9 @@ impl CoverArtWorker {
         self.keeper.release();
         self.session_cache.purge(self.keeper.epoch());
         self.keepalive_deadline = None;
+        self.last_track = None;
+        self.missing_handle_retries = 0;
+        self.pending_retry = None;
         self.clear_published(reason).await;
     }
 
@@ -686,6 +751,16 @@ impl CoverArtWorker {
             tokio::select! {
                 () = tokio::time::sleep(COVER_FALLBACK_POLL) => self.poll_once().await,
                 () = self.wake.notified() => self.poll_once().await,
+                () = async {
+                    if let Some(deadline) = self.pending_retry {
+                        tokio::time::sleep_until(deadline.into()).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    self.pending_retry = None;
+                    self.poll_once().await;
+                }
                 // Idle keepalive: fires only when no signal or fallback poll
                 // beat it to the loop, and its deadline is rearm-armed after
                 // every real OBEX transaction.
@@ -893,12 +968,18 @@ async fn spawn_track_signal_listener(wake: Arc<Notify>) {
 #[derive(Debug, Clone)]
 pub struct CoverArtShutdown {
     tx: tokio::sync::watch::Sender<bool>,
+    wake: Arc<Notify>,
 }
 
 impl CoverArtShutdown {
     /// Triggers graceful shutdown of the cover-art worker.
     pub fn shutdown(&self) {
         let _ = self.tx.send(true);
+    }
+
+    /// Wakes the cover-art worker to execute a poll cycle immediately.
+    pub fn wake(&self) {
+        self.wake.notify_one();
     }
 }
 
@@ -915,7 +996,11 @@ pub fn spawn_production(
     bt: &BluetoothDevice,
 ) -> Result<CoverArtShutdown, String> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let shutdown_handle = CoverArtShutdown { tx: shutdown_tx };
+    let wake = Arc::new(Notify::new());
+    let shutdown_handle = CoverArtShutdown {
+        tx: shutdown_tx,
+        wake: Arc::clone(&wake),
+    };
 
     let source = DevicePlaybackSource { bt: bt.clone() };
     std::thread::Builder::new()
@@ -954,7 +1039,6 @@ pub fn spawn_production(
                     object = COVER_ART_OBJECT_PATH,
                     "cover-art D-Bus service published"
                 );
-                let wake = Arc::new(Notify::new());
                 spawn_track_signal_listener(Arc::clone(&wake)).await;
                 let mut worker = CoverArtWorker::new(
                     Box::new(source),
@@ -1924,5 +2008,90 @@ mod tests {
         );
         assert_eq!(harness.counters.releases(), 0, "BIP session stays held");
         assert_eq!(harness.counters.fetches(), 1, "no fetch for peer garbage");
+    }
+
+    #[tokio::test]
+    async fn initial_connection_retries_fast_until_handle_appears() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        // First poll: peer just connected, no ImgHandle yet.
+        harness.script(scripted_playback(None));
+        // Immediate re-query right after ensure still has no ImgHandle.
+        harness.script(scripted_playback(None));
+        // Next poll (fast retry): ImgHandle now present.
+        harness.script(scripted_playback(Some("7654321")));
+        let mut worker = harness.worker(None);
+
+        worker.poll_once().await;
+        assert_eq!(harness.state.get().handle(), None);
+        assert_eq!(worker.missing_handle_retries, 1);
+        assert!(worker.pending_retry.is_some());
+
+        // Second poll (as if pending_retry fired)
+        worker.poll_once().await;
+        assert_eq!(harness.state.get().handle(), Some("7654321"));
+        assert_eq!(worker.missing_handle_retries, 0);
+        assert!(worker.pending_retry.is_none());
+    }
+
+    #[tokio::test]
+    async fn initial_connection_re_queries_after_new_bip_session() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        // When process_playback starts, initial snapshot has no ImgHandle.
+        // But the new session establishment prompts an immediate re-query,
+        // which returns the handle right away!
+        harness.script(scripted_playback(None));
+        harness.script(scripted_playback(Some("1234567")));
+        let mut worker = harness.worker(None);
+
+        worker.poll_once().await;
+        assert_eq!(harness.state.get().handle(), Some("1234567"));
+        assert_eq!(harness.counters.ensures(), 1);
+        assert_eq!(harness.counters.fetches(), 1);
+        assert_eq!(worker.missing_handle_retries, 0);
+    }
+
+    #[tokio::test]
+    async fn cover_art_shutdown_wake_notifies_listener() {
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        let wake = Arc::new(Notify::new());
+        let handle = CoverArtShutdown {
+            tx: shutdown_tx,
+            wake: Arc::clone(&wake),
+        };
+        handle.wake();
+        tokio::time::timeout(Duration::from_millis(100), wake.notified())
+            .await
+            .expect("wake() must notify wake");
+    }
+
+    #[tokio::test]
+    async fn track_change_resets_missing_handle_retries_budget() {
+        let mut harness = TestHarness::new(JPEG_BYTES);
+        let mut track1 = test_playback(None);
+        track1.title = "Track 1".into();
+        let mut track2 = test_playback(None);
+        track2.title = "Track 2".into();
+
+        // Script 1 & 2: initial poll plus immediate post-session re-query
+        harness.script(Ok(Some(track1.clone())));
+        harness.script(Ok(Some(track1.clone())));
+        // Script 3: second poll for Track 1
+        harness.script(Ok(Some(track1.clone())));
+        // Script 4: Track 2 arrives
+        harness.script(Ok(Some(track2.clone())));
+        let mut worker = harness.worker(None);
+
+        // First poll: initial connection, arms retry attempt 1
+        worker.poll_once().await;
+        assert_eq!(worker.missing_handle_retries, 1);
+
+        // Second poll (Track 1 still): retry attempt 2
+        worker.poll_once().await;
+        assert_eq!(worker.missing_handle_retries, 2);
+
+        // Third poll (Track 2 arrives): retry budget is reset to 0, then attempt 1 for Track 2
+        worker.poll_once().await;
+        assert_eq!(worker.missing_handle_retries, 1);
+        assert_eq!(worker.last_track, Some(("Track 2".into(), track2.artist)));
     }
 }

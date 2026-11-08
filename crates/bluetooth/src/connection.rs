@@ -907,6 +907,45 @@ fn get_track_prop_u32(val: &OwnedValue, key: &str) -> Option<u32> {
     get_track_prop::<u32>(val, key)
 }
 
+/// Inspects managed objects for any `org.bluez.MediaItem1` under `player_path`
+/// that advertises an `ImgHandle` in its `Metadata` dictionary (e.g. from `/NowPlaying`).
+///
+/// Queries `/NowPlaying` first for deterministic selection, then falls back to any
+/// child item path under `player_path` with strict path boundary validation.
+fn find_item_image_handle(
+    objects: &HashMap<OwnedObjectPath, HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>>,
+    player_path: &str,
+) -> Option<Box<str>> {
+    let now_playing_suffix = "/NowPlaying";
+    let mut fallback_handle: Option<Box<str>> = None;
+
+    // Single pass: return /NowPlaying immediately if found, or retain first valid child item fallback.
+    for (obj_path, ifaces) in objects {
+        let path_str = obj_path.as_str();
+        if path_str.strip_prefix(player_path) == Some(now_playing_suffix) {
+            if let Some(item_props) = find_iface(ifaces, "org.bluez.MediaItem1")
+                && let Some(metadata) = item_props.get("Metadata")
+                && let Some(handle) = get_track_prop_str(metadata, "ImgHandle")
+                && !handle.is_empty()
+            {
+                return Some(handle);
+            }
+        } else if fallback_handle.is_none()
+            && path_str
+                .strip_prefix(player_path)
+                .is_some_and(|rem| rem.starts_with('/'))
+            && let Some(item_props) = find_iface(ifaces, "org.bluez.MediaItem1")
+            && let Some(metadata) = item_props.get("Metadata")
+            && let Some(handle) = get_track_prop_str(metadata, "ImgHandle")
+            && !handle.is_empty()
+        {
+            fallback_handle = Some(handle);
+        }
+    }
+
+    fallback_handle
+}
+
 /// Extracts a D-Bus `ay` byte array property (e.g. `BlueALSA` `Volume`).
 fn get_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Box<[u8]>> {
     match props.get(key).map(|v| &**v) {
@@ -1252,6 +1291,10 @@ impl DbusClient {
         path: &str,
         props: &HashMap<String, OwnedValue>,
         devices: &[BtDevice],
+        objects: &HashMap<
+            OwnedObjectPath,
+            HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>,
+        >,
     ) -> BtPlaybackState {
         let status: Box<str> = get_str(props, "Status").unwrap_or("stopped").into();
         let position_ms = get_u32(props, "Position").unwrap_or(0);
@@ -1299,7 +1342,8 @@ impl DbusClient {
         let image_handle = props
             .get("Track")
             .and_then(|track_val| get_track_prop_str(track_val, "ImgHandle"))
-            .filter(|h| !h.is_empty());
+            .filter(|h| !h.is_empty())
+            .or_else(|| find_item_image_handle(objects, path));
 
         BtPlaybackState {
             device_address,
@@ -1437,6 +1481,7 @@ impl DbusClient {
                     path.as_str(),
                     props,
                     &devices,
+                    objects,
                 ));
             }
         }
