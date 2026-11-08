@@ -890,6 +890,25 @@ fn get_track_prop_u32(val: &OwnedValue, key: &str) -> Option<u32> {
     get_track_prop::<u32>(val, key)
 }
 
+/// Inspects managed objects for any `org.bluez.MediaItem1` under `player_path`
+/// that advertises an `ImgHandle` in its `Metadata` dictionary (e.g. from `/NowPlaying`).
+fn find_item_image_handle(
+    objects: &HashMap<OwnedObjectPath, HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>>,
+    player_path: &str,
+) -> Option<Box<str>> {
+    for (obj_path, ifaces) in objects {
+        if obj_path.as_str().starts_with(player_path)
+            && let Some(item_props) = find_iface(ifaces, "org.bluez.MediaItem1")
+            && let Some(metadata) = item_props.get("Metadata")
+            && let Some(handle) = get_track_prop_str(metadata, "ImgHandle")
+            && !handle.is_empty()
+        {
+            return Some(handle);
+        }
+    }
+    None
+}
+
 /// Extracts a D-Bus `ay` byte array property (e.g. `BlueALSA` `Volume`).
 fn get_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Box<[u8]>> {
     match props.get(key).map(|v| &**v) {
@@ -1235,6 +1254,10 @@ impl DbusClient {
         path: &str,
         props: &HashMap<String, OwnedValue>,
         devices: &[BtDevice],
+        objects: &HashMap<
+            OwnedObjectPath,
+            HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>,
+        >,
     ) -> BtPlaybackState {
         let status: Box<str> = get_str(props, "Status").unwrap_or("stopped").into();
         let position_ms = get_u32(props, "Position").unwrap_or(0);
@@ -1282,7 +1305,8 @@ impl DbusClient {
         let image_handle = props
             .get("Track")
             .and_then(|track_val| get_track_prop_str(track_val, "ImgHandle"))
-            .filter(|h| !h.is_empty());
+            .filter(|h| !h.is_empty())
+            .or_else(|| find_item_image_handle(objects, path));
 
         BtPlaybackState {
             device_address,
@@ -1420,6 +1444,7 @@ impl DbusClient {
                     path.as_str(),
                     props,
                     &devices,
+                    objects,
                 ));
             }
         }

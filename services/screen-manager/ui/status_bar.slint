@@ -89,6 +89,7 @@ export component TopStatusBar inherits Rectangle {
 
                         Text {
                             width: parent.width - 12px;
+                            height: parent.height;
                             x: (parent.width - self.width) / 2;
                             text: root.stream_codec;
                             color: Theme.active.primary_accent;
