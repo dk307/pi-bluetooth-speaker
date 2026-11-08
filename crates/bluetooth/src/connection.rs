@@ -22,7 +22,10 @@ use crate::cover_service::CoverSnapshot;
 use speaker_common::runtime::FromJoinError;
 
 use crate::cover_art::{COVER_ART_CACHE_DIR, cover_art_cached_path_in};
-use crate::transport::{BlueAlsaPcm, BtPlaybackState, decode_pcm_format, format_volume_bytes};
+use crate::transport::{
+    BlueAlsaPcm, BtPlaybackState, apply_mute_to_volume_bytes, decode_pcm_format,
+    encode_volume_bytes, format_volume_bytes,
+};
 
 /// Number of octets in a standard Bluetooth MAC address.
 pub const BT_ADDRESS_OCTETS: usize = 6;
@@ -550,6 +553,20 @@ impl BluetoothStatus {
     pub const fn playback_state(&self) -> Option<&BtPlaybackState> {
         self.playback.as_ref()
     }
+}
+
+/// Lightweight adapter, device, and audio-stream snapshot for live UI refresh.
+///
+/// Unlike [`BluetoothStatus`] it skips the `systemd` unit queries and the
+/// `hciconfig` subprocess probe, so it is cheap enough for the 250 ms monitor tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkSnapshot {
+    /// Active local controller adapter, if detected.
+    pub adapter: Option<BtAdapter>,
+    /// Known remote devices.
+    pub devices: Box<[BtDevice]>,
+    /// Active `BlueALSA` audio PCM streams.
+    pub pcms: Box<[BlueAlsaPcm]>,
 }
 
 #[derive(Debug)]
@@ -1160,11 +1177,20 @@ impl DbusClient {
 
     pub(crate) fn check_services(&self) -> Result<BluetoothServices, BtError> {
         let manager = SystemdManagerProxyBlocking::new(&self.conn())?;
+        // Check for bt-manager.service (native auto-trust agent + cover art provider),
+        // falling back to legacy bt-agent.service if present.
+        let bt_agent = match self.check_service(&manager, "bt-manager.service")? {
+            s if s.is_active() => s,
+            s => match self.check_service(&manager, "bt-agent.service")? {
+                legacy if legacy.is_active() => legacy,
+                _ => s,
+            },
+        };
         Ok(BluetoothServices {
             bluetoothd: self.check_service(&manager, "bluetooth.service")?,
             bluealsa: self.check_service(&manager, "bluealsa.service")?,
             bluealsa_aplay: self.check_service(&manager, "bluealsa-aplay.service")?,
-            bt_agent: self.check_service(&manager, "bt-agent.service")?,
+            bt_agent,
         })
     }
 
@@ -1575,6 +1601,73 @@ impl DbusClient {
         Ok(pcms)
     }
 
+    fn select_active_pcm(pcms: &[BlueAlsaPcm]) -> Result<&BlueAlsaPcm, BtError> {
+        crate::transport::select_active_pcm(pcms).ok_or_else(|| {
+            BtError::no_active_player("no active BlueALSA PCM stream found on D-Bus")
+        })
+    }
+
+    /// Selects the target `BlueALSA` PCM stream (preferring an actively `running`
+    /// stream, otherwise the first available stream) and encodes its new `Volume`
+    /// (`ay`) byte array for `percent` (`0..=100`, unmuted).
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if no `BlueALSA` PCM stream is present.
+    pub fn resolve_pcm_volume_target(
+        objects: &ManagedObjects,
+        percent: u8,
+    ) -> Result<(Box<str>, Vec<u8>), BtError> {
+        let pcms = Self::parse_bluealsa_objects(objects, &[]);
+        let pcm = Self::select_active_pcm(&pcms)?;
+        let bytes = encode_volume_bytes(pcm.channels, percent, false);
+        Ok((pcm.pcm_path.clone(), bytes))
+    }
+
+    /// Selects the target `BlueALSA` PCM stream and computes its updated `Volume`
+    /// (`ay`) byte array with the mute bit (`0x80`) set or cleared while preserving
+    /// per-channel 7-bit levels.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if no `BlueALSA` PCM stream is present.
+    pub fn resolve_pcm_mute_target(
+        objects: &ManagedObjects,
+        muted: bool,
+    ) -> Result<(Box<str>, Vec<u8>), BtError> {
+        let pcms = Self::parse_bluealsa_objects(objects, &[]);
+        let pcm = Self::select_active_pcm(&pcms)?;
+        let existing = objects
+            .iter()
+            .find(|(path, _)| path.as_str() == pcm.pcm_path.as_ref())
+            .and_then(|(_, ifaces)| find_iface(ifaces, "org.bluealsa.PCM1"))
+            .and_then(|props| get_byte_array(props, "Volume"))
+            .unwrap_or_default();
+        let bytes = apply_mute_to_volume_bytes(&existing, pcm.channels, muted);
+        Ok((pcm.pcm_path.clone(), bytes))
+    }
+
+    fn set_pcm_volume_bytes(&self, pcm_path: &str, bytes: &[u8]) -> Result<(), BtError> {
+        let proxy = zbus::blocking::Proxy::new(
+            &self.conn(),
+            "org.bluealsa",
+            pcm_path,
+            "org.bluealsa.PCM1",
+        )?;
+        proxy.set_property("Volume", bytes)?;
+        Ok(())
+    }
+
+    pub(crate) fn set_volume(&self, percent: u8) -> Result<(), BtError> {
+        let objects = self.fetch_bluealsa_objects()?;
+        let (pcm_path, bytes) = Self::resolve_pcm_volume_target(&objects, percent)?;
+        self.set_pcm_volume_bytes(&pcm_path, &bytes)
+    }
+
+    pub(crate) fn set_mute(&self, muted: bool) -> Result<(), BtError> {
+        let objects = self.fetch_bluealsa_objects()?;
+        let (pcm_path, bytes) = Self::resolve_pcm_mute_target(&objects, muted)?;
+        self.set_pcm_volume_bytes(&pcm_path, &bytes)
+    }
+
     /// Maps a `GetCodecs` D-Bus method error, treating `UnknownMethod` / `UnknownObject`
     /// (older `BlueALSA` versions) as an empty codec list.
     ///
@@ -1830,7 +1923,7 @@ impl BluetoothDeviceMock {
                 volume: Some("L: 100 R: 100".into()),
                 volume_percent: Some(79),
                 muted: false,
-                delay: Some("2000".into()),
+                delay: Some("200.0 ms".into()),
             }],
             playback: Some(BtPlaybackState {
                 device_address: Some(phone_addr),
@@ -2189,6 +2282,73 @@ impl BluetoothDeviceMock {
         }
     }
 
+    fn apply_mock_pcm_volume(pcm: &mut BlueAlsaPcm, percent: u8, muted: bool) {
+        let clamped = percent.min(100);
+        let bytes = encode_volume_bytes(pcm.channels, clamped, muted);
+        let channel_names = [Box::<str>::from("L"), Box::<str>::from("R")];
+        let (vol_str, is_muted, vol_pct) = format_volume_bytes(&bytes, Some(&channel_names));
+        pcm.volume = vol_str;
+        pcm.muted = is_muted;
+        pcm.volume_percent = vol_pct;
+    }
+
+    fn active_mock_pcm_mut(pcms: &mut [BlueAlsaPcm]) -> Option<&mut BlueAlsaPcm> {
+        let idx = pcms.iter().position(|p| p.running).unwrap_or(0);
+        pcms.get_mut(idx)
+    }
+
+    /// Sets the simulated volume percentage (`0..=100`) and mute state on the active mock PCM stream.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_pcm_volume_state(&self, percent: u8, muted: bool) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(pcm) = Self::active_mock_pcm_mut(&mut state.pcms) {
+            Self::apply_mock_pcm_volume(pcm, percent, muted);
+        }
+        self.change_flag.notify();
+    }
+
+    fn set_volume(&self, percent: u8) -> Result<(), BtError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        let pcm = Self::active_mock_pcm_mut(&mut state.pcms)
+            .ok_or_else(|| BtError::no_active_player("no active mock PCM"))?;
+        Self::apply_mock_pcm_volume(pcm, percent, false);
+        self.change_flag.notify();
+        Ok(())
+    }
+
+    fn set_mute(&self, muted: bool) -> Result<(), BtError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        let pcm = Self::active_mock_pcm_mut(&mut state.pcms)
+            .ok_or_else(|| BtError::no_active_player("no active mock PCM"))?;
+        let pct = pcm.volume_percent.unwrap_or(0);
+        Self::apply_mock_pcm_volume(pcm, pct, muted);
+        self.change_flag.notify();
+        Ok(())
+    }
+
+    fn link_snapshot(&self) -> Result<LinkSnapshot, BtError> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        Ok(LinkSnapshot {
+            adapter: state.adapter.clone(),
+            devices: state.devices.clone().into_boxed_slice(),
+            pcms: state.pcms.clone().into_boxed_slice(),
+        })
+    }
+
     fn get_adapter_mut<'a>(
         state: &'a mut MockState,
         target_adapter: Option<&str>,
@@ -2474,7 +2634,26 @@ impl BluetoothDevice {
     /// # Errors
     /// Returns [`BtError`] if querying fails.
     pub fn audio_pcms(&self) -> Result<Box<[BlueAlsaPcm]>, BtError> {
-        Ok(self.status()?.pcms)
+        Ok(self.link_snapshot()?.pcms)
+    }
+
+    /// Returns the adapter, remote devices, and audio streams without service or hardware probes.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails or a mock fault is injected.
+    pub fn link_snapshot(&self) -> Result<LinkSnapshot, BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.link_snapshot(),
+            Backend::Dbus(dbus) => {
+                let (adapter, devices, _) = dbus.query_bluez(None)?;
+                let pcms = dbus.query_bluealsa(&devices)?;
+                Ok(LinkSnapshot {
+                    adapter,
+                    devices,
+                    pcms,
+                })
+            }
+        }
     }
 
     /// Returns the active media player playback state, if available.
@@ -2595,6 +2774,30 @@ impl BluetoothDevice {
         match &*self.backend {
             Backend::Mock(mock) => mock.player_seek(position_ms),
             Backend::Dbus(dbus) => dbus.player_seek(position_ms),
+        }
+    }
+
+    /// Sets the output volume percentage (`0..=100`) and unmutes the active `BlueALSA` PCM stream.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails, no active PCM stream exists,
+    /// or (in mock mode) an injected fault fires.
+    pub fn set_volume(&self, percent: u8) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.set_volume(percent),
+            Backend::Dbus(dbus) => dbus.set_volume(percent),
+        }
+    }
+
+    /// Sets or clears the mute state on the active `BlueALSA` PCM stream while preserving volume level.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails, no active PCM stream exists,
+    /// or (in mock mode) an injected fault fires.
+    pub fn set_mute(&self, muted: bool) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.set_mute(muted),
+            Backend::Dbus(dbus) => dbus.set_mute(muted),
         }
     }
 

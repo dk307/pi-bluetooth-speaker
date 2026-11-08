@@ -47,6 +47,7 @@ fn save_and_load_roundtrip() {
     let config = CoreConfig {
         theme: Some(ThemePreset::Peppy),
         marquee_fps: MarqueeFps::FPS_30,
+        ..CoreConfig::default()
     };
     config.save(&path).expect("save");
     let loaded = CoreConfig::load(&path).expect("load");
@@ -209,12 +210,14 @@ fn save_replaces_existing_config_atomically() {
     CoreConfig {
         theme: None,
         marquee_fps: MarqueeFps::FPS_60,
+        ..CoreConfig::default()
     }
     .save(&path)
     .expect("initial save");
     CoreConfig {
         theme: Some(ThemePreset::StudioDark),
         marquee_fps: MarqueeFps::FPS_30,
+        ..CoreConfig::default()
     }
     .save(&path)
     .expect("replacement save");

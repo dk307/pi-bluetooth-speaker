@@ -22,12 +22,21 @@ fn drain_worker_commands(
             speaker_bluetooth::TransportCommand::Seek(pos) => {
                 let _ = bt.player_seek(pos);
             }
+            speaker_bluetooth::TransportCommand::SetVolume(pct) => {
+                let _ = bt.set_volume(pct);
+            }
+            speaker_bluetooth::TransportCommand::SetMute(muted) => {
+                let _ = bt.set_mute(muted);
+            }
         }
     }
-    if let Ok(status) = bt.status()
-        && let Some(playback) = status.playback
-    {
-        shell.refresh_playback_display(&playback);
+    if let Ok(status) = bt.status() {
+        if let Some(playback) = status.playback {
+            shell.refresh_playback_display(&playback);
+        }
+        if let Some(pcm) = status.pcms.first() {
+            shell.apply_pcm_stream(pcm);
+        }
     }
 }
 
@@ -591,6 +600,7 @@ fn ui_shell_now_playing_callbacks() {
     assert!(!bt.status().unwrap().playback.unwrap().is_playing());
     assert!(!shell.is_playing());
 
+    std::thread::sleep(std::time::Duration::from_millis(310));
     shell.window().invoke_toggle_play_pause();
     assert!(shell.is_playing());
     drain_worker_commands(&bt, &commands, &shell);
@@ -688,4 +698,174 @@ fn ui_shell_cover_art_loading_and_error_handling() {
     pb.cover_art_path = None;
     shell.apply_bluetooth_playback(&pb);
     assert!(!shell.window().get_has_cover_art());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
+    use screen_manager::config::{
+        CoreConfig, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+    };
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow, ThemePreset};
+    use slint::ComponentHandle;
+    use speaker_bluetooth::{BlueAlsaPcm, BtAddress};
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    // 1. Default config state on AppShell
+    assert!(!shell.is_volume_hud_visible());
+    assert!(!shell.is_volume_hud_active());
+    assert_eq!(shell.volume_hud_opacity(), 0.0);
+    assert_eq!(shell.volume_step_percent(), 2);
+    assert_eq!(shell.volume_hud_timeout_ms(), 4_000);
+    assert_eq!(shell.volume_hud_fade_ms(), 200);
+
+    // 2. Apply CoreConfig overrides
+    let cfg = CoreConfig {
+        theme: Some(ThemePreset::MarantzAmber),
+        marquee_fps: MarqueeFps::FPS_30,
+        volume_step_percent: VolumeStepPercent::new(4),
+        volume_hud_timeout_ms: VolumeHudTimeoutMs::new(1_500),
+        volume_hud_fade_ms: VolumeHudFadeMs::new(150),
+    };
+    shell.apply_config(&cfg);
+    assert_eq!(shell.current_theme(), ThemePreset::MarantzAmber);
+    assert_eq!(shell.volume_step_percent(), 4);
+    assert_eq!(shell.volume_hud_timeout_ms(), 1_500);
+    assert_eq!(shell.volume_hud_fade_ms(), 150);
+
+    // Reset step to 2% per user default
+    shell.set_volume_step_percent(2);
+    assert_eq!(shell.volume_step_percent(), 2);
+
+    // 3. Initial PCM seed does NOT pop up the Volume HUD on boot
+    let mut pcm = BlueAlsaPcm {
+        pcm_path: "/org/bluealsa/pcm0".into(),
+        device_address: BtAddress::new([1, 2, 3, 4, 5, 6]),
+        resolved_name: "Phone".into(),
+        transport: "A2DP-sink".into(),
+        running: true,
+        selected_codec: "AAC".into(),
+        available_codecs: Box::default(),
+        sampling_rate: 48_000,
+        channels: 2,
+        format: "S16_LE".into(),
+        volume: Some("L: 64 R: 64".into()),
+        volume_percent: Some(50),
+        muted: false,
+        delay: None,
+    };
+    shell.apply_pcm_stream(&pcm);
+    assert_eq!(shell.volume(), 50.0);
+    assert!(
+        !shell.is_volume_hud_visible(),
+        "initial startup PCM seed must not pop up the Volume HUD"
+    );
+
+    // 4. Subsequent external PCM volume change DOES open the Volume HUD
+    pcm.volume_percent = Some(64);
+    shell.apply_pcm_stream(&pcm);
+    assert_eq!(shell.volume(), 64.0);
+    assert!(
+        shell.is_volume_hud_visible(),
+        "external AVRCP/BlueALSA volume change must open the Volume HUD"
+    );
+    assert!(shell.is_volume_hud_active());
+
+    // Dismiss HUD manually and verify marquee suppression toggles cleanly
+    shell.set_marquee_compose_in_rust(true);
+    shell.set_track_metadata(
+        "A Very Long Track Title That Overflows The Viewport Width",
+        "Dire Straits",
+        "Brothers in Arms",
+    );
+    assert!(
+        shell.marquee_row_specs().is_empty(),
+        "marquee row specs must be suppressed while Volume HUD is active"
+    );
+    shell.window().show().expect("show window");
+    assert!(fb.render_frame(&window).expect("render Volume HUD frame"));
+    shell.dismiss_volume_hud();
+    assert!(!shell.is_volume_hud_visible());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_rotary_encoder_volume_and_mute_integration() {
+    use screen_manager::ui::{AppShell, EncoderVolumeTracker, Framebuffer, MainWindow};
+    use speaker_bluetooth::{BluetoothDevice, TransportCommandQueue};
+    use speaker_hardware::{EncoderDevice, RotationDirection};
+
+    let fb = Framebuffer::new_mocked().0;
+    let _window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+    shell.set_volume(64.0);
+
+    let (bt, _bt_mock) = BluetoothDevice::new_mocked();
+    let commands = TransportCommandQueue::new();
+    shell.wire_bluetooth_transport(&commands);
+
+    let (encoder, enc_mock) = EncoderDevice::new_mocked();
+    let mut tracker = EncoderVolumeTracker::seeded(&encoder.read_status().unwrap());
+
+    // Poll with no movement -> no change, HUD stays hidden
+    assert!(!tracker.poll_and_apply(&encoder, &shell).unwrap());
+    assert!(!shell.is_volume_hud_visible());
+
+    // Rotate 3 detents CW (+6% at 2%/detent -> 64% + 6% = 70%)
+    enc_mock.simulate_rotation(RotationDirection::Clockwise, 3);
+    assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
+    assert_eq!(shell.volume(), 70.0);
+    assert!(shell.is_volume_hud_visible());
+    drain_worker_commands(&bt, &commands, &shell);
+    assert_eq!(
+        bt.status().unwrap().pcms[0].volume_percent,
+        Some(70),
+        "rotary encoder CW detents must update BlueALSA PCM volume"
+    );
+
+    // Rotate 5 detents CCW (-10% at 2%/detent -> 70% - 10% = 60%)
+    enc_mock.simulate_rotation(RotationDirection::CounterClockwise, 5);
+    assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
+    assert_eq!(shell.volume(), 60.0);
+    drain_worker_commands(&bt, &commands, &shell);
+    assert_eq!(bt.status().unwrap().pcms[0].volume_percent, Some(60));
+
+    // Press encoder push-switch -> toggles mute on and keeps Volume HUD visible
+    enc_mock.set_switch_pressed(true);
+    enc_mock.set_switch_pressed(false);
+    assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
+    assert!(shell.is_muted());
+    assert!(shell.is_volume_hud_visible());
+    drain_worker_commands(&bt, &commands, &shell);
+    assert!(bt.status().unwrap().pcms[0].muted);
+
+    // Turning encoder while muted automatically unmutes and applies step
+    enc_mock.simulate_rotation(RotationDirection::Clockwise, 1);
+    assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
+    assert!(!shell.is_muted());
+    assert_eq!(shell.volume(), 62.0);
+    drain_worker_commands(&bt, &commands, &shell);
+    assert!(!bt.status().unwrap().pcms[0].muted);
+    assert_eq!(bt.status().unwrap().pcms[0].volume_percent, Some(62));
+
+    // Equal CW and CCW detents in same poll still refresh HUD visibility
+    shell.dismiss_volume_hud();
+    enc_mock.simulate_rotation(RotationDirection::Clockwise, 1);
+    enc_mock.simulate_rotation(RotationDirection::CounterClockwise, 1);
+    assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
+    assert!(shell.is_volume_hud_visible());
+
+    // Even number of switch presses in one poll refreshes HUD without flipping mute
+    shell.dismiss_volume_hud();
+    enc_mock.set_switch_pressed(true);
+    enc_mock.set_switch_pressed(false);
+    enc_mock.set_switch_pressed(true);
+    enc_mock.set_switch_pressed(false);
+    assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
+    assert!(shell.is_volume_hud_visible());
 }
