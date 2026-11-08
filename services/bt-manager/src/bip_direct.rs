@@ -27,7 +27,7 @@ use obex_protocol::response::ResponseCode;
 use obex_protocol::tokio::Client;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-pub use speaker_bluetooth::BtAddress;
+use speaker_bluetooth::BtAddress;
 
 /// AVRCP 1.6 cover-art OBEX Target UUID
 /// (`7163DD54-4A7E-11E2-B47C-0050C2490048`, big-endian bytes).

@@ -5,6 +5,7 @@ use obex_protocol::packet::{Request, Response};
 use obex_protocol::response::ResponseCode;
 use obex_protocol::srm::SingleResponseMode;
 use obex_protocol::tokio::{Client, Object, Server};
+use speaker_bluetooth::BtAddress;
 use std::error::Error as _;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
