@@ -2,6 +2,36 @@ import { Theme } from "theme.slint";
 import { NowPlayingView } from "now_playing.slint";
 import { VolumeHudOverlay } from "volume_hud.slint";
 
+// One label / value line in the Bluetooth details cards.
+component DetailRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    height: 24px;
+
+    HorizontalLayout {
+        spacing: 8px;
+
+        Text {
+            text: root.label;
+            color: Theme.active.secondary_accent;
+            font-size: 12px;
+            font-weight: 800;
+            vertical-alignment: center;
+            width: 76px;
+        }
+
+        Text {
+            text: root.value;
+            color: Theme.active.text_primary;
+            font-size: 14px;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
 export component MainViewport inherits Rectangle {
     background: Theme.active.chassis;
 
@@ -25,7 +55,18 @@ export component MainViewport inherits Rectangle {
     in-out property <float> left_peak_ratio: 0.0;
     in-out property <float> right_peak_ratio: 0.0;
     in-out property <string> track_or_device: "Waiting for Connection...";
+    in property <string> stream_codec: "aptX-HD";
+    in property <bool> bt_connected: false;
+    in property <string> bt_device_address: "—";
+    in property <string> bt_link_text: "Waiting for connection";
+    in property <string> bt_rssi_text: "";
+    in property <string> bt_battery_text: "";
+    in property <string> bt_stream_format: "—";
+    in property <string> bt_delay_text: "—";
+    in property <string> bt_adapter_name: "—";
+    in property <string> bt_adapter_address: "—";
 
+    callback bluetooth_back_clicked();
     callback toggle_play_pause();
     callback next_track();
     callback previous_track();
@@ -93,222 +134,116 @@ export component MainViewport inherits Rectangle {
         }
     }
 
-    // Tab 2: Bluetooth Status & Controller
+    // Tab 2: Bluetooth connection details (opened from the status bar or the dock)
     if root.active_tab == 2 : VerticalLayout {
         padding: 14px;
+        spacing: 12px;
 
-        VerticalLayout {
+        // Header: title, live link state pill, back button
+        HorizontalLayout {
+            height: 40px;
             spacing: 12px;
 
-            HorizontalLayout {
-                spacing: 14px;
-
-                // Left Card: Connected Source & A2DP Sink
-                Rectangle {
-                    horizontal-stretch: 1;
-                    background: Theme.active.card_surface;
-                    border-radius: 14px;
-                    border-width: 1px;
-                    border-color: Theme.active.card_border;
-
-                    VerticalLayout {
-                        padding: 16px;
-                        spacing: 10px;
-
-                        HorizontalLayout {
-                            alignment: start;
-                            spacing: 8px;
-
-                            Rectangle {
-                                width: 10px;
-                                height: 10px;
-                                border-radius: 5px;
-                                background: root.is_playing ? Theme.active.primary_accent : Theme.active.secondary_accent;
-                                y: 4px;
-                            }
-
-                            Text {
-                                text: "ACTIVE SOURCE / A2DP SINK";
-                                color: Theme.active.primary_accent;
-                                font-size: 14px;
-                                font-weight: 800;
-                            }
-                        }
-
-                        Text {
-                            text: root.track_or_device;
-                            color: Theme.active.text_primary;
-                            font-size: 20px;
-                            font-weight: 800;
-                            overflow: elide;
-                        }
-
-                        Text {
-                            text: root.is_playing ? "Streaming High-Res Audio" : "Connected (Standby / Idle)";
-                            color: root.is_playing ? Theme.active.primary_accent : Theme.active.text_muted;
-                            font-size: 14px;
-                            font-weight: 600;
-                        }
-
-                        Rectangle {
-                            height: 32px;
-                            background: Theme.active.chassis;
-                            border-radius: 8px;
-                            border-width: 1px;
-                            border-color: Theme.active.card_border;
-
-                            HorizontalLayout {
-                                padding-left: 10px;
-                                padding-right: 10px;
-                                alignment: start;
-                                spacing: 8px;
-
-                                Text {
-                                    text: "CODEC:";
-                                    color: Theme.active.secondary_accent;
-                                    font-size: 12px;
-                                    font-weight: 800;
-                                    vertical-alignment: center;
-                                }
-
-                                Text {
-                                    text: root.stream_details;
-                                    color: Theme.active.text_primary;
-                                    font-size: 13px;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                }
-                            }
-                        }
-
-                        Text {
-                            text: "Profile: A2DP Sink (Advanced Audio Distribution Profile)";
-                            color: Theme.active.text_muted;
-                            font-size: 12px;
-                        }
-
-                        Text {
-                            text: "Routing: BlueALSA -> CamillaDSP 96k/32-bit Active Crossover";
-                            color: Theme.active.text_muted;
-                            font-size: 12px;
-                        }
-                    }
-                }
-
-                // Right Card: Controller & Pairing
-                Rectangle {
-                    horizontal-stretch: 1;
-                    background: Theme.active.card_surface;
-                    border-radius: 14px;
-                    border-width: 1px;
-                    border-color: Theme.active.card_border;
-
-                    VerticalLayout {
-                        padding: 16px;
-                        spacing: 10px;
-
-                        HorizontalLayout {
-                            alignment: start;
-                            spacing: 8px;
-
-                            Rectangle {
-                                width: 10px;
-                                height: 10px;
-                                border-radius: 5px;
-                                background: Theme.active.primary_accent;
-                                y: 4px;
-                            }
-
-                            Text {
-                                text: "BLUETOOTH CONTROLLER";
-                                color: Theme.active.primary_accent;
-                                font-size: 14px;
-                                font-weight: 800;
-                            }
-                        }
-
-                        Text {
-                            text: "DietPi Audiophile Speaker";
-                            color: Theme.active.text_primary;
-                            font-size: 20px;
-                            font-weight: 800;
-                            overflow: elide;
-                        }
-
-                        Text {
-                            text: "Hardware: TP-Link UB500 (RTL8761B / hci0)";
-                            color: Theme.active.secondary_accent;
-                            font-size: 14px;
-                            font-weight: 600;
-                        }
-
-                        Rectangle {
-                            height: 38px;
-                            background: Theme.active.primary_accent;
-                            border-radius: 8px;
-
-                            Text {
-                                text: "DISCOVERABLE & READY TO PAIR";
-                                color: #000000;
-                                font-size: 13px;
-                                font-weight: 800;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        Text {
-                            text: "Agent Policy: Auto-Accept & Trust (No PIN prompt)";
-                            color: Theme.active.text_muted;
-                            font-size: 12px;
-                        }
-
-                        Text {
-                            text: "Software Stack: BlueZ 5.79 / BlueALSA v5.0.0";
-                            color: Theme.active.text_muted;
-                            font-size: 12px;
-                        }
-                    }
-                }
+            Text {
+                text: "BLUETOOTH CONNECTION";
+                color: Theme.active.primary_accent;
+                font-size: 18px;
+                font-weight: 800;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
             }
 
-            // Bottom Telemetry Strip
             Rectangle {
-                height: 30px;
+                width: 150px;
                 background: Theme.active.card_surface;
-                border-radius: 8px;
+                border-radius: 10px;
                 border-width: 1px;
                 border-color: Theme.active.card_border;
 
-                HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    alignment: space-between;
+                Text {
+                    text: root.is_playing ? "STREAMING" : (root.bt_connected ? "CONNECTED" : "WAITING");
+                    color: root.is_playing ? Theme.active.primary_accent : Theme.active.secondary_accent;
+                    font-size: 14px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            Rectangle {
+                width: 110px;
+                background: Theme.active.primary_accent;
+                border-radius: 10px;
+
+                Text {
+                    text: "Back";
+                    color: Theme.active.dock_active_text;
+                    font-size: 15px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    clicked => { root.bluetooth_back_clicked(); }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 14px;
+
+            // Left card: connected source (org.bluez.Device1)
+            Rectangle {
+                horizontal-stretch: 1;
+                background: Theme.active.card_surface;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: Theme.active.card_border;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 6px;
 
                     Text {
-                        text: "DSP Crossover: 96kHz / 32-bit Float Matrix";
-                        color: Theme.active.text_muted;
-                        font-size: 12px;
-                        font-weight: 600;
-                        vertical-alignment: center;
+                        text: "CONNECTED SOURCE";
+                        color: Theme.active.primary_accent;
+                        font-size: 13px;
+                        font-weight: 800;
                     }
+                    DetailRow { label: "DEVICE"; value: root.track_or_device; }
+                    DetailRow { label: "ADDRESS"; value: root.bt_device_address; }
+                    DetailRow { label: "LINK"; value: root.bt_link_text; }
+                    DetailRow { label: "PROFILE"; value: "A2DP Sink • AVRCP"; }
+                    if root.bt_rssi_text != "" : DetailRow { label: "SIGNAL"; value: root.bt_rssi_text; }
+                    if root.bt_battery_text != "" : DetailRow { label: "BATTERY"; value: root.bt_battery_text; }
+                }
+            }
+
+            // Right card: audio stream (BlueALSA PCM) and local controller (org.bluez.Adapter1)
+            Rectangle {
+                horizontal-stretch: 1;
+                background: Theme.active.card_surface;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: Theme.active.card_border;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 6px;
 
                     Text {
-                        text: "BCM2837 Core Load: Nominal";
-                        color: Theme.active.text_muted;
-                        font-size: 12px;
-                        font-weight: 600;
-                        vertical-alignment: center;
+                        text: "AUDIO STREAM";
+                        color: Theme.active.primary_accent;
+                        font-size: 13px;
+                        font-weight: 800;
                     }
-
-                    Text {
-                        text: "Audio Latency: ~12ms";
-                        color: Theme.active.text_muted;
-                        font-size: 12px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                    }
+                    DetailRow { label: "CODEC"; value: root.stream_codec; }
+                    DetailRow { label: "FORMAT"; value: root.bt_stream_format; }
+                    DetailRow { label: "LATENCY"; value: root.bt_delay_text; }
+                    DetailRow { label: "VOLUME"; value: root.is_muted ? "Muted" : (Math.round(root.volume_value) + "%"); }
+                    DetailRow { label: "SPEAKER"; value: root.bt_adapter_name; }
+                    DetailRow { label: "ADAPTER"; value: root.bt_adapter_address; }
                 }
             }
         }

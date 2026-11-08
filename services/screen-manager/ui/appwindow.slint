@@ -77,6 +77,19 @@ export component MainWindow inherits Window {
         }
     }
 
+    // Bluetooth details (Tab 2) text, pushed from the bt-monitor worker snapshot.
+    in-out property <bool> bt_connected: false;
+    in-out property <string> bt_device_address: "—";
+    in-out property <string> bt_link_text: "Waiting for connection";
+    in-out property <string> bt_rssi_text: "";
+    in-out property <string> bt_battery_text: "";
+    in-out property <string> bt_stream_format: "—";
+    in-out property <string> bt_delay_text: "—";
+    in-out property <string> bt_adapter_name: "—";
+    in-out property <string> bt_adapter_address: "—";
+    // Tab to return to when the Bluetooth details screen is dismissed.
+    in-out property <int> previous_tab: 0;
+
     // Marquee text strips pre-rendered offscreen by `MarqueeStripRasterizer`; the images
     // are re-rasterized from Rust only when their text, color, or typography changes.
     in-out property <image> title_marquee_strip;
@@ -99,6 +112,17 @@ export component MainWindow inherits Window {
     callback select_theme(int);
     callback cycle_theme();
 
+    // Opens the Bluetooth details tab from any screen; calling it again (or `Back`)
+    // returns to the tab it was opened from.
+    public function toggle_bluetooth_details() {
+        if (root.active_tab == 2) {
+            root.active_tab = root.previous_tab == 2 ? 0 : root.previous_tab;
+        } else {
+            root.previous_tab = root.active_tab;
+            root.active_tab = 2;
+        }
+    }
+
     VerticalLayout {
         padding: 0px;
         spacing: 0px;
@@ -112,7 +136,12 @@ export component MainWindow inherits Window {
             stream_bit_depth: root.stream_bit_depth;
             volume_value: root.volume_value;
             is_muted: root.is_muted;
-            source_clicked => { root.source_clicked(); }
+            source_clicked => {
+                root.toggle_bluetooth_details();
+                root.source_clicked();
+            }
+            device_clicked => { root.toggle_bluetooth_details(); }
+            protocol_clicked => { root.toggle_bluetooth_details(); }
             night_mode_clicked => { root.night_mode_clicked(); }
             volume_clicked => {
                 root.show_volume_hud();
@@ -140,6 +169,16 @@ export component MainWindow inherits Window {
             left_peak_ratio: root.left_peak_ratio;
             right_peak_ratio: root.right_peak_ratio;
             track_or_device: root.track_or_device;
+            stream_codec: root.stream_codec;
+            bt_connected: root.bt_connected;
+            bt_device_address: root.bt_device_address;
+            bt_link_text: root.bt_link_text;
+            bt_rssi_text: root.bt_rssi_text;
+            bt_battery_text: root.bt_battery_text;
+            bt_stream_format: root.bt_stream_format;
+            bt_delay_text: root.bt_delay_text;
+            bt_adapter_name: root.bt_adapter_name;
+            bt_adapter_address: root.bt_adapter_address;
             title_marquee_strip: root.title_marquee_strip;
             artist_marquee_text: root.artist_marquee_text;
 
@@ -148,6 +187,7 @@ export component MainWindow inherits Window {
             previous_track => { root.previous_track(); }
             toggle_mute => { root.toggle_mute(); }
             stream_pill_clicked => { root.stream_pill_clicked(); }
+            bluetooth_back_clicked => { root.toggle_bluetooth_details(); }
             volume_changed(val) => { root.volume_changed(val); }
             dismiss_volume_hud => { root.dismiss_volume_hud(); }
             volume_hud_activity => { root.show_volume_hud(); }

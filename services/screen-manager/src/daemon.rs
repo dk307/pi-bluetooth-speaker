@@ -578,17 +578,13 @@ pub fn init_shell_with_config(
     let commands = speaker_bluetooth::TransportCommandQueue::new();
     let maybe_bt = if mocked_device {
         let (mock_bt, _) = speaker_bluetooth::BluetoothDevice::new_mocked();
-        if let Ok(Some(ref pb)) = mock_bt.playback_state() {
-            shell.apply_bluetooth_playback(pb);
-        }
+        apply_initial_bt_state(&shell, &mock_bt);
         shell.wire_bluetooth_transport(&commands);
         Some(mock_bt)
     } else {
         match speaker_bluetooth::BluetoothDevice::new() {
             Ok(bt) => {
-                if let Ok(Some(ref pb)) = bt.playback_state() {
-                    shell.apply_bluetooth_playback(pb);
-                }
+                apply_initial_bt_state(&shell, &bt);
                 shell.wire_bluetooth_transport(&commands);
                 Some(bt)
             }
@@ -612,6 +608,33 @@ pub fn init_shell_with_config(
     }
 }
 
+#[cfg(feature = "ui")]
+fn apply_initial_bt_state(shell: &AppShell, bt: &speaker_bluetooth::BluetoothDevice) {
+    let preferred = match bt.playback_state() {
+        Ok(Some(pb)) => {
+            shell.apply_bluetooth_playback(&pb);
+            pb.device_address
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to query initial Bluetooth playback state");
+            None
+        }
+    };
+    match bt.link_snapshot() {
+        Ok(ref snapshot) => {
+            let details = crate::ui::BtLinkDetails::select(snapshot, preferred);
+            if let Some(ref pcm) = details.pcm {
+                shell.apply_pcm_stream(pcm);
+            }
+            shell.apply_bt_link_details(&details);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to query initial Bluetooth link snapshot");
+        }
+    }
+}
+
 /// Worker-side snapshot of Bluetooth state published to the render thread.
 ///
 /// Each field is an `Option` delta: `None` means "no change this tick", while the
@@ -624,6 +647,8 @@ pub struct BtSharedUpdate {
     pub playback: Option<speaker_bluetooth::BtPlaybackState>,
     /// Active PCM stream, if it changed since the last publish.
     pub pcm: Option<speaker_bluetooth::BlueAlsaPcm>,
+    /// Bluetooth connection details for the details screen, if they changed.
+    pub details: Option<crate::ui::BtLinkDetails>,
     /// Cover art delta: outer `Some` = cover state changed; inner `Some` = decoded
     /// pixel buffer to display, inner `None` = clear the displayed cover art.
     /// Carried as a `SharedPixelBuffer` (which is `Send + Sync`) rather than a
@@ -912,6 +937,7 @@ const BT_WAIT_SLICE: Duration = Duration::from_millis(100);
 struct BtMonitorState {
     last_pb: Option<speaker_bluetooth::BtPlaybackState>,
     last_pcms: Option<Box<[speaker_bluetooth::BlueAlsaPcm]>>,
+    last_details: Option<crate::ui::BtLinkDetails>,
     cover: CoverState,
     settle: Option<SettleWindow>,
     pcm_settle: Option<SettleWindow>,
@@ -999,8 +1025,9 @@ impl BtMonitorState {
         }
     }
 
-    /// Queries `bt.audio_pcms()` and stages any PCM change into `update`.
-    fn publish_audio_pcms(
+    /// Queries one lightweight link snapshot and stages PCM and connection-detail
+    /// changes into `update`.
+    fn publish_link_state(
         &mut self,
         bt: &speaker_bluetooth::BluetoothDevice,
         update: &mut BtSharedUpdate,
@@ -1013,18 +1040,32 @@ impl BtMonitorState {
             self.pcm_settle = None;
             self.last_pcms = None;
         }
-        if let Ok(ref pcms) = bt.audio_pcms()
-            && self.last_pcms.as_ref() != Some(pcms)
-            && let Some(active) = speaker_bluetooth::select_active_pcm(pcms)
-        {
-            let settling = self
-                .pcm_settle
-                .as_ref()
-                .is_some_and(|w| w.suppresses_pcm(active));
-            if !settling {
-                update.pcm = Some(active.clone());
-                self.last_pcms = Some(pcms.clone());
+        let snapshot = match bt.link_snapshot() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to query Bluetooth link snapshot");
+                return;
             }
+        };
+        if self.last_pcms.as_ref() != Some(&snapshot.pcms) {
+            if let Some(active) = speaker_bluetooth::select_active_pcm(&snapshot.pcms) {
+                let settling = self
+                    .pcm_settle
+                    .as_ref()
+                    .is_some_and(|w| w.suppresses_pcm(active));
+                if !settling {
+                    update.pcm = Some(active.clone());
+                    self.last_pcms = Some(snapshot.pcms.clone());
+                }
+            } else {
+                self.last_pcms = Some(snapshot.pcms.clone());
+            }
+        }
+        let preferred = self.last_pb.as_ref().and_then(|pb| pb.device_address);
+        let details = crate::ui::BtLinkDetails::select(&snapshot, preferred);
+        if self.last_details.as_ref() != Some(&details) {
+            update.details = Some(details.clone());
+            self.last_details = Some(details);
         }
     }
 
@@ -1034,12 +1075,17 @@ impl BtMonitorState {
         self.last_pb = None;
         self.cover.path = None;
         self.last_pcms = None;
+        self.last_details = None;
     }
 
     /// Merges non-empty delta fields from `update` into `shared`, recovering from
     /// a poisoned mutex guard.
     fn commit_update(shared: &Mutex<BtSharedUpdate>, update: BtSharedUpdate) {
-        if update.playback.is_some() || update.pcm.is_some() || update.cover.is_some() {
+        if update.playback.is_some()
+            || update.pcm.is_some()
+            || update.details.is_some()
+            || update.cover.is_some()
+        {
             // A poisoned mutex is recovered (not silently dropped): the snapshot
             // was already computed and the dedup state advanced, so losing it
             // here would skip that state until the device changes again.
@@ -1052,6 +1098,9 @@ impl BtMonitorState {
             }
             if update.pcm.is_some() {
                 lock.pcm = update.pcm;
+            }
+            if update.details.is_some() {
+                lock.details = update.details;
             }
             if update.cover.is_some() {
                 lock.cover = update.cover;
@@ -1092,7 +1141,7 @@ impl BtMonitorState {
             &mut self.cover,
             &mut self.settle,
         );
-        self.publish_audio_pcms(bt, &mut update);
+        self.publish_link_state(bt, &mut update);
 
         // A command that landed while the blocking snapshot query ran must not
         // merge a pre-command snapshot. The query already advanced the dedup
@@ -1395,6 +1444,9 @@ fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpda
         if let Some(pcm) = lock.pcm.take() {
             shell.apply_pcm_stream(&pcm);
         }
+        if let Some(details) = lock.details.take() {
+            shell.apply_bt_link_details(&details);
+        }
         if let Some(cover) = lock.cover.take() {
             match cover {
                 // Cheap on the render thread: just wraps the pre-decoded buffer
@@ -1423,7 +1475,11 @@ fn sync_marquee_overlay(
     overlay_theme: &mut Option<ThemePreset>,
 ) -> Result<(), FramebufferError> {
     if shell.should_suppress_marquee() {
+        // Marquee rows exist on the Now Playing tab only and are suppressed while the
+        // Volume HUD overlay is visible; re-arming (capture redraw) happens when the
+        // Now Playing tab is unobstructed again.
         fb.set_marquee_rows(Vec::new());
+        *overlay_theme = None;
         return Ok(());
     }
     let theme = shell.current_theme();
@@ -1942,6 +1998,7 @@ mod tests {
             BtSharedUpdate {
                 playback: Some(playback(None, false)),
                 pcm: None,
+                details: Some(crate::ui::BtLinkDetails::default()),
                 cover: Some(None),
             },
         );
@@ -1950,6 +2007,58 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(recovered.playback.is_some());
         assert!(recovered.cover.is_some());
+        assert!(recovered.details.is_some());
+    }
+
+    #[test]
+    fn publish_link_state_stages_details_once_and_resets() {
+        let (bt, _mock) = BluetoothDevice::new_mocked();
+        let mut state = BtMonitorState::default();
+
+        let mut first = BtSharedUpdate::default();
+        state.publish_link_state(&bt, &mut first);
+        let details = first.details.expect("first tick publishes details");
+        assert!(details.device.is_some());
+        assert!(details.pcm.is_some());
+        assert!(first.pcm.is_some());
+
+        // Unchanged snapshot is deduplicated.
+        let mut second = BtSharedUpdate::default();
+        state.publish_link_state(&bt, &mut second);
+        assert!(second.details.is_none());
+        assert!(second.pcm.is_none());
+
+        // A dedup reset forces a full republish.
+        state.reset_dedup();
+        let mut third = BtSharedUpdate::default();
+        state.publish_link_state(&bt, &mut third);
+        assert!(third.details.is_some());
+    }
+
+    #[test]
+    fn publish_link_state_keeps_state_on_query_fault() {
+        let (bt, mock) = BluetoothDevice::new_mocked();
+        mock.set_fault(Some("link fault".into()));
+        let mut state = BtMonitorState::default();
+        let mut update = BtSharedUpdate::default();
+        state.publish_link_state(&bt, &mut update);
+        assert!(update.details.is_none());
+        assert!(state.last_details.is_none());
+    }
+
+    #[test]
+    fn publish_link_state_clears_details_on_disconnect() {
+        let (bt, mock) = BluetoothDevice::new_mocked();
+        let mut state = BtMonitorState::default();
+        state.publish_link_state(&bt, &mut BtSharedUpdate::default());
+
+        mock.clear_devices();
+        mock.clear_pcms();
+        let mut update = BtSharedUpdate::default();
+        state.publish_link_state(&bt, &mut update);
+        let details = update.details.expect("disconnect republishes details");
+        assert!(details.device.is_none());
+        assert!(details.pcm.is_none());
     }
 
     #[test]
