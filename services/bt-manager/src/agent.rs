@@ -555,8 +555,20 @@ where
                     match conn_factory().await {
                         Ok(conn) => {
                             retry_delay = Duration::from_secs(1);
+                            // Run the BlueZ 5.82 <-> bluez-alsa v5.0.0 audio transport reconciler
+                            // alongside the agent supervisor on the active D-Bus connection.
+                            let reconciler_handle =
+                                speaker_bluetooth::spawn_bt_transport_reconciler(conn.clone());
+
                             run_agent_supervisor(conn, default_agent_path(), mode, &mut shutdown_rx)
                                 .await;
+
+                            reconciler_handle.abort();
+                            if let Err(e) = reconciler_handle.await
+                                && e.is_panic()
+                            {
+                                std::panic::resume_unwind(e.into_panic());
+                            }
                             if *shutdown_rx.borrow() {
                                 break;
                             }

@@ -4,6 +4,7 @@
 pub mod connection;
 pub mod cover_art;
 pub mod cover_service;
+pub mod reconciler;
 pub mod transport;
 
 #[doc(inline)]
@@ -13,6 +14,9 @@ pub use connection::{
     BluetoothStatus, BluezSnapshot, BtAdapter, BtAddress, BtDevice, BtError, DEFAULT_BT_ADAPTER,
     LinkSnapshot, resolve_cover_art_with,
 };
+
+#[doc(inline)]
+pub use reconciler::{spawn_bt_transport_reconciler, spawn_bt_transport_reconciler_with};
 
 #[cfg(feature = "test-util")]
 #[doc(inline)]

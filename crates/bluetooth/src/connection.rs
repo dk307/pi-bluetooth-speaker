@@ -782,7 +782,7 @@ pub(crate) trait BlueZAdapter1 {
 pub type ManagedObjects =
     HashMap<OwnedObjectPath, HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>>;
 
-fn find_iface<'a>(
+pub(crate) fn find_iface<'a>(
     ifaces: &'a HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>,
     target: &str,
 ) -> Option<&'a HashMap<String, OwnedValue>> {
