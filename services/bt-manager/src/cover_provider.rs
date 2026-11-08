@@ -457,7 +457,7 @@ impl CoverArtWorker {
         if epoch != prev_epoch && playback.image_handle.is_none() {
             match self.source.status().await {
                 Ok(Some(refreshed)) => *playback = refreshed,
-                Ok(None) => tracing::debug!("playback disappeared during post-session re-query"),
+                Ok(None) => tracing::debug!("no updated playback during post-session re-query"),
                 Err(e) => tracing::warn!(
                     error = %e,
                     "failed to re-query playback status after BIP session establishment"
@@ -751,11 +751,13 @@ impl CoverArtWorker {
             tokio::select! {
                 () = tokio::time::sleep(COVER_FALLBACK_POLL) => self.poll_once().await,
                 () = self.wake.notified() => self.poll_once().await,
-                () = tokio::time::sleep_until(
-                    self.pending_retry
-                        .unwrap_or_else(|| Instant::now() + Duration::from_hours(24))
-                        .into(),
-                ), if self.pending_retry.is_some() => {
+                () = async {
+                    if let Some(deadline) = self.pending_retry {
+                        tokio::time::sleep_until(deadline.into()).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
                     self.pending_retry = None;
                     self.poll_once().await;
                 }
