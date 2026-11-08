@@ -49,10 +49,10 @@ pub const BIP_IMAGE_PULL_UUID16: u16 = 0x111B;
 /// OBEX header identifier of the BIP `Img-Handle` header (`obexd/client/bip.c`
 /// `IMG_HANDLE_TAG`); the AOSP responder reads the image handle exclusively
 /// from this header, not from the generic OBEX Name header.
-const IMG_HANDLE_HEADER_ID: u8 = 0x30;
+pub const IMG_HANDLE_HEADER_ID: u8 = 0x30;
 
 /// Largest accepted image-handle string (e.g. `0000001`).
-const IMG_HANDLE_MAX_LEN: usize = 64;
+pub const IMG_HANDLE_MAX_LEN: usize = 64;
 
 const _: () = {
     assert!(AVRCP_COVER_ART_UUID.len() == 16);
@@ -117,6 +117,7 @@ enum BipErrorKind {
 }
 
 impl BipError {
+    #[must_use]
     fn new(kind: BipErrorKind) -> Self {
         Self {
             kind,
@@ -126,55 +127,71 @@ impl BipError {
     }
 
     /// Attaches an underlying error as this error's [`std::error::Error::source`].
-    fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+    #[must_use]
+    pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
         self.source = Some(Box::new(source));
         self
     }
 
-    pub(crate) fn sdp_lookup(source: bluesdp::SdpError) -> Self {
+    #[must_use]
+    pub fn sdp_lookup(source: bluesdp::SdpError) -> Self {
         Self::new(BipErrorKind::SdpLookup {
             details: source.to_string().into(),
         })
         .with_source(source)
     }
 
-    pub(crate) fn service_not_found(address: impl Into<Box<str>>) -> Self {
+    #[must_use]
+    pub fn service_not_found(address: impl Into<Box<str>>) -> Self {
         Self::new(BipErrorKind::ServiceNotFound {
             address: address.into(),
         })
     }
 
-    pub(crate) fn rfcomm_connect(source: std::io::Error) -> Self {
+    #[must_use]
+    pub fn rfcomm_connect(source: std::io::Error) -> Self {
         Self::new(BipErrorKind::RfcommConnect {
             details: source.to_string().into(),
         })
         .with_source(source)
     }
 
-    pub(crate) fn l2cap_connect(source: std::io::Error) -> Self {
+    #[must_use]
+    pub fn l2cap_connect(source: std::io::Error) -> Self {
         Self::new(BipErrorKind::L2capConnect {
             details: source.to_string().into(),
         })
         .with_source(source)
     }
 
-    pub(crate) fn invalid_handle(details: impl Into<Box<str>>) -> Self {
+    #[must_use]
+    pub fn invalid_handle(details: impl Into<Box<str>>) -> Self {
         Self::new(BipErrorKind::InvalidHandle {
             details: details.into(),
         })
     }
 
-    pub(crate) fn obex(source: ObexError) -> Self {
+    #[must_use]
+    pub fn obex(source: ObexError) -> Self {
         Self::new(BipErrorKind::Obex {
             details: source.to_string().into(),
         })
         .with_source(source)
     }
 
-    pub(crate) fn image_rejected(operation: &'static str, response_code: ResponseCode) -> Self {
+    #[must_use]
+    pub fn image_rejected(operation: &'static str, response_code: ResponseCode) -> Self {
         Self::new(BipErrorKind::ImageRejected {
             operation,
             response_code: response_code as u8,
+        })
+    }
+
+    #[must_use]
+    pub fn image_rejected_raw(operation: &'static str, response_code: u8) -> Self {
+        Self::new(BipErrorKind::ImageRejected {
+            operation,
+            response_code,
         })
     }
 
@@ -322,31 +339,47 @@ pub trait BipChannel: Send + Sync {
 /// SDP); host tests inject a scripted core so the channel assembly logic —
 /// SDP-vs-known-channel selection, address construction, error mapping — is
 /// exercised without any Bluetooth hardware.
-#[async_trait::async_trait]
-pub(crate) trait BipSocketCore: Send + Sync {
-    /// SDP lookup of the BIP Image Pull RFCOMM channel (`None` when the
-    /// device publishes no such service record).
-    #[expect(
-        clippy::double_must_use,
-        reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
-    )]
-    async fn sdp_bip_rfcomm_channel(&self, address: &str) -> Result<Option<u8>, BipError>;
+mod bip_socket_core {
+    use super::{BipError, BipStream, BtAddress};
 
-    /// Connects an RFCOMM stream to the given server channel.
-    #[expect(
-        clippy::double_must_use,
-        reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
-    )]
-    async fn connect_rfcomm(&self, address: &BtAddress, channel: u8)
-    -> Result<BipStream, BipError>;
+    #[async_trait::async_trait]
+    pub trait BipSocketCore: Send + Sync {
+        /// SDP lookup of the BIP Image Pull RFCOMM channel (`None` when the
+        /// device publishes no such service record).
+        #[expect(
+            clippy::double_must_use,
+            reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
+        )]
+        async fn sdp_bip_rfcomm_channel(&self, address: &str) -> Result<Option<u8>, BipError>;
 
-    /// Connects an L2CAP (ERTM) stream to the given PSM.
-    #[expect(
-        clippy::double_must_use,
-        reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
-    )]
-    async fn connect_l2cap(&self, address: &BtAddress, psm: u16) -> Result<BipStream, BipError>;
+        /// Connects an RFCOMM stream to the given server channel.
+        #[expect(
+            clippy::double_must_use,
+            reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
+        )]
+        async fn connect_rfcomm(
+            &self,
+            address: &BtAddress,
+            channel: u8,
+        ) -> Result<BipStream, BipError>;
+
+        /// Connects an L2CAP (ERTM) stream to the given PSM.
+        #[expect(
+            clippy::double_must_use,
+            reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
+        )]
+        async fn connect_l2cap(&self, address: &BtAddress, psm: u16)
+        -> Result<BipStream, BipError>;
+    }
 }
+
+// Internal transport seam: `pub(crate)` in production builds; `pub` only when
+// `test-util` is enabled so the moved `tests/bip_direct_integration.rs` suite
+// can inject scripted cores without widening the public API surface.
+#[cfg(not(any(test, feature = "test-util")))]
+pub(crate) use bip_socket_core::BipSocketCore;
+#[cfg(any(test, feature = "test-util"))]
+pub use bip_socket_core::BipSocketCore;
 
 /// Production [`BipSocketCore`]: real bluer sockets and real SDP queries.
 #[derive(Debug, Default, Clone, Copy)]
@@ -437,6 +470,11 @@ impl std::fmt::Debug for RfcommBipChannel {
 }
 
 impl RfcommBipChannel {
+    /// Returns the statically configured RFCOMM channel, if any.
+    #[must_use]
+    pub const fn known_channel(&self) -> Option<u8> {
+        self.known_channel
+    }
     /// Creates a channel that skips the SDP lookup and connects directly to
     /// the given RFCOMM channel number.
     ///
@@ -450,12 +488,9 @@ impl RfcommBipChannel {
     }
 
     /// Creates a channel over an injected transport core (host tests).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     #[must_use]
-    pub(crate) fn with_core(
-        known_channel: Option<u8>,
-        core: std::sync::Arc<dyn BipSocketCore>,
-    ) -> Self {
+    pub fn with_core(known_channel: Option<u8>, core: std::sync::Arc<dyn BipSocketCore>) -> Self {
         Self {
             known_channel,
             core,
@@ -515,6 +550,11 @@ impl std::fmt::Debug for L2capBipChannel {
 }
 
 impl L2capBipChannel {
+    /// Returns the L2CAP PSM.
+    #[must_use]
+    pub const fn psm(&self) -> u16 {
+        self.psm
+    }
     /// Creates a channel targeting a specific L2CAP PSM.
     #[must_use]
     pub fn new(psm: u16) -> Self {
@@ -525,9 +565,9 @@ impl L2capBipChannel {
     }
 
     /// Creates a channel over an injected transport core (host tests).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     #[must_use]
-    pub(crate) fn with_core(psm: u16, core: std::sync::Arc<dyn BipSocketCore>) -> Self {
+    pub fn with_core(psm: u16, core: std::sync::Arc<dyn BipSocketCore>) -> Self {
         Self { psm, core }
     }
 }
@@ -552,7 +592,7 @@ const L2CAP_MODE_ERTM: u8 = 0x03;
 /// default (`L2CAP_DEFAULT_MTU`) and fragments every image into dozens of
 /// stop-and-wait OBEX packets. 32767 (not 65535) also stays clear of signed
 /// 16-bit length handling in Android's javax.obex stack.
-const L2CAP_AOSP_RECEIVE_MTU: u16 = 32767;
+pub const L2CAP_AOSP_RECEIVE_MTU: u16 = 32767;
 
 /// Kernel `struct l2cap_options` layout (include/net/bluetooth/l2cap.h):
 /// three `u16` fields, three `u8` fields, then a `u16` with one byte of
@@ -630,36 +670,26 @@ fn request_l2cap_receive_mtu<F: AsRawFd>(socket: &F) -> std::io::Result<()> {
 ///
 /// Matches the configured L2CAP receive MTU and stays clear of signed 16-bit
 /// length handling in Android's javax.obex stack.
-const OBEX_AOSP_MAX_PACKET_LENGTH: u16 = 32767;
+pub const OBEX_AOSP_MAX_PACKET_LENGTH: u16 = 32767;
 const _: () = {
     assert!(OBEX_AOSP_MAX_PACKET_LENGTH >= obex_protocol::packet::MINIMUM_PACKET_LENGTH);
 };
 
-/// Builds an OBEX client tuned for the phone's AVRCP cover-art server.
-///
-/// Enables Single Response Mode (GOEP 2.0) so multi-packet GET responses
-/// stream back-to-back instead of stopping after every 0x90 Continue frame
-/// to wait for a client continuation round-trip; the obex-protocol engine
-/// falls back automatically when the responder does not latch SRM.
 /// Deadline for the OBEX CONNECT handshake. obexd's pipeline used an
 /// explicit watchdog; without one a phone that accepts the socket and then
 /// stops responding would wedge the provider worker forever (the ACL link
 /// stays alive while the A2DP stream plays, so the link layer never fires).
-#[cfg(test)]
-const OBEX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-#[cfg(not(test))]
+///
+/// The three OBEX deadlines are unconditional production values: host tests
+/// inject their own short deadlines directly into `with_obex_timeout`, so no
+/// build (including `--features test-util`) ever sees shrunk production
+/// behavior.
 const OBEX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Deadline for a complete OBEX GET (CONNECT-for-GET through final body).
-#[cfg(test)]
-const OBEX_GET_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-#[cfg(not(test))]
 const OBEX_GET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Deadline for the keepalive SETPATH round-trip.
-#[cfg(test)]
-const OBEX_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-#[cfg(not(test))]
 const OBEX_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Bounds an OBEX request/response cycle with an application-level deadline.
@@ -681,7 +711,13 @@ fn obex_timeout(operation: &'static str, deadline: std::time::Duration) -> ObexE
     ))
 }
 
-async fn with_obex_timeout<F, T>(
+/// Wraps an OBEX future with a timeout deadline.
+///
+/// # Errors
+///
+/// Returns [`ObexError::Io`] with [`std::io::ErrorKind::TimedOut`] if the operation
+/// does not complete within `deadline`, or passes through the underlying error from `fut`.
+pub async fn with_obex_timeout<F, T>(
     operation: &'static str,
     deadline: std::time::Duration,
     fut: F,
@@ -695,8 +731,14 @@ where
     }
 }
 
+/// Builds an OBEX client tuned for the phone's AVRCP cover-art server.
+///
+/// Enables Single Response Mode (GOEP 2.0) so multi-packet GET responses
+/// stream back-to-back instead of stopping after every 0x90 Continue frame
+/// to wait for a client continuation round-trip; the obex-protocol engine
+/// falls back automatically when the responder does not latch SRM.
 #[must_use]
-fn cover_art_client<T: AsyncRead + AsyncWrite + Unpin>(stream: T) -> Client<T> {
+pub fn cover_art_client<T: AsyncRead + AsyncWrite + Unpin>(stream: T) -> Client<T> {
     Client::new(stream)
         .with_max_packet_length(OBEX_AOSP_MAX_PACKET_LENGTH)
         .with_single_response_mode(true)
@@ -761,7 +803,7 @@ where
 /// # Errors
 /// Returns [`BipError`] for invalid handles, OBEX transport/protocol failures
 /// and responder rejections (see [`BipError::response_code`]).
-async fn get_image_on<T>(
+pub async fn get_image_on<T>(
     client: &mut Client<T>,
     image_type: BipImageType,
     img_handle: &str,
@@ -1117,7 +1159,8 @@ impl BipSessionKeeper for PersistentBipSession {
 }
 
 /// Builds the RFCOMM socket address for the resolved BIP channel.
-fn bip_socket_address(octets: [u8; 6], channel: u8) -> bluer::rfcomm::SocketAddr {
+#[must_use]
+pub fn bip_socket_address(octets: [u8; 6], channel: u8) -> bluer::rfcomm::SocketAddr {
     bluer::rfcomm::SocketAddr::new(bluer::Address(octets), channel)
 }
 
@@ -1126,7 +1169,11 @@ fn bip_socket_address(octets: [u8; 6], channel: u8) -> bluer::rfcomm::SocketAddr
 /// Pure except for its tracing side effect, so both outcomes (channel found,
 /// service record absent) are unit-testable on any host while the physical
 /// L2CAP/RFCOMM transport stays isolated in [`RfcommBipChannel::open`].
-fn resolve_sdp_channel(
+///
+/// # Errors
+///
+/// Returns [`BipError`] with [`BipErrorKind::ServiceNotFound`] if `channel` is `None`.
+pub fn resolve_sdp_channel(
     address: &str,
     elapsed_ms: u64,
     channel: Option<u8>,
@@ -1164,6 +1211,3 @@ fn map_obex_failure(operation: &'static str, error: ObexError) -> BipError {
         BipError::obex(error)
     }
 }
-
-#[cfg(test)]
-mod tests;

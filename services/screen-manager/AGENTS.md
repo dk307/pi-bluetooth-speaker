@@ -1,22 +1,26 @@
-# Agent Instructions: `core` Service & Hardware Utilities
+# Agent Instructions: `screen-manager` Service & UI Architecture
 
-This document defines the behavioral, architectural, and engineering rules for AI agents developing, refactoring, and testing the `core` service (`screen-manager`) and its hardware diagnostic utilities.
+This document defines the behavioral, architectural, and engineering rules for AI agents developing, refactoring, and testing the `screen-manager` service and its UI / display components.
 
 ---
 
 ## 1. Target Platform & Compilation Environment
 
 * **Target Hardware:** **Raspberry Pi 3 Model B** (Broadcom BCM2837, quad-core ARM Cortex-A53 `aarch64`, running DietPi / Debian 13 Trixie).
-* **Primary Rust Target:** `aarch64-unknown-linux-gnu` with Cortex-A53 pipeline scheduling (`-C target-cpu=cortex-a53`) and hardware ARM NEON SIMD vectorization with crypto disabled (`-C target-feature=+neon,-aes,-sha2`), configured in [`.cargo/config.toml`](.cargo/config.toml).
+* **Primary Rust Target:** `aarch64-unknown-linux-gnu` with Cortex-A53 pipeline scheduling (`-C target-cpu=cortex-a53`) and hardware ARM NEON SIMD vectorization with crypto disabled (`-C target-feature=+neon,-aes,-sha2`), configured in [`.cargo/config.toml`](../../.cargo/config.toml).
+* **Workspace Build Profiles & Fast Host Linker:**
+  * **Raspberry Pi Release Deployment (`[profile.release]`):** Tuned for maximal runtime performance on Cortex-A53 (`opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true`).
+  * **Development & Test Profile (`[profile.dev]`):** Configured with `debug = 1` (line tables only) to accelerate test and coverage compilations while preserving full backtraces.
+  * **Host Linker (`x86_64-unknown-linux-gnu`):** Uses `-C link-arg=-fuse-ld=lld` in [`.cargo/config.toml`](../../.cargo/config.toml).
 * **Building for the Target Platform:**
   Always compile binaries for the Raspberry Pi 3 `aarch64-unknown-linux-gnu` target:
   ```bash
-  cargo build --config services/screen-manager/.cargo/config.toml --manifest-path services/screen-manager/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins
+  cargo build -p screen-manager --target aarch64-unknown-linux-gnu --release --bins
   ```
 * **Live Hardware Testing via SSH (`root@192.168.2.120`):**
   * You can test compiled `aarch64` binaries directly on the live Raspberry Pi 3 over SSH at `root@192.168.2.120`.
   * **Strict Non-Destructive Rule:** **Do NOT modify any persistent files, configurations, or running services on the SSH server.** Copy test/utility binaries only to `/tmp/<binary>`, execute them, and remove `/tmp/<binary>` immediately afterward. **Exception:** when the user explicitly asks to deploy/install release binaries, copy them to `/usr/local/bin` (never touch configs or services, and do not restart services unless asked).
-  * **Mandatory Deployment Script:** When asked to deploy/install release binaries to the SSH server, ALWAYS use the provided helper script [`scripts/deploy_binaries.sh`](scripts/deploy_binaries.sh) instead of manually running `scp`/`ssh` commands. It handles copying binaries from the release build output to `/usr/local/bin`, performs sha256 integrity verification on both ends, and sets executable permissions. Usage: `scripts/deploy_binaries.sh` (deploys all known binaries) or `scripts/deploy_binaries.sh <binary-name>...` (deploys selected binaries only).
+  * **Mandatory Deployment Script:** When asked to deploy/install release binaries to the SSH server, ALWAYS use the provided helper script [`scripts/deploy_binaries.sh`](../../scripts/deploy_binaries.sh) instead of manually running `scp`/`ssh` commands. It handles copying binaries from the release build output to `/usr/local/bin`, performs sha256 integrity verification on both ends, and sets executable permissions. Usage: `scripts/deploy_binaries.sh screen-manager` or `scripts/deploy_binaries.sh`.
 
 ---
 
@@ -40,12 +44,13 @@ Before designing types, writing modules, implementing error handling, or writing
 1. **Mockable I/O & Hardware (`M-MOCKABLE-SYSCALLS`, `M-DI-HIERARCHY`):**
    * Hardware drivers and external I/O types must never perform unmockable ad-hoc syscalls or offer `Default` implementations (`#[expect(clippy::new_without_default, reason = "...")]`).
    * Provide inherent mocking via `new_mocked() -> (Self, MockCtrl)` using an internal backend enum (`Sysfs`/`Hardware` vs. `Mock`) so tests can inject readings and faults deterministically without physical hardware.
-   * *Project Convention (`M-TEST-UTIL`):* Diagnostic and peripheral drivers intentionally provide inherent `new_mocked()` companion controllers unconditionally in production builds (and `speaker_core::diag::ScopedTempDir` is similarly exported unconditionally) to guarantee that CI coverage verification, binary unit tests, integration tests, and standalone diagnostic utilities execute host-agnostically without physical hardware or separate test-only feature flags.
+   * *Project Convention (`M-TEST-UTIL`):* Diagnostic and peripheral drivers intentionally provide inherent `new_mocked()` companion controllers unconditionally in production builds (and `speaker_common::diag::ScopedTempDir` is similarly exported unconditionally) to guarantee that CI coverage verification, binary unit tests, integration tests, and standalone diagnostic utilities execute host-agnostically without physical hardware or separate test-only feature flags.
+   * **Integration Test Discipline (Tests Belong Under `tests/`, Never in `src/`):** All test logic must reside exclusively under `tests/` (`tests/*_integration.rs`, `tests/cli_tests.rs`). Never write `#[cfg(test)] mod tests { ... }` or unit test functions within `src/`. Expose mock companion controllers via `test-util` or inherent `new_mocked()` methods to keep `src/` strictly production code.
 2. **Three-Fold Purpose for Hardware Classes:**
-   Every hardware peripheral abstraction in `speaker_core::hardware` must serve three purposes:
+   Every hardware peripheral abstraction in `speaker_hardware` must serve three purposes:
    * **Core Service:** Cheaply cloneable (`Arc`-backed per `M-SERVICES-CLONE`), `Send + Sync` (`M-TYPES-SEND`), with non-blocking `async` methods that isolate slow/blocking hardware I/O on `tokio::task::spawn_blocking`.
    * **Tests & Mocking:** Controllable via its companion mock handle (`new_mocked()`) and/or custom sysfs paths for unit and integration testing (`tests/`).
-   * **Diagnostic CLI Utilities (`src/bin/*.rs`):** Usable directly in standalone Rust utilities that print hardware GPIO pinout metadata (`GpioPinInfo`: BCM pin, physical header pin, bus protocol, DT overlay) alongside live telemetry.
+   * **Diagnostic CLI Utilities (`tools/diagnostics/src/bin/*.rs`):** Usable directly in standalone Rust utilities that print hardware GPIO pinout metadata (`GpioPinInfo`: BCM pin, physical header pin, bus protocol, DT overlay) alongside live telemetry.
 3. **Strong Typing & Invariant Guards (`M-STRONG-TYPES`, `M-STRONG-TYPES-GUARD`, `C-NEWTYPE`):**
    * Avoid primitive obsession. Use domain newtypes (`BcmPin`, `PhysicalPin`, `Temperature`, `SensorId`, `VolumePercent`, `AttenuationDb`) that guard their invariants at construction time via fallible constructors (`from_*`, `parse`, `TryFrom`, `FromStr`).
    * Use `Path` / `PathBuf` for filesystem paths (`M-STRONG-TYPES`) and `Box<str>` / `Box<[T]>` for immutable owned sequences (`M-BOX-DST`).
@@ -64,7 +69,7 @@ Before designing types, writing modules, implementing error handling, or writing
    * **Testable CLI Utilities:** Architect CLI diagnostic binaries with modular, testable entrypoints (`fn run_app(sensor: &Sensor, opts: &CliOptions) -> ExitCode`) to enable deterministic unit and integration testing of CLI flags, JSON outputs, session summaries, and error handling without physical hardware.
    * **Thorough Mock & Invariant Coverage:** Test domain invariant bounds, conversions, all mock state controls, and fault injections. Isolated physical hardware syscalls (e.g., `/dev/i2c-1`) must have their surrounding logic completely tested.
 8. **Code Simplification & Deduplication (`screen-manager` Architecture):**
-   * **Shared Diagnostic & Runtime Infrastructure (`crate::diag`, `crate::runtime`):** Do not copy-paste CLI scaffolding (`CommonCliOptions::parse_common_flag`, `parse_args_with_common`, `OutputFormat`, `NumericStats`, `resolve_cli_opts`, `format_timestamp`, `next_arg_value`, `parse_count_arg`, `parse_interval_arg`, `fahrenheit`, `foot_candles`, `round_2dp`, `ScopedTempDir`) across `src/bin/read_*.rs` utilities or `tests/*.rs`. Use `crate::diag` for shared CLI/test helpers (keeping `diag` independent of `hardware` so the dependency edge is strictly `hardware -> diag`) and `crate::runtime::run_blocking` / `abort_and_map` for `spawn_blocking` task execution and cancellation testing. Shared utilities like `ScopedTempDir` must offer a fallible constructor (`try_new`) alongside infallible test conveniences. Diagnostic loop termination must break consistently on cumulative sample stats (`stats.total_reads() >= limit` / `stats.samples.total_reads() >= limit`) to ensure summary metrics and exit codes stay synchronized.
+   * **Shared Diagnostic & Runtime Infrastructure (`speaker_common::diag`, `speaker_common::runtime`):** Do not copy-paste CLI scaffolding (`CommonCliOptions::parse_common_flag`, `parse_args_with_common`, `OutputFormat`, `NumericStats`, `resolve_cli_opts`, `format_timestamp`, `next_arg_value`, `parse_count_arg`, `parse_interval_arg`, `fahrenheit`, `foot_candles`, `round_2dp`, `ScopedTempDir`) across `tools/diagnostics/src/bin/read_*.rs` utilities or `tests/*.rs`. Use `speaker_common::diag` for shared CLI/test helpers (keeping `diag` independent of `hardware` so the dependency edge is strictly `hardware -> diag`) and `speaker_common::runtime::run_blocking` / `abort_and_map` for `spawn_blocking` task execution and cancellation testing. Shared utilities like `ScopedTempDir` must offer a fallible constructor (`try_new`) alongside infallible test conveniences. Diagnostic loop termination must break consistently on cumulative sample stats (`stats.total_reads() >= limit` / `stats.samples.total_reads() >= limit`) to ensure summary metrics and exit codes stay synchronized.
    * **Make Invalid States Unrepresentable & Avoid Derived Fields:** Use sum types (`I2cDetail::Message | I2cDetail::Source`, `SimSource::Lux | SimSource::Raw`) instead of parallel `Option` fields in error kinds and mock state structs. Eliminate speculative/dead error variants (e.g. `Io` variants when the driver already produces wrapped I2C errors). Do not store derived fields (such as `foot_candles` on `LightDiagnostics`) or duplicate `min`/`max` tracking alongside `NumericStats`. Use strongly-typed newtypes (`PhysicalPin::new(1)`, `PhysicalPin::new(9)`) rather than raw string slices for hardware metadata pin descriptors.
    * **Enforce Parsing & Backtrace-Free Machine Summaries at the Domain Boundary (`M-STRONG-TYPES-GUARD`):** Implement both programmatic constructors (`SensorId::parse`, `I2cAddress::new`, `TryFrom`) and soft user-facing string parsers (`SensorId::parse_str`, `I2cAddress::parse_hex` returning `Result<Self, String>`) sharing a zero-allocation validator on the domain type in `hardware::*`, rejecting signed inputs (`+`, `-`) both before and after any `0x`/`0X` prefix. Expose a single-line `err.summary()` method on canonical errors (`LightError`, `TempError`) via `impl_canonical_error_display!` for `NDJSON` telemetry so `RUST_BACKTRACE=1` never injects multi-line stack traces into machine streams.
    * **Minimal Surface Area & Host-Testable State Machines (`HwState`):** Encapsulate driver state transitions and settle-time calculations on `HwState` (`prepare_read`, `record_power_down`, `record_wake_or_reset`, `record_mode_change`) so they are unit-testable on any host. Prefer `#[derive(Copy)]` on small value-type option structs, bare `?` error propagation via `From`, `Duration::checked_sub` for settle calculations, and struct-update syntax (`..CliOptions::default()`) in tests.
@@ -105,8 +110,8 @@ Before designing types, writing modules, implementing error handling, or writing
 AI agents working on `screen-manager` **MUST** follow the repository-wide **First-Pass PR Quality, Code Simplification & Continuous Learning Protocol** defined canonically in [root `AGENTS.md` (§4)](../../AGENTS.md).
 
 * **Service-Specific Gate Sequence:** Before every push, execute in order:
-  1. `cargo fmt --manifest-path services/screen-manager/Cargo.toml -- --check`
-  2. `cargo clippy --manifest-path services/screen-manager/Cargo.toml --all-targets -- -D warnings`
-  3. `cargo llvm-cov --manifest-path services/screen-manager/Cargo.toml --target x86_64-unknown-linux-gnu --fail-under-lines 90 --fail-under-functions 90`
-  4. `cargo build --config services/screen-manager/.cargo/config.toml --manifest-path services/screen-manager/Cargo.toml --target aarch64-unknown-linux-gnu --release --bins`
+  1. `cargo fmt -p screen-manager -- --check`
+  2. `cargo clippy -p screen-manager --all-targets -- -D warnings`
+  3. `cargo llvm-cov -p screen-manager --target x86_64-unknown-linux-gnu --fail-under-lines 90 --fail-under-functions 90`
+  4. `cargo build -p screen-manager --target aarch64-unknown-linux-gnu --release --bins`
 * **Protocol & Review Rules:** Consult [root `AGENTS.md` (§4.1–§4.3)](../../AGENTS.md) for the 3-Tier review triage classification, mandatory critical analysis of code review comments before fixing (only fix what genuinely makes sense), strict PR blast radius containment, code anti-bloat mandate, and continuous post-review distillation requirements.

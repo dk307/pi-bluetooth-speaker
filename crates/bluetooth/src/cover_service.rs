@@ -140,7 +140,8 @@ fn query_snapshot_impl(conn: &zbus::blocking::Connection) -> CoverSnapshot {
 /// zbus surfaces remote D-Bus errors as `MethodError` carrying the remote
 /// error name (e.g. `org.freedesktop.DBus.Error.ServiceUnknown`), with some
 /// canonical names also converted into the typed `FDO` variant.
-fn is_absent_service_error(e: &zbus::Error) -> bool {
+#[must_use]
+pub fn is_absent_service_error(e: &zbus::Error) -> bool {
     match e {
         zbus::Error::MethodError(name, _, _) => is_absent_error_name(name.as_str()),
         zbus::Error::FDO(fdo) => {
@@ -154,44 +155,11 @@ fn is_absent_service_error(e: &zbus::Error) -> bool {
 }
 
 /// Whether a remote D-Bus error name reports the service (name) being absent.
-fn is_absent_error_name(name: &str) -> bool {
+#[must_use]
+pub fn is_absent_error_name(name: &str) -> bool {
     name.ends_with("ServiceUnknown") || name.ends_with("NameHasNoOwner")
 }
 
 fn log_query_failure(context: &str, e: &zbus::Error) {
     tracing::warn!(error = %e, context);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{is_absent_error_name, is_absent_service_error};
-
-    #[test]
-    fn absent_service_errors_are_classified() {
-        use zbus::Error;
-        use zbus::fdo;
-
-        assert!(is_absent_error_name(
-            "org.freedesktop.DBus.Error.ServiceUnknown"
-        ));
-        assert!(is_absent_error_name(
-            "org.freedesktop.DBus.Error.NameHasNoOwner"
-        ));
-        assert!(!is_absent_error_name(
-            "org.freedesktop.DBus.Error.AccessDenied"
-        ));
-
-        assert!(is_absent_service_error(&Error::FDO(Box::new(
-            fdo::Error::NameHasNoOwner("org.speaker.CoverArt".into())
-        ))));
-        assert!(is_absent_service_error(&Error::FDO(Box::new(
-            fdo::Error::ServiceUnknown("org.speaker.CoverArt".into())
-        ))));
-        assert!(!is_absent_service_error(&Error::InputOutput(
-            std::io::Error::from(std::io::ErrorKind::ConnectionReset).into()
-        )));
-        assert!(!is_absent_service_error(&Error::FDO(Box::new(
-            fdo::Error::AccessDenied("nope".into())
-        ))));
-    }
 }

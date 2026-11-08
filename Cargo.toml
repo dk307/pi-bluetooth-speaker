@@ -115,6 +115,9 @@ cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 module_name_repetitions = "allow"
 
+[profile.dev]
+debug = 1
+
 [profile.release]
 opt-level = 3
 lto = "fat"

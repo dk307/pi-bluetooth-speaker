@@ -7,8 +7,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use bt_manager::agent::{
-    AgentCapabilityMode, AutoTrustAgent, DEFAULT_AGENT_PATH, default_agent_path,
-    run_agent_supervisor, spawn_auto_trust_with,
+    AgentCapabilityMode, AgentError, AutoTrustAgent, DEFAULT_AGENT_PATH, default_agent_path,
+    is_already_exists, run_agent_supervisor, spawn_auto_trust_with,
 };
 use tokio::sync::watch;
 use zbus::zvariant::ObjectPath;
@@ -481,4 +481,92 @@ async fn spawn_set_trusted_in_tokio_runtime_marks_device_trusted() {
         success,
         "spawn_set_trusted must asynchronously set Trusted property to true"
     );
+}
+
+#[test]
+fn capability_mode_as_str_and_display() {
+    assert_eq!(
+        AgentCapabilityMode::DisplayYesNo.as_capability_str(),
+        "DisplayYesNo"
+    );
+    assert_eq!(
+        AgentCapabilityMode::NoInputNoOutput.as_capability_str(),
+        "NoInputNoOutput"
+    );
+    assert_eq!(AgentCapabilityMode::DisplayYesNo.as_str(), "display-yes-no");
+    assert_eq!(
+        AgentCapabilityMode::NoInputNoOutput.as_str(),
+        "no-input-no-output"
+    );
+    assert_eq!(
+        format!("{}", AgentCapabilityMode::DisplayYesNo),
+        "display-yes-no"
+    );
+    assert_eq!(
+        format!("{}", AgentCapabilityMode::NoInputNoOutput),
+        "no-input-no-output"
+    );
+}
+
+#[test]
+fn capability_mode_from_str() {
+    assert_eq!(
+        "display-yes-no".parse::<AgentCapabilityMode>().unwrap(),
+        AgentCapabilityMode::DisplayYesNo
+    );
+    assert_eq!(
+        "displayyesno".parse::<AgentCapabilityMode>().unwrap(),
+        AgentCapabilityMode::DisplayYesNo
+    );
+    assert_eq!(
+        "auto".parse::<AgentCapabilityMode>().unwrap(),
+        AgentCapabilityMode::DisplayYesNo
+    );
+    assert_eq!(
+        "no-input-no-output".parse::<AgentCapabilityMode>().unwrap(),
+        AgentCapabilityMode::NoInputNoOutput
+    );
+    assert_eq!(
+        "strict".parse::<AgentCapabilityMode>().unwrap(),
+        AgentCapabilityMode::NoInputNoOutput
+    );
+    let _ = "invalid-mode".parse::<AgentCapabilityMode>().unwrap_err();
+}
+
+#[test]
+fn capability_mode_serde() {
+    let json = serde_json::to_string(&AgentCapabilityMode::DisplayYesNo).unwrap();
+    assert_eq!(json, "\"display-yes-no\"");
+    let parsed: AgentCapabilityMode = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, AgentCapabilityMode::DisplayYesNo);
+
+    let json = serde_json::to_string(&AgentCapabilityMode::NoInputNoOutput).unwrap();
+    assert_eq!(json, "\"no-input-no-output\"");
+    let parsed: AgentCapabilityMode = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, AgentCapabilityMode::NoInputNoOutput);
+}
+
+#[test]
+fn default_agent_path_is_valid() {
+    assert_eq!(default_agent_path().as_str(), DEFAULT_AGENT_PATH);
+}
+
+#[test]
+fn agent_error_predicates_and_display() {
+    let err = AgentError::spawn(std::io::Error::other("thread spawn failed"));
+    assert!(err.is_spawn());
+    assert_eq!(
+        err.summary(),
+        "failed to spawn auto-trust agent thread: thread spawn failed"
+    );
+    assert!(std::error::Error::source(&err).is_some());
+}
+
+#[test]
+fn already_exists_detection() {
+    let err_already = zbus::Error::Address("org.bluez.Error.AlreadyExists".into());
+    assert!(is_already_exists(&err_already));
+
+    let other_err = zbus::Error::Address("other error".into());
+    assert!(!is_already_exists(&other_err));
 }

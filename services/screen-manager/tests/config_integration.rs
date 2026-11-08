@@ -1,7 +1,10 @@
 //! Integration tests for the appliance configuration store (`CoreConfig`).
 #![cfg(feature = "ui")]
 
-use screen_manager::config::{ConfigError, CoreConfig, DEFAULT_MARQUEE_FPS, MarqueeFps};
+use screen_manager::config::{
+    ConfigError, CoreConfig, DEFAULT_MARQUEE_FPS, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
+    VolumeStepPercent,
+};
 use screen_manager::ui::ThemePreset;
 use speaker_common::diag::ScopedTempDir;
 use std::error::Error as _;
@@ -292,4 +295,70 @@ fn save_installs_world_readable_mode() {
     CoreConfig::default().save(&path).unwrap();
     let mode = std::fs::metadata(&path).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o644);
+}
+
+#[test]
+fn volume_config_newtypes_enforce_domain_bounds() {
+    for good_step in [1u8, 2, 5, 25] {
+        let parsed = VolumeStepPercent::try_from(good_step).expect("valid step");
+        assert_eq!(parsed.value(), good_step);
+        assert_eq!(u8::from(parsed), good_step);
+    }
+    for bad_step in [0u8, 26, u8::MAX] {
+        let err = VolumeStepPercent::try_from(bad_step).expect_err("invalid step");
+        assert!(err.is_invalid_value());
+        assert!(err.summary().contains("invalid volume_step_percent"));
+    }
+
+    for good_timeout in [250u32, 2_500, 30_000] {
+        let parsed = VolumeHudTimeoutMs::try_from(good_timeout).expect("valid timeout");
+        assert_eq!(parsed.value(), good_timeout);
+        assert_eq!(u32::from(parsed), good_timeout);
+    }
+    for bad_timeout in [0u32, 249, 30_001, u32::MAX] {
+        let err = VolumeHudTimeoutMs::try_from(bad_timeout).expect_err("invalid timeout");
+        assert!(err.is_invalid_value());
+        assert!(err.summary().contains("invalid volume_hud_timeout_ms"));
+    }
+
+    for good_fade in [0u32, 200, 2_000] {
+        let parsed = VolumeHudFadeMs::try_from(good_fade).expect("valid fade");
+        assert_eq!(parsed.value(), good_fade);
+        assert_eq!(u32::from(parsed), good_fade);
+    }
+    for bad_fade in [2_001u32, u32::MAX] {
+        let err = VolumeHudFadeMs::try_from(bad_fade).expect_err("invalid fade");
+        assert!(err.is_invalid_value());
+        assert!(err.summary().contains("invalid volume_hud_fade_ms"));
+    }
+}
+
+#[test]
+#[should_panic(expected = "volume_step_percent out of range 1..=25")]
+fn volume_step_percent_new_rejects_zero() {
+    let _ = VolumeStepPercent::new(0);
+}
+
+#[test]
+#[should_panic(expected = "volume_step_percent out of range 1..=25")]
+fn volume_step_percent_new_rejects_overflow() {
+    let _ = VolumeStepPercent::new(26);
+}
+
+#[test]
+#[should_panic(expected = "volume_hud_timeout_ms out of range 250..=30000")]
+fn volume_hud_timeout_ms_new_rejects_underflow() {
+    let _ = VolumeHudTimeoutMs::new(249);
+}
+
+#[test]
+#[should_panic(expected = "volume_hud_timeout_ms out of range 250..=30000")]
+fn volume_hud_timeout_ms_new_rejects_overflow() {
+    let _ = VolumeHudTimeoutMs::new(30_001);
+}
+
+#[test]
+#[should_panic(expected = "volume_hud_fade_ms out of range 0..=2000")]
+fn volume_hud_fade_ms_new_rejects_overflow() {
+    let _ = VolumeHudFadeMs::new(2_001);
 }
