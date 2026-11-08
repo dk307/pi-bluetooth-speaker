@@ -2,7 +2,6 @@ import { BootCheckLine, SplashScreen } from "splash.slint";
 import { Theme, ThemePalette } from "theme.slint";
 import { TopStatusBar } from "status_bar.slint";
 import { MainViewport } from "viewport.slint";
-import { NavDock } from "nav_dock.slint";
 import { MarqueeRasterizer } from "marquee_rasterizer.slint";
 import { MarqueeCompose } from "marquee_state.slint";
 
@@ -149,9 +148,10 @@ export component MainWindow inherits Window {
             }
         }
 
-        // Middle Viewport: 800 x 360
+        // Main Viewport: 800 x 420 (expands to fill bottom space)
         viewport := MainViewport {
             active_tab <=> root.active_tab;
+            cd_enabled: root.cd_enabled;
             track_title: root.track_title;
             track_artist: root.track_artist;
             track_album: root.track_album;
@@ -188,20 +188,31 @@ export component MainWindow inherits Window {
             toggle_mute => { root.toggle_mute(); }
             stream_pill_clicked => { root.stream_pill_clicked(); }
             bluetooth_back_clicked => { root.toggle_bluetooth_details(); }
+            settings_clicked => {
+                root.previous_tab = root.active_tab;
+                root.active_tab = 5;
+            }
+            settings_back_clicked => {
+                root.active_tab = root.previous_tab == 5 ? 0 : root.previous_tab;
+            }
+            vu_meter_back_clicked => {
+                root.active_tab = root.previous_tab == 1 ? 0 : root.previous_tab;
+            }
+            cd_back_clicked => {
+                root.active_tab = root.previous_tab == 3 ? 0 : root.previous_tab;
+            }
+            dsp_back_clicked => {
+                root.active_tab = root.previous_tab == 4 ? 0 : root.previous_tab;
+            }
+            select_tab(idx) => {
+                root.previous_tab = root.active_tab;
+                root.active_tab = idx;
+            }
             volume_changed(val) => { root.volume_changed(val); }
             dismiss_volume_hud => { root.dismiss_volume_hud(); }
             volume_hud_activity => { root.show_volume_hud(); }
             select_theme(idx) => { root.select_theme(idx); }
             cycle_theme => { root.cycle_theme(); }
-        }
-
-        // Bottom Navigation Dock: 800 x 60
-        dock := NavDock {
-            active_tab <=> root.active_tab;
-            cd_enabled: root.cd_enabled;
-            tab_selected(idx) => {
-                root.tab_selected(idx);
-            }
         }
     }
 }
