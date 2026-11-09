@@ -40,5 +40,6 @@ pub use cover_art::{
 #[doc(inline)]
 pub use cover_service::{
     COVER_ART_DBUS_NAME, COVER_ART_INTERFACE, COVER_ART_OBJECT_PATH, CoverArtSnapshot,
-    CoverSnapshot, query_snapshot, query_snapshot_state,
+    CoverSnapshot, is_absent_error_name, is_absent_service_error, query_snapshot,
+    query_snapshot_state,
 };

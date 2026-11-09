@@ -10,14 +10,14 @@
 //! `M-MOCKABLE-SYSCALLS`, `M-ERRORS-CANONICAL-STRUCTS`).
 
 use std::backtrace::Backtrace;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 use std::collections::HashMap;
 use std::fmt::{self, Debug, Formatter};
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{IntoRawFd, RawFd};
 use std::path::{Path, PathBuf};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -71,7 +71,7 @@ const fn eviocgabs_ioctl(abs: u8) -> libc::c_ulong {
 
 /// Constructs a Linux `libc::input_event`.
 #[must_use]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 pub fn make_input_event(type_: u16, code: u16, value: i32) -> libc::input_event {
     libc::input_event {
         time: libc::timeval {
@@ -86,7 +86,7 @@ pub fn make_input_event(type_: u16, code: u16, value: i32) -> libc::input_event 
 
 /// Serializes a `libc::input_event` to raw bytes matching host C struct memory layout.
 #[must_use]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 pub fn input_event_to_bytes(
     ev: &libc::input_event,
 ) -> [u8; std::mem::size_of::<libc::input_event>()] {
@@ -225,7 +225,7 @@ impl EvdevSyscall for NativeEvdevSyscall {
 
 /// Configuration for a simulated evdev touch device.
 #[derive(Debug, Clone)]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "Mock fault injection flags require individual toggles"
@@ -253,7 +253,7 @@ pub struct MockDeviceConfig {
     pub fail_name: bool,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl Default for MockDeviceConfig {
     fn default() -> Self {
         Self {
@@ -287,7 +287,7 @@ impl Default for MockDeviceConfig {
 
 /// Simulated evdev syscall backend for deterministic testing.
 #[derive(Debug)]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 pub struct MockEvdevSyscall {
     devices: Mutex<HashMap<RawFd, MockDeviceConfig>>,
     path_configs: Mutex<HashMap<PathBuf, MockDeviceConfig>>,
@@ -295,7 +295,7 @@ pub struct MockEvdevSyscall {
     closed_fds: Mutex<Vec<RawFd>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl Default for MockEvdevSyscall {
     fn default() -> Self {
         Self {
@@ -307,7 +307,7 @@ impl Default for MockEvdevSyscall {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl MockEvdevSyscall {
     /// Creates a new empty [`MockEvdevSyscall`].
     #[must_use]
@@ -346,7 +346,7 @@ impl MockEvdevSyscall {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl EvdevSyscall for MockEvdevSyscall {
     fn open(&self, path: &Path) -> io::Result<RawFd> {
         let configs = self.path_configs.lock().expect("path_configs poisoned");
@@ -894,7 +894,8 @@ impl Drop for TouchInputDevice {
 }
 
 /// Returns true if a device name matches recognized touchscreen hardware.
-fn is_touchscreen_name(name: &str) -> bool {
+#[must_use]
+pub fn is_touchscreen_name(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower.contains("touch") || lower.contains("raspberrypi-ts") || lower.contains("ft5406")
 }
@@ -1113,6 +1114,12 @@ impl TouchInputDevice {
         self.decoder.set_calibration(calibration)
     }
 
+    /// Returns a reference to the active coordinate calibration profile.
+    #[must_use]
+    pub fn calibration(&self) -> &TouchCalibration {
+        self.decoder.calibration()
+    }
+
     /// Reads pending touch events from hardware or mock controller.
     ///
     /// # Panics
@@ -1205,399 +1212,5 @@ impl TouchInputDevice {
         }
 
         Ok(count)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::error::Error;
-
-    #[test]
-    fn evdev_open_and_poll_raw_hardware_events() {
-        let mock = Arc::new(MockEvdevSyscall::new());
-        let syscall: Arc<dyn EvdevSyscall> = Arc::clone(&mock) as _;
-        let device_path = PathBuf::from("/dev/input/event0");
-        mock.register_path(&device_path, MockDeviceConfig::default());
-
-        let mut dev = TouchInputDevice::open_with(&device_path, Arc::clone(&syscall))
-            .expect("open_with failed");
-        assert_eq!(dev.query_device_name(), "raspberrypi-ts");
-        let fd = dev.as_raw_fd().expect("expected raw fd");
-        assert!(fd >= 100);
-
-        // Push Down, Move, Up events
-        let mut event_bytes = Vec::new();
-        // Down (ABS_X, ABS_Y, BTN_TOUCH 1, SYN)
-        event_bytes.extend_from_slice(&input_event_to_bytes(&make_input_event(EV_ABS, ABS_X, 100)));
-        event_bytes.extend_from_slice(&input_event_to_bytes(&make_input_event(EV_ABS, ABS_Y, 120)));
-        event_bytes.extend_from_slice(&input_event_to_bytes(&make_input_event(
-            EV_KEY, BTN_TOUCH, 1,
-        )));
-        event_bytes.extend_from_slice(&input_event_to_bytes(&make_input_event(
-            EV_SYN, SYN_REPORT, 0,
-        )));
-
-        // Move (ABS_X, SYN)
-        event_bytes.extend_from_slice(&input_event_to_bytes(&make_input_event(EV_ABS, ABS_X, 150)));
-        event_bytes.extend_from_slice(&input_event_to_bytes(&make_input_event(
-            EV_SYN, SYN_REPORT, 0,
-        )));
-
-        // Up (BTN_TOUCH 0, SYN)
-        event_bytes.extend_from_slice(&input_event_to_bytes(&make_input_event(
-            EV_KEY, BTN_TOUCH, 0,
-        )));
-        event_bytes.extend_from_slice(&input_event_to_bytes(&make_input_event(
-            EV_SYN, SYN_REPORT, 0,
-        )));
-
-        mock.push_raw_events(fd, &event_bytes);
-
-        let actions = dev.poll_actions().expect("poll_actions failed");
-        assert_eq!(actions.len(), 3);
-        assert_eq!(actions[0], TouchAction::Down { x: 100.0, y: 120.0 });
-        assert_eq!(actions[1], TouchAction::Move { x: 150.0, y: 120.0 });
-        assert_eq!(actions[2], TouchAction::Up { x: 150.0, y: 120.0 });
-
-        // Second poll encounters WouldBlock and returns empty
-        assert_eq!(
-            dev.poll_actions().expect("poll empty"),
-            Vec::<TouchAction>::new()
-        );
-
-        // Drop dev and verify descriptor closed
-        drop(dev);
-        assert!(mock.is_closed(fd));
-    }
-
-    #[test]
-    fn evdev_partial_chunk_buffering() {
-        let mock = Arc::new(MockEvdevSyscall::new());
-        let syscall: Arc<dyn EvdevSyscall> = Arc::clone(&mock) as _;
-        let device_path = PathBuf::from("/dev/input/event1");
-        mock.register_path(&device_path, MockDeviceConfig::default());
-
-        let mut dev = TouchInputDevice::open_with(&device_path, Arc::clone(&syscall))
-            .expect("open_with failed");
-        let fd = dev.as_raw_fd().unwrap();
-
-        let ev1 = make_input_event(EV_ABS, ABS_X, 200);
-        let ev1_bytes = input_event_to_bytes(&ev1);
-        let split_idx = 10;
-        assert!(split_idx < ev1_bytes.len());
-
-        // Push partial bytes
-        mock.push_raw_events(fd, &ev1_bytes[..split_idx]);
-        assert_eq!(
-            dev.poll_actions().expect("poll partial"),
-            Vec::<TouchAction>::new()
-        );
-
-        // Push remaining bytes + syn
-        let mut rest = Vec::new();
-        rest.extend_from_slice(&ev1_bytes[split_idx..]);
-        rest.extend_from_slice(&input_event_to_bytes(&make_input_event(
-            EV_KEY, BTN_TOUCH, 1,
-        )));
-        rest.extend_from_slice(&input_event_to_bytes(&make_input_event(
-            EV_SYN, SYN_REPORT, 0,
-        )));
-
-        mock.push_raw_events(fd, &rest);
-        let actions = dev.poll_actions().expect("poll assembled");
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0], TouchAction::Down { x: 200.0, y: 0.0 });
-    }
-
-    #[test]
-    fn evdev_open_and_ioctl_fault_injections() {
-        let mock = Arc::new(MockEvdevSyscall::new());
-        let syscall: Arc<dyn EvdevSyscall> = Arc::clone(&mock) as _;
-
-        // 1. Open failure
-        let p_not_found = PathBuf::from("/dev/input/missing");
-        let err = TouchInputDevice::open_with(&p_not_found, Arc::clone(&syscall)).unwrap_err();
-        assert!(err.is_io());
-
-        let p_denied = PathBuf::from("/dev/input/denied");
-        mock.register_path(
-            &p_denied,
-            MockDeviceConfig {
-                fail_open: Some(io::ErrorKind::PermissionDenied),
-                ..Default::default()
-            },
-        );
-        let err = TouchInputDevice::open_with(&p_denied, Arc::clone(&syscall)).unwrap_err();
-        assert!(err.is_io());
-
-        // 2. Nonblocking fcntl failure
-        let p_nb_fail = PathBuf::from("/dev/input/nb_fail");
-        mock.register_path(
-            &p_nb_fail,
-            MockDeviceConfig {
-                fail_nonblocking: true,
-                ..Default::default()
-            },
-        );
-        let err = TouchInputDevice::open_with(&p_nb_fail, Arc::clone(&syscall)).unwrap_err();
-        assert!(err.is_io());
-
-        // 3. ABS ioctl complete failure
-        let p_abs_fail = PathBuf::from("/dev/input/abs_fail");
-        mock.register_path(
-            &p_abs_fail,
-            MockDeviceConfig {
-                fail_abs: true,
-                ..Default::default()
-            },
-        );
-        let err = TouchInputDevice::open_with(&p_abs_fail, Arc::clone(&syscall)).unwrap_err();
-        assert!(err.is_io());
-
-        // 4. Invalid calibration bounds (min >= max)
-        let p_bad_bounds = PathBuf::from("/dev/input/bad_bounds");
-        mock.register_path(
-            &p_bad_bounds,
-            MockDeviceConfig {
-                abs_x: libc::input_absinfo {
-                    value: 0,
-                    minimum: 800,
-                    maximum: 800,
-                    fuzz: 0,
-                    flat: 0,
-                    resolution: 0,
-                },
-                ..Default::default()
-            },
-        );
-        let err = TouchInputDevice::open_with(&p_bad_bounds, Arc::clone(&syscall)).unwrap_err();
-        assert!(format!("{err}").contains("Invalid touch axis limits"));
-
-        // 5. ST abs fails, MT abs succeeds (fallback branch)
-        let p_mt_fallback = PathBuf::from("/dev/input/mt_fallback");
-        mock.register_path(
-            &p_mt_fallback,
-            MockDeviceConfig {
-                fail_st_abs_only: true,
-                ..Default::default()
-            },
-        );
-        let dev = TouchInputDevice::open_with(&p_mt_fallback, Arc::clone(&syscall))
-            .expect("MT fallback should succeed");
-        assert_eq!(dev.decoder.calibration.max_x, 800.0);
-
-        // 6. query_name failure fallback
-        let p_bad_name = PathBuf::from("/dev/input/bad_name");
-        mock.register_path(
-            &p_bad_name,
-            MockDeviceConfig {
-                fail_name: true,
-                ..Default::default()
-            },
-        );
-        let dev_bad_name = TouchInputDevice::open_with(&p_bad_name, Arc::clone(&syscall)).unwrap();
-        assert_eq!(dev_bad_name.query_device_name(), "Unknown Evdev Device");
-
-        // 7. read error handling
-        let p_read_err = PathBuf::from("/dev/input/read_err");
-        mock.register_path(
-            &p_read_err,
-            MockDeviceConfig {
-                fail_read: Some(io::ErrorKind::BrokenPipe),
-                ..Default::default()
-            },
-        );
-        let mut dev_read_err =
-            TouchInputDevice::open_with(&p_read_err, Arc::clone(&syscall)).unwrap();
-        let err = dev_read_err.poll_actions().unwrap_err();
-        assert!(err.is_io());
-    }
-
-    #[test]
-    fn evdev_auto_discover_scenarios() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let temp_path = temp.path();
-
-        let mock = Arc::new(MockEvdevSyscall::new());
-        let syscall: Arc<dyn EvdevSyscall> = Arc::clone(&mock) as _;
-
-        // Scenario 1: Empty directory -> NotFound
-        let err = TouchInputDevice::auto_discover_in(temp_path, &syscall).unwrap_err();
-        assert!(err.is_device_not_found());
-
-        // Scenario 2: event0 is a Keyboard, event1 is TouchScreen
-        let ev0 = temp_path.join("event0");
-        let ev1 = temp_path.join("event1");
-        std::fs::write(&ev0, b"").unwrap();
-        std::fs::write(&ev1, b"").unwrap();
-
-        mock.register_path(
-            &ev0,
-            MockDeviceConfig {
-                name: "Standard Keyboard".to_string(),
-                ..Default::default()
-            },
-        );
-        mock.register_path(
-            &ev1,
-            MockDeviceConfig {
-                name: "Freenove TouchScreen Device".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let dev = TouchInputDevice::auto_discover_in(temp_path, &syscall)
-            .expect("auto_discover should find event1");
-        assert_eq!(dev.query_device_name(), "Freenove TouchScreen Device");
-
-        // Scenario 3: event0 is directly a touchscreen
-        mock.register_path(
-            &ev0,
-            MockDeviceConfig {
-                name: "raspberrypi-ts".to_string(),
-                ..Default::default()
-            },
-        );
-        let dev0 = TouchInputDevice::auto_discover_in(temp_path, &syscall)
-            .expect("auto_discover should find event0 directly");
-        assert_eq!(dev0.query_device_name(), "raspberrypi-ts");
-    }
-
-    #[test]
-    fn native_evdev_syscall_with_pipes() {
-        let native = NativeEvdevSyscall;
-        let mut fds = [0; 2];
-        // SAFETY: pipe initializes the 2-element c_int array with valid file descriptors.
-        let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        assert_eq!(ret, 0);
-        let [rfd, wfd] = fds;
-
-        // Test set_nonblocking on pipe
-        native
-            .set_nonblocking(rfd)
-            .expect("set_nonblocking on pipe");
-
-        // Read on empty nonblocking pipe -> WouldBlock
-        let mut buf = [0u8; 16];
-        let err = native.read(rfd, &mut buf).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
-
-        // Write to pipe and read
-        let data = b"touch-data";
-        // SAFETY: writing into a valid OS pipe descriptor with accurate length.
-        let written = unsafe { libc::write(wfd, data.as_ptr().cast::<libc::c_void>(), data.len()) };
-        assert_eq!(written, 10);
-
-        let n = native.read(rfd, &mut buf).expect("read from pipe");
-        assert_eq!(&buf[..n], data);
-
-        // abs_code > u8::MAX returns InvalidInput without unsafe ioctl call
-        let err = native.query_abs(rfd, 1000).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-
-        // Name match helper tests including ft5406 digitizers
-        assert!(is_touchscreen_name("ft5406"));
-        assert!(is_touchscreen_name("rpi-ft5406"));
-        assert!(is_touchscreen_name("FT5406 memory based driver"));
-        assert!(is_touchscreen_name("raspberrypi-ts"));
-        assert!(is_touchscreen_name("Goodix Capacitive TouchScreen"));
-        assert!(!is_touchscreen_name("keyboard"));
-        assert!(!is_touchscreen_name("mouse"));
-
-        // Close pipe fds
-        native.close(rfd).expect("close rfd");
-        native.close(wfd).expect("close wfd");
-    }
-
-    #[test]
-    fn touch_error_comprehensive() {
-        let err_io = TouchError::io(
-            "/dev/input/event0",
-            io::Error::new(io::ErrorKind::NotFound, "not found"),
-        );
-        assert!(err_io.is_io());
-        assert!(!err_io.is_device_not_found());
-        assert!(!err_io.is_mock_fault());
-        let _ = err_io.backtrace();
-        assert!(format!("{err_io}").contains("Touch I/O error"));
-        assert!(err_io.source().is_some());
-
-        let err_dnf = TouchError::device_not_found("No input found");
-        assert!(err_dnf.is_device_not_found());
-        assert!(format!("{err_dnf}").contains("Touch device not found"));
-        assert!(err_dnf.source().is_none());
-
-        let err_cfg = TouchError::invalid_config("Zero span axis");
-        assert!(format!("{err_cfg}").contains("Invalid touch configuration"));
-        assert!(err_cfg.source().is_none());
-    }
-
-    #[test]
-    fn multi_touch_protocol_b_tracking_id() {
-        let mut decoder = TouchDecoder::new(TouchCalibration::default());
-
-        // MT Tracking ID >= 0 indicates down
-        decoder.process_event(&make_input_event(EV_ABS, ABS_MT_POSITION_X, 300));
-        decoder.process_event(&make_input_event(EV_ABS, ABS_MT_POSITION_Y, 200));
-        decoder.process_event(&make_input_event(EV_ABS, ABS_MT_TRACKING_ID, 42));
-        let down = decoder.process_event(&make_input_event(EV_SYN, SYN_REPORT, 0));
-        assert_eq!(down, Some(TouchAction::Down { x: 300.0, y: 200.0 }));
-
-        // MT Tracking ID -1 indicates release (Up)
-        decoder.process_event(&make_input_event(EV_ABS, ABS_MT_TRACKING_ID, -1));
-        let up = decoder.process_event(&make_input_event(EV_SYN, SYN_REPORT, 0));
-        assert_eq!(up, Some(TouchAction::Up { x: 300.0, y: 200.0 }));
-    }
-
-    #[test]
-    fn production_wrappers_and_calibration_setters() {
-        // Test production open on nonexistent path
-        let err = TouchInputDevice::open("/dev/input/nonexistent-test-node").unwrap_err();
-        assert!(err.is_io());
-
-        // Test set_calibration on device
-        let (mut dev, _) = TouchInputDevice::new_mocked();
-        dev.set_calibration(TouchCalibration {
-            invert_x: true,
-            invert_y: true,
-            swap_xy: true,
-            ..Default::default()
-        })
-        .expect("valid calibration should be accepted");
-        assert!(dev.decoder.calibration().swap_xy);
-
-        // Test NaN and inverted/zero span calibration rejection
-        let nan_cal = TouchCalibration {
-            min_x: f32::NAN,
-            ..Default::default()
-        };
-        assert!(!nan_cal.is_valid());
-        assert_eq!(nan_cal.map_to_screen(100, 100, 800.0, 480.0), (0.0, 0.0));
-        let err_nan = dev.set_calibration(nan_cal).unwrap_err();
-        assert!(format!("{err_nan}").contains("Invalid touch calibration"));
-        assert!(dev.decoder.calibration().is_valid());
-
-        let zero_span_cal = TouchCalibration {
-            min_x: 100.0,
-            max_x: 100.0,
-            ..Default::default()
-        };
-        assert!(!zero_span_cal.is_valid());
-        assert_eq!(
-            zero_span_cal.map_to_screen(100, 100, 800.0, 480.0),
-            (0.0, 0.0)
-        );
-        let err_zero = dev.set_calibration(zero_span_cal).unwrap_err();
-        assert!(format!("{err_zero}").contains("Invalid touch calibration"));
-        assert!(dev.decoder.calibration().is_valid());
-
-        // NativeEvdevSyscall error paths with invalid fd (-1)
-        let native = NativeEvdevSyscall;
-        let _ = native.set_nonblocking(-1).unwrap_err();
-        let _ = native.read(-1, &mut [0u8; 8]).unwrap_err();
-        let _ = native.query_abs(-1, ABS_X).unwrap_err();
-        let _ = native.query_name(-1).unwrap_err();
-        let _ = native.close(-1).unwrap_err();
     }
 }

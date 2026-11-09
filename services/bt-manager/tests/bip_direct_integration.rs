@@ -1,9 +1,14 @@
-use super::*;
+use bt_manager::bip_direct::*;
+use obex_protocol::Error as ObexError;
+use obex_protocol::header::{Header, HeaderValue};
 use obex_protocol::packet::{Request, Response};
+use obex_protocol::response::ResponseCode;
 use obex_protocol::srm::SingleResponseMode;
-use obex_protocol::tokio::{Object, Server};
+use obex_protocol::tokio::{Client, Object, Server};
+use speaker_bluetooth::BtAddress;
 use std::error::Error as _;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 
 fn body_bytes(len: usize, fill: u8) -> Vec<u8> {
@@ -47,9 +52,9 @@ impl obex_protocol::tokio::Handler for StubCoverArtServer {
     ) -> impl Future<Output = std::result::Result<Object, Response>> + Send {
         let handle = request.headers.iter().find_map(|h| match h {
             Header::Other {
-                id: IMG_HANDLE_HEADER_ID,
+                id,
                 value: HeaderValue::Unicode(name),
-            } => Some(name),
+            } if *id == IMG_HANDLE_HEADER_ID => Some(name),
             _ => None,
         });
         let name = request.headers.iter().find_map(|h| match h {
@@ -832,10 +837,7 @@ async fn persistent_session_reestablishes_on_transport_change() {
 async fn persistent_session_maps_connect_rejection_to_image_rejected() {
     let session = PersistentBipSession::with_channel_factory(|_| {
         Box::new(FailingChannel(std::sync::Arc::new(|| {
-            BipError::new(BipErrorKind::ImageRejected {
-                operation: "OBEX CONNECT",
-                response_code: 0x43,
-            })
+            BipError::image_rejected_raw("OBEX CONNECT", 0x43)
         }))) as Box<dyn BipChannel>
     });
     let mut session = session;
@@ -878,11 +880,15 @@ async fn get_times_out_when_peer_stops_responding() {
 #[tokio::test]
 async fn connect_times_out_when_peer_stops_responding() {
     let (mut client, _server) = silent_client();
-    let error = with_obex_timeout("OBEX CONNECT", OBEX_CONNECT_TIMEOUT, async {
-        client
-            .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
-            .await
-    })
+    let error = with_obex_timeout(
+        "OBEX CONNECT",
+        std::time::Duration::from_millis(100),
+        async {
+            client
+                .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
+                .await
+        },
+    )
     .await
     .expect_err("the unresponsive peer must time out");
     assert!(
@@ -894,9 +900,11 @@ async fn connect_times_out_when_peer_stops_responding() {
 #[tokio::test]
 async fn keepalive_times_out_when_peer_stops_responding() {
     let (mut client, _server) = silent_client();
-    let error = with_obex_timeout("OBEX SETPATH", OBEX_KEEPALIVE_TIMEOUT, async {
-        client.set_path_root().await
-    })
+    let error = with_obex_timeout(
+        "OBEX SETPATH",
+        std::time::Duration::from_millis(100),
+        async { client.set_path_root().await },
+    )
     .await
     .expect_err("the unresponsive peer must time out");
     assert!(
@@ -911,13 +919,13 @@ fn bip_channel_for_builds_matching_transport_impl() {
     // downcast; assert each variant against the equivalent direct constructor.
     let _ = bip_channel_for(BipTransport::SdpRfcomm);
     let rfcomm = RfcommBipChannel::default();
-    assert_eq!(rfcomm.known_channel, None);
+    assert_eq!(rfcomm.known_channel(), None);
 
     let _ = bip_channel_for(BipTransport::RfcommChannel(27));
     let rfcomm = RfcommBipChannel::with_known_channel(27);
-    assert_eq!(rfcomm.known_channel, Some(27));
+    assert_eq!(rfcomm.known_channel(), Some(27));
 
     let _ = bip_channel_for(BipTransport::L2capPsm(4097));
     let l2cap = L2capBipChannel::new(4097);
-    assert_eq!(l2cap.psm, 4097);
+    assert_eq!(l2cap.psm(), 4097);
 }

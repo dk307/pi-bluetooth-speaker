@@ -328,25 +328,3 @@ impl std::error::Error for ConfigError {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn poll_interval_secs_conversions() {
-        let interval = PollIntervalSecs::new(10);
-        assert_eq!(interval.value(), 10);
-        assert_eq!(interval.as_duration(), Duration::from_secs(10));
-        assert_eq!(u64::from(interval), 10);
-        assert_eq!(PollIntervalSecs::try_from(10).unwrap(), interval);
-        let err = PollIntervalSecs::try_from(0).unwrap_err();
-        assert!(err.to_string().contains("invalid interval seconds '0'"));
-    }
-
-    #[test]
-    #[should_panic(expected = "poll interval must be at least 1 second")]
-    fn poll_interval_secs_new_rejects_zero() {
-        let _ = PollIntervalSecs::new(0);
-    }
-}

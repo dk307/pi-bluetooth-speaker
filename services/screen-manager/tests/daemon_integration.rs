@@ -3,17 +3,15 @@
 #[cfg(feature = "ui")]
 use std::fs;
 #[cfg(feature = "ui")]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "ui")]
 use screen_manager::daemon::{
-    BT_COMMAND_SETTLE, COVER_DECODE_RETRY, CoverState, SettleKind, SettleWindow, TARGET_COVER_SIZE,
-    decode_cover_buffer, publish_playback_state,
-};
-#[cfg(feature = "ui")]
-use screen_manager::daemon::{
-    BtSharedUpdate, ShellInit, init_shell, report_display, run_app, run_render_loop, run_shell_on,
-    run_splash_on, run_ui_display, run_ui_display_on_path, run_ui_lifecycle,
+    BT_COMMAND_SETTLE, BT_KEEP_ALIVE, BT_PLAYING_POLL, BtMonitorState, BtSharedUpdate,
+    COVER_DECODE_RETRY, CoverState, SettleKind, SettleWindow, ShellInit, TARGET_COVER_SIZE,
+    decode_cover_buffer, finish_boot_worker, idle_sleep, init_shell, publish_playback_state,
+    report_display, run_app, run_render_loop, run_shell_on, run_splash_on, run_ui_display,
+    run_ui_display_on_path, run_ui_lifecycle,
 };
 use screen_manager::daemon::{
     CoreCliOptions, ScreenTarget, headless_requested, parse_cli_args_from, parse_preview_secs,
@@ -892,4 +890,223 @@ fn run_render_loop_with_devices_polls_rotary_encoder_and_faults_gracefully() {
     );
     assert!((shell.volume() - 54.0).abs() < 1e-4);
     assert!(shell.is_volume_hud_visible());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn bt_monitor_state_commands_settle_and_commit() {
+    use speaker_bluetooth::{BluetoothDevice, TransportCommand, TransportCommandQueue};
+
+    let (bt, mock) = BluetoothDevice::new_mocked();
+    let shared = Mutex::new(BtSharedUpdate::default());
+    let commands = TransportCommandQueue::new();
+    let mut state = BtMonitorState::default();
+
+    // Initial tick populates last_pb, last_pcms, and shared state.
+    assert!(state.poll_tick(&bt, &shared, &commands));
+    assert!(state.has_playback());
+    assert_eq!(state.keep_alive_interval(), BT_PLAYING_POLL);
+    assert!(shared.lock().unwrap().playback.is_some());
+    assert!(shared.lock().unwrap().pcm.is_some());
+
+    // Arm seek settle window, then toggle settle window, and exercise all commands.
+    commands.push(TransportCommand::Seek(45_000));
+    assert!(state.poll_tick(&bt, &shared, &commands));
+    assert!(matches!(
+        state.settle().map(|s| &s.kind),
+        Some(SettleKind::Seek { target_ms: 45_000 })
+    ));
+
+    commands.push(TransportCommand::TogglePlayPause);
+    commands.push(TransportCommand::NextTrack);
+    commands.push(TransportCommand::PreviousTrack);
+    assert!(state.poll_tick(&bt, &shared, &commands));
+    assert!(matches!(
+        state.settle().map(|s| &s.kind),
+        Some(SettleKind::Toggle { .. })
+    ));
+    assert_eq!(state.keep_alive_interval(), BT_KEEP_ALIVE);
+
+    // Volume and Mute commands arm pcm_settle and update mock PCM state.
+    commands.push(TransportCommand::SetVolume(64));
+    assert!(state.poll_tick(&bt, &shared, &commands));
+    assert_eq!(bt.audio_pcms().unwrap()[0].volume_percent, Some(64));
+
+    commands.push(TransportCommand::SetMute(true));
+    assert!(state.poll_tick(&bt, &shared, &commands));
+    assert!(bt.audio_pcms().unwrap()[0].muted);
+
+    // Verify SettleKind::Volume suppresses mismatched PCM volume/mute until caught up or expired.
+    let vol_settle = SettleWindow {
+        kind: SettleKind::Volume {
+            target_pct: Some(80),
+            target_muted: false,
+        },
+        started: Instant::now(),
+    };
+    let stale_pcm = &bt.audio_pcms().unwrap()[0];
+    assert!(vol_settle.suppresses_pcm(stale_pcm));
+    mock.set_pcm_volume_state(80, false);
+    let caught_up_pcm = &bt.audio_pcms().unwrap()[0];
+    assert!(!vol_settle.suppresses_pcm(caught_up_pcm));
+
+    // Fault injection on transport commands logs warning without panicking.
+    mock.set_fault(Some("dbus transport fault".into()));
+    commands.push(TransportCommand::NextTrack);
+    assert!(state.poll_tick(&bt, &shared, &commands));
+    mock.set_fault(None);
+
+    // Reset dedup helper clears cached snapshots.
+    state.reset_dedup();
+    assert!(!state.has_playback());
+    assert!(!state.has_pcms());
+    assert!(state.cover_path().is_none());
+
+    // Poisoned mutex recovery in commit_update.
+    let poisoned = Arc::new(Mutex::new(BtSharedUpdate::default()));
+    let p_clone = Arc::clone(&poisoned);
+    let _ = std::thread::spawn(move || {
+        let _guard = p_clone.lock().unwrap();
+        panic!("intentional poison");
+    })
+    .join();
+    BtMonitorState::commit_update(
+        &poisoned,
+        BtSharedUpdate {
+            playback: Some(playback(None, false)),
+            pcm: None,
+            details: Some(screen_manager::ui::BtLinkDetails::default()),
+            cover: Some(None),
+        },
+    );
+    let recovered = poisoned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(recovered.playback.is_some());
+    assert!(recovered.cover.is_some());
+    assert!(recovered.details.is_some());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn publish_link_state_stages_details_once_and_resets() {
+    use speaker_bluetooth::BluetoothDevice;
+
+    let (bt, _mock) = BluetoothDevice::new_mocked();
+    let mut state = BtMonitorState::default();
+
+    let mut first = BtSharedUpdate::default();
+    state.publish_link_state(&bt, &mut first);
+    let details = first.details.expect("first tick publishes details");
+    assert!(details.device.is_some());
+    assert!(details.pcm.is_some());
+    assert!(first.pcm.is_some());
+
+    // Unchanged snapshot is deduplicated.
+    let mut second = BtSharedUpdate::default();
+    state.publish_link_state(&bt, &mut second);
+    assert!(second.details.is_none());
+    assert!(second.pcm.is_none());
+
+    // A dedup reset forces a full republish.
+    state.reset_dedup();
+    let mut third = BtSharedUpdate::default();
+    state.publish_link_state(&bt, &mut third);
+    assert!(third.details.is_some());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn publish_link_state_keeps_state_on_query_fault() {
+    use speaker_bluetooth::BluetoothDevice;
+
+    let (bt, mock) = BluetoothDevice::new_mocked();
+    mock.set_fault(Some("link fault".into()));
+    let mut state = BtMonitorState::default();
+    let mut update = BtSharedUpdate::default();
+    state.publish_link_state(&bt, &mut update);
+    assert!(update.details.is_none());
+    assert!(state.last_details().is_none());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn publish_link_state_clears_details_on_disconnect() {
+    use speaker_bluetooth::BluetoothDevice;
+
+    let (bt, mock) = BluetoothDevice::new_mocked();
+    let mut state = BtMonitorState::default();
+    state.publish_link_state(&bt, &mut BtSharedUpdate::default());
+
+    mock.clear_devices();
+    mock.clear_pcms();
+    let mut update = BtSharedUpdate::default();
+    state.publish_link_state(&bt, &mut update);
+    let details = update.details.expect("disconnect republishes details");
+    assert!(details.device.is_none());
+    assert!(details.pcm.is_none());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn finish_boot_worker_abandons_or_joins() {
+    // Hung / unfinished worker path (`checks_done == false`).
+    finish_boot_worker(None, false);
+
+    // Normal worker completion path (`checks_done == true`).
+    let ok_handle = std::thread::spawn(|| {});
+    finish_boot_worker(Some(ok_handle), true);
+
+    // Worker panic propagation path (`M-PANIC-ON-BUG`).
+    let panic_handle = std::thread::spawn(|| panic!("boot worker panic"));
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        finish_boot_worker(Some(panic_handle), true);
+    }));
+    assert!(res.is_err(), "worker panic must be re-raised");
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn idle_sleep_various_fd_conditions() {
+    // 1. None fd (always sleeps timeout)
+    idle_sleep(None);
+
+    // 2. Negative fd (POSIX specifies negative fds are ignored and revents=0, times out safely)
+    idle_sleep(Some(-1));
+
+    // 3. Pipe fd with no data (poll times out, sleeps safely)
+    let mut fds = [0; 2];
+    // SAFETY: pipe creates 2 valid descriptors.
+    let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    assert_eq!(ret, 0);
+    let [rfd, wfd] = fds;
+
+    idle_sleep(Some(rfd));
+
+    // 4. Pipe fd with pending data (poll wakes immediately)
+    let data = b"touch";
+    // SAFETY: writing test bytes into valid pipe.
+    let _ = unsafe { libc::write(wfd, data.as_ptr().cast::<libc::c_void>(), data.len()) };
+    idle_sleep(Some(rfd));
+
+    // SAFETY: close test pipe descriptors.
+    unsafe {
+        libc::close(rfd);
+        libc::close(wfd)
+    };
+
+    // 5. Pipe fd with write end closed (poll immediately wakes with POLLHUP, sleeps to avoid busy-spin)
+    let mut fds2 = [0; 2];
+    // SAFETY: pipe creates 2 valid descriptors.
+    let ret2 = unsafe { libc::pipe(fds2.as_mut_ptr()) };
+    assert_eq!(ret2, 0);
+    let [rfd2, wfd2] = fds2;
+    // SAFETY: closing writer triggers POLLHUP on reader without pending data.
+    unsafe { libc::close(wfd2) };
+    idle_sleep(Some(rfd2));
+    // SAFETY: clean up test reader.
+    unsafe { libc::close(rfd2) };
+
+    // 6. Closed positive fd (poll returns POLLNVAL on Linux/POSIX, sleeps to avoid busy-spin)
+    idle_sleep(Some(rfd2));
 }

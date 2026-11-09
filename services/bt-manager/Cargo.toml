@@ -29,7 +29,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 
+[features]
+default = []
+test-util = []
+
 [dev-dependencies]
+bt-manager = { path = ".", features = ["test-util"] }
 speaker-bluetooth = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }
 

@@ -5,6 +5,7 @@ members = [
     "crates/hardware",
     "crates/dsp",
     "crates/bluetooth",
+    "crates/title-breaker",
     "services/screen-manager",
     "services/bt-manager",
     "tools/diagnostics",
@@ -21,6 +22,7 @@ speaker-common = { path = "crates/common" }
 speaker-hardware = { path = "crates/hardware" }
 speaker-dsp = { path = "crates/dsp" }
 speaker-bluetooth = { path = "crates/bluetooth" }
+speaker-title-breaker = { path = "crates/title-breaker" }
 
 # Asynchronous Concurrency Runtime
 tokio = { version = "=1.53.3", features = ["full"] }
@@ -114,6 +116,9 @@ literal_string_with_formatting_args = "allow"
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 module_name_repetitions = "allow"
+
+[profile.dev]
+debug = 1
 
 [profile.release]
 opt-level = 3
