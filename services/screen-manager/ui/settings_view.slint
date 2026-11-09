@@ -2,7 +2,7 @@ import { ElevatedCard, OutlinedCard, FilledButton, Icon, MaterialText, Horizonta
 import { MaterialPalette } from "@material/material.slint";
 import { MaterialTypography } from "@material/material.slint";
 import { MaterialStyleMetrics } from "material_metrics_override.slint";
-import { Theme } from "theme.slint";
+import { AppTheme } from "app_theme.slint";
 
 // Theme preset card using Rectangle with Material styling (defined first for use in SettingsView)
 component ThemePresetCard inherits Rectangle {
@@ -223,7 +223,7 @@ export component SettingsView inherits VerticalLayout {
                     accent_name: "Electric Cyan";
                     primary_color: #00C8FF;
                     secondary_color: #70E1FF;
-                    selected: Theme.active_preset == 0;
+                    selected: AppTheme.active_preset == 0;
                     clicked => { root.select_theme(0); }
                 }
 
@@ -234,7 +234,7 @@ export component SettingsView inherits VerticalLayout {
                     accent_name: "Warm Amber";
                     primary_color: #E5A93C;
                     secondary_color: #FFD166;
-                    selected: Theme.active_preset == 1;
+                    selected: AppTheme.active_preset == 1;
                     clicked => { root.select_theme(1); }
                 }
 
@@ -245,7 +245,7 @@ export component SettingsView inherits VerticalLayout {
                     accent_name: "Synthwave Pink";
                     primary_color: #00F0FF;
                     secondary_color: #FF007F;
-                    selected: Theme.active_preset == 2;
+                    selected: AppTheme.active_preset == 2;
                     clicked => { root.select_theme(2); }
                 }
 
@@ -256,7 +256,7 @@ export component SettingsView inherits VerticalLayout {
                     accent_name: "Precision Mono";
                     primary_color: #F0F0F0;
                     secondary_color: #A0A0A0;
-                    selected: Theme.active_preset == 3;
+                    selected: AppTheme.active_preset == 3;
                     clicked => { root.select_theme(3); }
                 }
 
@@ -267,7 +267,7 @@ export component SettingsView inherits VerticalLayout {
                     accent_name: "Vintage Gold";
                     primary_color: #F5B83D;
                     secondary_color: #FFDF85;
-                    selected: Theme.active_preset == 4;
+                    selected: AppTheme.active_preset == 4;
                     clicked => { root.select_theme(4); }
                 }
             }

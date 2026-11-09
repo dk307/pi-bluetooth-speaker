@@ -5,6 +5,8 @@ import { Palette } from "std-widgets.slint";
 import { MaterialSchemes, MaterialScheme } from "material_schemes.slint";
 
 export global MaterialPalette {
+    in-out property <ColorScheme> color-scheme <=> Palette.color-scheme;
+
     out property <color> primary: root.scheme.primary;
     out property <color> surface_tint: root.scheme.surfaceTint;
     out property <color> on_primary: root.scheme.onPrimary;
@@ -64,7 +66,7 @@ export global MaterialPalette {
     out property <float> disable_opacity: 38%;
     out property <color> background_modal: #000000.with_alpha(50%);
 
-    in property <MaterialSchemes> schemes: {
+    in-out property <MaterialSchemes> schemes: {
         light: {
             primary: rgb(68, 94, 145),
             surfaceTint: rgb(68, 94, 145),
@@ -169,5 +171,5 @@ export global MaterialPalette {
         },
     };
 
-    property <MaterialScheme> scheme: Palette.color_scheme == ColorScheme.dark ? root.schemes.dark : root.schemes.light;
+    property <MaterialScheme> scheme: root.color-scheme == ColorScheme.dark ? root.schemes.dark : root.schemes.light;
 }

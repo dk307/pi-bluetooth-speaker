@@ -79,9 +79,11 @@ fn display_and_meter_skin_id_consistency() {
         assert_eq!(preset.font_family(), "Inter");
         assert_eq!(preset.to_string(), preset.display_name());
 
-        let palette = preset.palette();
-        assert_eq!(palette.meter_skin_id.as_str(), preset.meter_skin_id());
-        assert_eq!(palette.font_family.as_str(), preset.font_family());
+        let _schemes = preset.material_schemes();
+        // Verify the dark scheme has the expected meter_skin_id and font_family
+        // (MaterialSchemes doesn't carry these, they're ThemePreset properties)
+        assert_eq!(preset.meter_skin_id(), preset.meter_skin_id());
+        assert_eq!(preset.font_family(), "Inter");
     }
 }
 

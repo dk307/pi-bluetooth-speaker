@@ -1,0 +1,9 @@
+/** Shared application theme state (single source of truth for preset index).
+
+ * The active preset index lives here so both Slint (skin selection) and Rust
+ * (`ThemePreset::apply`) read/write one place. Color tokens themselves come
+ * from `MaterialPalette` (pushed by Rust from `ThemePreset::material_schemes`).
+ */
+export global AppTheme {
+    in-out property <int> active_preset: 0;
+}

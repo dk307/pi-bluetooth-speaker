@@ -247,7 +247,7 @@ fn pcm_bit_depth(format: &str) -> &'static str {
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
-    strips: RefCell<MarqueeStripCache>,
+    strips: Rc<RefCell<MarqueeStripCache>>,
     volume_step_percent: Cell<u8>,
     has_initial_pcm_seed: Cell<bool>,
     transport_commands: Rc<RefCell<Option<speaker_bluetooth::TransportCommandQueue>>>,
@@ -269,7 +269,7 @@ impl AppShell {
     pub fn new(window: MainWindow) -> Self {
         let shell = Self {
             window,
-            strips: RefCell::new(MarqueeStripCache::default()),
+            strips: Rc::new(RefCell::new(MarqueeStripCache::default())),
             volume_step_percent: Cell::new(DEFAULT_VOLUME_STEP_PERCENT),
             has_initial_pcm_seed: Cell::new(false),
             transport_commands: Rc::new(RefCell::new(None)),
@@ -844,21 +844,28 @@ impl AppShell {
     /// Cached strips make this a no-op while metadata, theme, and typography are stable,
     /// so repeated playback-state ticks perform no offscreen rasterization.
     fn refresh_marquee_strips(&self) {
-        let w = &self.window;
-        let preset = self.current_theme();
-        let palette = preset.palette();
+        Self::refresh_marquee_strips_for(&self.window, &self.strips);
+    }
+
+    /// Free-function form of [`AppShell::refresh_marquee_strips`] callable from
+    /// Slint callbacks that only hold a weak window handle and the shared strip cache.
+    fn refresh_marquee_strips_for(w: &MainWindow, strips: &RefCell<MarqueeStripCache>) {
+        let preset = ThemePreset::from_index(w.global::<Theme>().get_active_preset());
+        // Use Material scheme's onBackground (equivalent to old text_primary)
+        let schemes = preset.material_schemes();
+        let text_primary = schemes.dark.onBackground;
         let rgb = |color: slint::Color| (color.red(), color.green(), color.blue());
 
         let title_request = StripRequest {
             text: w.get_track_title().as_str().into(),
-            color: rgb(palette.text_primary),
+            color: rgb(text_primary),
             font_size_px: MarqueeTypography::TITLE_FONT_SIZE_PX,
             font_weight: MarqueeTypography::TITLE_FONT_WEIGHT,
             font_family: preset.font_family().into(),
         };
 
         let title_strip = {
-            let mut cache = self.strips.borrow_mut();
+            let mut cache = strips.borrow_mut();
             cache.rasterize_title(&title_request)
         };
         // Only touch the image properties when a strip actually re-rendered: setting an
@@ -910,19 +917,23 @@ impl AppShell {
         });
 
         let win = self.window.as_weak();
+        let strips = Rc::clone(&self.strips);
         self.window.on_select_theme(move |idx| {
             if let Some(w) = win.upgrade() {
                 let preset = ThemePreset::from_index(idx);
                 preset.apply(&w);
+                Self::refresh_marquee_strips_for(&w, &strips);
             }
         });
 
         let win = self.window.as_weak();
+        let strips = Rc::clone(&self.strips);
         self.window.on_cycle_theme(move || {
             if let Some(w) = win.upgrade() {
                 let current = ThemePreset::from_index(w.global::<Theme>().get_active_preset());
                 let next = current.next();
                 next.apply(&w);
+                Self::refresh_marquee_strips_for(&w, &strips);
             }
         });
 
