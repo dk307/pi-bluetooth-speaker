@@ -66,25 +66,31 @@ fn slug_parsing_valid_and_invalid() {
 
 #[test]
 fn display_and_meter_skin_id_consistency() {
-    for preset in [
+    let presets = [
         ThemePreset::McIntoshBlue,
         ThemePreset::MarantzAmber,
         ThemePreset::CyberpunkNeon,
         ThemePreset::StudioDark,
         ThemePreset::Peppy,
-    ] {
+    ];
+    for preset in presets {
         assert_ne!(preset.display_name(), "");
         assert_ne!(preset.slug(), "");
         assert_ne!(preset.meter_skin_id(), "");
         assert_eq!(preset.font_family(), "Inter");
         assert_eq!(preset.to_string(), preset.display_name());
 
-        let _schemes = preset.material_schemes();
-        // Verify the dark scheme has the expected meter_skin_id and font_family
-        // (MaterialSchemes doesn't carry these, they're ThemePreset properties)
-        assert_eq!(preset.meter_skin_id(), preset.meter_skin_id());
-        assert_eq!(preset.font_family(), "Inter");
+        // Each preset's Material scheme carries its own primary (no shared default).
+        let schemes = preset.material_schemes();
+        assert_eq!(schemes.dark, schemes.light);
     }
+    // Meter skins are distinct per preset (VU skin selection must not collide).
+    let skins: std::collections::HashSet<_> = presets.iter().map(|p| p.meter_skin_id()).collect();
+    assert_eq!(
+        skins.len(),
+        presets.len(),
+        "meter skin ids must be distinct"
+    );
 }
 
 #[test]

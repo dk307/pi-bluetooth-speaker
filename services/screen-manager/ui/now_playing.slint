@@ -340,9 +340,10 @@ export component NowPlayingView inherits Rectangle {
             horizontal-stretch: 1;
             background: transparent;
 
-            // Fixed artist center (30px top + ~40px title + 16px gap + 14px half artist row = 100px)
-            // Dynamic metadata.height proved unreliable (strip preferred-height varies); fixed value keeps equal distances deterministic.
-            property <length> artist_center_y: 100px;
+            // Artist center tracks the actual title strip height (dynamic), with a
+            // floor for the empty-strip startup state. Strip preferred-height varies
+            // when the strip is empty, so a floor keeps distances deterministic at boot.
+            property <length> artist_center_y: 30px + Math.max(title_marquee.height, 32px) + 16px + 14px;
             property <length> settings_center_y: parent.height - 52px;
             property <length> center_step: (self.settings_center_y - self.artist_center_y) / 3.0;
             property <length> seek_center_y: self.artist_center_y + self.center_step;
