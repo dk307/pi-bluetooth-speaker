@@ -2,9 +2,16 @@
 //!
 //! A lightweight service analogous to the `core` daemon: it installs `tracing`
 //! telemetry, parses a minimal command line (`--help`, `--version`,
-//! `--interval`, `--ticks`), runs a periodic Bluetooth status monitor loop,
-//! and (by default) hosts the direct-BIP cover-art provider that publishes
-//! the active track's artwork on the system D-Bus for future consumers.
+//! `--interval`, `--ticks`), runs an event-driven Bluetooth status monitor
+//! loop, and (by default) hosts the direct-BIP cover-art provider that
+//! publishes the active track's artwork on the system D-Bus for future
+//! consumers.
+//!
+//! The monitor wakes on BlueZ/BlueALSA `PropertiesChanged` D-Bus signals (via
+//! [`BluetoothDevice::wait_for_property_change`]) and re-polls at most once per
+//! `interval` as a keep-alive fallback, so state changes surface within
+//! milliseconds of a signal while idle CPU stays at the same low cadence as a
+//! fixed poller.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -16,7 +23,7 @@ use crate::agent::AgentCapabilityMode;
 use crate::config::BtManagerConfig;
 use speaker_bluetooth::{BluetoothDevice, BluetoothStatus, BtError};
 use speaker_common::diag::{
-    CliParse, DEFAULT_BT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts, run_poll_loop,
+    CliParse, DEFAULT_BT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts,
 };
 
 /// Default status poll interval (5 seconds).
@@ -69,7 +76,7 @@ pub fn print_usage(bin_name: &str) {
     println!("Options:");
     println!("  -c, --config <PATH>         JSON config file (default: {DEFAULT_BT_CONFIG_PATH})");
     println!(
-        "  -i, --interval <SECS>       Status poll interval in seconds (default: {})",
+        "  -i, --interval <SECS>       Status poll interval / keep-alive in seconds (default: {})",
         DEFAULT_POLL_INTERVAL.as_secs()
     );
     println!("  -n, --ticks <COUNT>         Exit after COUNT monitor ticks (at least 1)");
@@ -228,10 +235,14 @@ fn spawn_cover_art_subsystem(
 
 /// Runs the Bluetooth manager monitor loop with parsed options.
 ///
-/// Polls [`BluetoothDevice::status`] every `opts.interval`, logging each tick.
-/// When `opts.max_ticks` is set, the loop terminates after that many ticks
-/// (used by tests and preview runs); otherwise it runs until the process is
-/// stopped by systemd.
+/// Runs an event-driven status monitor: one immediate status poll, then a loop
+/// that blocks on [`BluetoothDevice::wait_for_property_change`] with the poll
+/// interval as the keep-alive timeout, running [`run_tick`] on every wake.
+/// This preserves the fixed-poller's worst-case cadence (at most one tick per
+/// interval) while reacting to BlueZ/BlueALSA property signals within
+/// milliseconds. When `opts.max_ticks` is set, the loop terminates after that
+/// many ticks (used by tests and preview runs); otherwise it runs until the
+/// process is stopped by systemd.
 ///
 /// Runs the Bluetooth manager application loop.
 ///
@@ -297,10 +308,16 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
 
     let mut ticks: u64 = 0;
     let mut last_status: Option<(usize, bool)> = None;
-    run_poll_loop(effective_interval, |_timestamp| {
+    // Event-driven monitor: poll once immediately (so startup state is logged
+    // without waiting for a signal or keep-alive), then block on the shared
+    // property-change flag with `effective_interval` as the keep-alive
+    // timeout. The timeout equals the legacy poll interval, so worst-case
+    // tick cadence, `--ticks` accounting and shutdown latency are identical
+    // to the previous fixed-interval loop; signals only make updates faster.
+    loop {
         if shutdown_requested.load(Ordering::SeqCst) {
             tracing::info!("shutdown requested, stopping monitor loop");
-            return true;
+            break;
         }
         match run_tick(bt) {
             Ok(status) => {
@@ -322,8 +339,11 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
             Err(e) => tracing::warn!(error = %e, "Bluetooth status poll failed"),
         }
         ticks = ticks.saturating_add(1);
-        opts.max_ticks.is_some_and(|limit| ticks >= limit)
-    });
+        if opts.max_ticks.is_some_and(|limit| ticks >= limit) {
+            break;
+        }
+        let _ = bt.wait_for_property_change(effective_interval);
+    }
 
     // Trigger auto-trust agent shutdown if it was started.
     if let Some(handle) = auto_trust_shutdown {
