@@ -337,13 +337,22 @@ impl ThemePreset {
         }
     }
 
+    /// Forces dark color scheme on a [`MaterialPalette`] global.
+    ///
+    /// All presets are dark-only (`light == dark` scheme). Slint 1.18 does not
+    /// re-export `ColorScheme` publicly (it lives in `i_slint_common::enums`
+    /// behind `private_unstable_api`); verified against Slint =1.18.1
+    /// (workspace-pinned). If a Slint upgrade moves this path, this helper is
+    /// the single breakage point.
+    fn force_dark(palette: &MaterialPalette) {
+        palette.set_color_scheme(slint::private_unstable_api::re_exports::ColorScheme::Dark);
+    }
+
     /// Applies this theme preset to a [`MainWindow`] component.
     pub fn apply(self, window: &MainWindow) {
         // Push Material scheme
         let material_palette = window.global::<MaterialPalette>();
-        // Force dark mode: all presets are dark-only (light == dark scheme)
-        material_palette
-            .set_color_scheme(slint::private_unstable_api::re_exports::ColorScheme::Dark);
+        Self::force_dark(&material_palette);
         let schemes = self.material_schemes();
         material_palette.set_schemes(schemes);
 
@@ -356,8 +365,7 @@ impl ThemePreset {
         // Splash has its own component tree: push Material schemes into its
         // MaterialPalette global so it reads MaterialPalette.* like other views.
         let material_palette = splash.global::<MaterialPalette>();
-        material_palette
-            .set_color_scheme(slint::private_unstable_api::re_exports::ColorScheme::Dark);
+        Self::force_dark(&material_palette);
         material_palette.set_schemes(self.material_schemes());
     }
 }
