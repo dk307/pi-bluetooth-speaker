@@ -157,15 +157,15 @@ component AmbientWaveIndicator inherits Rectangle {
     }
 }
 
-// Android Material 3 player transport button (see YouTube Music reference)
-// Hero (play/pause): large white filled circle with dark icon (M3 primary container)
-// Prev/next: plain icon buttons with no background/border, white icon (M3 IconButton)
+// Android Material 3 player transport button (button group, see M3 common buttons)
+// Hero (play/pause): large filled circle, primary/on_primary (M3 filled button / FAB)
+// Prev/next: tonal filled circles, secondary_container/on_secondary_container (M3 button group)
 component TransportButton inherits Rectangle {
     in property <image> icon;
     in property <bool> enabled: true;
     in property <bool> is_hero: false;
-    in property <color> background_color: MaterialPalette.inverse_surface;
-    in property <color> icon_color: MaterialPalette.background;
+    in property <color> background_color: MaterialPalette.primary;
+    in property <color> icon_color: MaterialPalette.on_primary;
     in property <bool> is_playing: false;
     in property <image> play_icon: @image-url("../../../assets/icons/play.svg");
     in property <image> pause_icon: @image-url("../../../assets/icons/pause.svg");
@@ -175,7 +175,7 @@ component TransportButton inherits Rectangle {
     width: root.btn_size;
     height: root.btn_size;
     border-radius: root.btn_size / 2;
-    background: root.is_hero ? (root.enabled ? root.background_color : MaterialPalette.surface) : transparent;
+    background: root.is_hero ? (root.enabled ? root.background_color : MaterialPalette.surface) : (root.enabled ? MaterialPalette.secondary_container : transparent);
     border-width: 0px;
     opacity: root.enabled ? (touch.pressed ? 0.8 : 1.0) : 0.35;
     animate opacity { duration: 80ms; easing: ease-out; }
@@ -378,8 +378,9 @@ export component NowPlayingView inherits Rectangle {
                         vertical-alignment: center;
                     }
 
-                    if root.is_playing : AmbientWaveIndicator {
+                    AmbientWaveIndicator {
                         is_playing: root.is_playing;
+                        visible: root.is_playing;
                     }
                 }
             }
@@ -446,33 +447,33 @@ export component NowPlayingView inherits Rectangle {
                     alignment: center;
                     spacing: 36px;
 
-                    // Previous Button - plain icon (M3)
+                    // Previous Button - tonal filled circle (M3 button group)
                     TransportButton {
                         icon: @image-url("../../../assets/icons/previous.svg");
                         enabled: root.transport_available;
                         is_hero: false;
-                        icon_color: MaterialPalette.on_surface;
+                        icon_color: MaterialPalette.on_secondary_container;
                         clicked => { root.previous_track(); }
                     }
 
-                    // Play / Pause (Hero Button) - large white filled circle (M3)
+                    // Play / Pause (Hero Button) - large filled primary circle (M3 filled button)
                     TransportButton {
                         icon: @image-url("../../../assets/icons/play.svg");
                         pause_icon: @image-url("../../../assets/icons/pause.svg");
                         is_playing: root.is_playing;
                         enabled: root.transport_available;
                         is_hero: true;
-                        background_color: MaterialPalette.inverse_surface;
-                        icon_color: MaterialPalette.background;
+                        background_color: MaterialPalette.primary;
+                        icon_color: MaterialPalette.on_primary;
                         clicked => { root.toggle_play_pause(); }
                     }
 
-                    // Next Button - plain icon (M3)
+                    // Next Button - tonal filled circle (M3 button group)
                     TransportButton {
                         icon: @image-url("../../../assets/icons/next.svg");
                         enabled: root.transport_available;
                         is_hero: false;
-                        icon_color: MaterialPalette.on_surface;
+                        icon_color: MaterialPalette.on_secondary_container;
                         clicked => { root.next_track(); }
                     }
                 }
