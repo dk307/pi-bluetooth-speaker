@@ -280,3 +280,24 @@ fn material_schemes_core_tokens_map_legacy_palette() {
         assert_eq!(dark.onSecondary, c(op), "{preset:?} onSecondary");
     }
 }
+
+#[test]
+fn settings_view_swatches_match_preset_constants() {
+    // Guards the .slint side: ThemePresetCard literals in settings_view.slint
+    // must carry the same hexes as ThemePreset::PRESET_SWATCHES. A Rust-only
+    // comparison cannot see drift introduced by editing the view.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/settings_view.slint");
+    let src = std::fs::read_to_string(&path).expect("settings_view.slint must exist");
+    for ((pr, pg, pb), (sr, sg, sb)) in ThemePreset::PRESET_SWATCHES {
+        let primary_hex = format!("#{:02X}{:02X}{:02X}", pr, pg, pb);
+        let secondary_hex = format!("#{:02X}{:02X}{:02X}", sr, sg, sb);
+        assert!(
+            src.contains(&primary_hex),
+            "settings_view.slint missing preset primary {primary_hex}"
+        );
+        assert!(
+            src.contains(&secondary_hex),
+            "settings_view.slint missing preset secondary {secondary_hex}"
+        );
+    }
+}
