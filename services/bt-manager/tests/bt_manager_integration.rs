@@ -138,6 +138,36 @@ fn run_app_terminates_on_tick_cap_with_mock() {
 }
 
 #[test]
+fn run_app_wakes_on_mock_property_change_before_keepalive() {
+    // The monitor loop must react to a property-change signal immediately
+    // instead of waiting out the full keep-alive interval: a mutation from
+    // another thread wakes the second tick long before the 60 s timeout.
+    let (bt, mock) = BluetoothDevice::new_mocked();
+    let dir = speaker_common::diag::ScopedTempDir::new("bt_app_event_wake");
+    let opts = BtManagerOptions {
+        config: Some(dir.path().join("missing.json")),
+        interval: Duration::from_secs(60),
+        explicit_interval: true,
+        max_ticks: Some(2),
+        cover_art: false,
+        auto_trust: false,
+        ..Default::default()
+    };
+    let start = std::time::Instant::now();
+    let changer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        mock.set_powered(false);
+    });
+    assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
+    changer.join().expect("changer thread");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "monitor must wake on property change, not keep-alive; took {elapsed:?}"
+    );
+}
+
+#[test]
 fn run_app_terminates_on_tick_cap_with_auto_trust_and_mock() {
     let (bt, _mock) = BluetoothDevice::new_mocked();
     let dir = speaker_common::diag::ScopedTempDir::new("bt_app_trust_test");
