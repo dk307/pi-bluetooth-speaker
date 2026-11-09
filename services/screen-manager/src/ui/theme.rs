@@ -2,15 +2,14 @@
 //!
 //! Provides strongly typed theme presets and palette models conforming to
 //! Microsoft Pragmatic Rust Guidelines (`M-STRONG-TYPES`, `M-STRONG-TYPES-GUARD`).
-//! Coordinates with Slint ahead-of-time declarative bindings (`ThemePalette`, `Theme`).
+//! Coordinates with Slint ahead-of-time declarative bindings (`MaterialPalette`, `AppTheme`).
 
 use std::fmt::{self, Display, Formatter};
 
 use slint::ComponentHandle;
 
 use super::generated::{
-    AppTheme, MainWindow, MaterialPalette, MaterialScheme, MaterialSchemes, SplashScreen, Theme,
-    ThemePalette,
+    AppTheme, MainWindow, MaterialPalette, MaterialScheme, MaterialSchemes, SplashScreen,
 };
 
 /// Strongly typed theme preset identifiers.
@@ -180,7 +179,7 @@ impl ThemePreset {
         )
     }
 
-    /// Per-preset base colors (same values as the legacy `ThemePalette`).
+    /// Per-preset base colors (single source; also drive the Settings swatches).
     #[must_use]
     fn material_base_colors(
         self,
@@ -350,161 +349,16 @@ impl ThemePreset {
 
         // Single source of truth for the preset index (skin selection reads this).
         window.global::<AppTheme>().set_active_preset(self.index());
-
-        // Also update legacy Theme for now (P2-P5 will migrate off)
-        let theme = window.global::<Theme>();
-        theme.set_active_preset(self.index());
-        // Inline ThemePalette creation (palette() method removed, replaced by material_schemes())
-        let palette = match self {
-            Self::McIntoshBlue => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x09, 0x0D, 0x12),
-                card_surface: slint::Color::from_rgb_u8(0x11, 0x19, 0x23),
-                card_border: slint::Color::from_rgb_u8(0x30, 0x36, 0x3D),
-                primary_accent: slint::Color::from_rgb_u8(0x00, 0xC8, 0xFF),
-                secondary_accent: slint::Color::from_rgb_u8(0x70, 0xE1, 0xFF),
-                needle_peak: slint::Color::from_rgb_u8(0xFF, 0x33, 0x44),
-                dock_active_text: slint::Color::from_rgb_u8(0x09, 0x0D, 0x12),
-                text_primary: slint::Color::from_rgb_u8(0xF0, 0xF6, 0xFC),
-                text_muted: slint::Color::from_rgb_u8(0x8B, 0x94, 0x9E),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-            Self::MarantzAmber => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x12, 0x10, 0x0D),
-                card_surface: slint::Color::from_rgb_u8(0x1C, 0x17, 0x12),
-                card_border: slint::Color::from_rgb_u8(0x3A, 0x2E, 0x22),
-                primary_accent: slint::Color::from_rgb_u8(0xE5, 0xA9, 0x3C),
-                secondary_accent: slint::Color::from_rgb_u8(0xFF, 0xD1, 0x66),
-                needle_peak: slint::Color::from_rgb_u8(0xD9, 0x38, 0x29),
-                dock_active_text: slint::Color::from_rgb_u8(0x12, 0x10, 0x0D),
-                text_primary: slint::Color::from_rgb_u8(0xFD, 0xFB, 0xF7),
-                text_muted: slint::Color::from_rgb_u8(0x9C, 0x92, 0x83),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-            Self::CyberpunkNeon => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x0D, 0x0B, 0x18),
-                card_surface: slint::Color::from_rgb_u8(0x1B, 0x14, 0x2E),
-                card_border: slint::Color::from_rgb_u8(0x3C, 0x23, 0x5A),
-                primary_accent: slint::Color::from_rgb_u8(0x00, 0xF0, 0xFF),
-                secondary_accent: slint::Color::from_rgb_u8(0xFF, 0x00, 0x7F),
-                needle_peak: slint::Color::from_rgb_u8(0xFF, 0x14, 0x93),
-                dock_active_text: slint::Color::from_rgb_u8(0x0D, 0x0B, 0x18),
-                text_primary: slint::Color::from_rgb_u8(0xF5, 0xEE, 0xFD),
-                text_muted: slint::Color::from_rgb_u8(0xA3, 0x90, 0xC5),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-            Self::StudioDark => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x12, 0x12, 0x12),
-                card_surface: slint::Color::from_rgb_u8(0x1E, 0x1E, 0x1E),
-                card_border: slint::Color::from_rgb_u8(0x2D, 0x2D, 0x2D),
-                primary_accent: slint::Color::from_rgb_u8(0xF0, 0xF0, 0xF0),
-                secondary_accent: slint::Color::from_rgb_u8(0xA0, 0xA0, 0xA0),
-                needle_peak: slint::Color::from_rgb_u8(0x00, 0xE6, 0x76),
-                dock_active_text: slint::Color::from_rgb_u8(0x00, 0x00, 0x00),
-                text_primary: slint::Color::from_rgb_u8(0xFF, 0xFF, 0xFF),
-                text_muted: slint::Color::from_rgb_u8(0x88, 0x88, 0x88),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-            Self::Peppy => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x14, 0x11, 0x0D),
-                card_surface: slint::Color::from_rgb_u8(0x20, 0x1A, 0x14),
-                card_border: slint::Color::from_rgb_u8(0x48, 0x38, 0x24),
-                primary_accent: slint::Color::from_rgb_u8(0xF5, 0xB8, 0x3D),
-                secondary_accent: slint::Color::from_rgb_u8(0xFF, 0xDF, 0x85),
-                needle_peak: slint::Color::from_rgb_u8(0xE6, 0x39, 0x46),
-                dock_active_text: slint::Color::from_rgb_u8(0x14, 0x11, 0x0D),
-                text_primary: slint::Color::from_rgb_u8(0xFF, 0xFD, 0xF5),
-                text_muted: slint::Color::from_rgb_u8(0xA6, 0x9B, 0x8D),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-        };
-        theme.set_active(palette);
     }
 
     /// Applies this theme preset to a [`SplashScreen`] component.
     pub fn apply_splash(self, splash: &SplashScreen) {
         // Splash has its own component tree: push Material schemes into its
-        // MaterialPalette global (colors) and legacy Theme (font_family only).
+        // MaterialPalette global so it reads MaterialPalette.* like other views.
         let material_palette = splash.global::<MaterialPalette>();
         material_palette
             .set_color_scheme(slint::private_unstable_api::re_exports::ColorScheme::Dark);
         material_palette.set_schemes(self.material_schemes());
-
-        let theme = splash.global::<Theme>();
-        theme.set_active_preset(self.index());
-        // Keep legacy ThemePalette for splash during transition (P5 removes Theme)
-        let palette = match self {
-            Self::McIntoshBlue => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x09, 0x0D, 0x12),
-                card_surface: slint::Color::from_rgb_u8(0x11, 0x19, 0x23),
-                card_border: slint::Color::from_rgb_u8(0x30, 0x36, 0x3D),
-                primary_accent: slint::Color::from_rgb_u8(0x00, 0xC8, 0xFF),
-                secondary_accent: slint::Color::from_rgb_u8(0x70, 0xE1, 0xFF),
-                needle_peak: slint::Color::from_rgb_u8(0xFF, 0x33, 0x44),
-                dock_active_text: slint::Color::from_rgb_u8(0x09, 0x0D, 0x12),
-                text_primary: slint::Color::from_rgb_u8(0xF0, 0xF6, 0xFC),
-                text_muted: slint::Color::from_rgb_u8(0x8B, 0x94, 0x9E),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-            Self::MarantzAmber => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x12, 0x10, 0x0D),
-                card_surface: slint::Color::from_rgb_u8(0x1C, 0x17, 0x12),
-                card_border: slint::Color::from_rgb_u8(0x3A, 0x2E, 0x22),
-                primary_accent: slint::Color::from_rgb_u8(0xE5, 0xA9, 0x3C),
-                secondary_accent: slint::Color::from_rgb_u8(0xFF, 0xD1, 0x66),
-                needle_peak: slint::Color::from_rgb_u8(0xD9, 0x38, 0x29),
-                dock_active_text: slint::Color::from_rgb_u8(0x12, 0x10, 0x0D),
-                text_primary: slint::Color::from_rgb_u8(0xFD, 0xFB, 0xF7),
-                text_muted: slint::Color::from_rgb_u8(0x9C, 0x92, 0x83),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-            Self::CyberpunkNeon => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x0D, 0x0B, 0x18),
-                card_surface: slint::Color::from_rgb_u8(0x1B, 0x14, 0x2E),
-                card_border: slint::Color::from_rgb_u8(0x3C, 0x23, 0x5A),
-                primary_accent: slint::Color::from_rgb_u8(0x00, 0xF0, 0xFF),
-                secondary_accent: slint::Color::from_rgb_u8(0xFF, 0x00, 0x7F),
-                needle_peak: slint::Color::from_rgb_u8(0xFF, 0x14, 0x93),
-                dock_active_text: slint::Color::from_rgb_u8(0x0D, 0x0B, 0x18),
-                text_primary: slint::Color::from_rgb_u8(0xF5, 0xEE, 0xFD),
-                text_muted: slint::Color::from_rgb_u8(0xA3, 0x90, 0xC5),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-            Self::StudioDark => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x12, 0x12, 0x12),
-                card_surface: slint::Color::from_rgb_u8(0x1E, 0x1E, 0x1E),
-                card_border: slint::Color::from_rgb_u8(0x2D, 0x2D, 0x2D),
-                primary_accent: slint::Color::from_rgb_u8(0xF0, 0xF0, 0xF0),
-                secondary_accent: slint::Color::from_rgb_u8(0xA0, 0xA0, 0xA0),
-                needle_peak: slint::Color::from_rgb_u8(0x00, 0xE6, 0x76),
-                dock_active_text: slint::Color::from_rgb_u8(0x00, 0x00, 0x00),
-                text_primary: slint::Color::from_rgb_u8(0xFF, 0xFF, 0xFF),
-                text_muted: slint::Color::from_rgb_u8(0x88, 0x88, 0x88),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-            Self::Peppy => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x14, 0x11, 0x0D),
-                card_surface: slint::Color::from_rgb_u8(0x20, 0x1A, 0x14),
-                card_border: slint::Color::from_rgb_u8(0x48, 0x38, 0x24),
-                primary_accent: slint::Color::from_rgb_u8(0xF5, 0xB8, 0x3D),
-                secondary_accent: slint::Color::from_rgb_u8(0xFF, 0xDF, 0x85),
-                needle_peak: slint::Color::from_rgb_u8(0xE6, 0x39, 0x46),
-                dock_active_text: slint::Color::from_rgb_u8(0x14, 0x11, 0x0D),
-                text_primary: slint::Color::from_rgb_u8(0xFF, 0xFD, 0xF5),
-                text_muted: slint::Color::from_rgb_u8(0xA6, 0x9B, 0x8D),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-        };
-        theme.set_active(palette);
     }
 }
 

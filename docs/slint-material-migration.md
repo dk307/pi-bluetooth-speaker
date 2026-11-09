@@ -996,3 +996,35 @@ The gallery example demonstrates loading themes from JSON files exported by [Mat
 - `material_slint_theme.json`, `material_green_theme.json`, etc.
 - Contains `schemes.light`, `schemes.dark`, `palettes.*`
 - Could be used for runtime theme switching instead of hardcoded `.slint` schemes
+---
+
+## Completion: Theme Migration P0–P5 (2026-11-08)
+
+Single source of truth: `ThemePreset` (Rust, 5 presets) → `MaterialScheme` (dark-only) → `MaterialPalette.schemes`; all views read `MaterialPalette.*`. `AppTheme.active_preset` is the single preset index (Slint skin switch + Rust). Legacy `Theme`/`ThemePalette`/`theme.slint` deleted.
+
+### Token map (legacy → Material)
+| Legacy | Material |
+|---|---|
+| `chassis` | `background` |
+| `card_surface` | `surface` |
+| `card_border` | `outline_variant` |
+| `primary_accent` | `primary` |
+| `secondary_accent` | `secondary` |
+| `text_primary` | `on_surface` |
+| `text_muted` | `on_surface_variant` |
+| `needle_peak` | `error` |
+| `dock_active_text` | `on_primary` |
+| hero play circle | `inverse_surface` / `background` |
+
+### Derivation (`ThemePreset::material_scheme_dark`)
+`primary`/`secondary`/`chassis`/`card_surface`/`card_border`/`text_primary`/`text_muted`/`needle_peak`/`dock_active_text` map directly; containers (`surface_container_*`, `*_container`) and `surface_dim`/`surface_bright` are weighted averages of base colors. `PRESET_SWATCHES` pins Settings swatch hexes to the same source.
+
+### Vendor patches (`material-1.1.0/`, see THEME_MIGRATION_PLAN.md)
+- `material_palette.slint`: `schemes` `in`→`in-out`; added `color-scheme <=> Palette.color-scheme` (Rust forces Dark)
+- `material_typography.slint` / `material_style_metrics.slint`: `out`→`in-out`, compact 800×480 defaults (from former `material_*_override.slint`, now deleted); added `border_radius_10`
+
+### Coverage gate deviation
+Plan P5 gated ≥90% lines/functions; workspace is 89.16%/91.67% (repo gate 85% passes). The shortfall is in unrelated crates (bluetooth/hardware) outside this migration's scope; `theme.rs` itself is 99.78%/100%.
+
+### Verification
+Host framebuffer probes: all 5 presets render distinct primaries on Settings; all Material tabs recolor on preset switch. Device: aarch64 release deployed, `screen-manager` active.

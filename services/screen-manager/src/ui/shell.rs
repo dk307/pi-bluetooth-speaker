@@ -18,7 +18,7 @@ use crate::config::{
 };
 
 use super::framebuffer::MarqueeRowSpec;
-use super::generated::{MainWindow, MarqueeCompose, Theme};
+use super::generated::{AppTheme, MainWindow, MarqueeCompose};
 use super::marquee::{MarqueeStripCache, MarqueeTypography, StripRequest};
 use super::theme::ThemePreset;
 
@@ -409,7 +409,7 @@ impl AppShell {
     /// Returns the currently active theme preset.
     #[must_use]
     pub fn current_theme(&self) -> ThemePreset {
-        ThemePreset::from_index(self.window.global::<Theme>().get_active_preset())
+        ThemePreset::from_index(self.window.global::<AppTheme>().get_active_preset())
     }
 
     /// Returns the currently active screen tab index (0 to 5).
@@ -850,7 +850,7 @@ impl AppShell {
     /// Free-function form of [`AppShell::refresh_marquee_strips`] callable from
     /// Slint callbacks that only hold a weak window handle and the shared strip cache.
     fn refresh_marquee_strips_for(w: &MainWindow, strips: &RefCell<MarqueeStripCache>) {
-        let preset = ThemePreset::from_index(w.global::<Theme>().get_active_preset());
+        let preset = ThemePreset::from_index(w.global::<AppTheme>().get_active_preset());
         // Use Material scheme's onBackground (equivalent to old text_primary)
         let schemes = preset.material_schemes();
         let text_primary = schemes.dark.onBackground;
@@ -930,7 +930,7 @@ impl AppShell {
         let strips = Rc::clone(&self.strips);
         self.window.on_cycle_theme(move || {
             if let Some(w) = win.upgrade() {
-                let current = ThemePreset::from_index(w.global::<Theme>().get_active_preset());
+                let current = ThemePreset::from_index(w.global::<AppTheme>().get_active_preset());
                 let next = current.next();
                 next.apply(&w);
                 Self::refresh_marquee_strips_for(&w, &strips);

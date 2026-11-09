@@ -1,4 +1,3 @@
-import { Theme } from "theme.slint";
 import { MaterialPalette } from "@material/material.slint";
 
 export struct BootCheckLine {
@@ -91,7 +90,7 @@ export component SplashScreen inherits Window {
     width: 800px;
     height: 480px;
     background: MaterialPalette.background;
-    default-font-family: Theme.active.font_family;
+    default-font-family: "Inter";
 
     // Single bottom check line, replaced as each boot check progresses.
     in property <BootCheckLine> current_check: {
