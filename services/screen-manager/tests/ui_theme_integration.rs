@@ -289,8 +289,8 @@ fn settings_view_swatches_match_preset_constants() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/settings_view.slint");
     let src = std::fs::read_to_string(&path).expect("settings_view.slint must exist");
     for ((pr, pg, pb), (sr, sg, sb)) in ThemePreset::PRESET_SWATCHES {
-        let primary_hex = format!("#{:02X}{:02X}{:02X}", pr, pg, pb);
-        let secondary_hex = format!("#{:02X}{:02X}{:02X}", sr, sg, sb);
+        let primary_hex = format!("#{pr:02X}{pg:02X}{pb:02X}");
+        let secondary_hex = format!("#{sr:02X}{sg:02X}{sb:02X}");
         assert!(
             src.contains(&primary_hex),
             "settings_view.slint missing preset primary {primary_hex}"
