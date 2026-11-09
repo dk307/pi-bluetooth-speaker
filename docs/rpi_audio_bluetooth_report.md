@@ -386,6 +386,8 @@ Persistent changes deployed to the Pi (previous values recoverable from backups)
 1. `/etc/bluetooth/main.conf` (backup: `/tmp/main.conf.bak`) — full deployed content:
    ```ini
    [General]
+   FastConnectable = true      ; added 2026-11-09 (faster phone-initiated
+                               ; connects; power tradeoff irrelevant, mains)
    Experimental = true
    Name = DietPi Speaker
    Class = 0x240414            ; loudspeaker CoD (was 0x240418)
@@ -401,7 +403,7 @@ Persistent changes deployed to the Pi (previous values recoverable from backups)
                                ; rejects Pixel TG without category-2 -> dead
                                ; absolute volume, see 7.6.1 Rank 0 gate)
    ```
-   The same content is committed as `baseline/etc/bluetooth/main.conf` so reinstalls include the fix.
+   The same content is committed as `baseline/etc/bluetooth/main.conf` so reinstalls include the fix. Verified live via `btmgmt info` (`fast-connectable` in current settings); note it is a kernel MGMT page-scan setting, not an `Adapter1` D-Bus property.
 2. `/var/lib/bluetooth/20:E1:5D:B2:16:BF/30:E0:44:67:38:A2/info` (BlueZ per-device store; backup: `/tmp/info.bak`) — the `Volume=64` seed under `[General]` is the applied change (see 7.6.1). Relevant sections of the deployed file:
    ```ini
    [LinkKey]
