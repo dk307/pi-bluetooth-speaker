@@ -1,8 +1,9 @@
-import { Theme } from "theme.slint";
+import { MaterialPalette } from "@material/material.slint";
+import { MaterialStyleMetrics } from "@material/material.slint";
 
 export component TopStatusBar inherits Rectangle {
     height: 60px;
-    background: Theme.active.chassis;
+    background: MaterialPalette.background;
 
     in property <string> active_source: "Bluetooth";
     in property <string> track_or_device: "Waiting for Connection...";
@@ -36,6 +37,9 @@ export component TopStatusBar inherits Rectangle {
         (volume_value <= 50.0 ? 2 :
         (volume_value <= 75.0 ? 3 : 4)));
 
+    // DIM toggle state (driven externally; reflects current night mode setting)
+    in property <bool> dim_active: false;
+
     callback source_clicked();
     callback night_mode_clicked();
     callback volume_clicked();
@@ -43,8 +47,8 @@ export component TopStatusBar inherits Rectangle {
     callback protocol_clicked();
 
     HorizontalLayout {
-        padding-left: 0px;
-        padding-right: 18px;
+        padding-left: MaterialStyleMetrics.padding_24;
+        padding-right: MaterialStyleMetrics.padding_24;
         alignment: space-between;
 
         // Left: Bluetooth Source (icon + label, no pill badge; vertically centered)
@@ -62,7 +66,7 @@ export component TopStatusBar inherits Rectangle {
                     // width pinned to the SVG's 370:100 aspect at bar scale)
                     Image {
                         source: @image-url("../../../assets/icons/bluetooth-logo-word.svg");
-                        colorize: Theme.active.primary_accent;
+                        colorize: MaterialPalette.primary;
                         height: root.height;
                         width: root.height * 3.45;
                         image-fit: fill;
@@ -71,30 +75,30 @@ export component TopStatusBar inherits Rectangle {
             }
         }
 
-        // Right: Audio Codec, Sample Rate, Bit Depth Badges + Volume + DIM Toggle (Vertically centered)
+        // Right: Codec Badge + Volume + DIM Toggle (Vertically centered)
         VerticalLayout {
             alignment: center;
             HorizontalLayout {
                 spacing: 10px;
 
-                // 1. Codec Badge (aptX-HD / AAC / SBC / LDAC)
+                // 1. Codec Badge (aptX-HD / AAC / SBC / LDAC) - original style with Material colors
                 VerticalLayout {
                     alignment: center;
                     Rectangle {
                         // Fixed size so codec name changes never shift neighbors.
                         width: 120px;
                         height: 40px;
-                        background: Theme.active.card_surface;
+                        background: MaterialPalette.surface;
                         border-radius: 10px;
                         border-width: 1px;
-                        border-color: Theme.active.card_border;
+                        border-color: MaterialPalette.outline_variant;
 
                         Text {
                             width: parent.width - 12px;
                             height: parent.height;
                             x: (parent.width - self.width) / 2;
                             text: root.stream_codec;
-                            color: Theme.active.primary_accent;
+                            color: MaterialPalette.primary;
                             font-size: 16px;
                             font-weight: 800;
                             horizontal-alignment: center;
@@ -110,7 +114,7 @@ export component TopStatusBar inherits Rectangle {
                     }
                 }
 
-                // 4. Volume / Mute Control (Takes whole vertical space of top row)
+                // 2. Volume / Mute Control (kept custom - specialized SVG icons)
                 VerticalLayout {
                     alignment: center;
                     Rectangle {
@@ -126,31 +130,31 @@ export component TopStatusBar inherits Rectangle {
 
                             if !root.is_muted && root.vol_level == 0 : Image {
                                 source: @image-url("../../../assets/icons/volume-0.svg");
-                                colorize: Theme.active.secondary_accent;
+                                colorize: MaterialPalette.secondary;
                                 width: 44px;
                                 image-fit: contain;
                             }
                             if !root.is_muted && root.vol_level == 1 : Image {
                                 source: @image-url("../../../assets/icons/volume-1.svg");
-                                colorize: Theme.active.secondary_accent;
+                                colorize: MaterialPalette.secondary;
                                 width: 44px;
                                 image-fit: contain;
                             }
                             if !root.is_muted && root.vol_level == 2 : Image {
                                 source: @image-url("../../../assets/icons/volume-2.svg");
-                                colorize: Theme.active.secondary_accent;
+                                colorize: MaterialPalette.secondary;
                                 width: 44px;
                                 image-fit: contain;
                             }
                             if !root.is_muted && root.vol_level == 3 : Image {
                                 source: @image-url("../../../assets/icons/volume-3.svg");
-                                colorize: Theme.active.secondary_accent;
+                                colorize: MaterialPalette.secondary;
                                 width: 44px;
                                 image-fit: contain;
                             }
                             if !root.is_muted && root.vol_level == 4 : Image {
                                 source: @image-url("../../../assets/icons/volume-4.svg");
-                                colorize: Theme.active.secondary_accent;
+                                colorize: MaterialPalette.secondary;
                                 width: 44px;
                                 image-fit: contain;
                             }
@@ -158,7 +162,7 @@ export component TopStatusBar inherits Rectangle {
                             if !root.is_muted : Text {
                                 width: 48px;
                                 text: Math.round(root.volume_value);
-                                color: Theme.active.secondary_accent;
+                                color: MaterialPalette.secondary;
                                 font-size: 20px;
                                 font-weight: 800;
                                 vertical-alignment: center;
@@ -166,7 +170,7 @@ export component TopStatusBar inherits Rectangle {
 
                             if root.is_muted : Image {
                                 source: @image-url("../../../assets/icons/volume-mute.svg");
-                                colorize: #EF4444;
+                                colorize: MaterialPalette.error;
                                 width: 44px;
                                 image-fit: contain;
                             }
@@ -180,22 +184,22 @@ export component TopStatusBar inherits Rectangle {
                     }
                 }
 
-                // 5. DIM Toggle Button
+                // 3. DIM Toggle Button - original style with Material colors
                 VerticalLayout {
                     alignment: center;
                     Rectangle {
                         width: 52px;
                         height: 40px;
-                        background: Theme.active.card_surface;
+                        background: MaterialPalette.surface;
                         border-radius: 10px;
                         border-width: 1px;
-                        border-color: Theme.active.card_border;
+                        border-color: MaterialPalette.outline_variant;
 
                         Image {
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
                             source: @image-url("../../../assets/icons/brightness.svg");
-                            colorize: Theme.active.text_muted;
+                            colorize: root.dim_active ? MaterialPalette.primary : MaterialPalette.secondary;
                             width: 24px;
                             height: 24px;
                             image-fit: contain;
@@ -233,7 +237,7 @@ export component TopStatusBar inherits Rectangle {
                     width: parent.width;
                     height: parent.height;
                     text: root.track_or_device;
-                    color: Theme.active.text_primary;
+                    color: MaterialPalette.on_surface;
                     font-size: 26px;
                     font-weight: 800;
                     vertical-alignment: center;
@@ -254,6 +258,6 @@ export component TopStatusBar inherits Rectangle {
         y: parent.height - self.height;
         width: parent.width;
         height: 1px;
-        background: Theme.active.card_border;
+        background: MaterialPalette.outline_variant;
     }
 }

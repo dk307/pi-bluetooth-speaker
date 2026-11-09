@@ -1,4 +1,5 @@
-import { Theme } from "theme.slint";
+import { MaterialPalette } from "@material/material.slint";
+import { AppTheme } from "app_theme.slint";
 import { NowPlayingView } from "now_playing.slint";
 import { VolumeHudOverlay } from "volume_hud.slint";
 import { SettingsView } from "settings_view.slint";
@@ -14,7 +15,7 @@ component DetailRow inherits Rectangle {
 
         Text {
             text: root.label;
-            color: Theme.active.secondary_accent;
+            color: MaterialPalette.secondary;
             font-size: 12px;
             font-weight: 800;
             vertical-alignment: center;
@@ -23,7 +24,7 @@ component DetailRow inherits Rectangle {
 
         Text {
             text: root.value;
-            color: Theme.active.text_primary;
+            color: MaterialPalette.on_surface;
             font-size: 14px;
             font-weight: 600;
             vertical-alignment: center;
@@ -34,7 +35,7 @@ component DetailRow inherits Rectangle {
 }
 
 export component MainViewport inherits Rectangle {
-    background: Theme.active.chassis;
+    background: MaterialPalette.background;
 
     in-out property <int> active_tab: 0;
     in property <bool> cd_enabled: false;
@@ -91,10 +92,10 @@ export component MainViewport inherits Rectangle {
         padding: 0px;
 
         Rectangle {
-            background: @linear-gradient(150deg, Theme.active.card_surface 0%, Theme.active.chassis 100%);
+            background: @linear-gradient(150deg, MaterialPalette.surface 0%, MaterialPalette.background 100%);
             border-radius: 0px;
             border-width: 1px;
-            border-color: Theme.active.card_border;
+            border-color: MaterialPalette.outline_variant;
             clip: true;
 
             now_playing := NowPlayingView {
@@ -124,10 +125,10 @@ export component MainViewport inherits Rectangle {
         padding: 8px;
 
         Rectangle {
-            background: Theme.active.card_surface;
+            background: MaterialPalette.surface;
             border-radius: 16px;
             border-width: 1px;
-            border-color: Theme.active.card_border;
+            border-color: MaterialPalette.outline_variant;
             clip: true;
 
             VerticalLayout {
@@ -139,14 +140,14 @@ export component MainViewport inherits Rectangle {
                     Rectangle {
                         width: 110px;
                         height: 42px;
-                        background: Theme.active.card_surface;
+                        background: MaterialPalette.surface;
                         border-radius: 12px;
                         border-width: 1px;
-                        border-color: Theme.active.card_border;
+                        border-color: MaterialPalette.outline_variant;
 
                         Text {
                             text: "Back";
-                            color: Theme.active.primary_accent;
+                            color: MaterialPalette.primary;
                             font-size: 18px;
                             font-weight: 800;
                             horizontal-alignment: center;
@@ -163,10 +164,10 @@ export component MainViewport inherits Rectangle {
                 Image {
                     width: 100%;
                     height: 100%;
-                    source: Theme.active_preset == 0 ? @image-url("../../../assets/skins/800x480/blue-bgr.png") :
-                            Theme.active_preset == 1 ? @image-url("../../../assets/skins/800x480/gold-bgr.png") :
-                            Theme.active_preset == 2 ? @image-url("../../../assets/skins/800x480/rainbow-bgr.png") :
-                            Theme.active_preset == 3 ? @image-url("../../../assets/skins/800x480/black-white-bgr.png") :
+                    source: AppTheme.active_preset == 0 ? @image-url("../../../assets/skins/800x480/blue-bgr.png") :
+                            AppTheme.active_preset == 1 ? @image-url("../../../assets/skins/800x480/gold-bgr.png") :
+                            AppTheme.active_preset == 2 ? @image-url("../../../assets/skins/800x480/rainbow-bgr.png") :
+                            AppTheme.active_preset == 3 ? @image-url("../../../assets/skins/800x480/black-white-bgr.png") :
                             @image-url("../../../assets/skins/800x480/vintage-bgr.png");
                     image-fit: contain;
                 }
@@ -186,7 +187,7 @@ export component MainViewport inherits Rectangle {
 
             Text {
                 text: "BLUETOOTH CONNECTION";
-                color: Theme.active.primary_accent;
+                color: MaterialPalette.primary;
                 font-size: 18px;
                 font-weight: 800;
                 vertical-alignment: center;
@@ -195,14 +196,14 @@ export component MainViewport inherits Rectangle {
 
             Rectangle {
                 width: 150px;
-                background: Theme.active.card_surface;
+                background: MaterialPalette.surface;
                 border-radius: 10px;
                 border-width: 1px;
-                border-color: Theme.active.card_border;
+                border-color: MaterialPalette.outline_variant;
 
                 Text {
                     text: root.is_playing ? "STREAMING" : (root.bt_connected ? "CONNECTED" : "WAITING");
-                    color: root.is_playing ? Theme.active.primary_accent : Theme.active.secondary_accent;
+                    color: root.is_playing ? MaterialPalette.primary : MaterialPalette.secondary;
                     font-size: 14px;
                     font-weight: 800;
                     horizontal-alignment: center;
@@ -213,12 +214,12 @@ export component MainViewport inherits Rectangle {
             Rectangle {
                 width: 120px;
                 height: 42px;
-                background: Theme.active.primary_accent;
+                background: MaterialPalette.primary;
                 border-radius: 12px;
 
                 Text {
                     text: "Back";
-                    color: Theme.active.dock_active_text;
+                    color: MaterialPalette.on_primary;
                     font-size: 18px;
                     font-weight: 800;
                     horizontal-alignment: center;
@@ -237,10 +238,10 @@ export component MainViewport inherits Rectangle {
             // Left card: connected source (org.bluez.Device1)
             Rectangle {
                 horizontal-stretch: 1;
-                background: Theme.active.card_surface;
+                background: MaterialPalette.surface;
                 border-radius: 14px;
                 border-width: 1px;
-                border-color: Theme.active.card_border;
+                border-color: MaterialPalette.outline_variant;
 
                 VerticalLayout {
                     padding: 16px;
@@ -248,7 +249,7 @@ export component MainViewport inherits Rectangle {
 
                     Text {
                         text: "CONNECTED SOURCE";
-                        color: Theme.active.primary_accent;
+                        color: MaterialPalette.primary;
                         font-size: 13px;
                         font-weight: 800;
                     }
@@ -264,10 +265,10 @@ export component MainViewport inherits Rectangle {
             // Right card: audio stream (BlueALSA PCM) and local controller (org.bluez.Adapter1)
             Rectangle {
                 horizontal-stretch: 1;
-                background: Theme.active.card_surface;
+                background: MaterialPalette.surface;
                 border-radius: 14px;
                 border-width: 1px;
-                border-color: Theme.active.card_border;
+                border-color: MaterialPalette.outline_variant;
 
                 VerticalLayout {
                     padding: 16px;
@@ -275,7 +276,7 @@ export component MainViewport inherits Rectangle {
 
                     Text {
                         text: "AUDIO STREAM";
-                        color: Theme.active.primary_accent;
+                        color: MaterialPalette.primary;
                         font-size: 13px;
                         font-weight: 800;
                     }
@@ -301,7 +302,7 @@ export component MainViewport inherits Rectangle {
 
             Text {
                 text: "OPTICAL CD PLAYER";
-                color: Theme.active.primary_accent;
+                color: MaterialPalette.primary;
                 font-size: 18px;
                 font-weight: 800;
                 vertical-alignment: center;
@@ -311,12 +312,12 @@ export component MainViewport inherits Rectangle {
             Rectangle {
                 width: 120px;
                 height: 42px;
-                background: Theme.active.primary_accent;
+                background: MaterialPalette.primary;
                 border-radius: 12px;
 
                 Text {
                     text: "Back";
-                    color: Theme.active.dock_active_text;
+                    color: MaterialPalette.on_primary;
                     font-size: 18px;
                     font-weight: 800;
                     horizontal-alignment: center;
@@ -330,10 +331,10 @@ export component MainViewport inherits Rectangle {
         }
 
         Rectangle {
-            background: Theme.active.card_surface;
+            background: MaterialPalette.surface;
             border-radius: 16px;
             border-width: 1px;
-            border-color: Theme.active.card_border;
+            border-color: MaterialPalette.outline_variant;
             vertical-stretch: 1;
 
             VerticalLayout {
@@ -342,7 +343,7 @@ export component MainViewport inherits Rectangle {
 
                 Text {
                     text: "USB Optical Drive Subsystem (cdda://)";
-                    color: Theme.active.secondary_accent;
+                    color: MaterialPalette.secondary;
                     font-size: 16px;
                     font-weight: 600;
                     horizontal-alignment: center;
@@ -362,7 +363,7 @@ export component MainViewport inherits Rectangle {
 
             Text {
                 text: "CAMILLADSP ACTIVE CROSSOVER";
-                color: Theme.active.primary_accent;
+                color: MaterialPalette.primary;
                 font-size: 18px;
                 font-weight: 800;
                 vertical-alignment: center;
@@ -372,12 +373,12 @@ export component MainViewport inherits Rectangle {
             Rectangle {
                 width: 120px;
                 height: 42px;
-                background: Theme.active.primary_accent;
+                background: MaterialPalette.primary;
                 border-radius: 12px;
 
                 Text {
                     text: "Back";
-                    color: Theme.active.dock_active_text;
+                    color: MaterialPalette.on_primary;
                     font-size: 18px;
                     font-weight: 800;
                     horizontal-alignment: center;
@@ -391,10 +392,10 @@ export component MainViewport inherits Rectangle {
         }
 
         Rectangle {
-            background: Theme.active.card_surface;
+            background: MaterialPalette.surface;
             border-radius: 16px;
             border-width: 1px;
-            border-color: Theme.active.card_border;
+            border-color: MaterialPalette.outline_variant;
             vertical-stretch: 1;
 
             VerticalLayout {
@@ -403,7 +404,7 @@ export component MainViewport inherits Rectangle {
 
                 Text {
                     text: "48kHz / 32-bit LE Processing Pipeline";
-                    color: Theme.active.secondary_accent;
+                    color: MaterialPalette.secondary;
                     font-size: 16px;
                     font-weight: 600;
                     horizontal-alignment: center;

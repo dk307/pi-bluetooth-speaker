@@ -31,7 +31,7 @@ pub use framebuffer::{
     Bgrx8888Pixel, FrameTiming, Framebuffer, FramebufferError, FramebufferMockCtrl, MarqueeRowSpec,
 };
 #[doc(inline)]
-pub use generated::{BootCheckLine, MainWindow, SplashScreen, Theme, ThemePalette};
+pub use generated::{AppTheme, BootCheckLine, MainWindow, SplashScreen};
 #[doc(inline)]
 pub use input::{
     TouchAction, TouchCalibration, TouchDecoder, TouchError, TouchInputDevice, TouchMockCtrl,

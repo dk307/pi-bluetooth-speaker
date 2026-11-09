@@ -2,13 +2,15 @@
 //!
 //! Provides strongly typed theme presets and palette models conforming to
 //! Microsoft Pragmatic Rust Guidelines (`M-STRONG-TYPES`, `M-STRONG-TYPES-GUARD`).
-//! Coordinates with Slint ahead-of-time declarative bindings (`ThemePalette`, `Theme`).
+//! Coordinates with Slint ahead-of-time declarative bindings (`MaterialPalette`, `AppTheme`).
 
 use std::fmt::{self, Display, Formatter};
 
 use slint::ComponentHandle;
 
-use super::generated::{MainWindow, SplashScreen, Theme, ThemePalette};
+use super::generated::{
+    AppTheme, MainWindow, MaterialPalette, MaterialScheme, MaterialSchemes, SplashScreen,
+};
 
 /// Strongly typed theme preset identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -112,6 +114,21 @@ impl ThemePreset {
         }
     }
 
+    /// `(primary, secondary)` swatch colors per preset, mirroring the literal
+    /// hexes in `settings_view.slint` (`ThemePresetCard` `primary_color` /
+    /// `secondary_color`). The unit test below pins the two sides together.
+    #[expect(
+        clippy::type_complexity,
+        reason = "flat lookup table of 5 (primary, secondary) RGB pairs"
+    )]
+    pub const PRESET_SWATCHES: [((u8, u8, u8), (u8, u8, u8)); 5] = [
+        ((0x00, 0xC8, 0xFF), (0x70, 0xE1, 0xFF)), // McIntosh
+        ((0xE5, 0xA9, 0x3C), (0xFF, 0xD1, 0x66)), // Marantz
+        ((0x00, 0xF0, 0xFF), (0xFF, 0x00, 0x7F)), // Cyberpunk
+        ((0xF0, 0xF0, 0xF0), (0xA0, 0xA0, 0xA0)), // Studio Dark
+        ((0xF5, 0xB8, 0x3D), (0xFF, 0xDF, 0x85)), // Peppy
+    ];
+
     /// Parses a theme preset from a slug or name string.
     ///
     /// # Errors
@@ -133,90 +150,223 @@ impl ThemePreset {
         }
     }
 
-    /// Builds the corresponding Slint [`ThemePalette`] model for this preset.
+    /// Builds the corresponding Material [`MaterialSchemes`] model for this preset (dark-only, light==dark).
+    /// Returns a `MaterialSchemes` with both `light` and `dark` set to the same dark scheme.
     #[must_use]
-    pub fn palette(self) -> ThemePalette {
-        match self {
-            Self::McIntoshBlue => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x09, 0x0D, 0x12),
-                card_surface: slint::Color::from_rgb_u8(0x11, 0x19, 0x23),
-                card_border: slint::Color::from_rgb_u8(0x30, 0x36, 0x3D),
-                primary_accent: slint::Color::from_rgb_u8(0x00, 0xC8, 0xFF),
-                secondary_accent: slint::Color::from_rgb_u8(0x70, 0xE1, 0xFF),
-                needle_peak: slint::Color::from_rgb_u8(0xFF, 0x33, 0x44),
-                dock_active_text: slint::Color::from_rgb_u8(0x09, 0x0D, 0x12),
-                text_primary: slint::Color::from_rgb_u8(0xF0, 0xF6, 0xFC),
-                text_muted: slint::Color::from_rgb_u8(0x8B, 0x94, 0x9E),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-            Self::MarantzAmber => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x12, 0x10, 0x0D),
-                card_surface: slint::Color::from_rgb_u8(0x1C, 0x17, 0x12),
-                card_border: slint::Color::from_rgb_u8(0x3A, 0x2E, 0x22),
-                primary_accent: slint::Color::from_rgb_u8(0xE5, 0xA9, 0x3C),
-                secondary_accent: slint::Color::from_rgb_u8(0xFF, 0xD1, 0x66),
-                needle_peak: slint::Color::from_rgb_u8(0xD9, 0x38, 0x29),
-                dock_active_text: slint::Color::from_rgb_u8(0x12, 0x10, 0x0D),
-                text_primary: slint::Color::from_rgb_u8(0xFD, 0xFB, 0xF7),
-                text_muted: slint::Color::from_rgb_u8(0x9C, 0x92, 0x83),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-            Self::CyberpunkNeon => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x0D, 0x0B, 0x18),
-                card_surface: slint::Color::from_rgb_u8(0x1B, 0x14, 0x2E),
-                card_border: slint::Color::from_rgb_u8(0x3C, 0x23, 0x5A),
-                primary_accent: slint::Color::from_rgb_u8(0x00, 0xF0, 0xFF),
-                secondary_accent: slint::Color::from_rgb_u8(0xFF, 0x00, 0x7F),
-                needle_peak: slint::Color::from_rgb_u8(0xFF, 0x14, 0x93),
-                dock_active_text: slint::Color::from_rgb_u8(0x0D, 0x0B, 0x18),
-                text_primary: slint::Color::from_rgb_u8(0xF5, 0xEE, 0xFD),
-                text_muted: slint::Color::from_rgb_u8(0xA3, 0x90, 0xC5),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-            Self::StudioDark => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x12, 0x12, 0x12),
-                card_surface: slint::Color::from_rgb_u8(0x1E, 0x1E, 0x1E),
-                card_border: slint::Color::from_rgb_u8(0x2D, 0x2D, 0x2D),
-                primary_accent: slint::Color::from_rgb_u8(0xF0, 0xF0, 0xF0),
-                secondary_accent: slint::Color::from_rgb_u8(0xA0, 0xA0, 0xA0),
-                needle_peak: slint::Color::from_rgb_u8(0x00, 0xE6, 0x76),
-                dock_active_text: slint::Color::from_rgb_u8(0x00, 0x00, 0x00),
-                text_primary: slint::Color::from_rgb_u8(0xFF, 0xFF, 0xFF),
-                text_muted: slint::Color::from_rgb_u8(0x88, 0x88, 0x88),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
-            Self::Peppy => ThemePalette {
-                chassis: slint::Color::from_rgb_u8(0x14, 0x11, 0x0D),
-                card_surface: slint::Color::from_rgb_u8(0x20, 0x1A, 0x14),
-                card_border: slint::Color::from_rgb_u8(0x48, 0x38, 0x24),
-                primary_accent: slint::Color::from_rgb_u8(0xF5, 0xB8, 0x3D),
-                secondary_accent: slint::Color::from_rgb_u8(0xFF, 0xDF, 0x85),
-                needle_peak: slint::Color::from_rgb_u8(0xE6, 0x39, 0x46),
-                dock_active_text: slint::Color::from_rgb_u8(0x14, 0x11, 0x0D),
-                text_primary: slint::Color::from_rgb_u8(0xFF, 0xFD, 0xF5),
-                text_muted: slint::Color::from_rgb_u8(0xA6, 0x9B, 0x8D),
-                meter_skin_id: self.meter_skin_id().into(),
-                font_family: self.font_family().into(),
-            },
+    pub fn material_schemes(self) -> MaterialSchemes {
+        let dark_scheme = self.material_scheme_dark();
+        MaterialSchemes {
+            light: dark_scheme.clone(),
+            dark: dark_scheme,
         }
+    }
+
+    /// Weighted average of two colors (for container derivation).
+    fn avg_color(a: slint::Color, b: slint::Color, wa: u16, wb: u16) -> slint::Color {
+        let blend = |x: u8, y: u8| -> u8 {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "weighted average of two u8 values fits in u8"
+            )]
+            {
+                ((u16::from(x) * wa + u16::from(y) * wb) / (wa + wb)) as u8
+            }
+        };
+        slint::Color::from_rgb_u8(
+            blend(a.red(), b.red()),
+            blend(a.green(), b.green()),
+            blend(a.blue(), b.blue()),
+        )
+    }
+
+    /// Per-preset base colors (single source; also drive the Settings swatches).
+    #[must_use]
+    fn material_base_colors(
+        self,
+    ) -> (
+        slint::Color,
+        slint::Color,
+        slint::Color,
+        slint::Color,
+        slint::Color,
+        slint::Color,
+        slint::Color,
+        slint::Color,
+        slint::Color,
+    ) {
+        let c = |r: u8, g: u8, b: u8| slint::Color::from_rgb_u8(r, g, b);
+        match self {
+            Self::McIntoshBlue => (
+                c(0x00, 0xC8, 0xFF),
+                c(0x70, 0xE1, 0xFF),
+                c(0x09, 0x0D, 0x12),
+                c(0x11, 0x19, 0x23),
+                c(0x30, 0x36, 0x3D),
+                c(0xF0, 0xF6, 0xFC),
+                c(0x8B, 0x94, 0x9E),
+                c(0xFF, 0x33, 0x44),
+                c(0x09, 0x0D, 0x12),
+            ),
+            Self::MarantzAmber => (
+                c(0xE5, 0xA9, 0x3C),
+                c(0xFF, 0xD1, 0x66),
+                c(0x12, 0x10, 0x0D),
+                c(0x1C, 0x17, 0x12),
+                c(0x3A, 0x2E, 0x22),
+                c(0xFD, 0xFB, 0xF7),
+                c(0x9C, 0x92, 0x83),
+                c(0xD9, 0x38, 0x29),
+                c(0x12, 0x10, 0x0D),
+            ),
+            Self::CyberpunkNeon => (
+                c(0x00, 0xF0, 0xFF),
+                c(0xFF, 0x00, 0x7F),
+                c(0x0D, 0x0B, 0x18),
+                c(0x1B, 0x14, 0x2E),
+                c(0x3C, 0x23, 0x5A),
+                c(0xF5, 0xEE, 0xFD),
+                c(0xA3, 0x90, 0xC5),
+                c(0xFF, 0x14, 0x93),
+                c(0x0D, 0x0B, 0x18),
+            ),
+            Self::StudioDark => (
+                c(0xF0, 0xF0, 0xF0),
+                c(0xA0, 0xA0, 0xA0),
+                c(0x12, 0x12, 0x12),
+                c(0x1E, 0x1E, 0x1E),
+                c(0x2D, 0x2D, 0x2D),
+                c(0xFF, 0xFF, 0xFF),
+                c(0x88, 0x88, 0x88),
+                c(0x00, 0xE6, 0x76),
+                c(0x00, 0x00, 0x00),
+            ),
+            Self::Peppy => (
+                c(0xF5, 0xB8, 0x3D),
+                c(0xFF, 0xDF, 0x85),
+                c(0x14, 0x11, 0x0D),
+                c(0x20, 0x1A, 0x14),
+                c(0x48, 0x38, 0x24),
+                c(0xFF, 0xFD, 0xF5),
+                c(0xA6, 0x9B, 0x8D),
+                c(0xE6, 0x39, 0x46),
+                c(0x14, 0x11, 0x0D),
+            ),
+        }
+    }
+
+    /// Builds the dark [`MaterialScheme`] for this preset.
+    #[must_use]
+    fn material_scheme_dark(self) -> MaterialScheme {
+        let avg = Self::avg_color;
+        let (
+            primary,
+            secondary,
+            chassis,
+            card_surface,
+            card_border,
+            text_primary,
+            text_muted,
+            needle_peak,
+            dock_active_text,
+        ) = self.material_base_colors();
+
+        // Container derivations (darken/lighten from base surface) using weighted average helper
+        let surface_container_high = avg(card_surface, chassis, 1, 2);
+        let surface_container_highest = avg(card_surface, chassis, 2, 1);
+        let surface_container_low = avg(card_surface, chassis, 1, 1);
+        let primary_container = avg(primary, chassis, 1, 3);
+        let secondary_container = avg(secondary, chassis, 1, 3);
+        let surface_dim = avg(chassis, card_surface, 3, 1);
+        let surface_bright = avg(card_surface, text_primary, 3, 1);
+        let surface_container_lowest = chassis;
+        let primary_fixed = primary;
+        let primary_fixed_dim = primary;
+        let secondary_fixed = secondary;
+        let secondary_fixed_dim = secondary;
+
+        MaterialScheme {
+            primary,
+            surfaceTint: primary,
+            onPrimary: dock_active_text,
+            primaryContainer: primary_container,
+            onPrimaryContainer: text_primary,
+            secondary,
+            onSecondary: dock_active_text,
+            secondaryContainer: secondary_container,
+            onSecondaryContainer: text_primary,
+            tertiary: needle_peak,
+            onTertiary: text_primary,
+            tertiaryContainer: surface_container_high,
+            onTertiaryContainer: text_primary,
+            error: needle_peak,
+            onError: text_primary,
+            errorContainer: surface_container_high,
+            onErrorContainer: text_primary,
+            background: chassis,
+            onBackground: text_primary,
+            surface: card_surface,
+            onSurface: text_primary,
+            surfaceVariant: card_border,
+            onSurfaceVariant: text_muted,
+            outline: card_border,
+            outlineVariant: card_border,
+            shadow: slint::Color::from_rgb_u8(0, 0, 0),
+            scrim: slint::Color::from_rgb_u8(0, 0, 0),
+            inverseSurface: text_primary,
+            inverseOnSurface: chassis,
+            inversePrimary: primary_container,
+            primaryFixed: primary_fixed,
+            onPrimaryFixed: dock_active_text,
+            primaryFixedDim: primary_fixed_dim,
+            onPrimaryFixedVariant: primary_container,
+            secondaryFixed: secondary_fixed,
+            onSecondaryFixed: dock_active_text,
+            secondaryFixedDim: secondary_fixed_dim,
+            onSecondaryFixedVariant: secondary_container,
+            tertiaryFixed: needle_peak,
+            onTertiaryFixed: text_primary,
+            tertiaryFixedDim: needle_peak,
+            onTertiaryFixedVariant: surface_container_high,
+            surfaceDim: surface_dim,
+            surfaceBright: surface_bright,
+            surfaceContainerLowest: surface_container_lowest,
+            surfaceContainerLow: surface_container_low,
+            surfaceContainer: card_surface,
+            surfaceContainerHigh: surface_container_high,
+            surfaceContainerHighest: surface_container_highest,
+        }
+    }
+
+    /// Forces dark color scheme on a [`MaterialPalette`] global.
+    ///
+    /// All presets are dark-only (`light == dark` scheme). Slint 1.18 does not
+    /// re-export `ColorScheme` publicly (it lives in `i_slint_common::enums`
+    /// behind `private_unstable_api`); verified against Slint =1.18.1
+    /// (workspace-pinned). If a Slint upgrade moves this path, this helper is
+    /// the single breakage point.
+    fn force_dark(palette: &MaterialPalette) {
+        palette.set_color_scheme(slint::private_unstable_api::re_exports::ColorScheme::Dark);
     }
 
     /// Applies this theme preset to a [`MainWindow`] component.
     pub fn apply(self, window: &MainWindow) {
-        let theme = window.global::<Theme>();
-        theme.set_active_preset(self.index());
-        theme.set_active(self.palette());
+        // Push Material scheme
+        let material_palette = window.global::<MaterialPalette>();
+        Self::force_dark(&material_palette);
+        let schemes = self.material_schemes();
+        material_palette.set_schemes(schemes);
+
+        // Single source of truth for the preset index (skin selection reads this).
+        window.global::<AppTheme>().set_active_preset(self.index());
     }
 
     /// Applies this theme preset to a [`SplashScreen`] component.
     pub fn apply_splash(self, splash: &SplashScreen) {
-        let theme = splash.global::<Theme>();
-        theme.set_active_preset(self.index());
-        theme.set_active(self.palette());
+        // Splash has its own component tree: push Material schemes into its
+        // MaterialPalette global so it reads MaterialPalette.* like other views.
+        let material_palette = splash.global::<MaterialPalette>();
+        Self::force_dark(&material_palette);
+        material_palette.set_schemes(self.material_schemes());
     }
 }
 

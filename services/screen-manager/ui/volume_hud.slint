@@ -1,11 +1,11 @@
-import { Theme } from "theme.slint";
+import { MaterialPalette } from "@material/material.slint";
 
 export component VolumeHudOverlay inherits Rectangle {
     width: 100%;
     height: 100%;
-    background: @linear-gradient(150deg, Theme.active.card_surface 0%, Theme.active.chassis 100%);
+    background: @linear-gradient(150deg, MaterialPalette.surface 0%, MaterialPalette.background 100%);
     border-width: 1px;
-    border-color: Theme.active.card_border;
+    border-color: MaterialPalette.outline_variant;
     clip: true;
 
     in-out property <float> volume_value: 75.0;
@@ -43,7 +43,7 @@ export component VolumeHudOverlay inherits Rectangle {
         // 1. Header Label
         Text {
             text: root.is_muted ? "VOLUME — MUTED" : "VOLUME";
-            color: root.is_muted ? #EF4444 : Theme.active.secondary_accent;
+            color: root.is_muted ? MaterialPalette.error : MaterialPalette.secondary;
             font-size: 16px;
             font-weight: 800;
             letter-spacing: 2px;
@@ -59,7 +59,7 @@ export component VolumeHudOverlay inherits Rectangle {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 text: root.is_muted ? "MUTE" : (Math.round(root.clamped_ratio * 100.0) + "%");
-                color: root.is_muted ? #EF4444 : Theme.active.text_primary;
+                color: root.is_muted ? MaterialPalette.error : MaterialPalette.on_surface;
                 font-size: 128px;
                 font-weight: 800;
                 horizontal-alignment: center;
@@ -95,9 +95,9 @@ export component VolumeHudOverlay inherits Rectangle {
                     width: parent.width - root.thumb_diameter;
                     height: root.track_height;
                     border-radius: self.height / 2;
-                    background: #1c2430;
+                    background: MaterialPalette.surface_container_highest;
                     border-width: 1px;
-                    border-color: Theme.active.card_border;
+                    border-color: MaterialPalette.outline_variant;
                     clip: true;
 
                     // Active fill bar
@@ -107,7 +107,7 @@ export component VolumeHudOverlay inherits Rectangle {
                         width: parent.width * root.clamped_ratio;
                         height: parent.height;
                         border-radius: self.height / 2;
-                        background: root.is_muted ? Theme.active.text_muted : Theme.active.primary_accent;
+                        background: root.is_muted ? MaterialPalette.on_surface_variant : MaterialPalette.primary;
                     }
                 }
 
@@ -118,9 +118,9 @@ export component VolumeHudOverlay inherits Rectangle {
                     border-radius: self.height / 2;
                     x: track_bar.x + (track_bar.width * root.clamped_ratio) - (self.width / 2);
                     y: (parent.height - self.height) / 2;
-                    background: root.is_muted ? Theme.active.card_surface : Theme.active.primary_accent;
+                    background: root.is_muted ? MaterialPalette.surface : MaterialPalette.primary;
                     border-width: 4px;
-                    border-color: Theme.active.text_primary;
+                    border-color: MaterialPalette.on_surface;
 
                     // High-contrast center dot inside the big circle
                     Rectangle {
@@ -129,7 +129,7 @@ export component VolumeHudOverlay inherits Rectangle {
                         border-radius: self.height / 2;
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height) / 2;
-                        background: Theme.active.text_primary;
+                        background: MaterialPalette.on_surface;
                     }
                 }
 
@@ -161,9 +161,9 @@ export component VolumeHudOverlay inherits Rectangle {
                 width: 220px;
                 height: 48px;
                 border-radius: self.height / 2;
-                background: root.is_muted ? #EF4444 : Theme.active.card_surface;
+                background: root.is_muted ? MaterialPalette.error : MaterialPalette.surface;
                 border-width: 2px;
-                border-color: root.is_muted ? #EF4444 : Theme.active.primary_accent;
+                border-color: root.is_muted ? MaterialPalette.error : MaterialPalette.primary;
                 opacity: mute_touch.pressed ? 0.75 : 1.0;
 
                 VerticalLayout {
@@ -177,7 +177,7 @@ export component VolumeHudOverlay inherits Rectangle {
                             source: root.is_muted
                                 ? @image-url("../../../assets/icons/volume-mute.svg")
                                 : @image-url("../../../assets/icons/volume-3.svg");
-                            colorize: root.is_muted ? #FFFFFF : Theme.active.primary_accent;
+                            colorize: root.is_muted ? MaterialPalette.on_error : MaterialPalette.primary;
                             width: 24px;
                             height: 24px;
                             image-fit: contain;
@@ -185,7 +185,7 @@ export component VolumeHudOverlay inherits Rectangle {
 
                         Text {
                             text: root.is_muted ? "UNMUTE" : "MUTE";
-                            color: root.is_muted ? #FFFFFF : Theme.active.text_primary;
+                            color: root.is_muted ? MaterialPalette.on_error : MaterialPalette.on_surface;
                             font-size: 16px;
                             font-weight: 800;
                             letter-spacing: 1px;
