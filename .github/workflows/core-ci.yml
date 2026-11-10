@@ -26,11 +26,13 @@ jobs:
 
       - name: Install System Dependencies
         # `yeslogic-fontconfig-sys` (via Slint's fontdb) needs pkg-config and the
-        # fontconfig headers; `lld` accelerates linking 32 instrumented test binaries.
+        # fontconfig headers; `alsa-sys` (via audio-manager) needs the ALSA
+        # headers discovered through pkg-config; `lld` accelerates linking
+        # 32 instrumented test binaries.
         run: |
-          if ! dpkg -s pkg-config libfontconfig-dev lld &>/dev/null; then
+          if ! dpkg -s pkg-config libfontconfig-dev libasound2-dev lld &>/dev/null; then
             sudo apt-get update -o Acquire::Languages=none
-            sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev lld
+            sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev libasound2-dev lld
           fi
 
       - name: Setup Rust Toolchain
@@ -90,9 +92,9 @@ jobs:
         # `yeslogic-fontconfig-sys` (via Slint's fontdb) needs pkg-config and the
         # fontconfig headers; the ubuntu-24.04-arm image ships neither by default.
         run: |
-          if ! dpkg -s pkg-config libfontconfig-dev &>/dev/null; then
+          if ! dpkg -s pkg-config libfontconfig-dev libasound2-dev &>/dev/null; then
             sudo apt-get update -o Acquire::Languages=none
-            sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev
+            sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev libasound2-dev
           fi
 
       - name: Setup Rust Toolchain
@@ -158,9 +160,9 @@ jobs:
 
       - name: Install System Dependencies
         run: |
-          if ! dpkg -s pkg-config libfontconfig-dev lld &>/dev/null; then
+          if ! dpkg -s pkg-config libfontconfig-dev libasound2-dev lld &>/dev/null; then
             sudo apt-get update -o Acquire::Languages=none
-            sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev lld
+            sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev libasound2-dev lld
           fi
 
       - name: Setup Rust Toolchain
