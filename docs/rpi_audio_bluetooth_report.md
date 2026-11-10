@@ -374,26 +374,38 @@ Volume control is a **three-stage chain**, and a failure at any stage freezes th
 2. **bluealsad / bluez-alsa 5.0.0:** Maps the D-Bus `Volume` property into its internal PCM volume model and signals changes to `bluealsa-aplay`.
 3. **bluealsa-aplay mixer binding:** With `-M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"` (`SoftVolume: false`), every transport volume event is translated directly into the Merus MA12070P hardware register `A.Mstr Vol` (0..144 raw steps, -144 dB..0 dB), leaving the digital path to CamillaDSP bit-perfect.
 
+> **Planned change:** this BT-coupled mixer ownership is slated for replacement by the new **`audio-manager`** service (single event-driven hardware owner of the amp; mute = raw 0, since the Merus card has **no ALSA mute switch** and the BlueALSA PCM mute bit is currently an audible no-op — verified live 2026-11-09). See `docs/audio_manager_plan.md`; §7.6.1 will become a four-stage chain (BlueZ → bt-manager → audio-manager → Merus) when phase 2 lands.
+
+**Critical BlueZ gate (Rank 0 root cause — BlueZ 5.88 `[AVRCP] VolumeCategory`, fixed 2026-11-09):** BlueZ 5.88 (deployed 2026-11-07) introduced commit `8baabd2f5` ("audio/avrcp: Only allow absolute volume call/event on category-2 peers") with a **new `main.conf` default `[AVRCP] VolumeCategory = true`**. With the default, `bluetoothd`'s AVRCP target init refuses to register the `EVENT_VOLUME_CHANGED` notification (AVRCP event 0x0D) unless the phone's own AVRCP Target SDP record advertises the **category-2** feature bit. The Pixel's TG record (AVRCP **1.4**, no category-2) fails the check, so the phone never learns the sink supports absolute volume, never sends `SetAbsoluteVolume` (PDU 0x50), and `MediaTransport1.Volume` stays frozen while BlueALSA/Merus downstream sit idle. Symptom fingerprint (observed live 2026-11-09): BlueZ transport Volume, BlueALSA PCM `Volume`, and the Merus `A.Mstr Vol` mixer all frozen at stale values during volume-key presses; **no** `SetAbsoluteVolume not supported` error in the journal (the phone silently never sends after the notification registration is skipped), and `btmon` shows only encrypted ACL traffic. Fix: set `[AVRCP] VolumeCategory = false` in `/etc/bluetooth/main.conf` and restart Bluetooth. Verified live after the fix: the phone's PDU 0x50 is accepted (`bluetoothd -d` shows `handle_vendordep_pdu() AVRCP PDU 0x50`), the transport `Volume` follows every key press, and `bluealsa-aplay` maps it onto the Merus mixer through the amp's dB curve. Note the gate requires the *remote's* TG SDP record version ≥ 1.4 **in addition to** category-2 when `VolumeCategory = true` (`avrcp_volume_supported()` in `profiles/audio/avrcp.c`).
+
 **Critical BlueZ gate (Rank 1 root cause of "volume stuck at 0"):** `bluetoothd`'s AVRCP target init only registers the Volume-Changed notification (AVRCP event 0x0D) with the phone if `btd_device_get_volume()` returns a valid value. If the device info file `/var/lib/bluetooth/<adapter_mac>/<device_mac>/info` has **no `Volume=` entry** under `[General]`, this returns -1 and the phone is never told the sink supports absolute volume — the phone then never sends volume updates, and the transport volume stays frozen (observed: stuck at 10/127 ≈ 8% while the Merus mixer stayed at a stale 107/144). Seeding `Volume=64` once in the info file bootstrap-resolves this; afterwards BlueZ persists the phone's last volume automatically on every change.
 
 **Critical BlueZ gate (Rank 2 root cause — ControllerMode collision):** On a `ControllerMode = dual` adapter, the BLE Media Control (MCP) profile collides with Classic AVRCP on modern Android (Pixel) devices, and the AVRCP TG feature init is skipped. The transport then exposes **no `SetVolume` method** and a read-only `Volume` property. Fix: set `ControllerMode = bredr` in `/etc/bluetooth/main.conf` and re-pair. The device `Class` must also be a loudspeaker CoD (`0x240414`), not a generic audio class. Note that starting with BlueZ 5.88, BlueZ also introduces automatic 1Hz `GetPlayStatus` polling (PR #2570) when remote targets lack `AVRCP_EVENT_PLAYBACK_POS_CHANGED`, along with inbound ACL connection race fixes (PR #2320/#2308) and deterministic A2DP codec prioritization (PR #2189).
 
-#### 7.6.2. Applied Configuration Fixes (2026-11-03 / 2026-11-07)
+#### 7.6.2. Applied Configuration Fixes (2026-11-03 / 2026-11-07 / 2026-11-09)
 Persistent changes deployed to the Pi (previous values recoverable from backups):
 
 1. `/etc/bluetooth/main.conf` (backup: `/tmp/main.conf.bak`) — full deployed content:
    ```ini
    [General]
+   FastConnectable = true      ; added 2026-11-09 (faster phone-initiated
+                               ; connects; power tradeoff irrelevant, mains)
    Experimental = true
    Name = DietPi Speaker
    Class = 0x240414            ; loudspeaker CoD (was 0x240418)
    DiscoverableTimeout = 0
    PairableTimeout = 0
-   ControllerMode = bredr      ; added (was unset -> dual)
+   ControllerMode = bredr      ; added 2026-11-03 (was unset -> dual)
 
    [Policy]
    AutoEnable = true
+
+   [AVRCP]
+   VolumeCategory = false      ; added 2026-11-09 (BlueZ 5.88 default true;
+                               ; rejects Pixel TG without category-2 -> dead
+                               ; absolute volume, see 7.6.1 Rank 0 gate)
    ```
+   The same content is committed as `baseline/etc/bluetooth/main.conf` so reinstalls include the fix. Verified live via `btmgmt info` (`fast-connectable` in current settings); note it is a kernel MGMT page-scan setting, not an `Adapter1` D-Bus property.
 2. `/var/lib/bluetooth/20:E1:5D:B2:16:BF/30:E0:44:67:38:A2/info` (BlueZ per-device store; backup: `/tmp/info.bak`) — the `Volume=64` seed under `[General]` is the applied change (see 7.6.1). Relevant sections of the deployed file:
    ```ini
    [LinkKey]
@@ -412,7 +424,7 @@ Persistent changes deployed to the Pi (previous values recoverable from backups)
    ```
    Note: the `Key=` link key is per-pairing (changes on re-pair) — the documented constant is the `Volume=64` line's presence under `[General]`.
 
-After changing BlueZ configuration, a **full re-pair** is required for the changes to take effect (both stacks cache SDP records and volume capability flags):
+After changing BlueZ configuration, a **full re-pair** is required for the changes to take effect (both stacks cache SDP records and volume capability flags) — except for `[AVRCP] VolumeCategory`, which takes effect on a plain `systemctl restart bluetooth` (the gate is evaluated per-connection in `target_init()`; verified live 2026-11-09 without re-pairing):
 ```bash
 bluetoothctl remove 30:E0:44:67:38:A2   # on the Pi (then "Forget" the device on the Pixel, re-pair)
 ```
@@ -464,7 +476,7 @@ ssh root@192.168.2.120 "bluealsa-cli info /org/bluealsa/hci0/dev_30_E0_44_67_38_
 ssh root@192.168.2.120 "amixer -c sndrpimerusamp sget 'A.Mstr Vol' | grep Mono"
 ```
 
-Healthy-state checklist after (re)connection: transport `State = active` and `Volume` writable; `SetVolume` present on `MediaTransport1`; `bluealsa-cli` `Volume` equals transport `Volume`; `SoftVolume: false`; mixer follows transport per 7.6.3. If the mixer is stuck after boot, check for the stale `asound.state` restore (`A.Mstr Vol Volume value 0`) and verify the boot-race fix in 7.2 is still deployed.
+Healthy-state checklist after (re)connection: transport `State = active` and `Volume` writable; `SetVolume` present on `MediaTransport1`; `bluealsa-cli` `Volume` equals transport `Volume`; `SoftVolume: false`; mixer follows transport per 7.6.3. If the mixer is stuck after boot, check for the stale `asound.state` restore (`A.Mstr Vol Volume value 0`) and verify the boot-race fix in 7.2 is still deployed. If the transport `Volume` is frozen during phone key presses, verify `[AVRCP] VolumeCategory = false` survived in `/etc/bluetooth/main.conf` (Rank 0 gate, 7.6.1) — note that `bluealsa-aplay` only drives the Merus mixer while the PCM is open (music streaming); volume updates received while idle are applied at PCM open.
 
 ---
 
