@@ -60,9 +60,8 @@ export component MainWindow inherits Window {
     // NEW: show_themes lifted to MainWindow for title switching in ScreenAppBar
     in-out property <bool> show_themes: false;
 
-    // NEW: background dim opacity for overlay blur effect (0.35 when HUD open, 1.0 normal)
-    out property <float> bg_dim_opacity: root.volume_hud_visible ? 0.35 : 1.0;
-    animate bg_dim_opacity { duration: 200ms; easing: ease-out; }
+    // NEW: single source of truth for status bar visibility
+    out property <bool> show_status_bar: root.active_tab == 0 && !root.volume_hud_visible;
 
     public function show_volume_hud() {
         root.volume_hud_elapsed_ms = 0;
@@ -136,18 +135,11 @@ export component MainWindow inherits Window {
     public function app_bar_back() {
         if (root.active_tab == 2) {
             root.toggle_bluetooth_details();
-        } else if (root.active_tab == 1) {
-            root.active_tab = root.previous_tab == 1 ? 0 : root.previous_tab;
-        } else if (root.active_tab == 3) {
-            root.active_tab = root.previous_tab == 3 ? 0 : root.previous_tab;
-        } else if (root.active_tab == 4) {
-            root.active_tab = root.previous_tab == 4 ? 0 : root.previous_tab;
-        } else if (root.active_tab == 5) {
-            if (root.show_themes) {
-                root.show_themes = false;
-            } else {
-                root.active_tab = root.previous_tab == 5 ? 0 : root.previous_tab;
-            }
+        } else if (root.active_tab == 5 && root.show_themes) {
+            root.show_themes = false;
+        } else if (root.active_tab != 0) {
+            // Tabs 1, 3, 4, and 5 (when not in themes): return to previous tab, falling back to Now Playing
+            root.active_tab = root.previous_tab == root.active_tab ? 0 : root.previous_tab;
         }
     }
 
@@ -157,7 +149,6 @@ export component MainWindow inherits Window {
         bg_column := VerticalLayout {
             width: 100%;
             height: 100%;
-            opacity: root.bg_dim_opacity;
 
             // Top 60px area: status bar + click-intercepting placeholder overlay
             Rectangle {
@@ -166,7 +157,7 @@ export component MainWindow inherits Window {
 
                 // Top Status Bar: 800 x 60 — ALWAYS MOUNTED, opacity-gated (tab 0 only, hidden when HUD open)
                 status_bar := TopStatusBar {
-                    opacity: (root.active_tab == 0 && !root.volume_hud_visible) ? 1.0 : 0.0;
+                    opacity: root.show_status_bar ? 1.0 : 0.0;
                     active_source: root.active_source;
                     track_or_device: root.track_or_device;
                     stream_codec: root.stream_codec;
@@ -193,7 +184,7 @@ export component MainWindow inherits Window {
                 status_bar_placeholder := Rectangle {
                     width: 100%;
                     height: 100%;
-                    visible: root.active_tab != 0 || root.volume_hud_visible;
+                    visible: !root.show_status_bar;
                     background: transparent;
                     TouchArea {
                         width: 100%;

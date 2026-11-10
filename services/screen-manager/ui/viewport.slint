@@ -192,6 +192,10 @@ export component MainViewport inherits Rectangle {
                         font-size: 13px;
                         font-weight: 800;
                     }
+                    DetailRow {
+                        label: "STATE";
+                        value: root.is_playing ? "STREAMING" : (root.bt_connected ? "CONNECTED" : "WAITING");
+                    }
                     DetailRow { label: "CODEC"; value: root.stream_codec; }
                     DetailRow { label: "FORMAT"; value: root.bt_stream_format; }
                     DetailRow { label: "LATENCY"; value: root.bt_delay_text; }

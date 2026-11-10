@@ -80,33 +80,27 @@ fn touch_decoder_processes_linux_input_events() {
     });
 
     // 1. Touch Down packet
-    assert!(
-        decoder
-            .process_event(&make_ev(
-                screen_manager::ui::input::EV_ABS,
-                screen_manager::ui::input::ABS_X,
-                200
-            ))
-            .is_none()
-    );
-    assert!(
-        decoder
-            .process_event(&make_ev(
-                screen_manager::ui::input::EV_ABS,
-                screen_manager::ui::input::ABS_Y,
-                150
-            ))
-            .is_none()
-    );
-    assert!(
-        decoder
-            .process_event(&make_ev(
-                screen_manager::ui::input::EV_KEY,
-                screen_manager::ui::input::BTN_TOUCH,
-                1
-            ))
-            .is_none()
-    );
+    assert!(decoder
+        .process_event(&make_ev(
+            screen_manager::ui::input::EV_ABS,
+            screen_manager::ui::input::ABS_X,
+            200
+        ))
+        .is_none());
+    assert!(decoder
+        .process_event(&make_ev(
+            screen_manager::ui::input::EV_ABS,
+            screen_manager::ui::input::ABS_Y,
+            150
+        ))
+        .is_none());
+    assert!(decoder
+        .process_event(&make_ev(
+            screen_manager::ui::input::EV_KEY,
+            screen_manager::ui::input::BTN_TOUCH,
+            1
+        ))
+        .is_none());
     let down_action = decoder.process_event(&make_ev(
         screen_manager::ui::input::EV_SYN,
         screen_manager::ui::input::SYN_REPORT,
@@ -115,15 +109,13 @@ fn touch_decoder_processes_linux_input_events() {
     assert_eq!(down_action, Some(TouchAction::Down { x: 200.0, y: 150.0 }));
 
     // 2. Motion packet
-    assert!(
-        decoder
-            .process_event(&make_ev(
-                screen_manager::ui::input::EV_ABS,
-                screen_manager::ui::input::ABS_X,
-                220
-            ))
-            .is_none()
-    );
+    assert!(decoder
+        .process_event(&make_ev(
+            screen_manager::ui::input::EV_ABS,
+            screen_manager::ui::input::ABS_X,
+            220
+        ))
+        .is_none());
     let move_action = decoder.process_event(&make_ev(
         screen_manager::ui::input::EV_SYN,
         screen_manager::ui::input::SYN_REPORT,
@@ -132,15 +124,13 @@ fn touch_decoder_processes_linux_input_events() {
     assert_eq!(move_action, Some(TouchAction::Move { x: 220.0, y: 150.0 }));
 
     // 3. Touch Up packet
-    assert!(
-        decoder
-            .process_event(&make_ev(
-                screen_manager::ui::input::EV_KEY,
-                screen_manager::ui::input::BTN_TOUCH,
-                0
-            ))
-            .is_none()
-    );
+    assert!(decoder
+        .process_event(&make_ev(
+            screen_manager::ui::input::EV_KEY,
+            screen_manager::ui::input::BTN_TOUCH,
+            0
+        ))
+        .is_none());
     let up_action = decoder.process_event(&make_ev(
         screen_manager::ui::input::EV_SYN,
         screen_manager::ui::input::SYN_REPORT,
@@ -430,9 +420,8 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
 #[test]
 fn evdev_open_and_poll_raw_hardware_events() {
     use screen_manager::ui::input::{
-        ABS_X, ABS_Y, BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN, EvdevSyscall, MockDeviceConfig,
-        MockEvdevSyscall, SYN_REPORT, TouchAction, TouchInputDevice, input_event_to_bytes,
-        make_input_event,
+        input_event_to_bytes, make_input_event, EvdevSyscall, MockDeviceConfig, MockEvdevSyscall,
+        TouchAction, TouchInputDevice, ABS_X, ABS_Y, BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN, SYN_REPORT,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -496,8 +485,8 @@ fn evdev_open_and_poll_raw_hardware_events() {
 #[test]
 fn evdev_partial_chunk_buffering() {
     use screen_manager::ui::input::{
-        ABS_X, BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN, EvdevSyscall, MockDeviceConfig, MockEvdevSyscall,
-        SYN_REPORT, TouchAction, TouchInputDevice, input_event_to_bytes, make_input_event,
+        input_event_to_bytes, make_input_event, EvdevSyscall, MockDeviceConfig, MockEvdevSyscall,
+        TouchAction, TouchInputDevice, ABS_X, BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN, SYN_REPORT,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -706,7 +695,7 @@ fn evdev_auto_discover_scenarios() {
 
 #[test]
 fn native_evdev_syscall_with_pipes() {
-    use screen_manager::ui::input::{EvdevSyscall, NativeEvdevSyscall, is_touchscreen_name};
+    use screen_manager::ui::input::{is_touchscreen_name, EvdevSyscall, NativeEvdevSyscall};
     use std::io;
 
     let native = NativeEvdevSyscall;
@@ -783,8 +772,8 @@ fn touch_error_comprehensive() {
 #[test]
 fn multi_touch_protocol_b_tracking_id() {
     use screen_manager::ui::input::{
-        ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID, EV_ABS, EV_SYN, SYN_REPORT,
-        TouchAction, TouchCalibration, TouchDecoder, make_input_event,
+        make_input_event, TouchAction, TouchCalibration, TouchDecoder, ABS_MT_POSITION_X,
+        ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID, EV_ABS, EV_SYN, SYN_REPORT,
     };
 
     let mut decoder = TouchDecoder::new(TouchCalibration::default());
@@ -805,7 +794,7 @@ fn multi_touch_protocol_b_tracking_id() {
 #[test]
 fn production_wrappers_and_calibration_setters() {
     use screen_manager::ui::input::{
-        ABS_X, EvdevSyscall, NativeEvdevSyscall, TouchCalibration, TouchInputDevice,
+        EvdevSyscall, NativeEvdevSyscall, TouchCalibration, TouchInputDevice, ABS_X,
     };
 
     // Test production open on nonexistent path
