@@ -7,7 +7,13 @@ Wants=bluealsa.service camilladsp.service
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"
+# Pure audio forwarding only. The Merus mixer (A.Mstr Vol) is owned solely by
+# audio-manager (D-Bus org.speaker.AudioManager); bt-manager's sync_volume
+# feeds it from the BlueALSA PCM volume. Do NOT re-add -M/--mixer-control:
+# bluealsa-aplay maps the BlueZ MediaTransport1 volume into the mixer, which
+# stays 0 under [AVRCP] VolumeCategory=false and slams the amp to raw 0 on
+# every PCM restart (the documented two-writer fight).
+ExecStart=/usr/bin/bluealsa-aplay -S -D default --volume=none
 Restart=always
 RestartSec=2
 
