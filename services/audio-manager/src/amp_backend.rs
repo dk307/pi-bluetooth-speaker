@@ -2,6 +2,22 @@
 //!
 //! Provides `AmpBackend` trait with production `RealAmpBackend` and
 //! test `MockAmpBackend` (via `new_mocked()` pair).
+//!
+//! Datasheet reference:
+//! <https://www.infineon.com/assets/row/public/documents/24/49/infineon-ma12070p-datasheet-en.pdf>
+//! (V1.1, 2022-02-09). Volume register map: §8.5 (`0x40`/`0x41` master
+//! integer/fractional dB, `0x42`..`0x45` per-channel; Table 8-9 maps the
+//! 10-bit setting to +24.00 .. −144.00 dB at 0.25 dB granularity). The
+//! kernel ALSA control (`A.Mstr Vol`, raw 0..144) covers only the
+//! −144..0 dB attenuation at 1 dB/step.
+//!
+//! Serial mute control (datasheet §8.5, register `0x36` bit 7
+//! `audio_proc_mute`: 1 = mute, 0 = play) is **not** exposed by the
+//! kernel driver as an ALSA switch; the board's `/MUTE` GPIO line is used
+//! by the driver instead. Live-verified on the Pi: the device answers on
+//! I2C address `0x20` (`/dev/i2c-1`; `0x23` NACKs writes) and a
+//! read-modify-write of `0x36` bit 7 mutes/restores playback and the
+//! setting persists (the kernel driver does not rewrite `0x36`).
 
 use std::sync::{Arc, Mutex};
 

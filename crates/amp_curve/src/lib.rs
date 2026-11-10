@@ -1,5 +1,11 @@
 //! Shared perceptual volume curve for Merus MA12070P amplifier.
 //!
+//! Datasheet reference:
+//! <https://www.infineon.com/assets/row/public/documents/24/49/infineon-ma12070p-datasheet-en.pdf>
+//! (V1.1, 2022-02-09). Table 8-9 maps the 10-bit VLP register to gain
+//! (+24.00 .. -144.00 dB, 0.25 dB granularity); §8.5 describes the volume
+//! registers (`0x40`/`0x41` master, `0x42`..`0x45` channels).
+//!
 //! This crate provides the single source of truth for volume mapping between:
 //! - AVRCP absolute volume (0..127) from BlueZ/phone
 //! - Percent volume (0..100) for the D-Bus API (`SetLevel`)
@@ -20,23 +26,19 @@ pub const PERCENT_MAX: u8 = 100;
 pub const AVRCP_MAX: u8 = 127;
 
 /// Calibration points from live measurement (AVRCP, raw, dB).
-/// Source: docs/rpi_audio_bluetooth_report.md §7.6.4 table.
-/// The dB values are derived from raw: dB = raw - 144 (since raw 0 = -144 dB).
+/// Source: docs/rpi_audio_bluetooth_report.md §7.6.4 table — the verified
+/// `MediaTransport1.Volume` → Merus mixer mapping that bluez-alsa natively
+/// applies. The dB values are derived from raw: dB = raw − 144 (raw 0 =
+/// −144 dB), which matches the MA12070P datasheet (Table 8-9: gain =
+/// 24 − integer register; the kernel ALSA control exposes raw 0..144 as
+/// 1 dB/step over −144..0 dB and does not expose the +24..0 dB boost half
+/// nor the 0.25 dB fractional steps).
 const CALIBRATION_POINTS: &[(u8, u16, i16)] = &[
-    (0, 0, -144), // mute endpoint
-    (10, 44, -100),
-    (20, 75, -69),
-    (30, 93, -51),
-    (40, 106, -38),
-    (50, 116, -28),
-    (60, 123, -21),
-    (70, 128, -16),
-    (80, 132, -12),
-    (90, 136, -8),
-    (100, 139, -5),
-    (110, 141, -3),
-    (120, 143, -1),
-    (127, 144, 0), // 0 dB endpoint
+    (0, 0, -144),   // mute endpoint (hard mute)
+    (32, 124, -20), // bottom of working range
+    (64, 134, -10),
+    (96, 140, -4),
+    (127, 144, 0), // full output
 ];
 
 /// Piecewise-linear interpolation on the dB domain.
@@ -62,8 +64,10 @@ const fn build_percent_to_raw() -> [u16; 101] {
     let mut table = [0u16; 101];
     let mut p = 0u16;
     while p <= 100 {
-        // Convert percent to AVRCP domain for interpolation: avrcp = percent * 127 / 100
-        let avrcp_x = (p * 127) / 100;
+        // Convert percent to AVRCP domain for interpolation, rounded so that
+        // the AVRCP -> percent -> raw roundtrip lands back on the calibrated
+        // raw value (truncation loses up to ~3 raw steps at low volumes).
+        let avrcp_x = (p * 127 + 50) / 100;
         // Find the calibration segment
         let mut db_tenths = 0i16;
         let mut i = 0;

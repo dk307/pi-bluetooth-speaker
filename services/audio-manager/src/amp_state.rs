@@ -88,40 +88,51 @@ impl AmpState {
     }
 
     /// Get the current level as percent (0..100) for D-Bus reporting.
-    /// Inverse of PERCENT_TO_RAW via binary search (upper bound).
-    /// Returns the highest percent that maps to the target raw value.
+    /// Canonical inverse of PERCENT_TO_RAW: returns the midpoint percent of
+    /// the raw value's flat segment (the curve's top segment is compressed —
+    /// several percents share one raw step), bounding the roundtrip error to
+    /// half the segment width. Falls back to the nearest raw when the level
+    /// is outside the curve's range.
     pub fn level_percent(&self, curve: &PercentToRaw) -> u8 {
-        let target = self.level_raw;
-        // Binary search for upper bound: first index where curve[index] > target
-        let mut lo = 0u8;
-        let mut hi = 101u8; // Use 101 to allow returning 100
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if curve[mid as usize] <= target {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        // lo is now the first index where curve[lo] > target
-        // The answer is lo - 1 (the last index where curve[index] <= target)
-        if lo == 0 { 0 } else { lo - 1 }
+        Self::raw_to_percent(self.level_raw, curve)
+            .unwrap_or_else(|| Self::nearest_percent(self.level_raw, curve))
     }
 
-    /// Get the hardware level as percent (what's actually on the amp).
-    pub fn hardware_level_percent(&self, curve: &PercentToRaw) -> u8 {
-        let hw_level = self.hardware_level();
-        // Find closest percent
+    /// Midpoint percent of the flat segment for `raw`; `None` when no percent
+    /// maps to it.
+    fn raw_to_percent(raw: u16, curve: &PercentToRaw) -> Option<u8> {
+        let mut first: Option<u8> = None;
+        let mut last = 0u8;
+        for (p, &r) in curve.iter().enumerate() {
+            if r == raw {
+                if first.is_none() {
+                    first = Some(u8::try_from(p).ok()?);
+                }
+                last = u8::try_from(p).ok()?;
+            }
+        }
+        first.map(|f| (f + last).div_ceil(2))
+    }
+
+    /// Nearest percent when `raw` is not on the curve.
+    fn nearest_percent(raw: u16, curve: &PercentToRaw) -> u8 {
         let mut best = 0u8;
         let mut best_diff = u16::MAX;
-        for p in 0..=100u8 {
-            let diff = curve[p as usize].abs_diff(hw_level);
+        for (p, &r) in curve.iter().enumerate() {
+            let diff = r.abs_diff(raw);
             if diff < best_diff {
                 best_diff = diff;
-                best = p;
+                best = u8::try_from(p).unwrap_or(best);
             }
         }
         best
+    }
+
+    /// Get the hardware level as percent (what's actually on the amp).
+    /// Canonical midpoint inverse, matching [`Self::level_percent`].
+    pub fn hardware_level_percent(&self, curve: &PercentToRaw) -> u8 {
+        Self::raw_to_percent(self.hardware_level(), curve)
+            .unwrap_or_else(|| Self::nearest_percent(self.hardware_level(), curve))
     }
 }
 
