@@ -14,9 +14,11 @@
 //! mutes/restores playback mid-stream, and the setting persists because the
 //! kernel driver never rewrites `0x36`.
 //!
-//! The daemon applies mute as **belt-and-braces**: the serial bit (instant,
-//! authoritative) *and* the ALSA raw-0 level write (protects against a power
-//! cycle, which resets `0x36` to the unmuted default `0x41`).
+//! The daemon applies mute with the serial bit **only**: the mixer level
+//! always stays live at `level_raw`, so no pre-mute volume is stored or
+//! restored and unmute is instant. (The bit resets to the unmuted power-on
+//! default `0x41` on an amp power cycle; the next `SetMute`/`SetLevel`
+//! through the daemon re-applies it.)
 
 use rppal::i2c::I2c;
 

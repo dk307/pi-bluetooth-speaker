@@ -96,17 +96,6 @@ impl RealAmpBackend {
         })
     }
 
-    /// Serial mute register read-modify-write (blocking operation).
-    fn set_serial_mute_blocking(i2c: &mut rppal::i2c::I2c, muted: bool) -> AmpResult<()> {
-        crate::i2c_mute::set_serial_mute_blocking(i2c, muted)
-    }
-
-    /// Serial mute register read (blocking operation).
-    fn read_serial_mute_blocking(i2c: &mut rppal::i2c::I2c) -> AmpResult<bool> {
-        let reg = crate::i2c_mute::read_audio_proc_reg_blocking(i2c)?;
-        Ok(crate::i2c_mute::is_muted_bit(reg))
-    }
-
     /// Validate the A.Mstr Vol control exists and has range 0..144 (blocking).
     fn validate_control_blocking(mixer: &Mixer, card_name: &str) -> AmpResult<()> {
         let selem_id = SelemId::new("A.Mstr Vol", 0);
@@ -161,9 +150,15 @@ impl RealAmpBackend {
 #[async_trait]
 impl AmpBackend for RealAmpBackend {
     async fn write_state(&self, state: &AmpState) -> AmpResult<AmpState> {
+        // Serial mute bit FIRST: if the RMW fails, reject with the hardware
+        // fully untouched. A mixer-write failure after the bit is applied
+        // fails silent (safe direction) and heals on the next write.
+        self.set_serial_mute(state.muted).await?;
+
+        // Mute is the serial register bit only; the mixer level stays live
+        // so unmute is instant and no pre-mute level needs storing.
         let mixer = self.mixer.clone();
         let level = state.level_raw;
-
         tokio::task::spawn_blocking(move || {
             let guard = mixer
                 .lock()
@@ -173,10 +168,6 @@ impl AmpBackend for RealAmpBackend {
         .await
         .context("Write volume task panicked")??;
 
-        // Mute is the serial register bit only; the mixer level stays live
-        // so unmute is instant and no pre-mute level needs storing.
-        self.set_serial_mute(state.muted).await?;
-
         // Return the logical state that was requested.
         Ok(*state)
     }
@@ -185,7 +176,7 @@ impl AmpBackend for RealAmpBackend {
         // The serial mute bit is the authoritative mute state.
         let serial_muted = self.read_serial_mute().await?;
         let mixer = self.mixer.clone();
-        let mut state = tokio::task::spawn_blocking(move || -> AmpResult<AmpState> {
+        tokio::task::spawn_blocking(move || -> AmpResult<AmpState> {
             let mixer = mixer
                 .lock()
                 .map_err(|e| AmpError::internal(e.to_string()))?;
@@ -196,24 +187,24 @@ impl AmpBackend for RealAmpBackend {
             let raw = elem.get_playback_volume(SelemChannelId::FrontLeft)? as u16;
             Ok(AmpState {
                 level_raw: raw,
-                muted: false,
+                muted: serial_muted,
             })
         })
         .await
-        .context("Read state task panicked")??;
-        state.muted = serial_muted;
-        Ok(state)
+        .context("Read state task panicked")?
     }
 
     async fn set_serial_mute(&self, muted: bool) -> AmpResult<()> {
         let i2c = self.i2c.clone();
         tokio::task::spawn_blocking(move || {
             let mut guard = i2c.lock().map_err(|e| AmpError::internal(e.to_string()))?;
-            Self::set_serial_mute_blocking(&mut guard, muted)
+            crate::i2c_mute::set_serial_mute_blocking(&mut guard, muted)
         })
         .await
         .context("Serial mute task panicked")??;
-        info!(muted, "Serial mute register updated");
+        // Written on every SetLevel too (bit rewrite); the user-visible
+        // lifecycle is logged at info! by the D-Bus layer.
+        debug!(muted, "Serial mute register updated");
         Ok(())
     }
 
@@ -221,7 +212,8 @@ impl AmpBackend for RealAmpBackend {
         let i2c = self.i2c.clone();
         tokio::task::spawn_blocking(move || {
             let mut guard = i2c.lock().map_err(|e| AmpError::internal(e.to_string()))?;
-            Self::read_serial_mute_blocking(&mut guard)
+            let reg = crate::i2c_mute::read_audio_proc_reg_blocking(&mut guard)?;
+            Ok(crate::i2c_mute::is_muted_bit(reg))
         })
         .await
         .context("Serial mute read task panicked")?
@@ -364,6 +356,9 @@ impl AmpBackend for MockAmpBackend {
         let applied = *state;
         guard.state = applied;
         guard.last_write = Some(applied);
+        // Mirror the real backend: write_state applies the serial mute bit.
+        guard.serial_muted = state.muted;
+        guard.serial_mute_calls += 1;
         Ok(applied)
     }
 

@@ -152,9 +152,9 @@ async fn mock_serial_mute_fault_injection() {
 }
 
 #[tokio::test]
-async fn mock_write_state_sets_serial_mute_flag() {
-    // Mock write_state does not auto-toggle the serial bit (the real backend
-    // calls set_serial_mute itself); verify the two surfaces are independent.
+async fn mock_write_state_applies_serial_mute() {
+    // Mock fidelity: the real backend's write_state applies the serial mute
+    // bit after the mixer write; the mock mirrors that coupling.
     let (backend, ctrl) = MockAmpBackend::new_mocked();
     backend
         .write_state(&AmpState {
@@ -164,7 +164,16 @@ async fn mock_write_state_sets_serial_mute_flag() {
         .await
         .unwrap();
     assert!(ctrl.last_write().unwrap().muted);
-    assert_eq!(ctrl.last_serial_mute(), None);
-    backend.set_serial_mute(true).await.unwrap();
     assert_eq!(ctrl.last_serial_mute(), Some(true));
+    assert!(backend.read_serial_mute().await.unwrap());
+
+    backend
+        .write_state(&AmpState {
+            level_raw: 80,
+            muted: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(ctrl.last_serial_mute(), Some(false));
+    assert!(!backend.read_serial_mute().await.unwrap());
 }
