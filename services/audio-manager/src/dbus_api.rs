@@ -37,7 +37,8 @@ impl AudioManagerInterface {
 impl AudioManagerInterface {
     /// Set the volume level as a percentage (0..100).
     /// Maps to the Merus A.Mstr Vol register via the perceptual curve.
-    /// If muted, stores the level but does not apply to hardware.
+    /// If muted, the level is still applied to the mixer (silence is
+    /// guaranteed by the serial mute bit), so unmute is instant.
     pub async fn set_level(&self, percent: u8) -> Result<(), ZBusError> {
         if percent > 100 {
             return Err(ZBusError::Failed(format!(
@@ -49,7 +50,6 @@ impl AudioManagerInterface {
         let mut state_guard = self.state.lock().await;
         let new_state = state_guard.with_percent(percent, &PERCENT_TO_RAW);
 
-        // Write to hardware (only if not muted; if muted, backend still receives level but state.muted=true)
         let applied = self
             .backend
             .write_state(&new_state)
@@ -73,9 +73,7 @@ impl AudioManagerInterface {
         Ok(())
     }
 
-    /// Set mute state.
-    /// true: write raw 0 (hardware mute), remember level.
-    /// false: restore remembered level.
+    /// Set mute state (serial mute register; the mixer level is untouched).
     pub async fn set_mute(&self, muted: bool) -> Result<(), ZBusError> {
         let mut state_guard = self.state.lock().await;
         let new_state = if muted {
@@ -90,20 +88,13 @@ impl AudioManagerInterface {
             .await
             .map_err(|e| ZBusError::Failed(e.to_string()))?;
 
-        // Update only the mute flag in the interface's logical state; keep the logical level_raw.
-        // The backend's applied state contains the hardware level (0 when muted),
-        // but our logical state must remember the pre-mute level.
-        state_guard.muted = applied.muted;
+        *state_guard = applied;
 
         if let Err(e) = self.state_file.save(&applied).await {
             warn!(error = %e, "Failed to persist state after SetMute");
         }
 
-        info!(
-            muted = applied.muted,
-            hw_level = applied.hardware_level(),
-            "SetMute"
-        );
+        info!(muted = applied.muted, level = applied.level_raw, "SetMute");
         Ok(())
     }
 

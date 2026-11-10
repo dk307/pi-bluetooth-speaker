@@ -30,7 +30,7 @@ async fn set_level_unmuted() {
 }
 
 #[tokio::test]
-async fn set_level_muted_stores_only() {
+async fn set_level_while_muted_applies_level() {
     let (iface, ctrl, _dir) = make_interface();
     // Set the interface to muted state first
     iface.set_mute(true).await.unwrap();
@@ -39,26 +39,22 @@ async fn set_level_muted_stores_only() {
 
     let write = ctrl.last_write().unwrap();
     assert!(write.muted);
-    // Logical level is preserved when muted; hardware level clamps to 0
+    // Level applies to the mixer even while muted (serial mute silences
+    // output; unmute is instant).
     assert_eq!(write.level_raw, amp_curve::PERCENT_TO_RAW[80]);
-    assert_eq!(write.hardware_level(), 0);
-    // The call succeeded without changing mute state
 }
 
 #[tokio::test]
 async fn set_mute_on() {
     let (iface, ctrl, _dir) = make_interface();
-    ctrl.set_state(AmpState {
-        level_raw: 100,
-        muted: false,
-    });
+    iface.set_level(80).await.unwrap();
 
     iface.set_mute(true).await.unwrap();
 
     let write = ctrl.last_write().unwrap();
     assert!(write.muted);
-    // The interface's remembered logical level is preserved; hardware level clamps to 0
-    assert_eq!(write.hardware_level(), 0);
+    // Level stays live on the mixer while muted (serial mute silences).
+    assert_eq!(write.level_raw, amp_curve::PERCENT_TO_RAW[80]);
 }
 
 #[tokio::test]

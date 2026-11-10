@@ -10,8 +10,9 @@
 //! - **Single writer**: all mixer transactions serialized through one
 //!   `Mutex<AmpState>`; state mutated only after successful mixer write.
 //! - **Transactional mutation**: fallible ALSA write first, then commit state.
-//! - **Mute = raw 0** (-144 dB, true hardware mute); level remembered and
-//!   restored on unmute; level changes while muted are stored only.
+//! - **Mute = serial mute register only** (MA12070P `0x36` bit 7 via I2C
+//!   `0x20`, instant and driver-proof); the mixer level stays live on the
+//!   hardware, so no pre-mute volume is stored or restored.
 //! - **Boot & crash safety**: one-shot state restore from
 //!   `/var/lib/speaker/amp-state.json`; on exit leave amp at last state.
 //! - **Hardware validation at startup**: fail fast if `sndrpimerusamp` or
@@ -29,6 +30,8 @@ mod config;
 mod dbus_api;
 #[allow(dead_code)]
 mod error;
+#[allow(dead_code)]
+mod i2c_mute;
 mod state_file;
 
 use std::sync::Arc;

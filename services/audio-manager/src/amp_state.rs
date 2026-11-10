@@ -10,8 +10,12 @@ use crate::error::AmpResult;
 type PercentToRaw = [u16; 101];
 
 /// Internal amplifier state.
-/// - `level_raw`: raw register value 0..144 (0 = -144 dB mute, 144 = 0 dB)
-/// - `muted`: whether mute is active (when true, level_raw is remembered but 0 is written)
+/// - `level_raw`: raw register value 0..144, always live on the mixer
+/// - `muted`: serial mute register state (`0x36` bit 7); independent of level
+///
+/// Mute does NOT touch the level: the MA12070P serial mute silences the
+/// output while the mixer keeps its volume, so unmute is instant and no
+/// pre-mute level needs to be stored or restored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AmpState {
     pub level_raw: u16,
@@ -47,43 +51,39 @@ impl AmpState {
         Ok(Self { level_raw, muted })
     }
 
-    /// Get the level that should be written to hardware.
-    /// If muted, returns 0 (hardware mute). Otherwise returns level_raw.
+    /// Get the level that is (or should be) live on the hardware mixer.
+    /// The level is always kept on the mixer; mute is handled by the
+    /// serial mute register only.
+    #[must_use]
     pub fn hardware_level(&self) -> u16 {
-        if self.muted { 0 } else { self.level_raw }
+        self.level_raw
     }
 
     /// Apply a volume percent change (0..100), returning new state.
-    /// If currently muted, stores the new level but does not change mute.
+    /// Applies to the mixer even while muted (silence is guaranteed by the
+    /// serial mute bit; the level stays current for instant unmute).
     pub fn with_percent(self, percent: u8, curve: &PercentToRaw) -> Self {
-        let new_raw = curve[percent as usize];
         Self {
-            level_raw: new_raw,
+            level_raw: curve[percent as usize],
             muted: self.muted,
         }
     }
 
-    /// Apply mute on: remember current level, set muted=true.
+    /// Apply mute on: set muted=true (level untouched).
+    #[must_use]
     pub fn mute(self) -> Self {
-        if self.muted {
-            self
-        } else {
-            Self {
-                level_raw: self.level_raw, // remember
-                muted: true,
-            }
+        Self {
+            muted: true,
+            ..self
         }
     }
 
-    /// Apply mute off: restore remembered level, set muted=false.
+    /// Apply mute off: set muted=false (level untouched).
+    #[must_use]
     pub fn unmute(self) -> Self {
-        if !self.muted {
-            self
-        } else {
-            Self {
-                level_raw: self.level_raw, // already remembered
-                muted: false,
-            }
+        Self {
+            muted: false,
+            ..self
         }
     }
 

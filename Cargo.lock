@@ -394,6 +394,7 @@ dependencies = [
  "ctrlc",
  "libc",
  "nix 0.28.0",
+ "rppal",
  "sd-notify",
  "serde",
  "serde_json",

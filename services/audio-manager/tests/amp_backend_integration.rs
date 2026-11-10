@@ -41,16 +41,14 @@ async fn mock_backend_write_state_muted() {
         .await
         .unwrap();
     assert!(result.muted);
-    // `write_state` returns the logical requested state, preserving the stored
-    // level even when muted; hardware level clamps to 0.
+    // `write_state` returns the logical requested state; the level stays
+    // live on the mixer even while muted (serial mute silences output).
     assert_eq!(result.level_raw, 80);
-    assert_eq!(result.hardware_level(), 0);
+    assert_eq!(result.hardware_level(), 80);
 
     let write = ctrl.last_write().unwrap();
     assert!(write.muted);
-    // The stored level is preserved; hardware level is 0 while muted
     assert_eq!(write.level_raw, 80);
-    assert_eq!(write.hardware_level(), 0);
 }
 
 #[tokio::test]
@@ -127,4 +125,46 @@ async fn mock_ctrl_call_counts() {
     assert_eq!(v, 1);
     assert_eq!(w, 1);
     assert_eq!(r, 1);
+}
+
+#[tokio::test]
+async fn mock_serial_mute_write_and_read() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+
+    backend.set_serial_mute(true).await.unwrap();
+    assert_eq!(ctrl.serial_mute_calls(), 1);
+    assert_eq!(ctrl.last_serial_mute(), Some(true));
+    assert!(backend.read_serial_mute().await.unwrap());
+
+    backend.set_serial_mute(false).await.unwrap();
+    assert_eq!(ctrl.serial_mute_calls(), 2);
+    assert!(!backend.read_serial_mute().await.unwrap());
+}
+
+#[tokio::test]
+async fn mock_serial_mute_fault_injection() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_serial_mute_fail(true);
+    let err = backend.set_serial_mute(true).await.unwrap_err();
+    assert!(err.to_string().contains("mock serial mute failure"));
+    // One-shot failure: next call succeeds.
+    backend.set_serial_mute(false).await.unwrap();
+}
+
+#[tokio::test]
+async fn mock_write_state_sets_serial_mute_flag() {
+    // Mock write_state does not auto-toggle the serial bit (the real backend
+    // calls set_serial_mute itself); verify the two surfaces are independent.
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    backend
+        .write_state(&AmpState {
+            level_raw: 80,
+            muted: true,
+        })
+        .await
+        .unwrap();
+    assert!(ctrl.last_write().unwrap().muted);
+    assert_eq!(ctrl.last_serial_mute(), None);
+    backend.set_serial_mute(true).await.unwrap();
+    assert_eq!(ctrl.last_serial_mute(), Some(true));
 }

@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 speaker-common = { path = "../../crates/common" }
 amp-curve = { workspace = true }
+rppal = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 zbus = { workspace = true, features = ["tokio", "blocking-api"] }
 serde = { workspace = true, features = ["derive"] }

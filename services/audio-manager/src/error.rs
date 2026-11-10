@@ -7,6 +7,10 @@ pub enum AmpError {
     #[error("ALSA error: {0}")]
     Alsa(#[from] alsa::Error),
 
+    /// I2C bus error (serial mute register access).
+    #[error("I2C error: {0}")]
+    I2c(#[from] rppal::i2c::Error),
+
     /// I/O error (state file, etc.).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

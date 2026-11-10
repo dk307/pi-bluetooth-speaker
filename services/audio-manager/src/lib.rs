@@ -8,6 +8,7 @@ pub mod amp_state;
 pub mod config;
 pub mod dbus_api;
 pub mod error;
+pub mod i2c_mute;
 pub mod state_file;
 
 // Re-export key types for consumers (tests, etc.)

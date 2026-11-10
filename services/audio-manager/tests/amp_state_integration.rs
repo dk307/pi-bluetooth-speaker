@@ -11,12 +11,14 @@ fn default_state() {
 }
 
 #[test]
-fn hardware_level_muted() {
+fn hardware_level_muted_keeps_level() {
     let s = AmpState {
         level_raw: 100,
         muted: true,
     };
-    assert_eq!(s.hardware_level(), 0);
+    // Mute no longer touches the level: the serial mute register silences
+    // the output while the mixer keeps its volume.
+    assert_eq!(s.hardware_level(), 100);
 }
 
 #[test]
@@ -29,7 +31,7 @@ fn hardware_level_unmuted() {
 }
 
 #[test]
-fn mute_remembers_level() {
+fn mute_keeps_level() {
     let s = AmpState {
         level_raw: 100,
         muted: false,
@@ -37,11 +39,11 @@ fn mute_remembers_level() {
     .mute();
     assert!(s.muted);
     assert_eq!(s.level_raw, 100);
-    assert_eq!(s.hardware_level(), 0);
+    assert_eq!(s.hardware_level(), 100);
 }
 
 #[test]
-fn unmute_restores_level() {
+fn unmute_keeps_level() {
     let s = AmpState {
         level_raw: 100,
         muted: true,
@@ -83,7 +85,7 @@ fn with_percent_when_muted_stores_only() {
     .with_percent(80, &PERCENT_TO_RAW);
     assert!(s.muted);
     assert_eq!(s.level_raw, PERCENT_TO_RAW[80]);
-    assert_eq!(s.hardware_level(), 0);
+    assert_eq!(s.hardware_level(), PERCENT_TO_RAW[80]);
 }
 
 #[test]
@@ -151,11 +153,13 @@ fn hardware_level_percent() {
 }
 
 #[test]
-fn hardware_level_percent_muted() {
+fn hardware_level_percent_muted_keeps_level() {
+    // Mute no longer clamps the hardware level; it reads back as the level.
     let s = AmpState {
         level_raw: 100,
         muted: true,
     };
     let p = s.hardware_level_percent(&PERCENT_TO_RAW);
-    assert_eq!(p, 0);
+    // raw 100 (-44 dB) reads back as the nearest/midpoint percent (~20%).
+    assert_eq!(p, 20);
 }
