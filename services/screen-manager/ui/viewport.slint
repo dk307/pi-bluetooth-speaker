@@ -71,17 +71,12 @@ export component MainViewport inherits Rectangle {
 
     callback bluetooth_back_clicked();
     callback settings_clicked();
-    callback settings_back_clicked();
     callback select_tab(int);
-    callback vu_meter_back_clicked();
-    callback cd_back_clicked();
-    callback dsp_back_clicked();
     callback toggle_play_pause();
     callback next_track();
     callback previous_track();
     callback toggle_mute();
     callback volume_changed(float);
-    callback dismiss_volume_hud();
     callback stream_pill_clicked();
     callback cycle_theme();
     callback select_theme(int);
@@ -269,7 +264,6 @@ export component MainViewport inherits Rectangle {
         SettingsView {
             cd_enabled: root.cd_enabled;
             show_themes <=> root.show_themes;
-            back_clicked => { root.settings_back_clicked(); }
             bluetooth_clicked => { root.select_tab(2); }
             vu_meter_clicked => { root.select_tab(1); }
             dsp_clicked => { root.select_tab(4); }

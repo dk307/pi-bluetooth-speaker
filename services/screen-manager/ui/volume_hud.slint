@@ -24,6 +24,16 @@ export component VolumeHudOverlay inherits Rectangle {
     callback dismiss_requested();
     callback interaction_activity();
 
+    // Full-viewport backdrop touch catcher: prevents touches from leaking through to
+    // the underlying tab and allows tapping empty space to dismiss the HUD early.
+    backdrop_touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            root.dismiss_requested();
+        }
+    }
+
     // Main content column: header (60px) + body (fills remaining)
     VerticalLayout {
         // Overlay app bar header (60px) — title "Volume", leading close icon

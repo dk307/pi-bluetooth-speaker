@@ -159,26 +159,47 @@ export component MainWindow inherits Window {
             height: 100%;
             opacity: root.bg_dim_opacity;
 
-            // Top Status Bar: 800 x 60 — ALWAYS MOUNTED, visible-gated (tab 0 only, hidden when HUD open)
-            status_bar := TopStatusBar {
-                visible: root.active_tab == 0 && !root.volume_hud_visible;
-                active_source: root.active_source;
-                track_or_device: root.track_or_device;
-                stream_codec: root.stream_codec;
-                stream_sample_rate: root.stream_sample_rate;
-                stream_bit_depth: root.stream_bit_depth;
-                volume_value: root.volume_value;
-                is_muted: root.is_muted;
-                source_clicked => {
-                    root.toggle_bluetooth_details();
-                    root.source_clicked();
+            // Top 60px area: status bar + click-intercepting placeholder overlay
+            Rectangle {
+                height: 60px;
+                width: 100%;
+
+                // Top Status Bar: 800 x 60 — ALWAYS MOUNTED, opacity-gated (tab 0 only, hidden when HUD open)
+                status_bar := TopStatusBar {
+                    opacity: (root.active_tab == 0 && !root.volume_hud_visible) ? 1.0 : 0.0;
+                    active_source: root.active_source;
+                    track_or_device: root.track_or_device;
+                    stream_codec: root.stream_codec;
+                    stream_sample_rate: root.stream_sample_rate;
+                    stream_bit_depth: root.stream_bit_depth;
+                    volume_value: root.volume_value;
+                    is_muted: root.is_muted;
+                    source_clicked => {
+                        root.toggle_bluetooth_details();
+                        root.source_clicked();
+                    }
+                    device_clicked => { root.toggle_bluetooth_details(); }
+                    protocol_clicked => { root.toggle_bluetooth_details(); }
+                    night_mode_clicked => { root.night_mode_clicked(); }
+                    volume_clicked => {
+                        root.show_volume_hud();
+                        root.volume_clicked();
+                    }
                 }
-                device_clicked => { root.toggle_bluetooth_details(); }
-                protocol_clicked => { root.toggle_bluetooth_details(); }
-                night_mode_clicked => { root.night_mode_clicked(); }
-                volume_clicked => {
-                    root.show_volume_hud();
-                    root.volume_clicked();
+
+                // Placeholder overlay to intercept clicks when status_bar is hidden
+                // (tab != 0 or HUD open). The TouchArea consumes clicks that would
+                // otherwise fall through to the status_bar's TouchAreas at opacity 0.
+                status_bar_placeholder := Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    visible: root.active_tab != 0 || root.volume_hud_visible;
+                    background: transparent;
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => { /* consume click, do nothing */ }
+                    }
                 }
             }
 
@@ -239,24 +260,11 @@ export component MainWindow inherits Window {
                     root.previous_tab = root.active_tab;
                     root.active_tab = 5;
                 }
-                settings_back_clicked => {
-                    root.active_tab = root.previous_tab == 5 ? 0 : root.previous_tab;
-                }
-                vu_meter_back_clicked => {
-                    root.active_tab = root.previous_tab == 1 ? 0 : root.previous_tab;
-                }
-                cd_back_clicked => {
-                    root.active_tab = root.previous_tab == 3 ? 0 : root.previous_tab;
-                }
-                dsp_back_clicked => {
-                    root.active_tab = root.previous_tab == 4 ? 0 : root.previous_tab;
-                }
                 select_tab(idx) => {
                     root.previous_tab = root.active_tab;
                     root.active_tab = idx;
                 }
                 volume_changed(val) => { root.volume_changed(val); }
-                dismiss_volume_hud => { root.dismiss_volume_hud(); }
                 select_theme(idx) => { root.select_theme(idx); }
                 cycle_theme => { root.cycle_theme(); }
             }

@@ -410,11 +410,20 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
     assert!(!shell.is_muted());
     assert_eq!(commands.drain(), vec![TransportCommand::SetMute(false)]);
 
-    // 4. Dismiss HUD via the public function (close button in header triggers this)
-    shell.window().invoke_dismiss_volume_hud();
+    // 4. Tap the close button in the Volume HUD header (top-left: X: 20, Y: 30)
+    // to dismiss HUD — exercises the real hit-testing of the overlay app bar.
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: LogicalPosition::new(20.0, 30.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: LogicalPosition::new(20.0, 30.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
     assert!(
         !shell.is_volume_hud_visible(),
-        "Invoking dismiss_volume_hud must dismiss Volume HUD"
+        "Tapping close button must dismiss Volume HUD"
     );
 }
 

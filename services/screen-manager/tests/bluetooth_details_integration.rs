@@ -88,6 +88,10 @@ fn status_bar_codec_badge_opens_details_from_now_playing_tab() {
     assert_eq!(shell.current_tab(), 2, "codec badge tap opens details");
     assert_eq!(shell.window().get_previous_tab(), 0);
 
+    // Return to Now Playing to test the AAC badge path (status bar only visible on tab 0)
+    shell.window().invoke_app_bar_back();
+    assert_eq!(shell.current_tab(), 0);
+
     // Variable-spec codec ("AAC"): sample-rate and bit-depth pills are visible
     // and tapping them also opens/toggles Bluetooth details.
     shell.set_stream_codec("AAC");
