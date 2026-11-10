@@ -14,12 +14,14 @@ use std::time::Duration;
 
 use crate::agent::AgentCapabilityMode;
 use crate::config::BtManagerConfig;
+use futures_util::StreamExt as _;
 use speaker_bluetooth::{BluetoothDevice, BluetoothStatus, BtError};
 use speaker_common::diag::{
     CliParse, DEFAULT_BT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts,
 };
-use tokio::time::{Duration as TokioDuration, MissedTickBehavior, interval};
-use zbus::{Connection, Proxy};
+use std::collections::HashMap;
+use tokio::time::Duration as TokioDuration;
+use zbus::{Connection, MatchRule, MessageStream, Proxy};
 
 /// Default status poll interval (5 seconds).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -379,12 +381,7 @@ pub async fn run_app(bt: BluetoothDevice, opts: BtManagerOptions) -> ExitCode {
     if let Some(conn) = &conn {
         let bt_for_sync = bt.clone();
         let conn_for_sync = conn.clone();
-        let shutdown_requested_sync = Arc::clone(&shutdown_requested);
-        tokio::spawn(spawn_volume_sync_task(
-            bt_for_sync,
-            conn_for_sync,
-            shutdown_requested_sync,
-        ));
+        tokio::spawn(spawn_volume_sync_task(bt_for_sync, conn_for_sync));
     }
 
     // Event-driven monitor: poll once immediately (so startup state is logged
@@ -458,25 +455,234 @@ pub async fn run_app(bt: BluetoothDevice, opts: BtManagerOptions) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-async fn spawn_volume_sync_task(
-    bt: BluetoothDevice,
-    conn: Connection,
-    shutdown_requested: Arc<AtomicBool>,
+/// Predicate: does this D-Bus `PropertiesChanged` signal announce a `BlueALSA`
+/// A2DP PCM volume change?
+///
+/// Pure and host-testable; path/interface/key parsing never touches D-Bus.
+/// `pub` under `test-util` so the integration suite can exercise it; the bin
+/// target never calls it, hence the scoped `dead_code` allowance.
+#[cfg_attr(not(feature = "test-util"), allow(dead_code))]
+pub fn is_bluealsa_volume_signal<'a>(
+    path: Option<&'a str>,
+    interface: &str,
+    mut changed_keys: impl Iterator<Item = &'a str>,
+) -> bool {
+    path.is_some_and(|p| p.contains("a2dpsnk"))
+        && interface == "org.bluealsa.PCM1"
+        && changed_keys.any(|k| k == "Volume")
+}
+
+/// Runs one sync attempt, logging failures at debug level (volume sync is
+/// best-effort; the next signal retries).
+async fn sync_volume_logged(
+    bt: &BluetoothDevice,
+    conn: &Connection,
+    last_pcm_vol: &mut Option<u8>,
 ) {
-    let mut interval = interval(TokioDuration::from_secs(5));
-    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    if let Err(e) = sync_volume(bt, conn, last_pcm_vol).await {
+        tracing::debug!(error = %e, "Volume sync failed");
+    }
+}
+
+/// Extracts the per-channel volume byte array from a D-Bus property value.
+///
+/// Pure and host-testable; no D-Bus round-trips.
+#[cfg_attr(not(feature = "test-util"), allow(dead_code))]
+#[must_use]
+pub fn volume_bytes_from_value(value: &zbus::zvariant::Value<'_>) -> Option<Vec<u8>> {
+    match value {
+        zbus::zvariant::Value::Array(arr) => arr
+            .iter()
+            .map(|v| match v {
+                zbus::zvariant::Value::U8(b) => Some(*b),
+                _ => None,
+            })
+            .collect(),
+        zbus::zvariant::Value::U8(b) => Some(vec![*b]),
+        _ => None,
+    }
+}
+
+/// Applies one `BlueALSA` PCM volume (0..=100 percent) to audio-manager,
+/// deduplicated against the last applied value.
+async fn apply_pcm_volume(
+    conn: &Connection,
+    last_pcm_vol: &mut Option<u8>,
+    pcm_vol: u8,
+) -> Result<(), BtError> {
+    if *last_pcm_vol == Some(pcm_vol) {
+        tracing::debug!(pcm_volume = pcm_vol, "Volume sync skipped: no change");
+        return Ok(());
+    }
+
+    // `percent` is already 0..=100; forward directly — do NOT re-map through
+    // the AVRCP 0..127 table.
+    let proxy = Proxy::new(
+        conn,
+        "org.speaker.AudioManager",
+        "/org/speaker/amp",
+        "org.speaker.AudioManager1",
+    )
+    .await?;
+    proxy.call_method("SetLevel", &pcm_vol).await?;
+
+    tracing::info!(
+        pcm_volume = pcm_vol,
+        percent = pcm_vol,
+        "Volume sync: BlueALSA PCM -> audio-manager"
+    );
+    *last_pcm_vol = Some(pcm_vol);
+    Ok(())
+}
+
+/// Fully event-driven volume sync task — no timers, no polling.
+///
+/// Subscribes to `BlueALSA` D-Bus signals only:
+/// - `PropertiesChanged(Volume)` on a `PCM1` object → the new volume is parsed
+///   straight from the signal payload (zero extra D-Bus round-trips) and pushed
+///   to audio-manager, so rapid phone volume presses take effect immediately.
+/// - `InterfacesAdded` on the `BlueALSA` `ObjectManager` → a new `A2DP` PCM appeared
+///   (fresh connect); one full catch-up read syncs the current volume.
+///
+/// A one-shot catch-up runs at startup. The task never exits: it is terminated
+/// with the process when the async runtime is dropped, so no shutdown flag or
+/// timer is needed. If the signal stream dies, the reconnect loop rebuilds the
+/// match rule after a backoff (no hot-spin).
+// Selects over two signal streams; each arm shares the same reconnect/backoff
+// policy, so extracting sub-functions would just thread four mutable state
+// parameters through both.
+#[allow(
+    clippy::too_many_lines,
+    reason = "single event loop for two signal streams"
+)]
+async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
     let mut last_pcm_vol: Option<u8> = None;
+
+    let props_rule = match MatchRule::builder()
+        .sender("org.bluealsa")
+        .and_then(|b| b.interface("org.freedesktop.DBus.Properties"))
+        .and_then(|b| b.member("PropertiesChanged"))
+        .map(zbus::match_rule::Builder::build)
+    {
+        Ok(rule) => rule,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to build BlueALSA signal match rule");
+            return;
+        }
+    };
+    let interfaces_rule = match MatchRule::builder()
+        .sender("org.bluealsa")
+        .and_then(|b| b.interface("org.freedesktop.DBus.ObjectManager"))
+        .and_then(|b| b.member("InterfacesAdded"))
+        .map(zbus::match_rule::Builder::build)
+    {
+        Ok(rule) => rule,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to build BlueALSA ObjectManager match rule");
+            return;
+        }
+    };
+
+    // Signal-Listener Reconnect Loop: if a stream dies or setup fails,
+    // rebuild it from scratch after a backoff instead of hot-spinning.
     loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                if shutdown_requested.load(Ordering::SeqCst) {
-                    break;
-                }
-                if let Err(e) = sync_volume(&bt, &conn, &mut last_pcm_vol).await {
-                    tracing::debug!(error = %e, "Volume sync failed");
+        let (mut props_stream, mut iface_stream) = match MessageStream::for_match_rule(
+            props_rule.clone(),
+            &conn,
+            Some(64),
+        )
+        .await
+        {
+            Ok(props) => {
+                match MessageStream::for_match_rule(interfaces_rule.clone(), &conn, Some(8)).await {
+                    Ok(interfaces) => (props, interfaces),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to subscribe to BlueALSA InterfacesAdded");
+                        tokio::time::sleep(TokioDuration::from_millis(500)).await;
+                        continue;
+                    }
                 }
             }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to subscribe to BlueALSA PropertiesChanged");
+                tokio::time::sleep(TokioDuration::from_millis(500)).await;
+                continue;
+            }
+        };
+
+        // One-shot catch-up: apply the current volume on startup/reconnect.
+        sync_volume_logged(&bt, &conn, &mut last_pcm_vol).await;
+
+        loop {
+            tokio::select! {
+                signal = props_stream.next() => match signal {
+                    Some(Ok(signal)) => {
+                        let path = signal.header().path().map(std::string::ToString::to_string);
+                        let body = signal.body();
+                        let parsed = body.deserialize::<(
+                            Box<str>,
+                            HashMap<String, zbus::zvariant::Value<'_>>,
+                            Vec<String>,
+                        )>();
+                        let Ok((iface, props, _invalidated)) = parsed else {
+                            continue;
+                        };
+                        if !is_bluealsa_volume_signal(
+                            path.as_deref(),
+                            &iface,
+                            props.keys().map(String::as_str),
+                        ) {
+                            continue;
+                        }
+                        // Parse the new volume directly from the payload —
+                        // no GetManagedObjects round-trip.
+                        let Some(pcm_vol) = props
+                            .get("Volume")
+                            .and_then(volume_bytes_from_value)
+                            .as_deref()
+                            .and_then(|bytes| {
+                                speaker_bluetooth::format_volume_bytes(bytes, None).2
+                            })
+                        else {
+                            tracing::debug!("Volume property present but unparseable");
+                            continue;
+                        };
+                        if let Err(e) = apply_pcm_volume(&conn, &mut last_pcm_vol, pcm_vol).await {
+                            tracing::debug!(error = %e, "Volume sync failed");
+                        }
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!(error = %e, "BlueALSA volume signal stream error; reconnecting");
+                        break;
+                    }
+                    None => {
+                        tracing::warn!("BlueALSA volume signal stream closed; reconnecting");
+                        break;
+                    }
+                },
+                signal = iface_stream.next() => match signal {
+                    Some(Ok(signal)) => {
+                        // A new PCM appeared (fresh A2DP connect); do one full
+                        // catch-up read so the amp matches the phone volume.
+                        let path = signal.header().path().map(std::string::ToString::to_string);
+                        if path.as_deref().is_some_and(|p| p.contains("a2dpsnk")) {
+                            sync_volume_logged(&bt, &conn, &mut last_pcm_vol).await;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!(error = %e, "BlueALSA InterfacesAdded stream error; reconnecting");
+                        break;
+                    }
+                    None => {
+                        tracing::warn!("BlueALSA InterfacesAdded stream closed; reconnecting");
+                        break;
+                    }
+                },
+            }
         }
+
+        // Backoff before rebuilding the match rules / streams.
+        tokio::time::sleep(TokioDuration::from_millis(500)).await;
     }
 }
 

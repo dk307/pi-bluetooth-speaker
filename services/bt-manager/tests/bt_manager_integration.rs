@@ -2,7 +2,8 @@
 
 use bt_manager::agent::AgentCapabilityMode;
 use bt_manager::daemon::{
-    BtManagerOptions, parse_cli_args_from, parse_interval_secs, parse_ticks, run_app, run_tick,
+    BtManagerOptions, is_bluealsa_volume_signal, parse_cli_args_from, parse_interval_secs,
+    parse_ticks, run_app, run_tick,
 };
 use speaker_bluetooth::BluetoothDevice;
 use speaker_common::diag::CliParse;
@@ -281,4 +282,49 @@ fn run_app_fails_on_malformed_config() {
         .build()
         .expect("runtime");
     assert_eq!(rt.block_on(run_app(bt, opts)), ExitCode::FAILURE);
+}
+
+#[test]
+fn bluealsa_volume_signal_predicate() {
+    // A2DP PCM volume change -> must react
+    assert!(is_bluealsa_volume_signal(
+        Some("/org/bluealsa/hci0/dev_30_E0_44_67_38_A2/a2dpsnk/source"),
+        "org.bluealsa.PCM1",
+        ["Volume"].into_iter(),
+    ));
+    // HFP / other PCM interfaces -> ignore
+    assert!(!is_bluealsa_volume_signal(
+        Some("/org/bluealsa/hci0/dev_30_E0_44_67_38_A2/hfphf/sink"),
+        "org.bluealsa.PCM1",
+        ["Volume"].into_iter(),
+    ));
+    assert!(!is_bluealsa_volume_signal(
+        Some("/org/bluealsa/hci0/dev_30_E0_44_67_38_A2/a2dpsnk/source"),
+        "org.bluealsa.PCM1",
+        ["Running", "Codec"].into_iter(),
+    ));
+    // Non-PCM interface on a transport path -> ignore
+    assert!(!is_bluealsa_volume_signal(
+        Some("/org/bluealsa/hci0/dev_30_E0_44_67_38_A2/a2dpsnk/source"),
+        "org.freedesktop.DBus.Properties",
+        ["Volume"].into_iter(),
+    ));
+    // Missing path -> ignore
+    assert!(!is_bluealsa_volume_signal(
+        None,
+        "org.bluealsa.PCM1",
+        ["Volume"].into_iter(),
+    ));
+}
+
+#[test]
+fn volume_bytes_from_value_parses_scalar_and_rejects_garbage() {
+    use bt_manager::daemon::volume_bytes_from_value;
+    use zbus::zvariant::Value;
+
+    // Scalar byte (`BlueALSA` may emit a single `y` for mono transports)
+    assert_eq!(volume_bytes_from_value(&Value::U8(50)), Some(vec![50]));
+    // Non-volume types are rejected
+    assert_eq!(volume_bytes_from_value(&Value::Bool(true)), None);
+    assert_eq!(volume_bytes_from_value(&Value::Str("50".into())), None);
 }
