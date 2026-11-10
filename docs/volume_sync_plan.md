@@ -139,12 +139,23 @@ struct VolumeState {
 
 > **Superseded 2026-11-09:** resolved by the `[AVRCP] VolumeCategory = false` fix
 > (see banner). No bt-manager code changes are needed or desired for volume sync.
+>
+> **Follow-up design (2026-11-09):** the remaining mute/volume gaps — mute is an
+> audible no-op (the Merus mixer has no ALSA mute switch for the BlueALSA mute
+> bit to drive) and the amp is owned by `bluealsa-aplay` — are addressed by the
+> new **audio-manager** service plan: a single event-driven hardware owner of
+> `A.Mstr Vol` (mute = raw 0 / -144 dB, level restore on unmute) with bt-manager
+> and the UI as clients. Do **not** implement Options 3/4 below or the obsolete
+> polled `sync_volume` code in bt-manager (0–100% vs 0..127 scale bug; dual-writer
+> oscillation with `bluealsa-aplay`). See **`docs/audio_manager_plan.md`** —
+> Options 3/4 are replaced by its phase 2.
 
 1. **Test Option 1** (current buffer-tuned config) under real usage for 24-48h
    *(note: the buffer flags were never actually deployed to the live unit —
    `bluealsa-aplay.service` still runs without `--pcm-buffer-time/--pcm-period-time`)*
 2. If underruns persist → **Option 2** (upgrade bluealsa)
-3. If upgrade not feasible → **Option 3** (AVRCP target in bt-manager)
+3. ~~If upgrade not feasible → **Option 3** (AVRCP target in bt-manager)~~
+   → replaced by `docs/audio_manager_plan.md` phase 2
 4. **Avoid Option 4** unless absolutely necessary
 
 ---
