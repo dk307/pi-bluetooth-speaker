@@ -187,6 +187,22 @@ fn back_button_returns_to_previous_tab() {
 }
 
 #[test]
+fn back_button_leading_icon_click_navigates_back() {
+    let (shell, window) = shell_with_window();
+
+    // Navigate to a screen tab, then perform a real pointer click on the
+    // ScreenAppBar leading back icon (40x40 button at x 6..46, bar spans
+    // y 60..120 with the button vertically centered => y ~ 70..110).
+    shell.set_tab(4);
+    click(&window, 26.0, 90.0);
+    assert_eq!(
+        shell.current_tab(),
+        0,
+        "Clicking the ScreenAppBar back icon must return to Now Playing"
+    );
+}
+
+#[test]
 fn back_button_on_themes_closes_themes_view() {
     let (shell, _window) = shell_with_window();
 
