@@ -8,6 +8,7 @@ description = "Bluetooth & BlueALSA peripheral drivers, D-Bus connection managem
 
 [dependencies]
 speaker-common = { workspace = true }
+amp-curve = { workspace = true }
 zbus = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }

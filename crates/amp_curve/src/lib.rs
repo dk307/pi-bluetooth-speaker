@@ -68,7 +68,9 @@ const fn build_percent_to_raw() -> [u16; 101] {
         // the AVRCP -> percent -> raw roundtrip lands back on the calibrated
         // raw value (truncation loses up to ~3 raw steps at low volumes).
         let avrcp_x = (p * 127 + 50) / 100;
-        // Find the calibration segment
+        // Find the calibration segment; the last anchor (avrcp 127) is always
+        // matched by the `x >= x1` guard inside `interp_db_tenths`, so the
+        // loop below never falls through without assigning.
         let mut db_tenths = 0i16;
         let mut i = 0;
         while i < CALIBRATION_POINTS.len() - 1 {
@@ -80,13 +82,15 @@ const fn build_percent_to_raw() -> [u16; 101] {
             }
             i += 1;
         }
-        if db_tenths == 0 && p > 0 {
-            // Past the last point (should only happen at p=100, avrcp=127)
-            db_tenths = CALIBRATION_POINTS.last().unwrap().2 * 10;
-        }
-        // raw = 144 + dB, where dB = db_tenths / 10
-        // Since dB ≤ 0, raw = 144 - |dB|
-        let db = db_tenths / 10;
+        // raw = 144 + dB, rounded to the nearest dB step (truncation would
+        // bias up to 1 dB louder since all dB values here are ≤ 0).
+        // Round half away from zero for negatives: (-42-5)/10 = -4, and exact
+        // anchors (-200, -1440) are unaffected.
+        let db = if db_tenths < 0 {
+            (db_tenths - 5) / 10
+        } else {
+            db_tenths / 10
+        };
         let raw = (144i16 + db) as u16;
         if raw > RAW_MAX {
             table[p as usize] = RAW_MAX;
@@ -151,6 +155,25 @@ pub const fn percent_to_raw(percent: u8) -> u16 {
 #[inline]
 pub const fn avrcp_to_percent(avrcp: u8) -> u8 {
     AVRCP_TO_PERCENT[avrcp as usize]
+}
+
+/// Convert a *fractional* AVRCP level (e.g. the average of per-channel
+/// volumes) to percent, rounding to nearest. Single source of truth for the
+/// formula; the const [`AVRCP_TO_PERCENT`] table uses the same mapping for
+/// integer inputs (the two agree because the `.5` tie case is unreachable
+/// for `avrcp * 100 / 127`).
+#[must_use]
+pub fn avrcp_avg_to_percent(avg: f64) -> u8 {
+    let percent = ((avg / f64::from(AVRCP_MAX)) * f64::from(PERCENT_MAX))
+        .round()
+        .clamp(0.0, f64::from(PERCENT_MAX));
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "percentage clamped 0.0..=100.0 fits in u8"
+    )]
+    let percent = percent as u8;
+    percent
 }
 
 /// Convert raw to dB (tenths).
