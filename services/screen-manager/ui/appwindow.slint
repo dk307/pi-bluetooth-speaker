@@ -145,7 +145,8 @@ export component MainWindow inherits Window {
 
     // Root stacking container: bg_column (bottom), hud_scrim (middle), volume_hud (top)
     Rectangle {
-        // Background column that carries the dim opacity (covers home AND screens)
+        // Background column (home AND screens). Overlay dimming is applied by the
+        // hud_scrim layer below (single dimming mechanism).
         bg_column := VerticalLayout {
             width: 100%;
             height: 100%;
@@ -246,7 +247,6 @@ export component MainWindow inherits Window {
                 previous_track => { root.previous_track(); }
                 toggle_mute => { root.toggle_mute(); }
                 stream_pill_clicked => { root.stream_pill_clicked(); }
-                bluetooth_back_clicked => { root.toggle_bluetooth_details(); }
                 settings_clicked => {
                     root.previous_tab = root.active_tab;
                     root.active_tab = 5;
