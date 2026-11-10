@@ -6,8 +6,10 @@ members = [
     "crates/dsp",
     "crates/bluetooth",
     "crates/title-breaker",
+    "crates/amp_curve",
     "services/screen-manager",
     "services/bt-manager",
+    "services/audio-manager",
     "tools/diagnostics",
 ]
 
@@ -60,9 +62,15 @@ tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 # Async Trait for Trait-based Dependency Injection / Mocks
 async-trait = "=0.1.86"
 memmap2 = "=0.9.12"
+thiserror = "=2.0.21"
+sd-notify = "=0.1.1"
+
+# Shared volume curve for Merus MA12070P amplifier
+speaker-amp-curve = { path = "crates/amp_curve" }
 
 # Direct OBEX Cover Art over RFCOMM/L2CAP (AVRCP/BIP)
 bluer = { version = "=0.17.4", default-features = false, features = ["rfcomm", "l2cap"] }
+alsa = { version = "=0.12.1", default-features = false, features = ["std"] }
 obex-protocol = { version = "=0.1.0", default-features = false, features = ["tokio"] }
 bluesdp = "=0.1.1"
 

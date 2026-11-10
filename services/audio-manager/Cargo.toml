@@ -1,0 +1,45 @@
+[package]
+name = "audio-manager"
+version = "2.0.0"
+edition = "2024"
+authors = ["Audio Appliance Team"]
+license = "Apache-2.0"
+description = "Single owner of Merus MA12070P amplifier volume/mute (D-Bus service)"
+publish = false
+
+[dependencies]
+speaker-common = { path = "../../crates/common" }
+amp-curve = { path = "../../crates/amp_curve" }
+tokio = { workspace = true, features = ["full"] }
+zbus = { workspace = true, features = ["tokio", "blocking-api"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = { workspace = true }
+libc = { workspace = true }
+ctrlc = { workspace = true }
+alsa = { workspace = true }
+nix = { version = "=0.28.0", features = ["signal"] }
+thiserror = { workspace = true }
+config = { workspace = true }
+sd-notify = { version = "=0.1.1" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+zbus = { workspace = true, features = ["tokio", "blocking-api"] }
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[profile.dev]
+debug = 1
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+incremental = false

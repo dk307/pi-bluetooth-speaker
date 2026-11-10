@@ -7,7 +7,7 @@
 //! the active track's artwork on the system D-Bus for future consumers.
 
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -21,6 +21,101 @@ use speaker_common::diag::{
 
 /// Default status poll interval (5 seconds).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Reads the current Merus hardware mixer volume (A.Mstr Vol) as raw 0..144.
+fn read_merus_volume_raw() -> Result<u8, String> {
+    let output = Command::new("amixer")
+        .args(["-c", "sndrpimerusamp", "sget", "A.Mstr Vol"])
+        .output()
+        .map_err(|e| format!("amixer execution failed: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!("amixer failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Parse: "Mono: 80 [56%] [-64.00dB]"
+    let re = regex::Regex::new(r"Mono:\s+(\d+)\s+\[\d+%\]").unwrap();
+    re.captures(&stdout)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse::<u8>().ok())
+        .ok_or_else(|| format!("Failed to parse Merus volume from: {stdout}"))
+}
+
+/// Converts Merus raw volume (0..144) to AVRCP transport volume (0..127).
+fn merus_raw_to_avrcp(merus: u8) -> u8 {
+    match merus {
+        0 => 0,
+        1..=124 => ((merus as u16 * 32) / 124) as u8,
+        125..=134 => 32 + (((merus - 124) as u16 * 32) / 10) as u8,
+        135..=140 => 64 + (((merus - 134) as u16 * 32) / 6) as u8,
+        141..=144 => 96 + (((merus - 140) as u16 * 31) / 4) as u8,
+        _ => 127,
+    }
+}
+
+/// Converts AVRCP transport volume (0..127) to Merus raw volume (0..144).
+fn avrcp_to_merus_raw(avrcp: u8) -> u8 {
+    match avrcp {
+        0 => 0,
+        1..=32 => ((avrcp as u16 * 124) / 32) as u8,
+        33..=64 => 124 + (((avrcp - 32) as u16 * 10) / 32) as u8,
+        65..=96 => 134 + (((avrcp - 64) as u16 * 6) / 32) as u8,
+        97..=127 => 140 + (((avrcp - 96) as u16 * 4) / 31) as u8,
+        _ => 144,
+    }
+}
+
+/// Writes Merus raw volume (0..144) to hardware mixer via amixer.
+fn write_merus_volume_raw(raw: u8) -> Result<(), String> {
+    let output = Command::new("amixer")
+        .args(["-c", "sndrpimerusamp", "sset", "A.Mstr Vol", &raw.to_string()])
+        .output()
+        .map_err(|e| format!("amixer execution failed: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!("amixer failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(())
+}
+
+/// Syncs volume between BlueALSA PCM (mirrors transport) and Merus hardware mixer.
+fn sync_volume(bt: &BluetoothDevice) {
+    // Read current hardware volume
+    let hw_raw = match read_merus_volume_raw() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(error = %e, "Failed to read hardware volume for sync");
+            return;
+        }
+    };
+
+    // Read BlueALSA PCM volume (mirrors BlueZ transport volume)
+    let pcm_vol = match bt.audio_pcms() {
+        Ok(pcms) => {
+            pcms.iter()
+                .find(|p| p.pcm_path.contains("a2dpsnk"))
+                .and_then(|p| p.volume_percent)
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "Failed to read BlueALSA PCMs for sync");
+            None
+        }
+    };
+
+    if let Some(pcm_vol) = pcm_vol {
+        let target_raw = avrcp_to_merus_raw(pcm_vol);
+        if target_raw != hw_raw {
+            tracing::info!(pcm_volume = pcm_vol, hardware = hw_raw, target = target_raw, "Volume sync: BlueALSA PCM -> hardware");
+            if let Err(e) = write_merus_volume_raw(target_raw) {
+                tracing::warn!(error = %e, "Failed to write hardware volume");
+            }
+        }
+    } else {
+        // No active PCM: could sync hardware -> device info for next connect
+        tracing::debug!(hardware = hw_raw, "No active PCM for volume sync");
+    }
+}
 
 /// Bluetooth manager service command-line options.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,6 +392,7 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
 
     let mut ticks: u64 = 0;
     let mut last_status: Option<(usize, bool)> = None;
+    let mut last_volume_sync: std::time::Instant = std::time::Instant::now();
     run_poll_loop(effective_interval, |_timestamp| {
         if shutdown_requested.load(Ordering::SeqCst) {
             tracing::info!("shutdown requested, stopping monitor loop");
@@ -321,6 +417,13 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
             }
             Err(e) => tracing::warn!(error = %e, "Bluetooth status poll failed"),
         }
+
+        // Sync volume every 5 seconds (less frequently than status poll)
+        if last_volume_sync.elapsed() >= Duration::from_secs(5) {
+            sync_volume(bt);
+            last_volume_sync = std::time::Instant::now();
+        }
+
         ticks = ticks.saturating_add(1);
         opts.max_ticks.is_some_and(|limit| ticks >= limit)
     });
