@@ -45,6 +45,24 @@ fn toggle_returns_to_originating_tab() {
 }
 
 #[test]
+fn status_bar_clicks_are_intercepted_off_the_player_tab() {
+    let (shell, window) = shell_with_window();
+
+    // On tab 1 the status bar is hidden behind the status_bar_placeholder overlay:
+    // a click on the codec badge strip (X: 600, Y: 30) must NOT fall through to the
+    // hidden status bar's TouchAreas (opacity-0 elements still hit-test in Slint).
+    shell.set_tab(1);
+    click(&window, 600.0, 30.0);
+    click(&window, 100.0, 30.0);
+    click(&window, 690.0, 30.0);
+    assert_eq!(
+        shell.current_tab(),
+        1,
+        "Top-strip clicks on non-player tabs must be intercepted by the placeholder"
+    );
+}
+
+#[test]
 fn toggle_from_dock_selected_details_falls_back_to_player() {
     let (shell, _window) = shell_with_window();
 
