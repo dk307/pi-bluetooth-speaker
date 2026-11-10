@@ -187,6 +187,48 @@ fn back_button_returns_to_previous_tab() {
 }
 
 #[test]
+fn back_button_on_themes_closes_themes_view() {
+    let (shell, _window) = shell_with_window();
+
+    shell.set_tab(5);
+    shell.window().set_show_themes(true);
+    shell.window().invoke_app_bar_back();
+    assert!(
+        !shell.window().get_show_themes(),
+        "Back on the Themes view must close the themes list"
+    );
+    assert_eq!(
+        shell.current_tab(),
+        5,
+        "Back on the Themes view must stay on the Settings screen"
+    );
+
+    // Second back leaves the Settings screen entirely.
+    shell.window().invoke_app_bar_back();
+    assert_eq!(shell.current_tab(), 0);
+}
+
+#[test]
+fn back_button_falls_back_to_player_when_previous_tab_is_stale() {
+    let (shell, _window) = shell_with_window();
+
+    // previous_tab collapsed to the active tab (multi-hop history): back must
+    // fall back to Now Playing instead of staying on the same screen.
+    shell.set_tab(3);
+    shell.window().set_previous_tab(3);
+    shell.window().invoke_app_bar_back();
+    assert_eq!(
+        shell.current_tab(),
+        0,
+        "Back with stale previous_tab must return to Now Playing"
+    );
+
+    // Back on Now Playing is a no-op.
+    shell.window().invoke_app_bar_back();
+    assert_eq!(shell.current_tab(), 0);
+}
+
+#[test]
 fn link_details_apply_and_clear() {
     let (shell, _window) = shell_with_window();
     let (bt, mock) = BluetoothDevice::new_mocked();
