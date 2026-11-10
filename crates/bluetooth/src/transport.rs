@@ -123,6 +123,8 @@ pub struct BtPlaybackState {
     pub image_handle: Option<Box<str>>,
     /// Local cache path to downloaded cover art image (e.g. `/var/cache/speaker-covers/...jpg`).
     pub cover_art_path: Option<Box<str>>,
+    /// Phone/remote device volume (AVRCP absolute volume, 0-127), if reported by `MediaPlayer1`.
+    pub phone_volume: Option<u16>,
 }
 
 /// Placeholder title shown whenever no Bluetooth media player is connected.
@@ -145,6 +147,7 @@ impl Default for BtPlaybackState {
             obex_port: None,
             image_handle: None,
             cover_art_path: None,
+            phone_volume: None,
         }
     }
 }
@@ -172,6 +175,14 @@ impl BtPlaybackState {
     #[must_use]
     pub fn format_duration(&self) -> String {
         format_duration_ms(self.duration_ms)
+    }
+
+    /// Converts the reported AVRCP absolute volume (0-127) to a percentage
+    /// (0-100), rounded to nearest. `None` when no phone volume is reported.
+    #[must_use]
+    pub fn phone_volume_percent(&self) -> Option<u8> {
+        self.phone_volume
+            .map(|v| ((u32::from(v) * 100 + 63) / 127) as u8)
     }
 }
 

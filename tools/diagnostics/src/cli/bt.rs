@@ -325,8 +325,6 @@ pub fn print_human_audio_pipeline(status: &BluetoothStatus, opts: &CliOptions) {
                 (None, Some(raw)) => raw.to_string(),
                 (None, None) => "N/A".to_string(),
             };
-            let muted_str = if pcm.muted { "YES" } else { "NO" };
-
             println!("  Stream State      : {}", pcm.stream_state_description());
             println!(
                 "  ↳ Audio Source    : {} ({})",
@@ -338,7 +336,7 @@ pub fn print_human_audio_pipeline(status: &BluetoothStatus, opts: &CliOptions) {
                 "  ↳ Sample Rate     : {} Hz ({} Channels, {})",
                 pcm.sampling_rate, pcm.channels, pcm.format
             );
-            println!("  ↳ Hardware Volume : {vol_str} (Muted: {muted_str})");
+            println!("  ↳ Hardware Volume : {vol_str}");
             println!("  ↳ Audio Latency   : {delay_str}");
             println!("  ↳ Codecs Allowed  : {codecs_avail}");
             println!();
@@ -354,6 +352,10 @@ pub fn print_human_audio_pipeline(status: &BluetoothStatus, opts: &CliOptions) {
             p.status,
             p.format_position()
         );
+        if let Some(vol) = p.phone_volume {
+            let pct = p.phone_volume_percent().unwrap_or_default();
+            println!("  ↳ Phone Volume    : {pct}% (AVRCP absolute: {vol})");
+        }
         if let Some(ref path) = p.cover_art_path {
             println!("  ↳ BIP Cover Art   : {path}");
         } else if let Some(ref handle) = p.image_handle {
@@ -467,7 +469,6 @@ pub fn output_json_status(timestamp: &str, status: &BluetoothStatus, opts: &CliO
             "format": p.format,
             "volume": p.volume,
             "volume_percent": p.volume_percent,
-            "muted": p.muted,
             "delay": p.delay,
         })).collect::<Vec<_>>(),
         "playback": status.playback.as_ref().map(|p| serde_json::json!({
@@ -483,6 +484,8 @@ pub fn output_json_status(timestamp: &str, status: &BluetoothStatus, opts: &CliO
             "obex_port": p.obex_port,
             "image_handle": p.image_handle,
             "cover_art_path": p.cover_art_path,
+            "phone_volume": p.phone_volume,
+            "phone_volume_percent": p.phone_volume_percent(),
         })),
         "hardware": {
             "chip": status.hardware.chip,

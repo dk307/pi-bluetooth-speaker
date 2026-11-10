@@ -44,6 +44,7 @@ fn test_playback(handle: Option<&str>) -> BtPlaybackState {
         obex_port: Some(4097),
         image_handle: handle.map(Box::from),
         cover_art_path: None,
+        phone_volume: None,
     }
 }
 

@@ -1356,6 +1356,7 @@ impl DbusClient {
         };
 
         let obex_port = get_u16(props, "ObexPort").filter(|&p| p > 0);
+        let phone_volume = get_u16(props, "Volume").filter(|&v| v <= 127);
         let image_handle = props
             .get("Track")
             .and_then(|track_val| get_track_prop_str(track_val, "ImgHandle"))
@@ -1375,6 +1376,7 @@ impl DbusClient {
             obex_port,
             image_handle,
             cover_art_path: None,
+            phone_volume,
         }
     }
 
@@ -2003,6 +2005,7 @@ impl BluetoothDeviceMock {
                 obex_port: Some(4097),
                 image_handle: Some("1000001".into()),
                 cover_art_path: None,
+                phone_volume: Some(80), // 80/127 ≈ 63%
             }),
             fault: None,
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),

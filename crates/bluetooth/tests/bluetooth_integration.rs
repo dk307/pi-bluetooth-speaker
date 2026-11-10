@@ -1165,6 +1165,8 @@ fn playback_state_and_duration_formatting() {
     assert_eq!(def.obex_port, None);
     assert_eq!(def.image_handle, None);
     assert_eq!(def.cover_art_path, None);
+    assert_eq!(def.phone_volume, None);
+    assert_eq!(def.phone_volume_percent(), None);
     assert_eq!(def.progress_ratio(), 0.0);
     assert_eq!(def.format_position(), "00:00");
     assert_eq!(def.format_duration(), "00:00");
@@ -1182,11 +1184,22 @@ fn playback_state_and_duration_formatting() {
         obex_port: Some(4097),
         image_handle: Some("img001".into()),
         cover_art_path: Some("/tmp/test.jpg".into()),
+        phone_volume: None,
     };
     assert!(state.is_playing());
     assert_eq!(state.format_position(), "02:05");
     assert_eq!(state.format_duration(), "06:55");
     assert!((state.progress_ratio() - (125.0 / 415.0)).abs() < 1e-4);
+
+    // AVRCP absolute volume → percentage conversion (0-127 → 0-100, rounded)
+    state.phone_volume = Some(0);
+    assert_eq!(state.phone_volume_percent(), Some(0));
+    state.phone_volume = Some(127);
+    assert_eq!(state.phone_volume_percent(), Some(100));
+    state.phone_volume = Some(64);
+    assert_eq!(state.phone_volume_percent(), Some(50));
+    state.phone_volume = Some(80);
+    assert_eq!(state.phone_volume_percent(), Some(63));
 
     state.status = "Playing".into();
     assert!(state.is_playing());
@@ -1419,6 +1432,7 @@ fn parse_bluez_all_with_media_player() {
         .unwrap();
     player_props.insert("Track".to_string(), to_val(Value::Dict(track_dict)));
     player_props.insert("ObexPort".to_string(), to_val(Value::from(4097u16)));
+    player_props.insert("Volume".to_string(), to_val(Value::from(96u16)));
 
     player_ifaces.insert(iface("org.bluez.MediaPlayer1"), player_props);
     objects.insert(player_path, player_ifaces);
@@ -1452,6 +1466,30 @@ fn parse_bluez_all_with_media_player() {
         pb.player_path.as_deref(),
         Some("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0")
     );
+    // MediaPlayer1.Volume (AVRCP absolute volume) parsed and converted
+    assert_eq!(pb.phone_volume, Some(96));
+    assert_eq!(pb.phone_volume_percent(), Some(76));
+}
+
+#[test]
+fn parse_bluez_playback_rejects_out_of_range_phone_volume() {
+    let mut objects: ManagedObjects = HashMap::new();
+
+    // MediaPlayer1 with an out-of-spec Volume (> 127) must be reported as absent
+    let player_path = OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0")
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let mut player_ifaces = HashMap::new();
+    let mut player_props = HashMap::new();
+    player_props.insert("Status".to_string(), to_val("playing"));
+    player_props.insert("Volume".to_string(), to_val(Value::from(200u16)));
+    player_ifaces.insert(iface("org.bluez.MediaPlayer1"), player_props);
+    objects.insert(player_path, player_ifaces);
+
+    let (_, _, playback) = DbusClient::parse_bluez_all(&objects, None).unwrap();
+    let pb = playback.expect("playback should still parse");
+    assert_eq!(pb.phone_volume, None);
+    assert_eq!(pb.phone_volume_percent(), None);
 }
 
 #[test]
