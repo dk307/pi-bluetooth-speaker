@@ -44,30 +44,6 @@ component ThemePresetCard inherits Rectangle {
     }
 }
 
-// Custom Back button with +1 font size (17px) - Material FilledButton text style is fixed at label_large 14px
-component BackButton inherits Rectangle {
-    in property <string> text: "Back";
-    in property <length> btn_width: 100px;
-    width: root.btn_width;
-    height: 42px;
-    border-radius: self.height / 2;
-    background: MaterialPalette.primary;
-    opacity: touch.pressed ? 0.8 : 1.0;
-    animate opacity { duration: 80ms; easing: ease-out; }
-    Text {
-        width: parent.width;
-        height: parent.height;
-        text: root.text;
-        color: MaterialPalette.on_primary;
-        font-size: 17px;
-        font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    touch := TouchArea { clicked => { root.clicked(); } }
-    callback clicked();
-}
-
 // Android-style icon button for settings grid (custom component like TransportButton)
 component SettingsIconButton inherits Rectangle {
     in property <image> icon;
@@ -128,33 +104,6 @@ export component SettingsView inherits VerticalLayout {
 
     padding: MaterialStyleMetrics.padding_16;  // 16px
     spacing: MaterialStyleMetrics.spacing_16;
-
-    // Header: Title & Back Button
-    HorizontalLayout {
-        height: 48px;
-        spacing: MaterialStyleMetrics.spacing_12;
-
-        MaterialText {
-            text: root.show_themes ? "THEME PREFERENCES" : "SETTINGS";
-            style: MaterialTypography.title_large;  // 18px (+1 from title_medium)
-            color: MaterialPalette.primary;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-        }
-
-        // Back button - custom with 17px font (+1 from Material label_large 14px)
-        BackButton {
-            text: "Back";
-            btn_width: 100px;
-            clicked => {
-                if (root.show_themes) {
-                    root.show_themes = false;
-                } else {
-                    root.back_clicked();
-                }
-            }
-        }
-    }
 
     // View 1: Android-style icon button grid
     if !root.show_themes : VerticalLayout {

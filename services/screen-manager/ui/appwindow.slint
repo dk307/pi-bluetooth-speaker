@@ -5,6 +5,8 @@ import { TopStatusBar } from "status_bar.slint";
 import { MainViewport } from "viewport.slint";
 import { MarqueeRasterizer } from "marquee_rasterizer.slint";
 import { MarqueeCompose } from "marquee_state.slint";
+import { ScreenAppBar } from "screen_app_bar.slint";
+import { VolumeHudOverlay } from "volume_hud.slint";
 
 // Re-exported so slint-build generates the Rust global accessor for the composer bridge.
 export { MarqueeCompose }
@@ -54,6 +56,13 @@ export component MainWindow inherits Window {
     in-out property <float> right_peak_ratio: 0.0;
     in-out property <bool> cd_enabled: false;
     out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01;
+
+    // NEW: show_themes lifted to MainWindow for title switching in ScreenAppBar
+    in-out property <bool> show_themes: false;
+
+    // NEW: background dim opacity for overlay blur effect (0.35 when HUD open, 1.0 normal)
+    out property <float> bg_dim_opacity: root.volume_hud_visible ? 0.35 : 1.0;
+    animate bg_dim_opacity { duration: 200ms; easing: ease-out; }
 
     public function show_volume_hud() {
         root.volume_hud_elapsed_ms = 0;
@@ -123,97 +132,157 @@ export component MainWindow inherits Window {
         }
     }
 
-    VerticalLayout {
-        padding: 0px;
-        spacing: 0px;
-
-        // Top Status Bar: 800 x 60
-        status_bar := TopStatusBar {
-            active_source: root.active_source;
-            track_or_device: root.track_or_device;
-            stream_codec: root.stream_codec;
-            stream_sample_rate: root.stream_sample_rate;
-            stream_bit_depth: root.stream_bit_depth;
-            volume_value: root.volume_value;
-            is_muted: root.is_muted;
-            source_clicked => {
-                root.toggle_bluetooth_details();
-                root.source_clicked();
+    // NEW: Screen app bar back button handler
+    public function app_bar_back() {
+        if (root.active_tab == 2) {
+            root.toggle_bluetooth_details();
+        } else if (root.active_tab == 1) {
+            root.active_tab = root.previous_tab == 1 ? 0 : root.previous_tab;
+        } else if (root.active_tab == 3) {
+            root.active_tab = root.previous_tab == 3 ? 0 : root.previous_tab;
+        } else if (root.active_tab == 4) {
+            root.active_tab = root.previous_tab == 4 ? 0 : root.previous_tab;
+        } else if (root.active_tab == 5) {
+            if (root.show_themes) {
+                root.show_themes = false;
+            } else {
+                root.active_tab = root.previous_tab == 5 ? 0 : root.previous_tab;
             }
-            device_clicked => { root.toggle_bluetooth_details(); }
-            protocol_clicked => { root.toggle_bluetooth_details(); }
-            night_mode_clicked => { root.night_mode_clicked(); }
-            volume_clicked => {
-                root.show_volume_hud();
-                root.volume_clicked();
+        }
+    }
+
+    // Root stacking container: bg_column (bottom), hud_scrim (middle), volume_hud (top)
+    Rectangle {
+        // Background column that carries the dim opacity (covers home AND screens)
+        bg_column := VerticalLayout {
+            width: 100%;
+            height: 100%;
+            opacity: root.bg_dim_opacity;
+
+            // Top Status Bar: 800 x 60 — ALWAYS MOUNTED, visible-gated (tab 0 only, hidden when HUD open)
+            status_bar := TopStatusBar {
+                visible: root.active_tab == 0 && !root.volume_hud_visible;
+                active_source: root.active_source;
+                track_or_device: root.track_or_device;
+                stream_codec: root.stream_codec;
+                stream_sample_rate: root.stream_sample_rate;
+                stream_bit_depth: root.stream_bit_depth;
+                volume_value: root.volume_value;
+                is_muted: root.is_muted;
+                source_clicked => {
+                    root.toggle_bluetooth_details();
+                    root.source_clicked();
+                }
+                device_clicked => { root.toggle_bluetooth_details(); }
+                protocol_clicked => { root.toggle_bluetooth_details(); }
+                night_mode_clicked => { root.night_mode_clicked(); }
+                volume_clicked => {
+                    root.show_volume_hud();
+                    root.volume_clicked();
+                }
+            }
+
+            // Screen App Bar: 800 x 60 — ALWAYS MOUNTED, visible-gated (tabs 1-5)
+            screen_app_bar := ScreenAppBar {
+                visible: root.active_tab != 0;
+                title: root.active_tab == 1 ? "VU Meter" :
+                       root.active_tab == 2 ? "Bluetooth" :
+                       root.active_tab == 3 ? "CD Player" :
+                       root.active_tab == 4 ? "DSP & Tone" :
+                       root.active_tab == 5 ? (root.show_themes ? "Themes" : "Settings") : "";
+                leading_icon: @image-url("../../../assets/icons/back.svg");
+                leading_clicked => { root.app_bar_back(); }
+            }
+
+            // Main Viewport: 800 x 420 — ALWAYS MOUNTED (all `<=>` bindings intact)
+            viewport := MainViewport {
+                active_tab <=> root.active_tab;
+                cd_enabled: root.cd_enabled;
+                track_title: root.track_title;
+                track_artist: root.track_artist;
+                track_album: root.track_album;
+                stream_details: root.stream_details;
+                position_text: root.position_text;
+                duration_text: root.duration_text;
+                duration_ms: root.duration_ms;
+                progress_ratio: root.progress_ratio;
+                volume_value <=> root.volume_value;
+                is_playing: root.is_playing;
+                is_muted <=> root.is_muted;
+                volume_hud_opacity: root.volume_hud_opacity;
+                has_cover_art: root.has_cover_art;
+                cover_image: root.cover_image;
+                left_peak_ratio: root.left_peak_ratio;
+                right_peak_ratio: root.right_peak_ratio;
+                track_or_device: root.track_or_device;
+                stream_codec: root.stream_codec;
+                bt_connected: root.bt_connected;
+                bt_device_address: root.bt_device_address;
+                bt_link_text: root.bt_link_text;
+                bt_rssi_text: root.bt_rssi_text;
+                bt_battery_text: root.bt_battery_text;
+                bt_stream_format: root.bt_stream_format;
+                bt_delay_text: root.bt_delay_text;
+                bt_adapter_name: root.bt_adapter_name;
+                bt_adapter_address: root.bt_adapter_address;
+                title_marquee_strip: root.title_marquee_strip;
+                artist_marquee_text: root.artist_marquee_text;
+                show_themes <=> root.show_themes;
+
+                toggle_play_pause => { root.toggle_play_pause(); }
+                next_track => { root.next_track(); }
+                previous_track => { root.previous_track(); }
+                toggle_mute => { root.toggle_mute(); }
+                stream_pill_clicked => { root.stream_pill_clicked(); }
+                bluetooth_back_clicked => { root.toggle_bluetooth_details(); }
+                settings_clicked => {
+                    root.previous_tab = root.active_tab;
+                    root.active_tab = 5;
+                }
+                settings_back_clicked => {
+                    root.active_tab = root.previous_tab == 5 ? 0 : root.previous_tab;
+                }
+                vu_meter_back_clicked => {
+                    root.active_tab = root.previous_tab == 1 ? 0 : root.previous_tab;
+                }
+                cd_back_clicked => {
+                    root.active_tab = root.previous_tab == 3 ? 0 : root.previous_tab;
+                }
+                dsp_back_clicked => {
+                    root.active_tab = root.previous_tab == 4 ? 0 : root.previous_tab;
+                }
+                select_tab(idx) => {
+                    root.previous_tab = root.active_tab;
+                    root.active_tab = idx;
+                }
+                volume_changed(val) => { root.volume_changed(val); }
+                dismiss_volume_hud => { root.dismiss_volume_hud(); }
+                select_theme(idx) => { root.select_theme(idx); }
+                cycle_theme => { root.cycle_theme(); }
             }
         }
 
-        // Main Viewport: 800 x 420 (expands to fill bottom space)
-        viewport := MainViewport {
-            active_tab <=> root.active_tab;
-            cd_enabled: root.cd_enabled;
-            track_title: root.track_title;
-            track_artist: root.track_artist;
-            track_album: root.track_album;
-            stream_details: root.stream_details;
-            position_text: root.position_text;
-            duration_text: root.duration_text;
-            duration_ms: root.duration_ms;
-            progress_ratio: root.progress_ratio;
-            volume_value <=> root.volume_value;
-            is_playing: root.is_playing;
-            is_muted <=> root.is_muted;
-            volume_hud_opacity: root.volume_hud_opacity;
-            has_cover_art: root.has_cover_art;
-            cover_image: root.cover_image;
-            left_peak_ratio: root.left_peak_ratio;
-            right_peak_ratio: root.right_peak_ratio;
-            track_or_device: root.track_or_device;
-            stream_codec: root.stream_codec;
-            bt_connected: root.bt_connected;
-            bt_device_address: root.bt_device_address;
-            bt_link_text: root.bt_link_text;
-            bt_rssi_text: root.bt_rssi_text;
-            bt_battery_text: root.bt_battery_text;
-            bt_stream_format: root.bt_stream_format;
-            bt_delay_text: root.bt_delay_text;
-            bt_adapter_name: root.bt_adapter_name;
-            bt_adapter_address: root.bt_adapter_address;
-            title_marquee_strip: root.title_marquee_strip;
-            artist_marquee_text: root.artist_marquee_text;
+        // HUD scrim (middle layer)
+        hud_scrim := Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #000000;
+            opacity: root.volume_hud_opacity * 0.55;
+            visible: root.volume_hud_opacity > 0.01;
+        }
 
-            toggle_play_pause => { root.toggle_play_pause(); }
-            next_track => { root.next_track(); }
-            previous_track => { root.previous_track(); }
-            toggle_mute => { root.toggle_mute(); }
-            stream_pill_clicked => { root.stream_pill_clicked(); }
-            bluetooth_back_clicked => { root.toggle_bluetooth_details(); }
-            settings_clicked => {
-                root.previous_tab = root.active_tab;
-                root.active_tab = 5;
-            }
-            settings_back_clicked => {
-                root.active_tab = root.previous_tab == 5 ? 0 : root.previous_tab;
-            }
-            vu_meter_back_clicked => {
-                root.active_tab = root.previous_tab == 1 ? 0 : root.previous_tab;
-            }
-            cd_back_clicked => {
-                root.active_tab = root.previous_tab == 3 ? 0 : root.previous_tab;
-            }
-            dsp_back_clicked => {
-                root.active_tab = root.previous_tab == 4 ? 0 : root.previous_tab;
-            }
-            select_tab(idx) => {
-                root.previous_tab = root.active_tab;
-                root.active_tab = idx;
-            }
+        // Volume HUD overlay (top layer)
+        volume_hud := VolumeHudOverlay {
+            width: 100%;
+            height: 100%;
+            visible: root.volume_hud_opacity > 0.01;
+            opacity: root.volume_hud_opacity;
+            volume_value <=> root.volume_value;
+            is_muted <=> root.is_muted;
             volume_changed(val) => { root.volume_changed(val); }
-            dismiss_volume_hud => { root.dismiss_volume_hud(); }
-            volume_hud_activity => { root.show_volume_hud(); }
-            select_theme(idx) => { root.select_theme(idx); }
-            cycle_theme => { root.cycle_theme(); }
+            toggle_mute => { root.toggle_mute(); }
+            dismiss_requested => { root.dismiss_volume_hud(); }
+            interaction_activity => { root.show_volume_hud(); }
         }
     }
 }

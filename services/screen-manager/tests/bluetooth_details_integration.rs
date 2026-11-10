@@ -59,36 +59,43 @@ fn toggle_from_dock_selected_details_falls_back_to_player() {
 fn status_bar_logo_and_device_name_open_and_close_details() {
     let (shell, window) = shell_with_window();
 
-    // Bluetooth logo (left).
+    // Bluetooth logo (left) — only works on tab 0 (Now Playing).
     click(&window, 100.0, 30.0);
     assert_eq!(shell.current_tab(), 2, "logo tap opens details");
-    click(&window, 100.0, 30.0);
-    assert_eq!(shell.current_tab(), 0, "second tap returns to player");
+    // Back to Now Playing: invoke ScreenAppBar back action.
+    shell.window().invoke_app_bar_back();
+    assert_eq!(
+        shell.current_tab(),
+        0,
+        "back from details returns to player"
+    );
 
-    // Device name (center).
+    // Device name (center) — only works on tab 0.
     click(&window, 400.0, 30.0);
     assert_eq!(shell.current_tab(), 2, "device name tap opens details");
+    // Back via ScreenAppBar back action.
+    shell.window().invoke_app_bar_back();
+    assert_eq!(shell.current_tab(), 0);
 }
 
 #[test]
-fn status_bar_codec_badge_opens_details_from_any_tab() {
+fn status_bar_codec_badge_opens_details_from_now_playing_tab() {
     let (shell, window) = shell_with_window();
-    shell.set_tab(4);
 
     // Fixed-spec codec ("aptX-HD"): sample-rate and bit-depth pills are hidden.
+    // Codec badge only works on tab 0 (Now Playing) where the status bar is visible.
     click(&window, 600.0, 30.0);
     assert_eq!(shell.current_tab(), 2, "codec badge tap opens details");
-    assert_eq!(shell.window().get_previous_tab(), 4);
+    assert_eq!(shell.window().get_previous_tab(), 0);
 
     // Variable-spec codec ("AAC"): sample-rate and bit-depth pills are visible
     // and tapping them also opens/toggles Bluetooth details.
     shell.set_stream_codec("AAC");
     shell.set_stream_sample_rate("48 kHz");
     shell.set_stream_bit_depth("24-bit");
-    shell.set_tab(1);
     click(&window, 590.0, 30.0);
     assert_eq!(shell.current_tab(), 2, "bit-depth badge tap opens details");
-    assert_eq!(shell.window().get_previous_tab(), 1);
+    assert_eq!(shell.window().get_previous_tab(), 0);
 }
 
 #[test]
@@ -147,13 +154,13 @@ fn volume_and_dim_controls_do_not_open_details() {
 
 #[test]
 fn back_button_returns_to_previous_tab() {
-    let (shell, window) = shell_with_window();
+    let (shell, _window) = shell_with_window();
     shell.set_tab(1);
     shell.window().invoke_toggle_bluetooth_details();
     assert_eq!(shell.current_tab(), 2);
 
-    // Header Back button: right edge of the viewport header row.
-    click(&window, 731.0, 94.0);
+    // Invoke the ScreenAppBar back action directly (tests the wiring, not click coords).
+    shell.window().invoke_app_bar_back();
     assert_eq!(shell.current_tab(), 1);
 }
 

@@ -1,7 +1,6 @@
 import { MaterialPalette } from "@material/material.slint";
 import { AppTheme } from "app_theme.slint";
 import { NowPlayingView } from "now_playing.slint";
-import { VolumeHudOverlay } from "volume_hud.slint";
 import { SettingsView } from "settings_view.slint";
 
 // One label / value line in the Bluetooth details cards.
@@ -39,6 +38,7 @@ export component MainViewport inherits Rectangle {
 
     in-out property <int> active_tab: 0;
     in property <bool> cd_enabled: false;
+    in-out property <bool> show_themes: false;
     in-out property <string> track_title: "Waiting for Bluetooth Connection...";
     in-out property <string> track_artist: "";
     in-out property <string> track_album: "";
@@ -82,7 +82,6 @@ export component MainViewport inherits Rectangle {
     callback toggle_mute();
     callback volume_changed(float);
     callback dismiss_volume_hud();
-    callback volume_hud_activity();
     callback stream_pill_clicked();
     callback cycle_theme();
     callback select_theme(int);
@@ -131,46 +130,16 @@ export component MainViewport inherits Rectangle {
             border-color: MaterialPalette.outline_variant;
             clip: true;
 
-            VerticalLayout {
-                // Header row with back button at top-right
-                HorizontalLayout {
-                    height: 42px;
-                    alignment: end;
-
-                    Rectangle {
-                        width: 110px;
-                        height: 42px;
-                        background: MaterialPalette.surface;
-                        border-radius: 12px;
-                        border-width: 1px;
-                        border-color: MaterialPalette.outline_variant;
-
-                        Text {
-                            text: "Back";
-                            color: MaterialPalette.primary;
-                            font-size: 18px;
-                            font-weight: 800;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-
-                        TouchArea {
-                            clicked => { root.vu_meter_back_clicked(); }
-                        }
-                    }
-                }
-
-                // Full-screen background image
-                Image {
-                    width: 100%;
-                    height: 100%;
-                    source: AppTheme.active_preset == 0 ? @image-url("../../../assets/skins/800x480/blue-bgr.png") :
-                            AppTheme.active_preset == 1 ? @image-url("../../../assets/skins/800x480/gold-bgr.png") :
-                            AppTheme.active_preset == 2 ? @image-url("../../../assets/skins/800x480/rainbow-bgr.png") :
-                            AppTheme.active_preset == 3 ? @image-url("../../../assets/skins/800x480/black-white-bgr.png") :
-                            @image-url("../../../assets/skins/800x480/vintage-bgr.png");
-                    image-fit: contain;
-                }
+            // Full-screen background image
+            Image {
+                width: 100%;
+                height: 100%;
+                source: AppTheme.active_preset == 0 ? @image-url("../../../assets/skins/800x480/blue-bgr.png") :
+                        AppTheme.active_preset == 1 ? @image-url("../../../assets/skins/800x480/gold-bgr.png") :
+                        AppTheme.active_preset == 2 ? @image-url("../../../assets/skins/800x480/rainbow-bgr.png") :
+                        AppTheme.active_preset == 3 ? @image-url("../../../assets/skins/800x480/black-white-bgr.png") :
+                        @image-url("../../../assets/skins/800x480/vintage-bgr.png");
+                image-fit: contain;
             }
         }
     }
@@ -179,58 +148,6 @@ export component MainViewport inherits Rectangle {
     if root.active_tab == 2 : VerticalLayout {
         padding: 14px;
         spacing: 12px;
-
-        // Header: title, live link state pill, back button
-        HorizontalLayout {
-            height: 40px;
-            spacing: 12px;
-
-            Text {
-                text: "BLUETOOTH CONNECTION";
-                color: MaterialPalette.primary;
-                font-size: 18px;
-                font-weight: 800;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-            }
-
-            Rectangle {
-                width: 150px;
-                background: MaterialPalette.surface;
-                border-radius: 10px;
-                border-width: 1px;
-                border-color: MaterialPalette.outline_variant;
-
-                Text {
-                    text: root.is_playing ? "STREAMING" : (root.bt_connected ? "CONNECTED" : "WAITING");
-                    color: root.is_playing ? MaterialPalette.primary : MaterialPalette.secondary;
-                    font-size: 14px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-
-            Rectangle {
-                width: 120px;
-                height: 42px;
-                background: MaterialPalette.primary;
-                border-radius: 12px;
-
-                Text {
-                    text: "Back";
-                    color: MaterialPalette.on_primary;
-                    font-size: 18px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-
-                TouchArea {
-                    clicked => { root.bluetooth_back_clicked(); }
-                }
-            }
-        }
 
         HorizontalLayout {
             spacing: 14px;
@@ -296,40 +213,6 @@ export component MainViewport inherits Rectangle {
         padding: 14px;
         spacing: 12px;
 
-        HorizontalLayout {
-            height: 40px;
-            spacing: 12px;
-
-            Text {
-                text: "OPTICAL CD PLAYER";
-                color: MaterialPalette.primary;
-                font-size: 18px;
-                font-weight: 800;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-            }
-
-            Rectangle {
-                width: 120px;
-                height: 42px;
-                background: MaterialPalette.primary;
-                border-radius: 12px;
-
-                Text {
-                    text: "Back";
-                    color: MaterialPalette.on_primary;
-                    font-size: 18px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-
-                TouchArea {
-                    clicked => { root.cd_back_clicked(); }
-                }
-            }
-        }
-
         Rectangle {
             background: MaterialPalette.surface;
             border-radius: 16px;
@@ -356,40 +239,6 @@ export component MainViewport inherits Rectangle {
     if root.active_tab == 4 : VerticalLayout {
         padding: 14px;
         spacing: 12px;
-
-        HorizontalLayout {
-            height: 40px;
-            spacing: 12px;
-
-            Text {
-                text: "CAMILLADSP ACTIVE CROSSOVER";
-                color: MaterialPalette.primary;
-                font-size: 18px;
-                font-weight: 800;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-            }
-
-            Rectangle {
-                width: 120px;
-                height: 42px;
-                background: MaterialPalette.primary;
-                border-radius: 12px;
-
-                Text {
-                    text: "Back";
-                    color: MaterialPalette.on_primary;
-                    font-size: 18px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-
-                TouchArea {
-                    clicked => { root.dsp_back_clicked(); }
-                }
-            }
-        }
 
         Rectangle {
             background: MaterialPalette.surface;
@@ -419,6 +268,7 @@ export component MainViewport inherits Rectangle {
 
         SettingsView {
             cd_enabled: root.cd_enabled;
+            show_themes <=> root.show_themes;
             back_clicked => { root.settings_back_clicked(); }
             bluetooth_clicked => { root.select_tab(2); }
             vu_meter_clicked => { root.select_tab(1); }
@@ -427,19 +277,5 @@ export component MainViewport inherits Rectangle {
             select_theme(idx) => { root.select_theme(idx); }
             cycle_theme => { root.cycle_theme(); }
         }
-    }
-
-    // Universal Full-Viewport Volume HUD Overlay (§3.2).
-    // Permanently mounted in the item tree with `visible` gated on opacity so fade-out
-    // transitions never destroy/recreate the item tree (`M-NO-PER-FRAME-ITEM-TREE-CHURN`).
-    volume_hud := VolumeHudOverlay {
-        visible: root.volume_hud_opacity > 0.01;
-        opacity: root.volume_hud_opacity;
-        volume_value <=> root.volume_value;
-        is_muted <=> root.is_muted;
-        volume_changed(val) => { root.volume_changed(val); }
-        toggle_mute => { root.toggle_mute(); }
-        dismiss_requested => { root.dismiss_volume_hud(); }
-        interaction_activity => { root.volume_hud_activity(); }
     }
 }

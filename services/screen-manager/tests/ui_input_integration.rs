@@ -410,19 +410,11 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
     assert!(!shell.is_muted());
     assert_eq!(commands.drain(), vec![TransportCommand::SetMute(false)]);
 
-    // 4. Tap backdrop outside controls (e.g., X: 40, Y: 100) to dismiss HUD immediately
-    window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(40.0, 100.0),
-        button: PointerEventButton::Left,
-    });
-    window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(40.0, 100.0),
-        button: PointerEventButton::Left,
-    });
-    window.dispatch_event(WindowEvent::PointerExited);
+    // 4. Dismiss HUD via the public function (close button in header triggers this)
+    shell.window().invoke_dismiss_volume_hud();
     assert!(
         !shell.is_volume_hud_visible(),
-        "Tapping backdrop outside controls must dismiss Volume HUD"
+        "Invoking dismiss_volume_hud must dismiss Volume HUD"
     );
 }
 
@@ -885,17 +877,8 @@ fn touch_viewport_settings_button_opens_settings_screen_and_navigates() {
     );
     let _ = fb.render_frame(&window).expect("Render Settings screen");
 
-    // 2. Click "Back" button on Settings screen (top-right header, approx X: 733, Y: 92)
-    window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(733.0, 92.0),
-        button: PointerEventButton::Left,
-    });
-    window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(733.0, 92.0),
-        button: PointerEventButton::Left,
-    });
-    window.dispatch_event(WindowEvent::PointerExited);
-
+    // 2. Invoke ScreenAppBar back action (leading button triggers this)
+    shell.window().invoke_app_bar_back();
     assert_eq!(
         shell.current_tab(),
         0,
