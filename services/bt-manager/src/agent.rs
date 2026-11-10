@@ -202,7 +202,7 @@ impl AutoTrustAgent {
 
     pub fn request_pin_code(&self, device: ObjectPath<'_>) -> zbus::fdo::Result<String> {
         tracing::info!(%device, "RequestPinCode called; auto-trusting and returning '0000'");
-        spawn_set_trusted_and_seed(self.connection.clone(), device.into());
+        spawn_set_trusted(self.connection.clone(), device.into());
         Ok("0000".to_string())
     }
 
@@ -218,7 +218,7 @@ impl AutoTrustAgent {
 
     pub fn request_passkey(&self, device: ObjectPath<'_>) -> zbus::fdo::Result<u32> {
         tracing::info!(%device, "RequestPasskey called; auto-trusting and returning 0");
-        let _ = spawn_set_trusted_and_seed(self.connection.clone(), device.into());
+        let _ = spawn_set_trusted(self.connection.clone(), device.into());
         Ok(0)
     }
 
@@ -243,13 +243,13 @@ impl AutoTrustAgent {
             passkey,
             "RequestConfirmation called; auto-confirming numeric comparison and auto-trusting"
         );
-        let _ = spawn_set_trusted_and_seed(self.connection.clone(), device.into());
+        let _ = spawn_set_trusted(self.connection.clone(), device.into());
         Ok(())
     }
 
     pub fn request_authorization(&self, device: ObjectPath<'_>) -> zbus::fdo::Result<()> {
         tracing::info!(%device, "RequestAuthorization called; auto-authorizing and auto-trusting");
-        let _ = spawn_set_trusted_and_seed(self.connection.clone(), device.into());
+        let _ = spawn_set_trusted(self.connection.clone(), device.into());
         Ok(())
     }
 
@@ -259,7 +259,7 @@ impl AutoTrustAgent {
             %uuid,
             "AuthorizeService called; auto-authorizing service UUID and auto-trusting"
         );
-        let _ = spawn_set_trusted_and_seed(self.connection.clone(), device.into());
+        let _ = spawn_set_trusted(self.connection.clone(), device.into());
         Ok(())
     }
 
@@ -320,215 +320,18 @@ pub async fn set_device_trusted(
         .map_err(|e| zbus::Error::FDO(Box::new(e)))
 }
 
-/// Reads the current Merus MA12070P hardware mixer volume (`A.Mstr Vol`) and
-/// converts it to `AVRCP` transport volume (0..127) for `BlueZ` device info seeding.
-///
-/// # Errors
-/// Returns an error if the mixer cannot be read or parsed.
-///
-/// # Panics
-/// Panics if the built-in mixer-output parsing regex is invalid (statically
-/// impossible; the pattern is a compile-time constant).
-pub async fn read_hardware_volume_as_avrcp() -> Result<u8, String> {
-    // Read hardware mixer via amixer
-    let output = tokio::process::Command::new("amixer")
-        .args(["-c", "sndrpimerusamp", "sget", "A.Mstr Vol"])
-        .output()
-        .await
-        .map_err(|e| format!("amixer execution failed: {e}"))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "amixer failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Parse: "Mono: 117 [81%] [-27.00dB]"
-    let re = regex::Regex::new(r"Mono:\s+(\d+)\s+\[\d+%\]").unwrap();
-    let raw = re
-        .captures(&stdout)
-        .and_then(|c| c.get(1))
-        .and_then(|m| m.as_str().parse::<u8>().ok())
-        .ok_or_else(|| format!("Failed to parse Merus volume from: {stdout}"))?;
-
-    // Convert Merus raw (0..144) to AVRCP transport (0..127) using documented mapping
-    // Table from docs: Transport 0->Mixer 0, 32->124, 64->134, 96->140, 127->144
-    // We use the inverse mapping with linear interpolation between known points
-    let avrcp = merus_raw_to_avrcp(raw);
-    Ok(avrcp)
-}
-
-/// Converts Merus raw volume (0..144) to AVRCP transport volume (0..127).
-/// Uses the calibrated mapping from the hardware documentation.
-fn merus_raw_to_avrcp(merus: u8) -> u8 {
-    // Known calibration points (Transport -> Merus):
-    // 0 -> 0, 32 -> 124, 64 -> 134, 96 -> 140, 127 -> 144
-    // We invert this with linear interpolation between points
-    match merus {
-        0 => 0,
-        1..=124 => {
-            // Interpolate between (0,0) and (124,32)
-            ((u16::from(merus) * 32) / 124) as u8
-        }
-        125..=134 => {
-            // Interpolate between (124,32) and (134,64)
-            32 + ((u16::from(merus - 124) * 32) / 10) as u8
-        }
-        135..=140 => {
-            // Interpolate between (134,64) and (140,96)
-            64 + ((u16::from(merus - 134) * 32) / 6) as u8
-        }
-        141..=144 => {
-            // Interpolate between (140,96) and (144,127)
-            96 + ((u16::from(merus - 140) * 31) / 4) as u8
-        }
-        _ => 127,
-    }
-}
-
-/// Writes the `AVRCP` volume to the `BlueZ` device info file for persistent seeding.
-///
-/// # Errors
-/// Returns an error if the file cannot be read/written or `MAC` address is invalid.
-pub async fn seed_device_info_volume(device_mac: &str, avrcp_volume: u8) -> Result<(), String> {
-    use std::path::PathBuf;
-
-    // Get adapter MAC from BlueZ (default hci0)
-    let adapter_mac = get_adapter_mac().await?;
-    let info_dir = PathBuf::from(format!("/var/lib/bluetooth/{adapter_mac}/{device_mac}"));
-    let info_path = info_dir.join("info");
-
-    // Ensure directory exists (may not exist during RequestConfirmation, before pairing completes)
-    if let Err(e) = tokio::fs::create_dir_all(&info_dir).await {
-        // Directory might be created by BlueZ between check and create; ignore AlreadyExists
-        if e.kind() != std::io::ErrorKind::AlreadyExists {
-            return Err(format!("Failed to create device info directory: {e}"));
-        }
-    }
-
-    // Read existing content or create new with basic structure
-    let content = tokio::fs::read_to_string(&info_path)
-        .await
-        .unwrap_or_else(|_| {
-            // File doesn't exist yet (pairing in progress), create basic structure
-            format!(
-                "[LinkKey]\nKey=PLACEHOLDER\nType=4\nPINLength=0\n\n[General]\nName=Unknown\nClass=0x000000\nSupportedTechnologies=BR/EDR;\nTrusted=true\nVolume={avrcp_volume}\nBlocked=false\nServices=\n\n[DeviceID]\nSource=1\nVendor=0\nProduct=0\nVersion=0\n"
-            )
-        });
-
-    // If file existed, update Volume= in [General]
-    let new_content = if content.contains("Volume=") {
-        let mut lines: Vec<String> = content.lines().map(String::from).collect();
-        let mut in_general = false;
-        let mut volume_found = false;
-
-        for line in &mut lines {
-            let trimmed = line.trim();
-            if trimmed == "[General]" {
-                in_general = true;
-                continue;
-            }
-            if in_general && trimmed.starts_with('[') && trimmed != "[General]" {
-                in_general = false;
-            }
-            if in_general && trimmed.starts_with("Volume=") {
-                *line = format!("Volume={avrcp_volume}");
-                volume_found = true;
-                break;
-            }
-        }
-
-        if !volume_found {
-            // Find [General] section and insert after it
-            for (i, line) in lines.iter().enumerate() {
-                if line.trim() == "[General]" {
-                    lines.insert(i + 1, format!("Volume={avrcp_volume}"));
-                    volume_found = true;
-                    break;
-                }
-            }
-        }
-
-        if !volume_found {
-            return Err("[General] section not found in device info".into());
-        }
-
-        lines.join("\n") + "\n"
-    } else {
-        // File was newly created above with Volume already set
-        content
-    };
-
-    tokio::fs::write(&info_path, new_content)
-        .await
-        .map_err(|e| format!("Failed to write device info: {e}"))?;
-
-    tracing::info!(%device_mac, %avrcp_volume, "Seeded BlueZ device info with volume");
-    Ok(())
-}
-
-/// Gets the local Bluetooth adapter MAC address.
-async fn get_adapter_mac() -> Result<String, String> {
-    let output = tokio::process::Command::new("bluetoothctl")
-        .args(["show"])
-        .output()
-        .await
-        .map_err(|e| format!("bluetoothctl execution failed: {e}"))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "bluetoothctl failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let re = regex::Regex::new(r"Controller\s+([0-9A-F:]{17})").unwrap();
-    re.captures(&stdout)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
-        .ok_or_else(|| "Failed to parse adapter MAC from bluetoothctl show".into())
-}
-
-/// Spawns a background task to set `device.Trusted = true` asynchronously
-/// and seed the `BlueZ` device info with current hardware `AVRCP` volume.
+/// Spawns a background task to set `device.Trusted = true` asynchronously.
 ///
 /// If a Tokio runtime handle is available in the current context, the task is
 /// spawned on that runtime and its [`tokio::task::JoinHandle`] is returned.
 /// Otherwise, a warning is logged and `None` is returned so caller threads
 /// never panic.
-pub fn spawn_set_trusted_and_seed(
+pub fn spawn_set_trusted(
     connection: zbus::Connection,
     device: OwnedObjectPath,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         Some(handle.spawn(async move {
-            // Extract MAC from device object path: /org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX
-            let device_str = device.to_string();
-            let mac = device_str
-                .split('/')
-                .next_back()
-                .and_then(|s| s.strip_prefix("dev_"))
-                .map(|s| s.replace('_', ":"))
-                .unwrap_or_default();
-
-            // First, seed device info with current hardware volume
-            if !mac.is_empty() {
-                match read_hardware_volume_as_avrcp().await {
-                    Ok(avrcp_vol) => {
-                        if let Err(e) = seed_device_info_volume(&mac, avrcp_vol).await {
-                            tracing::warn!(%mac, error = %e, "Failed to seed device info volume");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(%mac, error = %e, "Failed to read hardware volume for seeding");
-                    }
-                }
-            }
-
-            // Then set device trusted
             match set_device_trusted(&connection, &device).await {
                 Ok(()) => tracing::info!(%device, "Device successfully marked as Trusted: yes"),
                 Err(e) => {
