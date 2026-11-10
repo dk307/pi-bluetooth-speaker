@@ -3,13 +3,13 @@
 use std::sync::Arc;
 
 use tracing::{debug, info, warn};
-use zbus::{interface, Connection};
 use zbus::fdo::Error as ZBusError;
+use zbus::{Connection, interface};
 
 use crate::amp_backend::AmpBackend;
 use crate::amp_state::AmpState;
-use amp_curve::PERCENT_TO_RAW;
 use crate::state_file::StateFile;
+use amp_curve::PERCENT_TO_RAW;
 
 /// The D-Bus interface implementation.
 pub struct AudioManagerInterface {
@@ -24,7 +24,11 @@ impl AudioManagerInterface {
         backend: Arc<dyn AmpBackend>,
         state_file: StateFile,
     ) -> Self {
-        Self { state, backend, state_file }
+        Self {
+            state,
+            backend,
+            state_file,
+        }
     }
 }
 
@@ -36,14 +40,20 @@ impl AudioManagerInterface {
     /// If muted, stores the level but does not apply to hardware.
     pub async fn set_level(&self, percent: u8) -> Result<(), ZBusError> {
         if percent > 100 {
-            return Err(ZBusError::Failed(format!("percent {} out of range 0..100", percent)));
+            return Err(ZBusError::Failed(format!(
+                "percent {} out of range 0..100",
+                percent
+            )));
         }
 
         let mut state_guard = self.state.lock().await;
         let new_state = state_guard.with_percent(percent, &PERCENT_TO_RAW);
 
         // Write to hardware (only if not muted; if muted, backend still receives level but state.muted=true)
-        let applied = self.backend.write_state(&new_state).await
+        let applied = self
+            .backend
+            .write_state(&new_state)
+            .await
             .map_err(|e| ZBusError::Failed(e.to_string()))?;
 
         // Commit state
@@ -54,7 +64,12 @@ impl AudioManagerInterface {
             warn!(error = %e, "Failed to persist state after SetLevel");
         }
 
-        info!(percent, hw_level = applied.hardware_level(), muted = applied.muted, "SetLevel");
+        info!(
+            percent,
+            hw_level = applied.hardware_level(),
+            muted = applied.muted,
+            "SetLevel"
+        );
         Ok(())
     }
 
@@ -63,9 +78,16 @@ impl AudioManagerInterface {
     /// false: restore remembered level.
     pub async fn set_mute(&self, muted: bool) -> Result<(), ZBusError> {
         let mut state_guard = self.state.lock().await;
-        let new_state = if muted { state_guard.mute() } else { state_guard.unmute() };
+        let new_state = if muted {
+            state_guard.mute()
+        } else {
+            state_guard.unmute()
+        };
 
-        let applied = self.backend.write_state(&new_state).await
+        let applied = self
+            .backend
+            .write_state(&new_state)
+            .await
             .map_err(|e| ZBusError::Failed(e.to_string()))?;
 
         // Update only the mute flag in the interface's logical state; keep the logical level_raw.
@@ -77,7 +99,11 @@ impl AudioManagerInterface {
             warn!(error = %e, "Failed to persist state after SetMute");
         }
 
-        info!(muted = applied.muted, hw_level = applied.hardware_level(), "SetMute");
+        info!(
+            muted = applied.muted,
+            hw_level = applied.hardware_level(),
+            "SetMute"
+        );
         Ok(())
     }
 

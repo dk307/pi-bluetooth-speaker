@@ -168,7 +168,7 @@ const _: () = {
     assert!(PERCENT_TO_RAW[100] == 144); // 100% → 0 dB (raw 144)
     assert!(AVRCP_TO_PERCENT[0] == 0); // AVRCP 0 → 0%
     assert!(AVRCP_TO_PERCENT[127] == 100); // AVRCP 127 → 100%
-                                           // Monotonicity
+    // Monotonicity
     let mut p = 1;
     while p <= 100 {
         assert!(PERCENT_TO_RAW[p] >= PERCENT_TO_RAW[p - 1]);

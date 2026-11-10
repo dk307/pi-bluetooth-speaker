@@ -50,11 +50,7 @@ impl AmpState {
     /// Get the level that should be written to hardware.
     /// If muted, returns 0 (hardware mute). Otherwise returns level_raw.
     pub fn hardware_level(&self) -> u16 {
-        if self.muted {
-            0
-        } else {
-            self.level_raw
-        }
+        if self.muted { 0 } else { self.level_raw }
     }
 
     /// Apply a volume percent change (0..100), returning new state.
@@ -109,11 +105,7 @@ impl AmpState {
         }
         // lo is now the first index where curve[lo] > target
         // The answer is lo - 1 (the last index where curve[index] <= target)
-        if lo == 0 {
-            0
-        } else {
-            lo - 1
-        }
+        if lo == 0 { 0 } else { lo - 1 }
     }
 
     /// Get the hardware level as percent (what's actually on the amp).

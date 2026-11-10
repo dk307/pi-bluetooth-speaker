@@ -1,8 +1,8 @@
 //! Atomic state file persistence for amplifier state.
 
-use std::path::{Path, PathBuf};
 use std::fs::{self, File};
-use std::io::{Write, BufReader};
+use std::io::{BufReader, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use tempfile::NamedTempFile;
@@ -25,11 +25,9 @@ impl StateFile {
 
     /// Load state from file. Returns error if file missing or corrupt.
     pub fn load(&self) -> AmpResult<AmpState> {
-        let file = File::open(&self.path)
-            .context("open state file")?;
+        let file = File::open(&self.path).context("open state file")?;
         let reader = BufReader::new(file);
-        let state: AmpState = serde_json::from_reader(reader)
-            .context("deserialize state")?;
+        let state: AmpState = serde_json::from_reader(reader).context("deserialize state")?;
         debug!(path = %self.path.display(), ?state, "Loaded amp state");
         Ok(state)
     }
@@ -37,13 +35,11 @@ impl StateFile {
     /// Save state to file atomically (temp file + rename).
     pub async fn save(&self, state: &AmpState) -> AmpResult<()> {
         // Serialize to JSON first (fail fast before any I/O)
-        let json = serde_json::to_vec_pretty(state)
-            .context("serialize state")?;
+        let json = serde_json::to_vec_pretty(state).context("serialize state")?;
 
         // Ensure parent directory exists
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .context("create state directory")?;
+            fs::create_dir_all(parent).context("create state directory")?;
         }
 
         // Write to temp file in same directory (for atomic rename)
@@ -51,10 +47,8 @@ impl StateFile {
             .context("create temp file")?;
 
         // Write and fsync
-        temp.as_file().write_all(&json)
-            .context("write temp file")?;
-        temp.as_file().sync_all()
-            .context("fsync temp file")?;
+        temp.as_file().write_all(&json).context("write temp file")?;
+        temp.as_file().sync_all().context("fsync temp file")?;
 
         // Atomic rename
         temp.persist(&self.path)

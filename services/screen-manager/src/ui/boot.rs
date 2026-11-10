@@ -163,7 +163,7 @@ fn probe_dsp() -> Result<Box<str>, Box<str>> {
 }
 
 fn probe_bluetooth() -> Result<Box<str>, Box<str>> {
-    let device = BluetoothDevice::new().map_err(|e| e.summary().into_boxed_str())?;
+    let device = BluetoothDevice::new_blocking().map_err(|e| e.summary().into_boxed_str())?;
     let status = device.status().map_err(|e| e.summary().into_boxed_str())?;
     if !status.is_operational() {
         return Err("adapter not operational".into());

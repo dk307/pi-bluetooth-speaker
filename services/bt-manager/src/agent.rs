@@ -320,11 +320,15 @@ pub async fn set_device_trusted(
         .map_err(|e| zbus::Error::FDO(Box::new(e)))
 }
 
-/// Reads the current Merus MA12070P hardware mixer volume (A.Mstr Vol) and
-/// converts it to AVRCP transport volume (0..127) for BlueZ device info seeding.
+/// Reads the current Merus MA12070P hardware mixer volume (`A.Mstr Vol`) and
+/// converts it to `AVRCP` transport volume (0..127) for `BlueZ` device info seeding.
 ///
 /// # Errors
 /// Returns an error if the mixer cannot be read or parsed.
+///
+/// # Panics
+/// Panics if the built-in mixer-output parsing regex is invalid (statically
+/// impossible; the pattern is a compile-time constant).
 pub async fn read_hardware_volume_as_avrcp() -> Result<u8, String> {
     // Read hardware mixer via amixer
     let output = tokio::process::Command::new("amixer")
@@ -334,7 +338,10 @@ pub async fn read_hardware_volume_as_avrcp() -> Result<u8, String> {
         .map_err(|e| format!("amixer execution failed: {e}"))?;
 
     if !output.status.success() {
-        return Err(format!("amixer failed: {}", String::from_utf8_lossy(&output.stderr)));
+        return Err(format!(
+            "amixer failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -363,32 +370,29 @@ fn merus_raw_to_avrcp(merus: u8) -> u8 {
         0 => 0,
         1..=124 => {
             // Interpolate between (0,0) and (124,32)
-            ((merus as u16 * 32) / 124) as u8
+            ((u16::from(merus) * 32) / 124) as u8
         }
         125..=134 => {
             // Interpolate between (124,32) and (134,64)
-            32 + (((merus - 124) as u16 * 32) / 10) as u8
+            32 + ((u16::from(merus - 124) * 32) / 10) as u8
         }
         135..=140 => {
             // Interpolate between (134,64) and (140,96)
-            64 + (((merus - 134) as u16 * 32) / 6) as u8
+            64 + ((u16::from(merus - 134) * 32) / 6) as u8
         }
         141..=144 => {
             // Interpolate between (140,96) and (144,127)
-            96 + (((merus - 140) as u16 * 31) / 4) as u8
+            96 + ((u16::from(merus - 140) * 31) / 4) as u8
         }
         _ => 127,
     }
 }
 
-/// Writes the AVRCP volume to the BlueZ device info file for persistent seeding.
+/// Writes the `AVRCP` volume to the `BlueZ` device info file for persistent seeding.
 ///
 /// # Errors
-/// Returns an error if the file cannot be read/written or MAC address is invalid.
-pub async fn seed_device_info_volume(
-    device_mac: &str,
-    avrcp_volume: u8,
-) -> Result<(), String> {
+/// Returns an error if the file cannot be read/written or `MAC` address is invalid.
+pub async fn seed_device_info_volume(device_mac: &str, avrcp_volume: u8) -> Result<(), String> {
     use std::path::PathBuf;
 
     // Get adapter MAC from BlueZ (default hci0)
@@ -410,8 +414,7 @@ pub async fn seed_device_info_volume(
         .unwrap_or_else(|_| {
             // File doesn't exist yet (pairing in progress), create basic structure
             format!(
-                "[LinkKey]\nKey=PLACEHOLDER\nType=4\nPINLength=0\n\n[General]\nName=Unknown\nClass=0x000000\nSupportedTechnologies=BR/EDR;\nTrusted=true\nVolume={}\nBlocked=false\nServices=\n\n[DeviceID]\nSource=1\nVendor=0\nProduct=0\nVersion=0\n",
-                avrcp_volume
+                "[LinkKey]\nKey=PLACEHOLDER\nType=4\nPINLength=0\n\n[General]\nName=Unknown\nClass=0x000000\nSupportedTechnologies=BR/EDR;\nTrusted=true\nVolume={avrcp_volume}\nBlocked=false\nServices=\n\n[DeviceID]\nSource=1\nVendor=0\nProduct=0\nVersion=0\n"
             )
         });
 
@@ -475,7 +478,10 @@ async fn get_adapter_mac() -> Result<String, String> {
         .map_err(|e| format!("bluetoothctl execution failed: {e}"))?;
 
     if !output.status.success() {
-        return Err(format!("bluetoothctl failed: {}", String::from_utf8_lossy(&output.stderr)));
+        return Err(format!(
+            "bluetoothctl failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -487,7 +493,7 @@ async fn get_adapter_mac() -> Result<String, String> {
 }
 
 /// Spawns a background task to set `device.Trusted = true` asynchronously
-/// and seed the BlueZ device info with current hardware volume.
+/// and seed the `BlueZ` device info with current hardware `AVRCP` volume.
 ///
 /// If a Tokio runtime handle is available in the current context, the task is
 /// spawned on that runtime and its [`tokio::task::JoinHandle`] is returned.
@@ -503,7 +509,7 @@ pub fn spawn_set_trusted_and_seed(
             let device_str = device.to_string();
             let mac = device_str
                 .split('/')
-                .last()
+                .next_back()
                 .and_then(|s| s.strip_prefix("dev_"))
                 .map(|s| s.replace('_', ":"))
                 .unwrap_or_default();

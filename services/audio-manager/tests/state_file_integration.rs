@@ -1,6 +1,6 @@
 //! Integration tests for state_file module.
 
-use audio_manager::{StateFile, AmpState};
+use audio_manager::{AmpState, StateFile};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -9,12 +9,15 @@ async fn save_and_load_roundtrip() {
     let path = dir.path().join("amp-state.json");
     let sf = StateFile::new(&path);
 
-    let state = AmpState { level_raw: 100, muted: false };
+    let state = AmpState {
+        level_raw: 100,
+        muted: false,
+    };
     sf.save(&state).await.unwrap();
 
     let loaded = sf.load().unwrap();
     assert_eq!(loaded.level_raw, 100);
-    assert_eq!(loaded.muted, false);
+    assert!(!loaded.muted);
 }
 
 #[tokio::test]
@@ -24,7 +27,10 @@ async fn save_atomic_on_crash() {
     let sf = StateFile::new(&path);
 
     // Write initial state
-    let state1 = AmpState { level_raw: 50, muted: false };
+    let state1 = AmpState {
+        level_raw: 50,
+        muted: false,
+    };
     sf.save(&state1).await.unwrap();
 
     // Simulate a partial write by corrupting the file directly
@@ -32,7 +38,10 @@ async fn save_atomic_on_crash() {
     std::fs::write(&path, b"corrupted").unwrap();
 
     // Next save should succeed and replace the file
-    let state2 = AmpState { level_raw: 75, muted: true };
+    let state2 = AmpState {
+        level_raw: 75,
+        muted: true,
+    };
     sf.save(&state2).await.unwrap();
 
     let loaded = sf.load().unwrap();

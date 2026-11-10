@@ -134,7 +134,11 @@ fn run_app_terminates_on_tick_cap_with_mock() {
         auto_trust: false,
         ..Default::default()
     };
-    assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    assert_eq!(rt.block_on(run_app(bt, opts)), ExitCode::SUCCESS);
 }
 
 #[test]
@@ -158,7 +162,11 @@ fn run_app_wakes_on_mock_property_change_before_keepalive() {
         std::thread::sleep(Duration::from_millis(50));
         mock.set_powered(false);
     });
-    assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    assert_eq!(rt.block_on(run_app(bt, opts)), ExitCode::SUCCESS);
     changer.join().expect("changer thread");
     let elapsed = start.elapsed();
     assert!(
@@ -182,7 +190,11 @@ fn run_app_terminates_on_tick_cap_with_auto_trust_and_mock() {
         capability: Some(AgentCapabilityMode::DisplayYesNo),
         auto_trust_bus_address: Some(format!("unix:path={}", missing_bus.display())),
     };
-    assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    assert_eq!(rt.block_on(run_app(bt, opts)), ExitCode::SUCCESS);
 }
 
 #[test]
@@ -200,7 +212,11 @@ fn run_app_respects_config_interval_when_not_explicit() {
         auto_trust: false,
         ..Default::default()
     };
-    assert_eq!(run_app(&bt, &opts), ExitCode::SUCCESS);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    assert_eq!(rt.block_on(run_app(bt, opts)), ExitCode::SUCCESS);
 }
 
 #[test]
@@ -225,7 +241,11 @@ fn run_app_zero_ticks_cap_is_rejected_at_parse() {
 #[test]
 fn run_tick_surfaces_status_from_mock() {
     let (bt, _mock) = BluetoothDevice::new_mocked();
-    let status = run_tick(&bt).expect("mock status");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let status = rt.block_on(run_tick(&bt)).expect("mock status");
     // The mock initializes with one default connected peer.
     assert_eq!(status.connected_count(), 1);
 }
@@ -256,5 +276,9 @@ fn run_app_fails_on_malformed_config() {
         config: Some(path),
         ..Default::default()
     };
-    assert_eq!(run_app(&bt, &opts), ExitCode::FAILURE);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    assert_eq!(rt.block_on(run_app(bt, opts)), ExitCode::FAILURE);
 }

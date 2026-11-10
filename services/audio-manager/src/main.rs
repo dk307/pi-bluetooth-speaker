@@ -18,17 +18,23 @@
 //!   `A.Mstr Vol` control is missing (systemd restarts).
 //! - **Mockable backend** for 100% host test coverage.
 
+// The bin target compiles these modules privately; test-only helpers (mocks,
+// unused error variants) trip dead_code. Scope the allow to the bin only.
+#[allow(dead_code)]
 mod amp_backend;
+#[allow(dead_code)]
 mod amp_state;
-mod dbus_api;
 mod config;
+#[allow(dead_code)]
+mod dbus_api;
+#[allow(dead_code)]
 mod error;
 mod state_file;
 
 use std::sync::Arc;
 
 use anyhow::Context;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
 
 use crate::amp_backend::{AmpBackend, RealAmpBackend};
@@ -54,7 +60,8 @@ async fn run_daemon(config: Config) -> anyhow::Result<()> {
 
     // 3. Request the well-known name
     let fdo = zbus::fdo::DBusProxy::new(&connection).await?;
-    let name: WellKnownName = "org.speaker.AudioManager".try_into()
+    let name: WellKnownName = "org.speaker.AudioManager"
+        .try_into()
         .context("Invalid well-known name")?;
     let name_for_release = name.clone();
     let request_result = fdo
@@ -84,17 +91,17 @@ async fn run_daemon(config: Config) -> anyhow::Result<()> {
         .write_state(&persisted)
         .await
         .context("Failed to apply persisted state to hardware")?;
-    info!(level = persisted.level_raw, muted = persisted.muted, "Restored amp state");
+    info!(
+        level = persisted.level_raw,
+        muted = persisted.muted,
+        "Restored amp state"
+    );
 
     // 6. Create shared state and D-Bus interface
     let state = Arc::new(tokio::sync::Mutex::new(persisted));
     let backend = Arc::new(backend);
     let state_file_for_shutdown = state_file.clone();
-    let interface = AudioManagerInterface::new(
-        state.clone(),
-        backend,
-        state_file,
-    );
+    let interface = AudioManagerInterface::new(state.clone(), backend, state_file);
 
     // 7. Export the D-Bus object
     let object_server = connection.object_server();
@@ -124,7 +131,7 @@ async fn run_daemon(config: Config) -> anyhow::Result<()> {
     }
 
     // 9. Graceful shutdown: persist state and release name
-    let final_state = state.lock().await.clone();
+    let final_state = *state.lock().await;
     state_file_for_shutdown.save(&final_state).await?;
     fdo.release_name(name_for_release).await?;
     sd_notify::notify(true, &[sd_notify::NotifyState::Stopping])

@@ -1,6 +1,6 @@
 //! Integration tests for dbus_api module.
 
-use audio_manager::{AudioManagerInterface, AmpBackend, MockAmpBackend, MockAmpCtrl, AmpState, Config, StateFile};
+use audio_manager::{AmpState, AudioManagerInterface, MockAmpBackend, MockAmpCtrl, StateFile};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -17,7 +17,10 @@ fn make_interface() -> (AudioManagerInterface, MockAmpCtrl, tempfile::TempDir) {
 #[tokio::test]
 async fn set_level_unmuted() {
     let (iface, ctrl, _dir) = make_interface();
-    ctrl.set_state(AmpState { level_raw: 50, muted: false });
+    ctrl.set_state(AmpState {
+        level_raw: 50,
+        muted: false,
+    });
 
     iface.set_level(80).await.unwrap();
 
@@ -36,8 +39,8 @@ async fn set_level_muted_stores_only() {
 
     let write = ctrl.last_write().unwrap();
     assert!(write.muted);
-    // Hardware level is 0 when muted
-    assert_eq!(write.level_raw, 0);
+    // Logical level is preserved when muted; hardware level clamps to 0
+    assert_eq!(write.level_raw, amp_curve::PERCENT_TO_RAW[80]);
     assert_eq!(write.hardware_level(), 0);
     // The call succeeded without changing mute state
 }
@@ -45,14 +48,16 @@ async fn set_level_muted_stores_only() {
 #[tokio::test]
 async fn set_mute_on() {
     let (iface, ctrl, _dir) = make_interface();
-    ctrl.set_state(AmpState { level_raw: 100, muted: false });
+    ctrl.set_state(AmpState {
+        level_raw: 100,
+        muted: false,
+    });
 
     iface.set_mute(true).await.unwrap();
 
     let write = ctrl.last_write().unwrap();
     assert!(write.muted);
-    // When muted, the hardware level returned is 0 (raw 0 = -144 dB)
-    assert_eq!(write.level_raw, 0);
+    // The interface's remembered logical level is preserved; hardware level clamps to 0
     assert_eq!(write.hardware_level(), 0);
 }
 
@@ -81,7 +86,7 @@ async fn set_level_out_of_range() {
 
 #[tokio::test]
 async fn properties_reflect_state() {
-    let (iface, ctrl, _dir) = make_interface();
+    let (iface, _ctrl, _dir) = make_interface();
     // Use the interface method to set the state, which updates both mock and interface
     iface.set_level(75).await.unwrap();
 

@@ -7,7 +7,7 @@
 //! the active track's artwork on the system D-Bus for future consumers.
 
 use std::path::PathBuf;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -16,87 +16,26 @@ use crate::agent::AgentCapabilityMode;
 use crate::config::BtManagerConfig;
 use speaker_bluetooth::{BluetoothDevice, BluetoothStatus, BtError};
 use speaker_common::diag::{
-    CliParse, DEFAULT_BT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts, run_poll_loop,
+    CliParse, DEFAULT_BT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts,
 };
+use tokio::time::{Duration as TokioDuration, MissedTickBehavior, interval};
+use zbus::{Connection, Proxy};
 
 /// Default status poll interval (5 seconds).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Reads the current Merus hardware mixer volume (A.Mstr Vol) as raw 0..144.
-fn read_merus_volume_raw() -> Result<u8, String> {
-    let output = Command::new("amixer")
-        .args(["-c", "sndrpimerusamp", "sget", "A.Mstr Vol"])
-        .output()
-        .map_err(|e| format!("amixer execution failed: {e}"))?;
-
-    if !output.status.success() {
-        return Err(format!("amixer failed: {}", String::from_utf8_lossy(&output.stderr)));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Parse: "Mono: 80 [56%] [-64.00dB]"
-    let re = regex::Regex::new(r"Mono:\s+(\d+)\s+\[\d+%\]").unwrap();
-    re.captures(&stdout)
-        .and_then(|c| c.get(1))
-        .and_then(|m| m.as_str().parse::<u8>().ok())
-        .ok_or_else(|| format!("Failed to parse Merus volume from: {stdout}"))
-}
-
-/// Converts Merus raw volume (0..144) to AVRCP transport volume (0..127).
-fn merus_raw_to_avrcp(merus: u8) -> u8 {
-    match merus {
-        0 => 0,
-        1..=124 => ((merus as u16 * 32) / 124) as u8,
-        125..=134 => 32 + (((merus - 124) as u16 * 32) / 10) as u8,
-        135..=140 => 64 + (((merus - 134) as u16 * 32) / 6) as u8,
-        141..=144 => 96 + (((merus - 140) as u16 * 31) / 4) as u8,
-        _ => 127,
-    }
-}
-
-/// Converts AVRCP transport volume (0..127) to Merus raw volume (0..144).
-fn avrcp_to_merus_raw(avrcp: u8) -> u8 {
-    match avrcp {
-        0 => 0,
-        1..=32 => ((avrcp as u16 * 124) / 32) as u8,
-        33..=64 => 124 + (((avrcp - 32) as u16 * 10) / 32) as u8,
-        65..=96 => 134 + (((avrcp - 64) as u16 * 6) / 32) as u8,
-        97..=127 => 140 + (((avrcp - 96) as u16 * 4) / 31) as u8,
-        _ => 144,
-    }
-}
-
-/// Writes Merus raw volume (0..144) to hardware mixer via amixer.
-fn write_merus_volume_raw(raw: u8) -> Result<(), String> {
-    let output = Command::new("amixer")
-        .args(["-c", "sndrpimerusamp", "sset", "A.Mstr Vol", &raw.to_string()])
-        .output()
-        .map_err(|e| format!("amixer execution failed: {e}"))?;
-
-    if !output.status.success() {
-        return Err(format!("amixer failed: {}", String::from_utf8_lossy(&output.stderr)));
-    }
-    Ok(())
-}
-
-/// Syncs volume between BlueALSA PCM (mirrors transport) and Merus hardware mixer.
-fn sync_volume(bt: &BluetoothDevice) {
-    // Read current hardware volume
-    let hw_raw = match read_merus_volume_raw() {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::debug!(error = %e, "Failed to read hardware volume for sync");
-            return;
-        }
-    };
-
+/// Syncs volume between `BlueALSA` PCM (mirrors transport) and audio-manager D-Bus service.
+async fn sync_volume(
+    bt: &BluetoothDevice,
+    conn: &Connection,
+    last_pcm_vol: &mut Option<u8>,
+) -> Result<(), BtError> {
     // Read BlueALSA PCM volume (mirrors BlueZ transport volume)
-    let pcm_vol = match bt.audio_pcms() {
-        Ok(pcms) => {
-            pcms.iter()
-                .find(|p| p.pcm_path.contains("a2dpsnk"))
-                .and_then(|p| p.volume_percent)
-        }
+    let pcm_vol = match bt.audio_pcms_async().await {
+        Ok(pcms) => pcms
+            .iter()
+            .find(|p| p.pcm_path.contains("a2dpsnk"))
+            .and_then(|p| p.volume_percent),
         Err(e) => {
             tracing::debug!(error = %e, "Failed to read BlueALSA PCMs for sync");
             None
@@ -104,20 +43,42 @@ fn sync_volume(bt: &BluetoothDevice) {
     };
 
     if let Some(pcm_vol) = pcm_vol {
-        let target_raw = avrcp_to_merus_raw(pcm_vol);
-        if target_raw != hw_raw {
-            tracing::info!(pcm_volume = pcm_vol, hardware = hw_raw, target = target_raw, "Volume sync: BlueALSA PCM -> hardware");
-            if let Err(e) = write_merus_volume_raw(target_raw) {
-                tracing::warn!(error = %e, "Failed to write hardware volume");
-            }
+        // Only sync if PCM volume changed
+        if *last_pcm_vol == Some(pcm_vol) {
+            tracing::debug!(pcm_volume = pcm_vol, "Volume sync skipped: no change");
+            return Ok(());
         }
+
+        // `volume_percent` is already 0..=100 (avg of per-channel levels);
+        // forward it directly — do NOT re-map through the AVRCP 0..127 table.
+        let percent = pcm_vol;
+
+        // Call audio-manager SetLevel via D-Bus
+        let proxy = Proxy::new(
+            conn,
+            "org.speaker.AudioManager",
+            "/org/speaker/amp",
+            "org.speaker.AudioManager1",
+        )
+        .await?;
+
+        proxy.call_method("SetLevel", &percent).await?;
+
+        tracing::info!(
+            pcm_volume = pcm_vol,
+            percent,
+            "Volume sync: BlueALSA PCM -> audio-manager"
+        );
+        *last_pcm_vol = Some(pcm_vol);
     } else {
-        // No active PCM: could sync hardware -> device info for next connect
-        tracing::debug!(hardware = hw_raw, "No active PCM for volume sync");
+        // No active PCM
+        tracing::debug!("No active PCM for volume sync");
     }
+
+    Ok(())
 }
 
-/// Bluetooth manager service command-line options.
+/// Bluetooth manager service command-line options..
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtManagerOptions {
     /// Status poll interval between monitor ticks.
@@ -267,8 +228,8 @@ where
 ///
 /// # Errors
 /// Propagates [`crate::hardware::BtError`] when the status snapshot fails.
-pub fn run_tick(bt: &BluetoothDevice) -> Result<BluetoothStatus, BtError> {
-    let status = bt.status()?;
+pub async fn run_tick(bt: &BluetoothDevice) -> Result<BluetoothStatus, BtError> {
+    let status = bt.status_async().await?;
     tracing::debug!(
         connected = status.connected_count(),
         streaming = status.is_streaming(),
@@ -336,8 +297,21 @@ fn spawn_cover_art_subsystem(
 ///
 /// Attempts to install a SIGINT/SIGTERM handler for graceful shutdown; if a handler
 /// is already installed (e.g. in test runners), a warning is logged and the loop proceeds.
+// Orchestrates subsystem boot, signal wiring, and the poll loop; splitting it
+// would obscure the startup sequence that must stay observable in one place.
+#[allow(
+    clippy::too_many_lines,
+    reason = "single orchestration point for subsystem boot"
+)]
+/// # Panics
+/// Panics if a temporary single-thread runtime cannot be built for the
+/// blocking status-poll fallback (unrecoverable runtime misconfiguration).
+///
+/// # Errors
+/// Returns [`ExitCode::FAILURE`] only when CLI/D-Bus bootstrap fails; poll
+/// and subsystem errors are logged and retried in-loop.
 #[must_use]
-pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
+pub async fn run_app(bt: BluetoothDevice, opts: BtManagerOptions) -> ExitCode {
     let path = BtManagerConfig::resolve_path(opts.config.as_deref());
     let cfg = match BtManagerConfig::load(&path) {
         Ok(cfg) => cfg,
@@ -377,14 +351,14 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
     }
 
     let auto_trust_shutdown = if enable_auto_trust {
-        spawn_auto_trust_subsystem(opts, effective_capability)
+        spawn_auto_trust_subsystem(&opts, effective_capability)
     } else {
         tracing::info!("Auto-trust agent disabled by configuration");
         None
     };
 
     let cover_art_shutdown = if enable_cover_art {
-        spawn_cover_art_subsystem(bt)
+        spawn_cover_art_subsystem(&bt)
     } else {
         tracing::info!("Cover-art provider disabled by configuration");
         None
@@ -392,13 +366,39 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
 
     let mut ticks: u64 = 0;
     let mut last_status: Option<(usize, bool)> = None;
-    let mut last_volume_sync: std::time::Instant = std::time::Instant::now();
-    run_poll_loop(effective_interval, |_timestamp| {
+
+    // Get D-Bus connection for volume sync
+    let conn = match Connection::system().await {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to connect to system D-Bus for volume sync; volume sync disabled");
+            None
+        }
+    };
+
+    if let Some(conn) = &conn {
+        let bt_for_sync = bt.clone();
+        let conn_for_sync = conn.clone();
+        let shutdown_requested_sync = Arc::clone(&shutdown_requested);
+        tokio::spawn(spawn_volume_sync_task(
+            bt_for_sync,
+            conn_for_sync,
+            shutdown_requested_sync,
+        ));
+    }
+
+    // Event-driven monitor: poll once immediately (so startup state is logged
+    // without waiting for a signal or keep-alive), then block on the shared
+    // property-change flag with `effective_interval` as the keep-alive
+    // timeout. The timeout equals the legacy poll interval, so worst-case
+    // tick cadence, `--ticks` accounting and shutdown latency are identical
+    // to the previous fixed-interval loop; signals only make updates faster.
+    loop {
         if shutdown_requested.load(Ordering::SeqCst) {
             tracing::info!("shutdown requested, stopping monitor loop");
-            return true;
+            break;
         }
-        match run_tick(bt) {
+        match run_tick(&bt).await {
             Ok(status) => {
                 let signature = (status.connected_count(), status.is_streaming());
                 if last_status != Some(signature) {
@@ -418,15 +418,28 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
             Err(e) => tracing::warn!(error = %e, "Bluetooth status poll failed"),
         }
 
-        // Sync volume every 5 seconds (less frequently than status poll)
-        if last_volume_sync.elapsed() >= Duration::from_secs(5) {
-            sync_volume(bt);
-            last_volume_sync = std::time::Instant::now();
+        ticks = ticks.saturating_add(1);
+        if opts.max_ticks.is_some_and(|limit| ticks >= limit) {
+            break;
         }
 
-        ticks = ticks.saturating_add(1);
-        opts.max_ticks.is_some_and(|limit| ticks >= limit)
-    });
+        // Wait for a property change (bounded by the keep-alive timeout);
+        // the blocking wait runs on the blocking pool to avoid stalling the
+        // async runtime.
+        let bt_for_wait = bt.clone();
+        let wait_result = speaker_common::runtime::run_blocking(
+            "bluetooth property wait",
+            move || -> Result<bool, BtError> {
+                Ok(bt_for_wait.wait_for_property_change(effective_interval))
+            },
+        )
+        .await;
+        // A keep-alive timeout (`false`) or signaled change (`true`) are both
+        // fine; only a cancelled/poisoned blocking task is worth a debug note.
+        if let Err(e) = wait_result {
+            tracing::debug!(error = %e, "Property-change wait task failed");
+        }
+    }
 
     // Trigger auto-trust agent shutdown if it was started.
     if let Some(handle) = auto_trust_shutdown {
@@ -445,23 +458,45 @@ pub fn run_app(bt: &BluetoothDevice, opts: &BtManagerOptions) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+async fn spawn_volume_sync_task(
+    bt: BluetoothDevice,
+    conn: Connection,
+    shutdown_requested: Arc<AtomicBool>,
+) {
+    let mut interval = interval(TokioDuration::from_secs(5));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut last_pcm_vol: Option<u8> = None;
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                if shutdown_requested.load(Ordering::SeqCst) {
+                    break;
+                }
+                if let Err(e) = sync_volume(&bt, &conn, &mut last_pcm_vol).await {
+                    tracing::debug!(error = %e, "Volume sync failed");
+                }
+            }
+        }
+    }
+}
+
 /// CLI main entrypoint for the `bt-manager` binary.
 ///
 /// Installs the global `tracing` subscriber before any other work so startup
 /// events are captured; verbosity is controlled by `RUST_LOG` (default `info`,
 /// see [`speaker_common::logging`]).
-pub fn main() -> ExitCode {
+pub async fn main() -> ExitCode {
     speaker_common::logging::init_daemon_logging();
     let opts = match resolve_cli_opts(parse_cli_args_from(env_args()), "bt-manager", print_usage) {
         Ok(opts) => opts,
         Err(exit_code) => return exit_code,
     };
-    let bt = match BluetoothDevice::new() {
+    let bt = match BluetoothDevice::new().await {
         Ok(bt) => bt,
         Err(e) => {
             tracing::error!(error = %e, "failed to connect to the system D-Bus");
             return ExitCode::FAILURE;
         }
     };
-    run_app(&bt, &opts)
+    run_app(bt, opts).await
 }

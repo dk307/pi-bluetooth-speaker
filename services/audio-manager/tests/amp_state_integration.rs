@@ -100,9 +100,9 @@ fn with_percent_when_unmuted_applies() {
 
 #[test]
 fn level_percent_inverse() {
-    for p in 0..=100 {
+    for (p, &raw) in PERCENT_TO_RAW.iter().enumerate() {
         let s = AmpState {
-            level_raw: PERCENT_TO_RAW[p],
+            level_raw: raw,
             muted: false,
         };
         let back = s.level_percent(&PERCENT_TO_RAW);
@@ -132,9 +132,9 @@ fn level_percent_muted_returns_stored() {
 
 #[test]
 fn hardware_level_percent() {
-    for p in 0..=100 {
+    for (p, &raw) in PERCENT_TO_RAW.iter().enumerate() {
         let s = AmpState {
-            level_raw: PERCENT_TO_RAW[p],
+            level_raw: raw,
             muted: false,
         };
         let back = s.hardware_level_percent(&PERCENT_TO_RAW);

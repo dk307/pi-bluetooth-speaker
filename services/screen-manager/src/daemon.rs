@@ -582,7 +582,7 @@ pub fn init_shell_with_config(
         shell.wire_bluetooth_transport(&commands);
         Some(mock_bt)
     } else {
-        match speaker_bluetooth::BluetoothDevice::new() {
+        match speaker_bluetooth::BluetoothDevice::new_blocking() {
             Ok(bt) => {
                 apply_initial_bt_state(&shell, &bt);
                 shell.wire_bluetooth_transport(&commands);

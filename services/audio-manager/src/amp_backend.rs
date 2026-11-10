@@ -15,6 +15,9 @@ use crate::error::{AmpError, AmpResult};
 
 /// Trait abstracting amplifier hardware operations.
 /// Production uses `RealAmpBackend`; tests inject `MockAmpBackend`.
+// `async_trait` wraps each async method in a pinned `Future`, which is itself
+// `#[must_use]`; clippy flags the generated wrapper as double-must-use.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait AmpBackend: Send + Sync {
     /// Write the complete amp state (level + mute) to hardware.
@@ -45,8 +48,7 @@ impl RealAmpBackend {
         let card_name = card_name.to_string();
         let card_name_for_closure = card_name.clone();
         let mixer = tokio::task::spawn_blocking(move || -> AmpResult<Mixer> {
-            let mixer = Mixer::new(&card_name_for_closure, false)
-                .map_err(AmpError::Alsa)?;
+            let mixer = Mixer::new(&card_name_for_closure, false).map_err(AmpError::Alsa)?;
             Ok(mixer)
         })
         .await
@@ -65,8 +67,12 @@ impl RealAmpBackend {
     /// Validate the A.Mstr Vol control exists and has range 0..144 (blocking).
     fn validate_control_blocking(mixer: &Mixer, card_name: &str) -> AmpResult<()> {
         let selem_id = SelemId::new("A.Mstr Vol", 0);
-        let elem = mixer.find_selem(&selem_id)
-            .ok_or_else(|| AmpError::control_error(format!("A.Mstr Vol control not found on card {}", card_name)))?;
+        let elem = mixer.find_selem(&selem_id).ok_or_else(|| {
+            AmpError::control_error(format!(
+                "A.Mstr Vol control not found on card {}",
+                card_name
+            ))
+        })?;
 
         let (min, max) = elem.get_playback_volume_range();
         if min != 0 || max != 144 {
@@ -88,7 +94,8 @@ impl RealAmpBackend {
     /// Write volume to the mixer (blocking operation).
     fn write_volume_blocking(mixer: &Mixer, level_raw: u16) -> AmpResult<()> {
         let selem_id = SelemId::new("A.Mstr Vol", 0);
-        let elem = mixer.find_selem(&selem_id)
+        let elem = mixer
+            .find_selem(&selem_id)
             .ok_or_else(|| AmpError::control_error("A.Mstr Vol control disappeared"))?;
 
         // Write to both channels (mono control, but write both for safety)
@@ -98,7 +105,10 @@ impl RealAmpBackend {
         // Verify write
         let written = elem.get_playback_volume(SelemChannelId::FrontLeft)?;
         if written != level_raw as i64 {
-            warn!(requested = level_raw, written, "Mixer write verification mismatch");
+            warn!(
+                requested = level_raw,
+                written, "Mixer write verification mismatch"
+            );
         }
 
         Ok(())
@@ -112,27 +122,36 @@ impl AmpBackend for RealAmpBackend {
         let level = if state.muted { 0 } else { state.level_raw };
 
         tokio::task::spawn_blocking(move || {
-            let guard = mixer.lock().map_err(|e| AmpError::internal(e.to_string()))?;
-            Self::write_volume_blocking(&*guard, level)
+            let guard = mixer
+                .lock()
+                .map_err(|e| AmpError::internal(e.to_string()))?;
+            Self::write_volume_blocking(&guard, level)
         })
         .await
         .context("Write volume task panicked")??;
 
-        // Return the state that was actually applied
-        Ok(AmpState { level_raw: level, muted: state.muted })
+        // Return the logical state that was requested (preserves level_raw even when muted)
+        // The hardware level is available via AmpState::hardware_level()
+        Ok(*state)
     }
 
     async fn read_state(&self) -> AmpResult<AmpState> {
         let mixer = self.mixer.clone();
         tokio::task::spawn_blocking(move || {
-            let mixer = mixer.lock().map_err(|e| AmpError::internal(e.to_string()))?;
+            let mixer = mixer
+                .lock()
+                .map_err(|e| AmpError::internal(e.to_string()))?;
             let selem_id = SelemId::new("A.Mstr Vol", 0);
-            let elem = mixer.find_selem(&selem_id)
+            let elem = mixer
+                .find_selem(&selem_id)
                 .ok_or_else(|| AmpError::control_error("A.Mstr Vol control disappeared"))?;
             let raw = elem.get_playback_volume(SelemChannelId::FrontLeft)? as u16;
             // We can't read mute from hardware (no mute switch), so infer from level
             let muted = raw == 0;
-            Ok(AmpState { level_raw: raw, muted })
+            Ok(AmpState {
+                level_raw: raw,
+                muted,
+            })
         })
         .await
         .context("Read state task panicked")?
@@ -142,8 +161,10 @@ impl AmpBackend for RealAmpBackend {
         let mixer = self.mixer.clone();
         let card_name = self.card_name.clone();
         tokio::task::spawn_blocking(move || {
-            let guard = mixer.lock().map_err(|e| AmpError::internal(e.to_string()))?;
-            Self::validate_control_blocking(&*guard, &card_name)
+            let guard = mixer
+                .lock()
+                .map_err(|e| AmpError::internal(e.to_string()))?;
+            Self::validate_control_blocking(&guard, &card_name)
         })
         .await
         .context("Validate task panicked")?
@@ -221,7 +242,9 @@ impl MockAmpBackend {
     /// Create a new mock backend and its controller pair.
     pub fn new_mocked() -> (Self, MockAmpCtrl) {
         let inner = Arc::new(Mutex::new(MockState::default()));
-        let backend = Self { inner: inner.clone() };
+        let backend = Self {
+            inner: inner.clone(),
+        };
         let ctrl = MockAmpCtrl { inner };
         (backend, ctrl)
     }
@@ -230,7 +253,10 @@ impl MockAmpBackend {
 #[async_trait]
 impl AmpBackend for MockAmpBackend {
     async fn write_state(&self, state: &AmpState) -> AmpResult<AmpState> {
-        let mut guard = self.inner.lock().map_err(|e| AmpError::internal(e.to_string()))?;
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| AmpError::internal(e.to_string()))?;
         guard.write_called += 1;
 
         if guard.should_fail_write {
@@ -238,15 +264,19 @@ impl AmpBackend for MockAmpBackend {
             return Err(AmpError::internal("mock write failure"));
         }
 
-        let level = if state.muted { 0 } else { state.level_raw };
-        let applied = AmpState { level_raw: level, muted: state.muted };
+        // Return the logical state that was requested (preserves level_raw even when muted)
+        // The hardware level is available via AmpState::hardware_level()
+        let applied = *state;
         guard.state = applied;
         guard.last_write = Some(applied);
         Ok(applied)
     }
 
     async fn read_state(&self) -> AmpResult<AmpState> {
-        let mut guard = self.inner.lock().map_err(|e| AmpError::internal(e.to_string()))?;
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| AmpError::internal(e.to_string()))?;
         guard.read_called += 1;
 
         if guard.should_fail_read {
@@ -258,7 +288,10 @@ impl AmpBackend for MockAmpBackend {
     }
 
     async fn validate(&self) -> AmpResult<()> {
-        let mut guard = self.inner.lock().map_err(|e| AmpError::internal(e.to_string()))?;
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| AmpError::internal(e.to_string()))?;
         guard.validate_called += 1;
 
         if guard.should_fail_validate {

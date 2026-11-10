@@ -1,6 +1,61 @@
 # Volume Sync Plan - Raspberry Pi Bluetooth Speaker
 
-## Current State (as of Nov 2026)
+## Final Architecture (IMPLEMENTED Nov 2026)
+
+The options below were evaluated; the shipped solution combines a BlueZ
+configuration fix with `audio-manager` as the sole amp owner and a small
+bt-manager sync task:
+
+```
+Phone volume buttons (AVRCP absolute volume, 0-127)
+    → bluealsad reads AVRCP volume itself (bluez-alsa v5.0, native)
+    → org.bluealsa.PCM1 Volume (ay, per-channel bytes)
+    → bt-manager `sync_volume` task (5 s dedup poll)
+    → audio-manager D-Bus SetLevel(percent)
+    → amp_curve PERCENT_TO_RAW → ALSA A.Mstr Vol (Merus raw 0-144)
+    → Speaker
+```
+
+### Ownership map (single-writer rule)
+
+| Component | Writes | Reads |
+|-----------|--------|-------|
+| `audio-manager` | **Only writer** of `A.Mstr Vol`; persists/restores state | ALSA mixer |
+| bt-manager `sync_volume` | audio-manager `SetLevel` (deduped on change) | `org.bluealsa.PCM1 Volume` |
+| screen-manager UI knob | → `bt.set_volume` → BlueALSA PCM → phone (AVRCP absolute) | BlueALSA volume (readout) |
+| bt-manager pairing agent | BlueZ info file `Volume=` seed (one-shot at trust) | amixer `A.Mstr Vol` (one-shot) |
+| reconciler | connection healing only — never volume | BlueZ/BlueALSA topology |
+
+### Root causes that were fixed
+
+1. **BlueZ 5.88 `[AVRCP] VolumeCategory = true`** rejects the Pixel's AVRCP TG
+   (it advertises no category-2 bit) → fixed with `VolumeCategory = false` in
+   `/etc/bluetooth/main.conf` (committed to `baseline/etc/bluetooth/main.conf`).
+   With this fix bluez-alsa receives AVRCP absolute volume natively; the BlueZ
+   `MediaTransport1.Volume` path is NOT used and stays 0.
+2. **Double conversion bug**: bt-manager took `volume_percent` (already 0-100)
+   from `format_volume_bytes` and re-mapped it through the AVRCP 0-127 table,
+   squashing the scale (100 % → 79 %). The percent is now forwarded directly.
+3. **Blocking zbus inside tokio**: bt-manager used
+   `zbus::blocking::Connection::system()` from async context (nested runtime
+   panic); the daemon now runs on a `current_thread` async runtime with
+   blocking calls isolated via `speaker_common::runtime::run_blocking`.
+4. **Mute restores 0**: `write_state` returned the hardware-clamped state
+   (level 0 when muted), losing the logical level; it now returns the logical
+   requested state and `AmpState::hardware_level()` clamps for hardware.
+
+### What was NOT needed
+
+- No AVRCP target implementation in bt-manager (Option 3 unnecessary).
+- `MediaTransport1.Volume` is not consulted (stays 0 under
+  `VolumeCategory = false`; bluez-alsa bypasses BlueZ for volume).
+- bluealsa-aplay still owns raw PCM routing; the amp mixer control is not
+  bound to it as a sync channel (`--mixer-control` is only used for the
+  softvol path; `audio-manager` drives the mixer directly).
+
+---
+
+## Historical Analysis (pre-audio-manager)
 
 ### Hardware
 - **DAC/Amp**: Merus MA12070P (Mono, 0-144 raw, fake dB scale 0-70=mute)
