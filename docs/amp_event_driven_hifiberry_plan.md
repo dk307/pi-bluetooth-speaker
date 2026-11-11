@@ -564,25 +564,52 @@ The real signal is CamillaDSP's engine `ProcessingState` over WebSocket
 `MockDsp`).
 
 Design — **CamillaDSP engine-state watcher** (new `dsp_watch` module in
-audio-manager):
-- Poll task (injectable `DspDevice` seam, `new_mocked() -> (Self, Ctrl)`);
-  edges only: `Running` → `StreamStarting`, `Paused`/`Inactive` →
-  `StreamStopping`; `Stalled` → treated as stop (PLL is dead if the engine
-  stalled hard); `Unknown`/read failure → hold last state (`warn!`, bounded
-  backoff — §4.5 no-flap rule).
+audio-manager), amended after the §11.3 design review:
+- Poll task (injectable `DspDevice` seam, `new_mocked() -> (Self, Ctrl)`).
+- **2-state collapse** — map `ProcessingState` into
+  `EmittedLifecycle::{Stopped, Running}` (`Running` = `Running`; everything
+  else = `Stopped`) and emit edges of THAT enum only: `Stopped→Running`
+  emits `StreamStarting`, `Running→Stopped` emits `StreamStopping`. This
+  structurally guarantees `Stalled→Paused→Inactive` (one stop, no
+  re-emission) and dedupes across intermediate engine states.
+- **Bootstrap:** `current_lifecycle = Stopped` at construction — first-poll
+  `Running` is a valid edge (one `StreamStarting`, boot-race solved);
+  first-poll `Paused`/`Inactive` emits nothing (stays boot-muted). Tests:
+  `first_poll_running_emits_stream_starting_once`,
+  `first_poll_paused_then_inactive_emits_nothing`.
+- **Stalled debounce:** `Stalled` is capture-side starvation (verified:
+  crates/dsp "Stalled (capture device starved)"); a transient BT stall
+  would bounce `Stalled→Running` and cause a full mute+handshake dropout.
+  Require **2 consecutive `Stopped` polls for `Stalled`-only stops**
+  (1-poll confirmation); `Paused`/`Inactive` remain 0-debounce immediate.
+- `Unknown`/WS read failure: do NOT mutate `current_lifecycle` — log
+  `warn!` with bounded backoff (§4.5 no-flap preserved structurally).
 - **Adaptive interval:** 250 ms while Playing (stop edge can arrive), 500 ms
   otherwise; configurable (`dsp_poll_interval_ms`, `dsp_watch_enabled`).
 - **Start-direction latency is irrelevant:** BT A2DP + camilladsp pipeline
   startup dominate; +250..500 ms is imperceptible.
-- **Stop-direction latency is backstopped by hardware:** if BCLK dies before
-  the poll lands, the existing PLL-loss path mutes immediately via `0x7C`.
-  Watcher = graceful pre-mute; PLL-loss handler = fast backstop.
+- **Stop-direction race (review-corrected):** no poll after `Paused` beats
+  BCLK death if camilladsp closes the pcm at the `Paused` transition — the
+  1 s PLL tick is a **state-consistency backstop** (mute register, user
+  intent), NOT a pop preventer. Pop prevention levers, in priority order:
+  1. `silence_timeout` in the camilladsp config — keeps BCLK running with
+     digital zeros after the signal drops, giving the watcher's pre-mute a
+     guaranteed window (config currently has NO `silence_timeout` set).
+  2. **Bench test (Phase 5): does `/ERROR` (GPIO23) assert on
+     `PLL_UNLOCK`?** The kernel `ma120x0p_irq_handler` mutes+disables on the
+     error-GPIO falling edge without reading registers (suggestive, not
+     proof). If the pin does assert on PLL unlock, the already-wired error
+     edge watch → PLL-loss mute becomes a µs-class backstop for free. If
+     false, rely on lever 1.
+  3. Bench question: does a stop without pre-mute audibly pop at all? If
+     clean → relax everything.
 - `start_stream()`'s bounded PLL handshake remains the authoritative clock
   gate regardless of watcher timeliness.
 
-**Open bench question (Phase 5, decides final intervals):** does a stop
-without pre-mute (BCLK death while unmuted) audibly pop on this board?
-If clean → relax polling; if audible → 100 ms polls while Playing.
+**Deployment blocker found during this review:** `baseline/etc/camilladsp/
+crossover.yml` still points playback at `hw:sndrpimerusamp,0` (the removed
+merus card). It must be updated to the hifiberry card (`sndrpihifiberry`)
+and `silence_timeout` added before any live deploy.
 
 Deferred alternatives: true event push (camilladsp does not push unsolicited
 stream-state events in this deployment; `crates/dsp` client is
