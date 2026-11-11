@@ -16,7 +16,7 @@
 //!   providing non-blocking asynchronous APIs.
 //! - Companion [`AmpDeviceMock`] enables deterministic testing without physical hardware.
 //! - Strongly typed domain models [`AmpErrorFlags`], [`AmpFault`], [`PowerModeProfile`],
-//!   [`AudioInConfig`], [`DcuMonitor`], and [`AmpI2cAddress`].
+//!   [`DcuMonitor`], and [`AmpI2cAddress`].
 
 use std::backtrace::Backtrace;
 use std::fmt::{self, Display, Formatter};
@@ -562,7 +562,7 @@ pub enum PowerModeProfile {
 }
 
 impl PowerModeProfile {
-    /// Decodes a power mode profile from register 0x1D bits [2:0].
+    /// Decodes a power mode profile from register 0x1D bits `[2:0]`.
     #[must_use]
     pub const fn from_raw(raw: u8) -> Self {
         match raw & 0x07 {
@@ -623,7 +623,7 @@ pub enum PowerModeMon {
 }
 
 impl PowerModeMon {
-    /// Decodes the power mode monitor from register 0x60 bits [1:0].
+    /// Decodes the power mode monitor from register 0x60 bits `[1:0]`.
     #[must_use]
     pub const fn from_raw(raw: u8) -> Self {
         match raw & 0x03 {
@@ -733,7 +733,9 @@ impl Display for DcuChannelStatus {
     }
 }
 
-/// Decoded status of both internal DCU charge pump channels (registers 0x61 and 0x62).
+/// Decoded status of both internal DCU charge pump channels (status
+/// registers 0x61 and 0x65; `dcu_mon0`/`dcu_mon1` bitfields span 0x60-0x62
+/// and 0x64-0x66 respectively in the driver header).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DcuMonitor {
     /// Channel 0 charge pump operational status.
@@ -743,7 +745,7 @@ pub struct DcuMonitor {
 }
 
 impl DcuMonitor {
-    /// Decodes DCU monitor registers 0x61 and 0x62.
+    /// Decodes DCU monitor status registers 0x61 and 0x65.
     #[must_use]
     pub const fn from_raw(dcu0: u8, dcu1: u8) -> Self {
         Self {
@@ -916,7 +918,7 @@ impl Display for AmpSettings {
         )?;
         writeln!(
             f,
-            "Manual Power Mode     : PM_man={} (manualPM set)",
+            "Manual Power Mode     : PM_man={} (0 = automatic profile follow)",
             self.pm_ctrl_pm
         )?;
         writeln!(f, "Power Mode Profile    : {}", self.pm_profile)?;

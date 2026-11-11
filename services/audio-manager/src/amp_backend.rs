@@ -153,29 +153,41 @@ impl RealAmpBackend {
 
         Ok(())
     }
+    /// Write the mixer level (blocking task wrapper).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] on mixer faults.
+    async fn write_mixer_level(&self, level_raw: u16) -> AmpResult<()> {
+        let mixer = self.mixer.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = mixer
+                .lock()
+                .map_err(|e| AmpError::internal(e.to_string()))?;
+            Self::write_volume_blocking(&guard, level_raw)
+        })
+        .await
+        .context("Write volume task panicked")??;
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl AmpBackend for RealAmpBackend {
     async fn write_state(&self, state: &AmpState) -> AmpResult<AmpState> {
-        // Serial mute bit FIRST: if the RMW fails, reject with the hardware
-        // fully untouched. A mixer-write failure after the bit is applied
-        // fails silent (safe direction) and heals on the next write.
-        self.set_serial_mute(state.muted).await?;
-
-        // Mute is the serial register bit only; the mixer level stays live
-        // so unmute is instant and no pre-mute level needs storing.
-        let mixer = self.mixer.clone();
-        let level = state.level_raw;
-        tokio::task::spawn_blocking(move || {
-            let guard = mixer
-                .lock()
-                .map_err(|e| AmpError::internal(e.to_string()))?;
-            Self::write_volume_blocking(&guard, level)
-        })
-        .await
-        .context("Write volume task panicked")??;
-
+        // Pop-free ordering (mirrors `I2cAmpBackend`): muting → mute first,
+        // then the volume; unmuting → write the volume while still muted,
+        // then clear the mute bit last (never expose the reset-default
+        // 0x18 = 0 dB level). Serial-bit write failures reject with the
+        // hardware untouched; a mixer-write failure after the bit is
+        // applied fails silent (safe direction) and heals on the next
+        // write.
+        if state.muted {
+            self.set_serial_mute(true).await?;
+            self.write_mixer_level(state.level_raw).await?;
+        } else {
+            self.write_mixer_level(state.level_raw).await?;
+            self.set_serial_mute(false).await?;
+        }
         // Return the logical state that was requested.
         Ok(*state)
     }

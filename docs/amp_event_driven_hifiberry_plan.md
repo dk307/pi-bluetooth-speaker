@@ -5,6 +5,19 @@
 > [`audio_manager_plan.md`](audio_manager_plan.md) §1–§2 (the `A.Mstr Vol` ALSA
 > mixer no longer exists in the new boot mode). Follows the event-driven design
 > agreed 2026-11-10.
+>
+> **⚠ Historical sections below are superseded:** §1–§8 and §6.1 were written
+> during planning/Phase 0 and contain register claims later corrected by
+> live verification and the audit record in **§9/§10**. Where they disagree,
+> §10 wins. Known-corrected claims: master volume `0x40` raw = **168 − raw**
+> (raw 0..144 = −0..−144 dB, NOT "raw = −dB" as a register value and NOT the
+> per-channel `24 − dB` formula); `0x1B` is **PM2 config** (`REG_PM2_CONFIG`),
+> not the input-format register; `0x25` is `audio_in_mode` mask `0xE0`
+> (bits 7:5, values 0-5) plus the `0x27` bit-5 `audio_in_mode_ext` gate, not
+> "gain bits 6:5"; `0x60` is the read-only **DCU power-mode monitor**
+> (`REG_DCU_PM_MON`, `dcu_mon0.pm_mon`), not the power-mode profile register
+> (that is `0x1D`, profiles 0-5); DCU per-channel status registers are
+> `0x61`/`0x65` (not `0x61`/`0x62` — `0x62` is `dcu_mon0.m_mon`).
 
 ## 1. Context & Root Cause
 
