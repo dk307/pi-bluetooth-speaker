@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use speaker_hardware::{
     AmpDevice, AmpError, AmpErrorFlags, AmpFault, AmpHardwareInfo, AmpI2cAddress, AmpSettings,
-    AmpStatus, DcuChannelStatus, DcuMonitor, Pm2Config, PowerModeMon,
-    PowerModeProfile, amp_test_helpers,
+    AmpStatus, DcuChannelStatus, DcuMonitor, Pm2Config, PowerModeMon, PowerModeProfile,
+    amp_test_helpers,
 };
 
 #[test]

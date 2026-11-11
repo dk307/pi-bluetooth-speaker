@@ -289,6 +289,12 @@ impl AmpController {
     pub async fn handle_error_edge(&mut self) -> AmpResult<()> {
         info!("GPIO error line asserted; reading live error register");
         let flags = self.device.read_live_errors_async().await?;
+        // Historical fault accumulation (0x6D) rides along for diagnostics:
+        // it shows whether the live fault is a repeat event since boot.
+        let latched = self.device.read_latched_errors_async().await?;
+        if latched != speaker_hardware::AmpErrorFlags::NONE {
+            debug!(?latched, "Latched error accumulation at edge");
+        }
         self.handle_faults(flags).await
     }
 
@@ -570,7 +576,12 @@ impl AmpController {
                     let result = self.handle_command(cmd.kind).await;
                     if let Some(reply) = cmd.reply {
                         let _ = reply
-                            .send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+                            .send(
+                                result
+                                    .as_ref()
+                                    .map(|_| ())
+                                    .map_err(|e| e.summary()),
+                            );
                     }
                     if let Err(e) = result {
                         warn!(error = %e, "Command handling failed; prior state preserved");

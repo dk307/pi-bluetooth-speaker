@@ -177,3 +177,25 @@ async fn mock_write_state_applies_serial_mute() {
     assert_eq!(ctrl.last_serial_mute(), Some(false));
     assert!(!backend.read_serial_mute().await.unwrap());
 }
+
+#[test]
+fn amp_error_summary_is_single_line_without_backtraces() {
+    // A hardware error carries a captured backtrace in its Display when
+    // RUST_BACKTRACE=1; the summary used for D-Bus error strings must be a
+    // single line without one.
+    let (amp, _mock) = speaker_hardware::AmpDevice::new_mocked();
+    let inner = amp.write_master_volume(999).unwrap_err();
+    let wrapped = audio_manager::AmpError::from(inner);
+
+    let summary = wrapped.summary();
+    assert!(
+        !summary.contains('\n'),
+        "summary must be single-line: {summary}"
+    );
+    assert!(!summary.contains("Backtrace"));
+    assert!(summary.contains("master_volume_raw"));
+
+    // Non-hardware variants pass through single-line thiserror formatting.
+    let io = audio_manager::AmpError::internal("boom");
+    assert_eq!(io.summary(), "Internal error: boom");
+}

@@ -61,6 +61,18 @@ pub enum AmpError {
 }
 
 impl AmpError {
+    /// Single-line error summary safe for machine-oriented output (D-Bus
+    /// error strings, telemetry): the hardware variant's inner
+    /// `speaker_hardware::AmpError` Display appends a multi-line backtrace
+    /// when one was captured, which would corrupt D-Bus error strings.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Hardware(inner) => inner.summary(),
+            other => other.to_string(),
+        }
+    }
+
     /// Create a hardware validation error.
     pub fn hardware_validation(reason: impl Into<String>) -> Self {
         Self::HardwareValidation {

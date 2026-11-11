@@ -101,7 +101,7 @@ impl AudioManagerInterface {
         let applied = backend
             .write_state(&new_state)
             .await
-            .map_err(|e| ZBusError::Failed(e.to_string()))?;
+            .map_err(|e| ZBusError::Failed(e.summary()))?;
 
         // Commit state
         *state_guard = applied;
@@ -141,7 +141,7 @@ impl AudioManagerInterface {
         let applied = backend
             .write_state(&new_state)
             .await
-            .map_err(|e| ZBusError::Failed(e.to_string()))?;
+            .map_err(|e| ZBusError::Failed(e.summary()))?;
 
         *state_guard = applied;
 
