@@ -8,8 +8,6 @@
 //! report flagged as 0% covered, over a real D-Bus transport.
 
 use std::collections::HashMap;
-use std::io::BufRead;
-use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use zbus::names::OwnedInterfaceName;
@@ -17,6 +15,7 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use speaker_bluetooth::bluetooth_test_helpers::{self, DbusClient, ManagedObjects};
 use speaker_bluetooth::{BluetoothDevice, BtAddress, BtDevice};
+use speaker_common::diag::spawn_private_bus;
 
 fn to_val<T: Into<Value<'static>>>(v: T) -> OwnedValue {
     OwnedValue::try_from(v.into()).unwrap()
@@ -24,32 +23,6 @@ fn to_val<T: Into<Value<'static>>>(v: T) -> OwnedValue {
 
 fn iface(name: &'static str) -> OwnedInterfaceName {
     OwnedInterfaceName::try_from(name).unwrap()
-}
-
-/// Kills the private `dbus-daemon` when the test ends.
-struct KillOnDrop(Child);
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// Spawns a private session bus and returns its `KillOnDrop` guard plus the
-/// bus address. Fails loudly when `dbus-daemon` is missing.
-fn spawn_private_bus() -> (KillOnDrop, String) {
-    let mut daemon = Command::new("dbus-daemon")
-        .args(["--session", "--nofork", "--print-address=1"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("dbus-daemon must be installed to run D-Bus live integration tests");
-    let mut address = String::new();
-    std::io::BufReader::new(daemon.stdout.take().unwrap())
-        .read_line(&mut address)
-        .unwrap();
-    let address = address.trim().to_string();
-    assert!(!address.is_empty(), "dbus-daemon printed no bus address");
-    (KillOnDrop(daemon), address)
 }
 
 /// Fake `org.freedesktop.DBus.ObjectManager` serving a static snapshot,
@@ -302,7 +275,11 @@ fn query_bluealsa_parses_pcms_and_available_codecs() {
     assert_eq!(pcm.resolved_name.as_ref(), "Pixel 8 Pro");
     assert_eq!(pcm.sampling_rate, 48_000);
     assert_eq!(pcm.channels, 2);
-    let codec_names: Vec<&str> = pcm.available_codecs.iter().map(AsRef::<str>::as_ref).collect();
+    let codec_names: Vec<&str> = pcm
+        .available_codecs
+        .iter()
+        .map(AsRef::<str>::as_ref)
+        .collect();
     assert_eq!(
         codec_names,
         ["aac", "sbc"],

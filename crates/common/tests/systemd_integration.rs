@@ -3,41 +3,12 @@
 //! unit-found, not-found, and transport-fault branches that pure unit tests
 //! cannot reach (`ServiceState` parsing itself is covered elsewhere).
 
-use std::io::BufRead;
-use std::process::{Child, Command, Stdio};
-
-use zbus::zvariant::OwnedObjectPath;
 use zbus::DBusError;
+use zbus::zvariant::OwnedObjectPath;
 
-use speaker_common::systemd::{check_systemd_unit, ServiceState};
+use speaker_common::diag::spawn_private_bus;
+use speaker_common::systemd::{ServiceState, check_systemd_unit};
 
-/// Kills the private `dbus-daemon` when the test ends.
-struct KillOnDrop(Child);
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// Spawns a private session bus and returns its `KillOnDrop` guard plus the
-/// bus address. Fails loudly when `dbus-daemon` is missing.
-fn spawn_private_bus() -> (KillOnDrop, String) {
-    let mut daemon = Command::new("dbus-daemon")
-        .args(["--session", "--nofork", "--print-address=1"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("dbus-daemon must be installed to run systemd integration tests");
-    let mut address = String::new();
-    std::io::BufReader::new(daemon.stdout.take().unwrap())
-        .read_line(&mut address)
-        .unwrap();
-    let address = address.trim().to_string();
-    assert!(!address.is_empty(), "dbus-daemon printed no bus address");
-    (KillOnDrop(daemon), address)
-}
-
-/// Fake `org.freedesktop.systemd1.Manager` resolving unit names to paths.
 /// Emulates systemd's `NoSuchUnit` reply for units that are not loaded.
 #[derive(Debug, DBusError)]
 #[zbus(prefix = "org.freedesktop.systemd1")]
