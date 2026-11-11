@@ -120,7 +120,7 @@ pub fn apply_mute_bit(reg: u8, muted: bool) -> u8 {
 
 /// Pure helper: extract mute state from register 0x36 bit 7.
 #[must_use]
-pub fn is_muted_bit(reg: u8) -> bool {
+pub const fn is_muted_bit(reg: u8) -> bool {
     reg & (1 << 7) != 0
 }
 
@@ -807,6 +807,83 @@ impl Display for AmpStatus {
     }
 }
 
+/// Phase 1.5 configuration values readable and writable on the MA12070P.
+///
+/// Groups the user-configurable amplifier settings: master volume, serial mute,
+/// manual power mode, power mode profile, I2S format, and audio input gain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AmpSettings {
+    /// Master volume raw attenuation (raw = -dB, 0..=144; 0 is full mute, 144 is 0 dB).
+    pub master_volume_raw: u16,
+    /// Master volume fractional register value (0.25 dB steps, bits 1:0 of 0x41).
+    pub master_volume_frac: u8,
+    /// Serial mute state (register 0x36 bit 7).
+    pub serial_muted: bool,
+    /// Decoded manual power mode `PM_man` (bits 5:4 of register 0x00, 0-3).
+    pub pm_ctrl_pm: u8,
+    /// Power mode profile selection (bits 2:0 of register 0x1D, 0-4).
+    pub pm_profile: u8,
+    /// I2S format select (bits 2:0 of register 0x35, 0-4).
+    pub i2s_format: u8,
+    /// Audio input gain select (bits 6:5 of register 0x25, 0-3).
+    pub audio_in_gain: u8,
+}
+
+impl AmpSettings {
+    /// Decodes a 7-byte register snapshot read from
+    /// `[REG_PM_CTRL, REG_PM_PROFILE, REG_AUDIO_IN_MODE, REG_I2S_FORMAT, REG_AUDIO_PROC, REG_VOL_DB_MASTER, REG_VOL_LSB_MASTER]`.
+    #[must_use]
+    pub const fn from_raw_registers(regs: [u8; 7]) -> Self {
+        let [
+            pm_ctrl,
+            pm_profile,
+            audio_in_mode,
+            i2s_format,
+            audio_proc,
+            vol_int,
+            vol_frac,
+        ] = regs;
+        Self {
+            // `as` cast required inside const blocks (From is not const fn); u8 -> u16 is lossless.
+            master_volume_raw: vol_int as u16,
+            master_volume_frac: vol_frac & 0x03,
+            serial_muted: is_muted_bit(audio_proc),
+            pm_ctrl_pm: (pm_ctrl >> 4) & 0x03,
+            pm_profile: pm_profile & 0x07,
+            i2s_format: i2s_format & 0x07,
+            audio_in_gain: (audio_in_mode >> 5) & 0x03,
+        }
+    }
+}
+
+impl Display for AmpSettings {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "Master Volume         : -{} dB (raw {}, frac {})",
+            self.master_volume_raw, self.master_volume_raw, self.master_volume_frac
+        )?;
+        writeln!(
+            f,
+            "Serial Mute           : {}",
+            if self.serial_muted {
+                "Muted"
+            } else {
+                "Unmuted"
+            }
+        )?;
+        writeln!(
+            f,
+            "Manual Power Mode     : PM_man={} (manualPM set)",
+            self.pm_ctrl_pm
+        )?;
+        writeln!(f, "Power Mode Profile    : {}", self.pm_profile)?;
+        writeln!(f, "I2S Format Select     : {}", self.i2s_format)?;
+        write!(f, "Audio Input Gain      : {}", self.audio_in_gain)?;
+        Ok(())
+    }
+}
+
 /// Hardware connection and GPIO pinout metadata for the MA12070P amplifier.
 #[derive(Debug, Clone)]
 pub struct AmpHardwareInfo {
@@ -1224,6 +1301,22 @@ impl AmpDeviceMock {
 
     // === Write-path mock methods (Phase 1.5) ===
 
+    fn read_settings(&self) -> Result<AmpSettings, AmpError> {
+        let state = self.state.read().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(AmpError::mock_fault(fault.clone()));
+        }
+        Ok(AmpSettings {
+            master_volume_raw: state.mock_master_volume_raw,
+            master_volume_frac: 0,
+            serial_muted: state.mock_serial_muted,
+            pm_ctrl_pm: (state.mock_pm_ctrl >> 4) & 0x03,
+            pm_profile: state.mock_pm_profile & 0x07,
+            i2s_format: state.mock_i2s_format & 0x07,
+            audio_in_gain: (state.mock_audio_in_mode >> 5) & 0x03,
+        })
+    }
+
     fn write_master_volume(&self, raw: u16) -> Result<(), AmpError> {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
@@ -1523,6 +1616,28 @@ where
         Ok(AmpErrorFlags::from_bits(acc_err))
     }
 
+    /// Reads the Phase 1.5 configuration registers as a decoded [`AmpSettings`].
+    ///
+    /// Public so host tests (embedded-hal mock buses) can exercise the read path,
+    /// mirroring the public Phase 1.5 write methods.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    pub fn read_settings(&mut self) -> Result<AmpSettings, AmpError> {
+        const SETTINGS_REGISTERS: [u8; 7] = [
+            REG_PM_CTRL,
+            REG_PM_PROFILE,
+            REG_AUDIO_IN_MODE,
+            REG_I2S_FORMAT,
+            REG_AUDIO_PROC,
+            REG_VOL_DB_MASTER,
+            REG_VOL_LSB_MASTER,
+        ];
+        Ok(AmpSettings::from_raw_registers(
+            self.read_regs(SETTINGS_REGISTERS)?,
+        ))
+    }
+
     // === Write operations (Phase 1.5) ===
 
     /// Write master volume (0x40 integer dB, 0x41 fractional 0.25 dB).
@@ -1723,6 +1838,23 @@ impl AmpDevice {
         }
     }
 
+    /// Reads the Phase 1.5 configuration values (volume, mute, power mode, I2S format, gain).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
+    pub fn read_settings(&self) -> Result<AmpSettings, AmpError> {
+        match self.inner.as_ref() {
+            Backend::Hardware { device, .. } => device
+                .lock()
+                .expect("hardware device lock poisoned")
+                .read_settings(),
+            Backend::Mock(mock) => mock.read_settings(),
+        }
+    }
+
     /// Clears historical latched error logs in register 0x2D.
     ///
     /// # Errors
@@ -1784,6 +1916,18 @@ impl AmpDevice {
     pub async fn read_status_async(&self) -> Result<AmpStatus, AmpError> {
         let this = self.clone();
         run_blocking("MA12070P status read", move || this.read_status()).await
+    }
+
+    /// Asynchronously reads the Phase 1.5 configuration values without blocking the async runtime.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if reading fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics.
+    pub async fn read_settings_async(&self) -> Result<AmpSettings, AmpError> {
+        let this = self.clone();
+        run_blocking("MA12070P settings read", move || this.read_settings()).await
     }
 
     /// Asynchronously clears historical latched error logs without blocking the async runtime.
@@ -2007,6 +2151,21 @@ impl AmpDevice {
         let this = self.clone();
         run_blocking("MA12070P write I2S format", move || {
             this.write_i2s_format(format)
+        })
+        .await
+    }
+
+    /// Asynchronously write audio in mode without blocking the async runtime.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics.
+    pub async fn write_audio_in_mode_async(&self, gain: u8) -> Result<(), AmpError> {
+        let this = self.clone();
+        run_blocking("MA12070P write audio in mode", move || {
+            this.write_audio_in_mode(gain)
         })
         .await
     }

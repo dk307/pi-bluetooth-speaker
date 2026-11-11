@@ -4,9 +4,9 @@ use std::error::Error;
 use std::time::Duration;
 
 use speaker_hardware::{
-    AmpDevice, AmpError, AmpErrorFlags, AmpFault, AmpHardwareInfo, AmpI2cAddress, AmpStatus,
-    AudioInConfig, AudioInputFormat, ClockRatio, DcuChannelStatus, DcuMonitor, PowerModeProfile,
-    amp_test_helpers,
+    AmpDevice, AmpError, AmpErrorFlags, AmpFault, AmpHardwareInfo, AmpI2cAddress, AmpSettings,
+    AmpStatus, AudioInConfig, AudioInputFormat, ClockRatio, DcuChannelStatus, DcuMonitor,
+    PowerModeProfile, amp_test_helpers,
 };
 
 #[test]
@@ -898,4 +898,145 @@ mod hardware_device_tests {
         let err = dev.write_audio_in_mode(4).unwrap_err();
         assert!(err.is_invalid_argument());
     }
+
+    #[test]
+    fn hardware_device_read_settings_decodes_registers() {
+        // Reset-typical snapshot: PM_CTRL manualPM|PM_man=2, PM_PROFILE=2,
+        // AUDIO_IN_MODE bit7 set (gain 0), I2S format 3, muted (0x36 bit 7),
+        // volume raw 116 with fractional 0.25 dB steps value 2.
+        let bus = MockBus::new()
+            .with_register(REG_PM_CTRL, 0x60)
+            .with_register(REG_PM_PROFILE, 0x02)
+            .with_register(REG_AUDIO_IN_MODE, 0x80)
+            .with_register(REG_I2S_FORMAT, 0x03)
+            .with_register(REG_AUDIO_PROC, 0x80)
+            .with_register(REG_VOL_DB_MASTER, 116)
+            .with_register(REG_VOL_LSB_MASTER, 0x02);
+        let mut dev = HardwareDevice::new(bus, addr());
+
+        let s = dev.read_settings().unwrap();
+        assert_eq!(s.master_volume_raw, 116);
+        assert_eq!(s.master_volume_frac, 2);
+        assert!(s.serial_muted);
+        assert_eq!(s.pm_ctrl_pm, 2);
+        assert_eq!(s.pm_profile, 2);
+        assert_eq!(s.i2s_format, 3);
+        assert_eq!(s.audio_in_gain, 0);
+    }
+
+    #[test]
+    fn hardware_device_settings_round_trip_after_writes() {
+        let bus = MockBus::new()
+            .with_register(REG_PM_CTRL, 0x00)
+            .with_register(REG_PM_PROFILE, 0x00)
+            .with_register(REG_AUDIO_IN_MODE, 0x00)
+            .with_register(REG_I2S_FORMAT, 0x00)
+            .with_register(REG_AUDIO_PROC, 0x00)
+            .with_register(REG_VOL_DB_MASTER, 0)
+            .with_register(REG_VOL_LSB_MASTER, 0);
+        let mut dev = HardwareDevice::new(bus, addr());
+
+        dev.write_master_volume(144).unwrap();
+        dev.write_serial_mute(true).unwrap();
+        dev.write_power_mode_ctrl(3).unwrap();
+        dev.write_power_mode_profile(4).unwrap();
+        dev.write_i2s_format(4).unwrap();
+        dev.write_audio_in_mode(3).unwrap();
+
+        let s = dev.read_settings().unwrap();
+        assert_eq!(s.master_volume_raw, 144);
+        assert_eq!(s.master_volume_frac, 0);
+        assert!(s.serial_muted);
+        assert_eq!(s.pm_ctrl_pm, 3);
+        assert_eq!(s.pm_profile, 4);
+        assert_eq!(s.i2s_format, 4);
+        assert_eq!(s.audio_in_gain, 3);
+    }
+}
+
+// === Phase 1.5 settings read-path tests ===
+
+#[test]
+fn mock_read_settings_defaults() {
+    let (amp, _mock) = AmpDevice::new_mocked();
+    let s = amp.read_settings().unwrap();
+    assert_eq!(s.master_volume_raw, 116);
+    assert_eq!(s.master_volume_frac, 0);
+    assert!(!s.serial_muted);
+    assert_eq!(s.pm_ctrl_pm, 2);
+    assert_eq!(s.pm_profile, 2);
+    assert_eq!(s.i2s_format, 0);
+    assert_eq!(s.audio_in_gain, 0);
+}
+
+#[test]
+fn mock_read_settings_reflects_writes() {
+    let (amp, _mock) = AmpDevice::new_mocked();
+    amp.write_master_volume(100).unwrap();
+    amp.write_serial_mute(true).unwrap();
+    amp.write_power_mode_ctrl(3).unwrap();
+    amp.write_power_mode_profile(4).unwrap();
+    amp.write_i2s_format(3).unwrap();
+    amp.write_audio_in_mode(2).unwrap();
+
+    let s = amp.read_settings().unwrap();
+    assert_eq!(s.master_volume_raw, 100);
+    assert!(s.serial_muted);
+    assert_eq!(s.pm_ctrl_pm, 3);
+    assert_eq!(s.pm_profile, 4);
+    assert_eq!(s.i2s_format, 3);
+    assert_eq!(s.audio_in_gain, 2);
+}
+
+#[test]
+fn mock_read_settings_fault_injection() {
+    let (amp, mock) = AmpDevice::new_mocked();
+    mock.set_fault(Some("simulated bus failure".into()));
+    let err = amp.read_settings().unwrap_err();
+    assert!(err.is_mock_fault());
+    assert!(err.summary().contains("simulated bus failure"));
+}
+
+#[test]
+fn settings_from_raw_registers_decodes() {
+    let s = AmpSettings::from_raw_registers([0x60, 0x02, 0x80, 0x03, 0x80, 116, 0x02]);
+    assert_eq!(s.master_volume_raw, 116);
+    assert_eq!(s.master_volume_frac, 2);
+    assert!(s.serial_muted);
+    assert_eq!(s.pm_ctrl_pm, 2);
+    assert_eq!(s.pm_profile, 2);
+    assert_eq!(s.i2s_format, 3);
+    assert_eq!(s.audio_in_gain, 0);
+
+    // Unmuted, minimum volume; raw reads are masked but not range-clamped,
+    // so out-of-spec register values (0x07 profile, gain 3) still decode.
+    let s = AmpSettings::from_raw_registers([0x40, 0x07, 0x7F, 0x07, 0x00, 0, 0x00]);
+    assert_eq!(s.master_volume_raw, 0);
+    assert_eq!(s.master_volume_frac, 0);
+    assert!(!s.serial_muted);
+    assert_eq!(s.pm_ctrl_pm, 0);
+    assert_eq!(s.pm_profile, 7);
+    assert_eq!(s.i2s_format, 7);
+    assert_eq!(s.audio_in_gain, 3);
+
+    // Display renders all six decoded settings.
+    let text = s.to_string();
+    assert!(text.contains("Master Volume"));
+    assert!(text.contains("Serial Mute"));
+    assert!(text.contains("Manual Power Mode"));
+    assert!(text.contains("Power Mode Profile"));
+    assert!(text.contains("I2S Format Select"));
+    assert!(text.contains("Audio Input Gain"));
+}
+
+#[tokio::test]
+async fn async_settings_read_and_audio_in_mode_write() {
+    let (amp, mock) = AmpDevice::new_mocked();
+
+    let s = amp.read_settings_async().await.unwrap();
+    assert_eq!(s.pm_ctrl_pm, 2);
+
+    amp.write_audio_in_mode_async(1).await.unwrap();
+    assert_eq!(mock.mock_audio_in_mode(), 1);
+    assert_eq!(amp.read_settings_async().await.unwrap().audio_in_gain, 1);
 }

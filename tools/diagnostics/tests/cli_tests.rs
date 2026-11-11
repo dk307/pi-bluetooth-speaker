@@ -264,6 +264,21 @@ fn amp_info_cli_argument_validation() {
             (&["--address", "0x19"], "invalid MA12070P I2C address"),
             (&["--address", "0x24"], "invalid MA12070P I2C address"),
             (&["--address", "0x5C"], "invalid MA12070P I2C address"),
+            (&["--set-volume"], "missing value for --set-volume"),
+            (&["--set-volume", "abc"], "expected an integer 0-144"),
+            (&["--set-volume", "-5"], "expected an integer 0-144"),
+            (&["--set-volume", "145"], "expected 0-144"),
+            (&["--set-mute"], "missing value for --set-mute"),
+            (&["--set-mute", "maybe"], "expected 'on' or 'off'"),
+            (&["--set-pm"], "missing value for --set-pm"),
+            (&["--set-pm", "4"], "expected 0-3"),
+            (&["--set-pm", "x"], "expected an integer 0-3"),
+            (&["--set-profile"], "missing value for --set-profile"),
+            (&["--set-profile", "5"], "expected 0-4"),
+            (&["--set-i2s"], "missing value for --set-i2s"),
+            (&["--set-i2s", "5"], "expected 0-4"),
+            (&["--set-gain"], "missing value for --set-gain"),
+            (&["--set-gain", "4"], "expected 0-3"),
         ],
     );
 }
@@ -795,7 +810,7 @@ fn amp_info_cli_mock_execution_and_fault_handling() {
 
     use speaker_common::diag::{CommonCliOptions, OutputFormat};
     use speaker_diagnostics::cli::amp::{
-        AmpStats, CliOptions, handle_amp_iteration, print_header, run_app,
+        AmpStats, CliOptions, SetValues, handle_amp_iteration, print_header, run_app,
     };
     use speaker_hardware::{AmpDevice, AmpErrorFlags, AmpI2cAddress};
 
@@ -812,6 +827,7 @@ fn amp_info_cli_mock_execution_and_fault_handling() {
         },
         address: AmpI2cAddress::default(),
         clear: false,
+        set: SetValues::default(),
     };
     let code = run_app(&amp, &once_opts);
     assert_eq!(code, ExitCode::SUCCESS);
@@ -831,6 +847,7 @@ fn amp_info_cli_mock_execution_and_fault_handling() {
         },
         address: AmpI2cAddress::default(),
         clear: false,
+        set: SetValues::default(),
     };
     let code = run_app(&amp, &multi_opts);
     assert_eq!(code, ExitCode::SUCCESS);
@@ -858,6 +875,7 @@ fn amp_info_cli_mock_execution_and_fault_handling() {
         },
         address: AmpI2cAddress::default(),
         clear: false,
+        set: SetValues::default(),
     };
     let code = run_app(&amp, &json_opts);
     assert_eq!(code, ExitCode::SUCCESS);
