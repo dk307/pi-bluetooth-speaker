@@ -402,3 +402,41 @@ above.
   independent of the loaded dtb); GPIO async strategy pinned to
   `rppal` + `spawn_blocking` + `mpsc` (open question 4 resolved); test plan
   split into hardware-crate and service-level test files.
+
+## 9. Implementation Status (2026-11-11)
+
+- **Stage A — committed (`35b7b94`):** driver corrections in
+  `crates/hardware/src/amp.rs` per §6.1 ground truth: VLP volume encoding
+  (`0x40` reg = `168 − raw`), `enable_audio_processor()` / `enable_limiter()` /
+  `write_limiter_thresholds()`, `0x35` RMW mask preserving bits 7:3,
+  `REG_DCU_MON1 = 0x65`, `decode_vlp_raw()` + mock fidelity
+  (`mock_i2s_format_reg` / `mock_audio_proc_reg` / `mock_limiter_thresholds_dbfs`).
+- **Stage B — committed (`ac4c385`):** Phase 2 implemented in audio-manager:
+  - `I2cAmpBackend` over the `AmpDevice` write path; `backend_id()` rename.
+  - `amp_gpio.rs`: sole owner of GPIO14 (/ENABLE) / 15 (/MUTE) / 23 (error);
+    blocking `poll_interrupt` edge watch in `spawn_blocking` → async mpsc
+    (callback returns `false` to stop).
+  - `amp_controller.rs`: full §3.1 state machine — boot wake +
+    probe()-equivalent init (standard I2S, VLP, limiter, −15 dBFS) +
+    state-file reconcile; bounded one-shot 200 ms PLL handshake (production
+    constant unconditional; tests inject short deadlines via the
+    parameterized `pll_lock_handshake`); thermal −6 dB throttle; critical
+    fault recovery (mute → /ENABLE cycle → full re-init → Muted); tokio
+    mutex state mirror; transactional mutation after successful writes.
+  - Config: `control_mode` (`"i2c"` default / `"alsa"` legacy), GPIO pins
+    (14/15/23 defaults), `safety_tick`.
+  - D-Bus: `with_commands()` i2c-mode constructor dispatches through the
+    controller loop with oneshot replies; legacy direct path retained.
+  - `i2c_mute.rs` deleted; alsa-mode `RealAmpBackend` mutes via `AmpDevice`
+    (single implementation of the `0x36` bit 7 RMW).
+  - Tests: `tests/amp_controller_integration.rs` (10) +
+    `tests/amp_backend_i2c_integration.rs` (7), fully mocked seams; all
+    local gates green.
+- **Open items (Phase 4/5 not yet done):**
+  - Production lifecycle events (`StreamStarting`/`StreamStopping`) are not
+    yet fed from a real source: the command channel + D-Bus dispatch exist,
+    but no systemd-unit or CamillaDSP watcher is wired in. Until then the
+    unmute path is exercisable via D-Bus `SetMute(false)` + `StreamStarting`
+    only from tests/diagnostics.
+  - Pi deployment (`scripts/deploy_binaries.sh`), service enablement in i2c
+    mode, and the live Phase 5 validation matrix are pending user approval.
