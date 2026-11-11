@@ -64,7 +64,7 @@ pub enum CtrlState {
 }
 
 /// Command payload (without the reply channel).
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AmpCommandKind {
     /// Volume change (percent 0..100); valid in every state.
     SetLevel(u8),

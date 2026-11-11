@@ -40,6 +40,19 @@ pub struct Config {
     #[serde(default = "default_safety_tick")]
     pub safety_tick: bool,
 
+    /// Enable the DSP stream-lifecycle watcher (plan §11.3): polls the
+    /// CamillaDSP engine state and emits `StreamStarting`/`StreamStopping`
+    /// edges to the controller. Disabled = the amp is driven only by D-Bus
+    /// commands (logged at boot).
+    #[serde(default = "default_dsp_watch")]
+    pub dsp_watch_enabled: bool,
+
+    /// Idle poll interval for the DSP watcher (ms). While the engine is
+    /// Running the watcher polls at half this interval (adaptive, plan
+    /// §11.3: 250 ms playing / 500 ms idle at the default).
+    #[serde(default = "default_dsp_poll_interval_ms")]
+    pub dsp_poll_interval_ms: u64,
+
     /// Path to the runtime state file.
     #[serde(default = "default_state_path")]
     pub state_path: PathBuf,
@@ -75,6 +88,14 @@ fn default_booster_pin() -> u8 {
 
 fn default_safety_tick() -> bool {
     true
+}
+
+fn default_dsp_watch() -> bool {
+    true
+}
+
+fn default_dsp_poll_interval_ms() -> u64 {
+    500
 }
 
 fn default_state_path() -> PathBuf {
@@ -131,6 +152,8 @@ impl Default for Config {
             error_gpio_pin: default_error_pin(),
             booster_gpio_pin: default_booster_pin(),
             safety_tick: default_safety_tick(),
+            dsp_watch_enabled: default_dsp_watch(),
+            dsp_poll_interval_ms: default_dsp_poll_interval_ms(),
             state_path: default_state_path(),
             log_level: None,
         }

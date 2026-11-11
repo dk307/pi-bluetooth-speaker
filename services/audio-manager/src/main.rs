@@ -38,10 +38,13 @@ mod config;
 #[allow(dead_code)]
 mod dbus_api;
 #[allow(dead_code)]
+mod dsp_watch;
+#[allow(dead_code)]
 mod error;
 mod state_file;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use tokio::signal::unix::{SignalKind, signal};
@@ -71,6 +74,8 @@ async fn run_daemon(config: Config) -> anyhow::Result<()> {
         mute_pin = config.mute_gpio_pin,
         error_pin = config.error_gpio_pin,
         safety_tick = config.safety_tick,
+        dsp_watch_enabled = config.dsp_watch_enabled,
+        dsp_poll_interval_ms = config.dsp_poll_interval_ms,
         state_path = %config.state_path.display(),
         "Audio-manager configuration resolved"
     );
@@ -159,6 +164,26 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<AmpCommand>(32);
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
+
+    // 6b. DSP stream-lifecycle watcher (plan §11.3): polls the CamillaDSP
+    //     engine state and emits StreamStarting/Stopping edges onto the
+    //     command channel. Exits when the channel closes with the
+    //     controller loop.
+    if config.dsp_watch_enabled {
+        let dsp_device = speaker_dsp::DspDevice::new();
+        let watcher_cmd_tx = cmd_tx.clone();
+        tokio::spawn(dsp_watch::run(
+            dsp_device,
+            watcher_cmd_tx,
+            Duration::from_millis(config.dsp_poll_interval_ms),
+        ));
+        info!(
+            poll_interval_ms = config.dsp_poll_interval_ms,
+            "DSP stream-lifecycle watcher enabled"
+        );
+    } else {
+        info!("DSP stream-lifecycle watcher disabled by configuration");
+    }
 
     let mirror = controller.mirror();
     let interface =

@@ -9,6 +9,7 @@ pub mod amp_gpio;
 pub mod amp_state;
 pub mod config;
 pub mod dbus_api;
+pub mod dsp_watch;
 pub mod error;
 pub mod state_file;
 
