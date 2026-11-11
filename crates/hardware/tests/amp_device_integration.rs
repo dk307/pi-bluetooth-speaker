@@ -556,3 +556,346 @@ async fn concurrent_device_clones_read_and_clear() {
     h2.await.unwrap();
     let _ = amp.read_status().unwrap();
 }
+
+// === Phase 1.5 Write-path tests ===
+
+#[test]
+fn mock_write_master_volume_and_read() {
+    let (amp, mock) = AmpDevice::new_mocked();
+    // Default mock volume is 116 (50%)
+    assert_eq!(mock.mock_master_volume_raw(), 116);
+
+    // Write new volume
+    amp.write_master_volume(144).unwrap(); // 0 dB
+    assert_eq!(mock.mock_master_volume_raw(), 144);
+
+    amp.write_master_volume(0).unwrap(); // -144 dB (mute)
+    assert_eq!(mock.mock_master_volume_raw(), 0);
+
+    amp.write_master_volume(72).unwrap(); // mid-range
+    assert_eq!(mock.mock_master_volume_raw(), 72);
+}
+
+#[test]
+fn mock_write_serial_mute_and_read() {
+    let (amp, mock) = AmpDevice::new_mocked();
+    assert!(!mock.mock_serial_muted());
+
+    amp.write_serial_mute(true).unwrap();
+    assert!(mock.mock_serial_muted());
+
+    amp.write_serial_mute(false).unwrap();
+    assert!(!mock.mock_serial_muted());
+}
+
+#[test]
+fn mock_write_power_mode_ctrl_and_read() {
+    let (amp, mock) = AmpDevice::new_mocked();
+    // Default: manualPM=1 (bit6), PM_man=2 (bits5:4) -> decoded PM_man = 2
+    assert_eq!(mock.mock_pm_ctrl(), 2);
+
+    amp.write_power_mode_ctrl(0).unwrap(); // PMP0
+    assert_eq!(mock.mock_pm_ctrl(), 0);
+
+    amp.write_power_mode_ctrl(3).unwrap(); // PMP3
+    assert_eq!(mock.mock_pm_ctrl(), 3);
+}
+
+#[test]
+fn mock_write_power_mode_profile_and_read() {
+    let (amp, mock) = AmpDevice::new_mocked();
+    // Default PMP2
+    assert_eq!(mock.mock_pm_profile(), 2);
+
+    amp.write_power_mode_profile(0).unwrap(); // PMP0
+    assert_eq!(mock.mock_pm_profile(), 0);
+
+    amp.write_power_mode_profile(4).unwrap(); // PMP4
+    assert_eq!(mock.mock_pm_profile(), 4);
+}
+
+#[test]
+fn mock_write_i2s_format_and_read() {
+    let (amp, mock) = AmpDevice::new_mocked();
+    // Default: Standard I2S = 0
+    assert_eq!(mock.mock_i2s_format(), 0);
+
+    amp.write_i2s_format(1).unwrap(); // Left-Justified
+    assert_eq!(mock.mock_i2s_format(), 1);
+
+    amp.write_i2s_format(4).unwrap(); // Right-Justified 24-bit
+    assert_eq!(mock.mock_i2s_format(), 4);
+}
+
+#[test]
+fn mock_write_audio_in_mode_and_read() {
+    let (amp, mock) = AmpDevice::new_mocked();
+    // Default: 20dB gain = 0
+    assert_eq!(mock.mock_audio_in_mode(), 0);
+
+    amp.write_audio_in_mode(1).unwrap(); // 26dB
+    assert_eq!(mock.mock_audio_in_mode(), 1);
+
+    amp.write_audio_in_mode(3).unwrap(); // 36dB
+    assert_eq!(mock.mock_audio_in_mode(), 3);
+}
+
+#[tokio::test]
+async fn async_write_methods_work_on_mock() {
+    let (amp, mock) = AmpDevice::new_mocked();
+
+    // Test async write_master_volume
+    amp.write_master_volume_async(100).await.unwrap();
+    assert_eq!(mock.mock_master_volume_raw(), 100);
+
+    // Test async write_serial_mute
+    amp.write_serial_mute_async(true).await.unwrap();
+    assert!(mock.mock_serial_muted());
+
+    // Test async write_power_mode_ctrl
+    amp.write_power_mode_ctrl_async(1).await.unwrap();
+    assert_eq!(mock.mock_pm_ctrl(), 1);
+
+    // Test async write_power_mode_profile
+    amp.write_power_mode_profile_async(3).await.unwrap();
+    assert_eq!(mock.mock_pm_profile(), 3);
+
+    // Test async write_i2s_format
+    amp.write_i2s_format_async(2).await.unwrap();
+    assert_eq!(mock.mock_i2s_format(), 2);
+
+    // Test async clear_latched_errors (aliased as clear_error_handler_async was removed)
+    amp.clear_latched_errors_async().await.unwrap();
+    // Just verify it doesn't error
+}
+
+#[test]
+fn mock_fault_injection_on_write_paths() {
+    let (amp, mock) = AmpDevice::new_mocked();
+
+    // Inject fault
+    mock.set_fault(Some("injected write fault".into()));
+
+    // All write methods should return the fault
+    assert!(amp.write_master_volume(100).unwrap_err().is_mock_fault());
+    assert!(amp.write_serial_mute(true).unwrap_err().is_mock_fault());
+    assert!(amp.write_power_mode_ctrl(0).unwrap_err().is_mock_fault());
+    assert!(amp.write_power_mode_profile(0).unwrap_err().is_mock_fault());
+    assert!(amp.write_i2s_format(0).unwrap_err().is_mock_fault());
+    assert!(amp.write_audio_in_mode(0).unwrap_err().is_mock_fault());
+
+    // Clear fault
+    mock.set_fault(None);
+    amp.write_master_volume(100).unwrap();
+}
+
+// === Embedded-hal mock bus tests (Phase 1.5) ===
+// These tests exercise the HardwareDevice implementation directly using
+// an embedded-hal mock bus, covering register-level logic that the mock backend doesn't.
+
+mod eh_mock_bus {
+    use embedded_hal::blocking::i2c::{Read, Write, WriteRead};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    /// Simple in-memory I2C register map for testing `HardwareDevice` logic.
+    /// Uses shared state (Rc<`RefCell`<...>>) so clones observe the same register values.
+    #[derive(Debug, Default, Clone)]
+    pub struct MockBus {
+        registers: Rc<RefCell<HashMap<u8, u8>>>,
+        /// Registers that are stuck at a specific value (simulates hardware
+        /// that accepts the transaction but ignores writes — read-back returns
+        /// the stuck value, exercising write verification paths).
+        stuck_registers: Rc<RefCell<HashMap<u8, u8>>>,
+    }
+
+    impl MockBus {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn with_register(self, reg: u8, val: u8) -> Self {
+            self.registers.borrow_mut().insert(reg, val);
+            self
+        }
+
+        /// Make a register stuck at a specific value (simulates hardware that ignores writes)
+        pub fn with_stuck_register(self, reg: u8, val: u8) -> Self {
+            self.stuck_registers.borrow_mut().insert(reg, val);
+            self.registers.borrow_mut().insert(reg, val);
+            self
+        }
+
+        /// Read the effective register value (stuck value wins over written value).
+        pub fn get_register(&self, reg: u8) -> Option<u8> {
+            if let Some(val) = self.stuck_registers.borrow().get(&reg) {
+                return Some(*val);
+            }
+            self.registers.borrow().get(&reg).copied()
+        }
+
+        fn write_register(&self, reg: u8, val: u8) {
+            // Stuck registers silently ignore writes.
+            if !self.stuck_registers.borrow().contains_key(&reg) {
+                self.registers.borrow_mut().insert(reg, val);
+            }
+        }
+    }
+
+    impl Write for MockBus {
+        type Error = &'static str;
+
+        fn write(&mut self, _address: u8, bytes: &[u8]) -> Result<(), Self::Error> {
+            // Register write transaction: [reg, val]. Empty writes are probes.
+            if bytes.len() >= 2 {
+                self.write_register(bytes[0], bytes[1]);
+            }
+            Ok(())
+        }
+    }
+
+    // Standard embedded-hal 0.2.7 Read trait: read(address, buffer)
+    impl Read for MockBus {
+        type Error = &'static str;
+
+        fn read(&mut self, _address: u8, _buffer: &mut [u8]) -> Result<(), Self::Error> {
+            // Not used by `HardwareDevice`; register reads go through `write_read`.
+            Ok(())
+        }
+    }
+
+    // Standard embedded-hal 0.2.7 WriteRead trait (write-read to specific address)
+    impl WriteRead for MockBus {
+        type Error = &'static str;
+
+        fn write_read(
+            &mut self,
+            _address: u8,
+            bytes: &[u8],
+            buffer: &mut [u8],
+        ) -> Result<(), Self::Error> {
+            // Register read transaction: write the register pointer, read back one byte.
+            if bytes.len() == 1 && buffer.len() == 1 {
+                let reg = bytes[0];
+                buffer[0] = self.get_register(reg).unwrap_or(0);
+            }
+            Ok(())
+        }
+    }
+}
+
+mod hardware_device_tests {
+    use super::eh_mock_bus::MockBus;
+    use speaker_hardware::amp::{
+        AmpI2cAddress, REG_AUDIO_IN_MODE, REG_AUDIO_PROC, REG_I2S_FORMAT, REG_PM_CTRL,
+        REG_PM_PROFILE, REG_VOL_DB_MASTER, REG_VOL_LSB_MASTER,
+    };
+    use speaker_hardware::amp_test_helpers::HardwareDevice;
+
+    fn addr() -> AmpI2cAddress {
+        AmpI2cAddress::default()
+    }
+
+    #[test]
+    fn hardware_device_write_master_volume_encodes_correctly() {
+        let bus = MockBus::new();
+        let mut dev = HardwareDevice::new(bus.clone(), addr());
+
+        // Write raw = 100 (0x64) -> int_reg = 0x64, frac_reg = 0
+        dev.write_master_volume(100).unwrap();
+
+        assert_eq!(bus.get_register(REG_VOL_DB_MASTER), Some(100));
+        assert_eq!(bus.get_register(REG_VOL_LSB_MASTER), Some(0));
+    }
+
+    #[test]
+    fn hardware_device_write_master_volume_rejects_out_of_range() {
+        let bus = MockBus::new();
+        let mut dev = HardwareDevice::new(bus, addr());
+
+        let err = dev.write_master_volume(145).unwrap_err();
+        assert!(err.is_invalid_argument());
+        assert!(err.summary().contains("master_volume_raw"));
+    }
+
+    #[test]
+    fn hardware_device_write_serial_mute_rmw_and_verify() {
+        let bus = MockBus::new().with_register(REG_AUDIO_PROC, 0x00);
+        let mut dev = HardwareDevice::new(bus.clone(), addr());
+
+        // Mute: RMW bit 7
+        dev.write_serial_mute(true).unwrap();
+        assert_eq!(bus.get_register(REG_AUDIO_PROC), Some(0x80));
+
+        // Unmute: RMW bit 7 clear
+        dev.write_serial_mute(false).unwrap();
+        assert_eq!(bus.get_register(REG_AUDIO_PROC), Some(0x00));
+    }
+
+    #[test]
+    fn hardware_device_write_serial_mute_verify_fails_on_mismatch() {
+        // Simulate hardware that ignores the write (stuck at 0)
+        let bus = MockBus::new().with_stuck_register(REG_AUDIO_PROC, 0x00);
+        let mut dev = HardwareDevice::new(bus, addr());
+
+        // This will write 0x80, but read-back returns 0x00 -> verification fails
+        let err = dev.write_serial_mute(true).unwrap_err();
+        assert!(err.is_verification());
+        assert!(err.summary().contains("0x36"));
+        assert!(err.summary().contains("0x80"));
+        assert!(err.summary().contains("0x00"));
+    }
+
+    #[test]
+    fn hardware_device_write_power_mode_ctrl_encodes_pm_man() {
+        let bus = MockBus::new().with_register(REG_PM_CTRL, 0x00);
+        let mut dev = HardwareDevice::new(bus.clone(), addr());
+
+        // Write PM_man = 2 (PMP2) -> should encode as 0x40 | (2 << 4) = 0x60
+        dev.write_power_mode_ctrl(2).unwrap();
+        assert_eq!(bus.get_register(REG_PM_CTRL), Some(0x60));
+
+        // Transition PMP2 -> PMP0 should clear old PM_man bits
+        dev.write_power_mode_ctrl(0).unwrap();
+        assert_eq!(bus.get_register(REG_PM_CTRL), Some(0x40)); // manualPM=1, PM_man=0
+    }
+
+    #[test]
+    fn hardware_device_write_power_mode_profile_validates_range() {
+        let bus = MockBus::new().with_register(REG_PM_PROFILE, 0x00);
+        let mut dev = HardwareDevice::new(bus.clone(), addr());
+
+        dev.write_power_mode_profile(4).unwrap();
+        assert_eq!(bus.get_register(REG_PM_PROFILE), Some(4));
+
+        let err = dev.write_power_mode_profile(5).unwrap_err();
+        assert!(err.is_invalid_argument());
+    }
+
+    #[test]
+    fn hardware_device_write_i2s_format_validates_range() {
+        let bus = MockBus::new().with_register(REG_I2S_FORMAT, 0x00);
+        let mut dev = HardwareDevice::new(bus.clone(), addr());
+
+        dev.write_i2s_format(3).unwrap();
+        assert_eq!(bus.get_register(REG_I2S_FORMAT), Some(3));
+
+        let err = dev.write_i2s_format(5).unwrap_err();
+        assert!(err.is_invalid_argument());
+    }
+
+    #[test]
+    fn hardware_device_write_audio_in_mode_validates_range() {
+        // Register 0x25 typically has bit 7 set at reset (0x80), preserved by mask 0x9F
+        let bus = MockBus::new().with_register(REG_AUDIO_IN_MODE, 0x80);
+        let mut dev = HardwareDevice::new(bus.clone(), addr());
+
+        dev.write_audio_in_mode(3).unwrap();
+        // Gain 3 -> bits 6:5 = 11, with bit 7 preserved -> 0x80 | 0x60 = 0xE0
+        assert_eq!(bus.get_register(REG_AUDIO_IN_MODE), Some(0xE0));
+
+        let err = dev.write_audio_in_mode(4).unwrap_err();
+        assert!(err.is_invalid_argument());
+    }
+}

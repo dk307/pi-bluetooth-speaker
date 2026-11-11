@@ -4927,7 +4927,6 @@ dependencies = [
  "serde",
  "serde_json",
  "speaker-common",
- "speaker-hardware",
  "tokio",
  "tracing",
 ]

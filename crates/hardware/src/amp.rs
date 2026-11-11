@@ -22,6 +22,7 @@ use std::backtrace::Backtrace;
 use std::fmt::{self, Display, Formatter};
 use std::sync::{Arc, Mutex, RwLock};
 
+use embedded_hal::blocking::i2c::{Read, Write, WriteRead};
 use rppal::i2c::I2c;
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +62,67 @@ pub const REG_ERROR_ACC: u8 = 0x6D;
 
 /// MA12070P real-time live error status register address.
 pub const REG_ERROR_LIVE: u8 = 0x7C;
+
+/// MA12070P power mode control register address (0x00).
+/// Bit 6: manualPM (1 = manual power mode control)
+/// Bits 5:4: `PM_man` (0-3 = Power Mode 0-3 selection)
+pub const REG_PM_CTRL: u8 = 0x00;
+
+/// MA12070P power mode profile register address (0x1D).
+/// Bits 2:0: `PMprofile` (0-4 = PMP0-PMP4 selection)
+pub const REG_PM_PROFILE: u8 = 0x1D;
+
+/// MA12070P audio in mode register address (0x25).
+/// Bits 6:5: gain select (0 = 20dB, 1 = 26dB, 2 = 32dB, 3 = 36dB)
+pub const REG_AUDIO_IN_MODE: u8 = 0x25;
+
+/// MA12070P I2S format register address (0x35).
+/// Bits 2:0: I2S format (0 = Standard I2S, 1 = Left-Justified, 2 = RJ-16, 3 = RJ-20, 4 = RJ-24)
+pub const REG_I2S_FORMAT: u8 = 0x35;
+
+/// MA12070P audio processor control register address (0x36).
+/// Bit 7: `audio_proc_mute` (1 = mute, 0 = play)
+pub const REG_AUDIO_PROC: u8 = 0x36;
+
+/// MA12070P master volume integer dB register address (0x40).
+/// Raw value 0..144 maps to -144..0 dB (raw = -dB).
+pub const REG_VOL_DB_MASTER: u8 = 0x40;
+
+/// MA12070P master volume fractional 0.25 dB register address (0x41).
+/// Bits 1:0: fractional steps (0, 0.25, 0.5, 0.75 dB)
+pub const REG_VOL_LSB_MASTER: u8 = 0x41;
+
+/// MA12070P channel 0 volume integer dB register address (0x42).
+/// Channels 0-3 at 0x42..=0x45. Raw 0..144 maps to +24..-120 dB (raw = 24 - dB).
+pub const REG_VOL_DB_CH0: u8 = 0x42;
+
+/// MA12070P channel volume fractional 0.25 dB register address (0x46).
+/// Bits 1:0 per channel (0, 0.25, 0.5, 0.75 dB).
+pub const REG_VOL_LSB_CH: u8 = 0x46;
+
+/// MA12070P channel 0 DRC limiter threshold integer dB register address (0x47).
+/// Channels 0-3 at 0x47..=0x4A. Raw 0..144 maps to +24..-120 dB (raw = 24 - dB).
+pub const REG_THR_DB_CH0: u8 = 0x47;
+
+/// MA12070P channel limiter threshold fractional 0.25 dB register address (0x4B).
+/// Bits 1:0 per channel (0, 0.25, 0.5, 0.75 dB).
+pub const REG_THR_LSB_CH: u8 = 0x4B;
+
+/// Pure helper: apply or clear the serial mute bit (0x36 bit 7) in a register value.
+#[must_use]
+pub fn apply_mute_bit(reg: u8, muted: bool) -> u8 {
+    if muted {
+        reg | (1 << 7)
+    } else {
+        reg & !(1 << 7)
+    }
+}
+
+/// Pure helper: extract mute state from register 0x36 bit 7.
+#[must_use]
+pub fn is_muted_bit(reg: u8) -> bool {
+    reg & (1 << 7) != 0
+}
 
 /// Validated 7-bit I2C slave address for the MA12070P amplifier (`0x20..=0x23`).
 ///
@@ -829,10 +891,29 @@ impl AmpHardwareInfo {
 #[derive(Debug)]
 pub(crate) enum AmpErrorKind {
     I2c(rppal::i2c::Error),
-    Cancelled { message: Box<str> },
-    InvalidAddress { address: u8 },
-    UnsupportedBus { bus: u8 },
-    MockFault { message: Box<str> },
+    Cancelled {
+        message: Box<str>,
+    },
+    InvalidAddress {
+        address: u8,
+    },
+    UnsupportedBus {
+        bus: u8,
+    },
+    MockFault {
+        message: Box<str>,
+    },
+    /// Register write verification failed (read-back mismatch).
+    Verification {
+        register: u8,
+        wrote: u8,
+        read: u8,
+    },
+    /// Invalid argument value for a domain operation.
+    InvalidArgument {
+        param: &'static str,
+        value: u16,
+    },
 }
 
 /// Canonical error returned by MA12070P amplifier drivers and utilities.
@@ -874,6 +955,18 @@ impl AmpError {
         })
     }
 
+    pub(crate) fn verification(register: u8, wrote: u8, read: u8) -> Self {
+        Self::new(AmpErrorKind::Verification {
+            register,
+            wrote,
+            read,
+        })
+    }
+
+    pub(crate) fn invalid_argument(param: &'static str, value: u16) -> Self {
+        Self::new(AmpErrorKind::InvalidArgument { param, value })
+    }
+
     /// Returns `true` if this error was caused by an I2C communication or bus failure.
     #[must_use]
     pub const fn is_i2c(&self) -> bool {
@@ -904,6 +997,18 @@ impl AmpError {
         matches!(self.kind, AmpErrorKind::MockFault { .. })
     }
 
+    /// Returns `true` if this error was caused by a register write verification mismatch.
+    #[must_use]
+    pub const fn is_verification(&self) -> bool {
+        matches!(self.kind, AmpErrorKind::Verification { .. })
+    }
+
+    /// Returns `true` if this error was caused by an invalid argument value.
+    #[must_use]
+    pub const fn is_invalid_argument(&self) -> bool {
+        matches!(self.kind, AmpErrorKind::InvalidArgument { .. })
+    }
+
     /// Returns the captured backtrace for this error.
     #[must_use]
     pub const fn backtrace(&self) -> &Backtrace {
@@ -927,6 +1032,17 @@ impl AmpError {
                 )
             }
             AmpErrorKind::MockFault { message } => write!(f, "injected mock fault: {message}"),
+            AmpErrorKind::Verification {
+                register,
+                wrote,
+                read,
+            } => write!(
+                f,
+                "register 0x{register:02X} verification failed: wrote 0x{wrote:02X}, read back 0x{read:02X}"
+            ),
+            AmpErrorKind::InvalidArgument { param, value } => {
+                write!(f, "invalid argument {param}: value {value} out of range")
+            }
         }
     }
 }
@@ -945,6 +1061,15 @@ impl std::error::Error for AmpError {
 impl From<rppal::i2c::Error> for AmpError {
     fn from(err: rppal::i2c::Error) -> Self {
         Self::i2c(err)
+    }
+}
+
+/// Test-bus seam: lets `embedded-hal` mock buses with `&'static str` errors
+/// satisfy the `AmpError: From<E>` bound of [`HardwareDevice`] in integration
+/// tests. Bus errors from such mocks are surfaced as mock faults.
+impl From<&'static str> for AmpError {
+    fn from(err: &'static str) -> Self {
+        Self::mock_fault(err)
     }
 }
 
@@ -968,6 +1093,13 @@ struct MockState {
     live_errors: AmpErrorFlags,
     latched_errors: AmpErrorFlags,
     fault: Option<Box<str>>,
+    // Write-path mock state (Phase 1.5)
+    mock_master_volume_raw: u16,
+    mock_serial_muted: bool,
+    mock_pm_ctrl: u8,
+    mock_pm_profile: u8,
+    mock_i2s_format: u8,
+    mock_audio_in_mode: u8,
 }
 
 impl AmpDeviceMock {
@@ -986,6 +1118,13 @@ impl AmpDeviceMock {
                 live_errors: AmpErrorFlags::NONE,
                 latched_errors: AmpErrorFlags::NONE,
                 fault: None,
+                // Write-path defaults
+                mock_master_volume_raw: 116, // ≈ -28 dB (raw = 144 + dB)
+                mock_serial_muted: false,
+                mock_pm_ctrl: 0x60, // manualPM=1 (bit6), PM_man=2 (bits5:4) -> PMP2
+                mock_pm_profile: 2, // PMP2
+                mock_i2s_format: 0, // Standard I2S
+                mock_audio_in_mode: 0, // 20dB gain
             })),
         }
     }
@@ -1082,29 +1221,263 @@ impl AmpDeviceMock {
         }
         Ok(state.latched_errors)
     }
+
+    // === Write-path mock methods (Phase 1.5) ===
+
+    fn write_master_volume(&self, raw: u16) -> Result<(), AmpError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(AmpError::mock_fault(fault.clone()));
+        }
+        if raw > 144 {
+            return Err(AmpError::invalid_argument("master_volume_raw", raw));
+        }
+        // Store the same encoded register values as hardware: int = raw, frac = 0
+        state.mock_master_volume_raw = raw;
+        Ok(())
+    }
+
+    fn write_serial_mute(&self, muted: bool) -> Result<(), AmpError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(AmpError::mock_fault(fault.clone()));
+        }
+        // Models the hardware RMW outcome on register 0x36 bit 7 (audio_proc_mute);
+        // verify-by-re-read always succeeds in the mock unless a fault is injected.
+        state.mock_serial_muted = muted;
+        Ok(())
+    }
+
+    fn write_power_mode_ctrl(&self, pm: u8) -> Result<(), AmpError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(AmpError::mock_fault(fault.clone()));
+        }
+        // Store the same encoded register value as hardware: (pm & 0x03) << 4 | 0x40
+        state.mock_pm_ctrl = 0x40 | ((pm & 0x03) << 4);
+        Ok(())
+    }
+
+    fn write_power_mode_profile(&self, profile: u8) -> Result<(), AmpError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(AmpError::mock_fault(fault.clone()));
+        }
+        if profile > 4 {
+            return Err(AmpError::invalid_argument("pm_profile", u16::from(profile)));
+        }
+        // Store encoded value: profile & 0x07
+        state.mock_pm_profile = profile & 0x07;
+        Ok(())
+    }
+
+    fn write_i2s_format(&self, format: u8) -> Result<(), AmpError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(AmpError::mock_fault(fault.clone()));
+        }
+        if format > 4 {
+            return Err(AmpError::invalid_argument("i2s_format", u16::from(format)));
+        }
+        // Store encoded value: format & 0x07
+        state.mock_i2s_format = format & 0x07;
+        Ok(())
+    }
+
+    fn write_audio_in_mode(&self, gain: u8) -> Result<(), AmpError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(AmpError::mock_fault(fault.clone()));
+        }
+        if gain > 3 {
+            return Err(AmpError::invalid_argument("audio_in_gain", u16::from(gain)));
+        }
+        // Store encoded value: (gain & 0x03) << 5
+        state.mock_audio_in_mode = (gain & 0x03) << 5;
+        Ok(())
+    }
+
+    // === Mock state setters for test inspection (Phase 1.5) ===
+
+    /// Get the mocked master volume raw value.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    #[must_use]
+    pub fn mock_master_volume_raw(&self) -> u16 {
+        self.state
+            .read()
+            .expect("mock lock poisoned")
+            .mock_master_volume_raw
+    }
+
+    /// Get the mocked serial mute state.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    #[must_use]
+    pub fn mock_serial_muted(&self) -> bool {
+        self.state
+            .read()
+            .expect("mock lock poisoned")
+            .mock_serial_muted
+    }
+
+    /// Get the mocked `PM_CTRL` decoded `PM_man` value (0-3).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    #[must_use]
+    pub fn mock_pm_ctrl(&self) -> u8 {
+        let encoded = self.state.read().expect("mock lock poisoned").mock_pm_ctrl;
+        (encoded >> 4) & 0x03
+    }
+
+    /// Get the mocked `PM_PROFILE` value (0-4).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    #[must_use]
+    pub fn mock_pm_profile(&self) -> u8 {
+        self.state
+            .read()
+            .expect("mock lock poisoned")
+            .mock_pm_profile
+    }
+
+    /// Get the mocked I2S format value (0-4).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    #[must_use]
+    pub fn mock_i2s_format(&self) -> u8 {
+        self.state
+            .read()
+            .expect("mock lock poisoned")
+            .mock_i2s_format
+    }
+
+    /// Get the mocked audio in mode gain value (0-3).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    #[must_use]
+    pub fn mock_audio_in_mode(&self) -> u8 {
+        let encoded = self
+            .state
+            .read()
+            .expect("mock lock poisoned")
+            .mock_audio_in_mode;
+        (encoded >> 5) & 0x03
+    }
+
+    /// Set the mocked master volume raw value directly (for test setup).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_mock_master_volume_raw(&self, raw: u16) {
+        self.state
+            .write()
+            .expect("mock lock poisoned")
+            .mock_master_volume_raw = raw;
+    }
+
+    /// Set the mocked serial mute state directly (for test setup).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_mock_serial_muted(&self, muted: bool) {
+        self.state
+            .write()
+            .expect("mock lock poisoned")
+            .mock_serial_muted = muted;
+    }
+
+    /// Set the mocked `PM_CTRL` value directly (for test setup).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_mock_pm_ctrl(&self, pm: u8) {
+        self.state.write().expect("mock lock poisoned").mock_pm_ctrl = pm;
+    }
+
+    /// Set the mocked `PM_PROFILE` value directly (for test setup).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_mock_pm_profile(&self, profile: u8) {
+        self.state
+            .write()
+            .expect("mock lock poisoned")
+            .mock_pm_profile = profile;
+    }
+
+    /// Set the mocked I2S format value directly (for test setup).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_mock_i2s_format(&self, format: u8) {
+        self.state
+            .write()
+            .expect("mock lock poisoned")
+            .mock_i2s_format = format;
+    }
+
+    /// Set the mocked audio in mode value directly (for test setup).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_mock_audio_in_mode(&self, gain: u8) {
+        self.state
+            .write()
+            .expect("mock lock poisoned")
+            .mock_audio_in_mode = gain;
+    }
 }
 
 /// Internal hardware peripheral device wrapping direct I2C bus transactions.
-struct HardwareDevice {
-    i2c: I2c,
+///
+/// Generic over `embedded_hal::blocking::i2c` traits to enable testing with embedded-hal mocks.
+/// Production code instantiates with `rppal::hal::I2c` (enabled by `rppal` `hal` feature).
+#[allow(
+    missing_debug_implementations,
+    reason = "Generic over I2C which may not implement Debug"
+)]
+pub struct HardwareDevice<I2C> {
+    i2c: I2C,
+    address: AmpI2cAddress,
 }
 
-impl HardwareDevice {
-    fn new(bus: u8, address: AmpI2cAddress) -> Result<Self, AmpError> {
-        let mut i2c = I2c::with_bus(bus)?;
-        i2c.set_slave_address(address.as_u16())?;
-        Ok(Self { i2c })
+impl<I2C, E> HardwareDevice<I2C>
+where
+    I2C: Write<Error = E> + Read<Error = E> + WriteRead<Error = E>,
+    AmpError: From<E>,
+{
+    pub fn new(i2c: I2C, address: AmpI2cAddress) -> Self {
+        // Probe is done by caller (with_bus_and_address uses set_slave_address)
+        // For embedded-hal mocks, no probe needed
+        Self { i2c, address }
     }
 
     fn read_reg(&mut self, reg: u8) -> Result<u8, AmpError> {
-        self.i2c.write(&[reg])?;
         let mut buf = [0u8; 1];
-        self.i2c.read(&mut buf)?;
+        self.i2c
+            .write_read(self.address.as_u8(), &[reg], &mut buf)?;
         Ok(buf[0])
     }
 
     fn write_reg(&mut self, reg: u8, val: u8) -> Result<(), AmpError> {
-        self.i2c.write(&[reg, val])?;
+        // Plain write transaction: `write_read` would clock a dummy byte out of
+        // the device via repeated-start read, which is not part of the
+        // MA12070P register-write protocol.
+        self.i2c.write(self.address.as_u8(), &[reg, val])?;
+        Ok(())
+    }
+
+    fn write_regs(&mut self, regs: &[(u8, u8)]) -> Result<(), AmpError> {
+        for (reg, val) in regs {
+            self.write_reg(*reg, *val)?;
+        }
         Ok(())
     }
 
@@ -1149,12 +1522,94 @@ impl HardwareDevice {
         let acc_err = self.read_reg(REG_ERROR_ACC)?;
         Ok(AmpErrorFlags::from_bits(acc_err))
     }
+
+    // === Write operations (Phase 1.5) ===
+
+    /// Write master volume (0x40 integer dB, 0x41 fractional 0.25 dB).
+    /// Raw = -dB (0 = -144 dB mute, 144 = 0 dB). Fractional in bits 1:0 of 0x41.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails or `raw > 144`.
+    pub fn write_master_volume(&mut self, raw: u16) -> Result<(), AmpError> {
+        const RAW_MAX: u16 = 144;
+        if raw > RAW_MAX {
+            return Err(AmpError::invalid_argument("master_volume_raw", raw));
+        }
+        let int_reg = raw as u8;
+        let frac_reg = 0; // amp_curve produces integer dB; frac reg reserved for 0.25 dB steps
+        self.write_regs(&[(REG_VOL_DB_MASTER, int_reg), (REG_VOL_LSB_MASTER, frac_reg)])
+    }
+
+    /// RMW of serial mute register 0x36 bit 7 with verify-by-re-read.
+    /// Live-verified implementation ported from audio-manager/i2c_mute.rs.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails or read-back verification fails.
+    pub fn write_serial_mute(&mut self, muted: bool) -> Result<(), AmpError> {
+        let reg = self.read_reg(REG_AUDIO_PROC)?;
+        let desired = apply_mute_bit(reg, muted);
+        self.write_reg(REG_AUDIO_PROC, desired)?;
+        let verify = self.read_reg(REG_AUDIO_PROC)?;
+        if is_muted_bit(verify) != muted {
+            return Err(AmpError::verification(REG_AUDIO_PROC, desired, verify));
+        }
+        Ok(())
+    }
+
+    /// RMW of `PM_CTRL` (0x00): set manualPM=1, `PM_man` from `PowerMode` (0-3).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    pub fn write_power_mode_ctrl(&mut self, pm: u8) -> Result<(), AmpError> {
+        let reg = self.read_reg(REG_PM_CTRL)?;
+        let desired = (reg & 0x0F) | 0x40 | ((pm & 0x03) << 4);
+        self.write_reg(REG_PM_CTRL, desired)
+    }
+
+    /// Write `PM_PROFILE` (0x1D) bits 2:0 (0-4).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails or `profile > 4`.
+    pub fn write_power_mode_profile(&mut self, profile: u8) -> Result<(), AmpError> {
+        if profile > 4 {
+            return Err(AmpError::invalid_argument("pm_profile", u16::from(profile)));
+        }
+        let reg = self.read_reg(REG_PM_PROFILE)?;
+        let desired = (reg & 0xF8) | (profile & 0x07);
+        self.write_reg(REG_PM_PROFILE, desired)
+    }
+
+    /// RMW of I2S format register 0x35 bits 2:0.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails or `format > 4`.
+    pub fn write_i2s_format(&mut self, format: u8) -> Result<(), AmpError> {
+        if format > 4 {
+            return Err(AmpError::invalid_argument("i2s_format", u16::from(format)));
+        }
+        let reg = self.read_reg(REG_I2S_FORMAT)?;
+        let desired = (reg & 0xF8) | (format & 0x07);
+        self.write_reg(REG_I2S_FORMAT, desired)
+    }
+
+    /// RMW of audio in mode register 0x25 bits 6:5.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails or `gain > 3`.
+    pub fn write_audio_in_mode(&mut self, gain: u8) -> Result<(), AmpError> {
+        if gain > 3 {
+            return Err(AmpError::invalid_argument("audio_in_gain", u16::from(gain)));
+        }
+        let reg = self.read_reg(REG_AUDIO_IN_MODE)?;
+        let desired = (reg & 0x9F) | ((gain & 0x03) << 5);
+        self.write_reg(REG_AUDIO_IN_MODE, desired)
+    }
 }
 
 /// Internal I2C / mock backend dispatch for [`AmpDevice`].
 enum Backend {
     Hardware {
-        device: Mutex<HardwareDevice>,
+        device: Mutex<HardwareDevice<I2c>>,
         bus: u8,
         address: AmpI2cAddress,
     },
@@ -1205,7 +1660,9 @@ impl AmpDevice {
     /// Returns [`AmpError`] if `bus` is not [`MA12070P_DEFAULT_I2C_BUS`] (`1`) or if the I2C bus cannot be opened.
     pub fn with_bus_and_address(bus: u8, address: AmpI2cAddress) -> Result<Self, AmpError> {
         validate_rpi3_bus(bus)?;
-        let device = HardwareDevice::new(bus, address)?;
+        let mut i2c = I2c::with_bus(bus)?;
+        i2c.set_slave_address(address.as_u16())?;
+        let device = HardwareDevice::new(i2c, address);
         Ok(Self {
             inner: Arc::new(Backend::Hardware {
                 device: Mutex::new(device),
@@ -1370,6 +1827,189 @@ impl AmpDevice {
         })
         .await
     }
+
+    // === Write operations (Phase 1.5) ===
+
+    /// Write master volume (0x40 integer dB, 0x41 fractional 0.25 dB).
+    /// Raw = -dB (0 = -144 dB mute, 144 = 0 dB). Caller maps percent→raw via `amp_curve::PERCENT_TO_RAW`.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails or `raw > 144`.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
+    pub fn write_master_volume(&self, raw: u16) -> Result<(), AmpError> {
+        match self.inner.as_ref() {
+            Backend::Hardware { device, .. } => device
+                .lock()
+                .expect("hardware device lock poisoned")
+                .write_master_volume(raw),
+            Backend::Mock(mock) => mock.write_master_volume(raw),
+        }
+    }
+
+    /// Write serial mute (0x36 bit 7) with verify-by-re-read.
+    /// Live-verified implementation.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails or verification mismatches.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
+    pub fn write_serial_mute(&self, muted: bool) -> Result<(), AmpError> {
+        match self.inner.as_ref() {
+            Backend::Hardware { device, .. } => device
+                .lock()
+                .expect("hardware device lock poisoned")
+                .write_serial_mute(muted),
+            Backend::Mock(mock) => mock.write_serial_mute(muted),
+        }
+    }
+
+    /// Write `PM_CTRL` (0x00): set manualPM=1, `PM_man` from `PowerMode` (0-3).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
+    pub fn write_power_mode_ctrl(&self, pm: u8) -> Result<(), AmpError> {
+        match self.inner.as_ref() {
+            Backend::Hardware { device, .. } => device
+                .lock()
+                .expect("hardware device lock poisoned")
+                .write_power_mode_ctrl(pm),
+            Backend::Mock(mock) => mock.write_power_mode_ctrl(pm),
+        }
+    }
+
+    /// Write `PM_PROFILE` (0x1D) bits 2:0 (0-4).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
+    pub fn write_power_mode_profile(&self, profile: u8) -> Result<(), AmpError> {
+        match self.inner.as_ref() {
+            Backend::Hardware { device, .. } => device
+                .lock()
+                .expect("hardware device lock poisoned")
+                .write_power_mode_profile(profile),
+            Backend::Mock(mock) => mock.write_power_mode_profile(profile),
+        }
+    }
+
+    /// Write I2S format (0x35) bits 2:0.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
+    pub fn write_i2s_format(&self, format: u8) -> Result<(), AmpError> {
+        match self.inner.as_ref() {
+            Backend::Hardware { device, .. } => device
+                .lock()
+                .expect("hardware device lock poisoned")
+                .write_i2s_format(format),
+            Backend::Mock(mock) => mock.write_i2s_format(format),
+        }
+    }
+
+    /// Write audio in mode (0x25) bits 6:5 gain select.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
+    pub fn write_audio_in_mode(&self, gain: u8) -> Result<(), AmpError> {
+        match self.inner.as_ref() {
+            Backend::Hardware { device, .. } => device
+                .lock()
+                .expect("hardware device lock poisoned")
+                .write_audio_in_mode(gain),
+            Backend::Mock(mock) => mock.write_audio_in_mode(gain),
+        }
+    }
+
+    // === Async write wrappers ===
+
+    /// Asynchronously write master volume without blocking the async runtime.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics.
+    pub async fn write_master_volume_async(&self, raw: u16) -> Result<(), AmpError> {
+        let this = self.clone();
+        run_blocking("MA12070P write master volume", move || {
+            this.write_master_volume(raw)
+        })
+        .await
+    }
+
+    /// Asynchronously write serial mute without blocking the async runtime.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails or verification mismatches.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics.
+    pub async fn write_serial_mute_async(&self, muted: bool) -> Result<(), AmpError> {
+        let this = self.clone();
+        run_blocking("MA12070P write serial mute", move || {
+            this.write_serial_mute(muted)
+        })
+        .await
+    }
+
+    /// Asynchronously write `PM_CTRL` without blocking the async runtime.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics.
+    pub async fn write_power_mode_ctrl_async(&self, pm: u8) -> Result<(), AmpError> {
+        let this = self.clone();
+        run_blocking("MA12070P write PM_CTRL", move || {
+            this.write_power_mode_ctrl(pm)
+        })
+        .await
+    }
+
+    /// Asynchronously write `PM_PROFILE` without blocking the async runtime.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics.
+    pub async fn write_power_mode_profile_async(&self, profile: u8) -> Result<(), AmpError> {
+        let this = self.clone();
+        run_blocking("MA12070P write PM_PROFILE", move || {
+            this.write_power_mode_profile(profile)
+        })
+        .await
+    }
+
+    /// Asynchronously write I2S format without blocking the async runtime.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics.
+    pub async fn write_i2s_format_async(&self, format: u8) -> Result<(), AmpError> {
+        let this = self.clone();
+        run_blocking("MA12070P write I2S format", move || {
+            this.write_i2s_format(format)
+        })
+        .await
+    }
 }
 
 const _: () = {
@@ -1378,7 +2018,7 @@ const _: () = {
     assert_send_sync::<AmpDeviceMock>();
 };
 
-#[cfg(feature = "test-util")]
+/// Test utilities for integration tests and unit tests.
 pub mod test_helpers {
     use super::AmpError;
 
@@ -1405,4 +2045,7 @@ pub mod test_helpers {
     pub fn make_mock_fault_error(detail: &str) -> AmpError {
         AmpError::mock_fault(detail)
     }
+
+    /// Re-export `HardwareDevice` for embedded-hal mock bus testing.
+    pub use super::HardwareDevice;
 }

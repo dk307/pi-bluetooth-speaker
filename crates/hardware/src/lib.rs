@@ -25,7 +25,6 @@ pub use amp::{
     REG_EH_CLEAR, REG_ERROR_ACC, REG_ERROR_LIVE, REG_POWER_MODE,
 };
 
-#[cfg(feature = "test-util")]
 #[doc(inline)]
 pub use amp::test_helpers as amp_test_helpers;
 
