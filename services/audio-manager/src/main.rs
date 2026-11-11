@@ -1,28 +1,37 @@
 //! Audio Manager — single owner of Merus MA12070P amplifier volume/mute.
 //!
-//! This daemon is the exclusive hardware owner of the `A.Mstr Vol` register.
+//! This daemon is the exclusive hardware owner of the MA12070P amplifier.
 //! All other components (bt-manager, screen-manager, future sources) are
 //! clients that call the D-Bus API: `SetLevel(percent)`, `SetMute(bool)`.
 //!
-//! Design principles (per docs/audio_manager_plan.md):
-//! - **Event-driven, zero polling**: only `tokio::select!` over incoming D-Bus
-//!   method calls; no timers, no keepalive, no periodic re-sync.
-//! - **Single writer**: all mixer transactions serialized through one
-//!   `Mutex<AmpState>`; state mutated only after successful mixer write.
-//! - **Transactional mutation**: fallible ALSA write first, then commit state.
-//! - **Mute = serial mute register only** (MA12070P `0x36` bit 7 via I2C
-//!   `0x20`, instant and driver-proof); the mixer level stays live on the
-//!   hardware, so no pre-mute volume is stored or restored.
+//! Two control modes (config `control_mode`):
+//! - **`i2c`** (default, Phase 2): event-driven sole hardware supervisor in
+//!   `dtoverlay=hifiberry-dac` mode. GPIO `/ENABLE`/`/MUTE`/`error` bring-up,
+//!   VLP volume registers, serial mute, PLL-lock-gated unmute, fault
+//!   recovery — see [`amp_controller`].
+//! - **`alsa`** (legacy, retained until cutover is verified): kernel-driver
+//!   mixer mode (`A.Mstr Vol`) with I2C serial mute — see [`amp_backend`].
+//!
+//! Design principles (per docs/audio_manager_plan.md + Phase 2 plan):
+//! - **Event-driven, zero polling as primary path**: `tokio::select!` over
+//!   D-Bus commands, lifecycle events, GPIO edges; only a bounded one-shot
+//!   PLL handshake (~200 ms) and an optional low-frequency safety tick.
+//! - **Single writer / transactional mutation**: in-memory state commits
+//!   strictly after successful hardware writes.
 //! - **Boot & crash safety**: one-shot state restore from
-//!   `/var/lib/speaker/amp-state.json`; on exit leave amp at last state.
-//! - **Hardware validation at startup**: fail fast if `sndrpimerusamp` or
-//!   `A.Mstr Vol` control is missing (systemd restarts).
-//! - **Mockable backend** for 100% host test coverage.
+//!   `/var/lib/speaker/amp-state.json`; amp left awake + muted between
+//!   streams (PLL handshake releases mute).
+//! - **Mockable seams** (`I2cAmpBackend::new_mocked`, `AmpGpio::new_mocked`)
+//!   for host test coverage.
 
 // The bin target compiles these modules privately; test-only helpers (mocks,
 // unused error variants) trip dead_code. Scope the allow to the bin only.
 #[allow(dead_code)]
 mod amp_backend;
+#[allow(dead_code)]
+mod amp_controller;
+#[allow(dead_code)]
+mod amp_gpio;
 #[allow(dead_code)]
 mod amp_state;
 mod config;
@@ -30,17 +39,20 @@ mod config;
 mod dbus_api;
 #[allow(dead_code)]
 mod error;
-#[allow(dead_code)]
-mod i2c_mute;
 mod state_file;
 
 use std::sync::Arc;
 
 use anyhow::Context;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use crate::amp_backend::{AmpBackend, RealAmpBackend};
+use speaker_hardware::{AmpI2cAddress, MA12070P_DEFAULT_I2C_BUS};
+
+use crate::amp_backend::{AmpBackend, I2cAmpBackend, RealAmpBackend};
+use crate::amp_controller::{AmpCommand, AmpController};
+use crate::amp_gpio::AmpGpioConfig;
 use crate::amp_state::AmpState;
 use crate::config::Config;
 use crate::dbus_api::AudioManagerInterface;
@@ -50,6 +62,146 @@ use zbus::names::WellKnownName;
 
 /// Main entry point for the audio-manager daemon.
 async fn run_daemon(config: Config) -> anyhow::Result<()> {
+    // Log the complete resolved configuration and subsystem states (logging
+    // discipline: never boot silently).
+    info!(
+        control_mode = %config.control_mode,
+        alsa_card = %config.alsa_card,
+        enable_pin = config.enable_gpio_pin,
+        mute_pin = config.mute_gpio_pin,
+        error_pin = config.error_gpio_pin,
+        safety_tick = config.safety_tick,
+        state_path = %config.state_path.display(),
+        "Audio-manager configuration resolved"
+    );
+
+    match config.control_mode.as_str() {
+        "i2c" => run_i2c_mode(config).await,
+        "alsa" => run_alsa_mode(config).await,
+        // Config validation already rejects other values; defensive.
+        other => Err(anyhow::anyhow!("Unsupported control_mode '{other}'")),
+    }
+}
+
+/// Phase 2 i2c mode: event-driven sole hardware supervisor.
+async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
+    // 1. Claim the GPIO lines and wake the amp BEFORE the first I2C write:
+    //    with hifiberry-dac the chip boots in /ENABLE hardware reset and
+    //    NACKs all writes until GPIO14 is driven LOW.
+    let gpio_cfg = AmpGpioConfig {
+        enable: config.enable_gpio_pin,
+        mute: config.mute_gpio_pin,
+        error: config.error_gpio_pin,
+    };
+    let gpio = tokio::task::spawn_blocking(move || crate::amp_gpio::AmpGpio::open(gpio_cfg))
+        .await
+        .context("GPIO open task panicked")?
+        .context("Failed to claim amp GPIO lines")?;
+    let gpio_for_watch = gpio.clone();
+
+    // 2. Open the I2C backend (validation read follows boot_init).
+    let backend = I2cAmpBackend::open(MA12070P_DEFAULT_I2C_BUS, AmpI2cAddress::default())
+        .await
+        .context("Failed to open I2C amp backend")?;
+    let device = backend.device().clone();
+    let backend: Arc<dyn AmpBackend> = Arc::new(backend);
+
+    // 3. Load persisted state.
+    let state_file = StateFile::new(&config.state_path);
+    let persisted = state_file.load().unwrap_or_else(|e| {
+        warn!(error = %e, "Failed to load state file, using defaults");
+        AmpState::default()
+    });
+
+    // 4. Boot bring-up: wake, probe-equivalent register init, reconcile.
+    let mut controller = AmpController::new(
+        Arc::clone(&backend),
+        device,
+        gpio,
+        state_file.clone(),
+        persisted,
+    );
+    controller
+        .boot_init(persisted)
+        .await
+        .context("Amp boot bring-up failed")?;
+
+    // 5. GPIO error-edge watch: blocking rppal poll in a spawn_blocking
+    //    task feeding an async mpsc (plan §5.3). The callback returns
+    //    `false` (channel closed) to stop the watch; the task runs for the
+    //    daemon lifetime otherwise.
+    let (edge_tx, edge_rx) = mpsc::channel::<()>(16);
+    tokio::task::spawn_blocking(move || {
+        gpio_for_watch.watch_error_edges(move || edge_tx.blocking_send(()).is_ok())
+    });
+
+    // 6. Connect to system D-Bus, claim the name, export the interface.
+    let connection = zbus::Connection::system()
+        .await
+        .context("Failed to connect to system D-Bus")?;
+    let fdo = zbus::fdo::DBusProxy::new(&connection).await?;
+    let name: WellKnownName = "org.speaker.AudioManager"
+        .try_into()
+        .context("Invalid well-known name")?;
+    let name_for_release = name.clone();
+    let request_result = fdo
+        .request_name(
+            name,
+            zbus::fdo::RequestNameFlags::AllowReplacement | zbus::fdo::RequestNameFlags::DoNotQueue,
+        )
+        .await
+        .context("Failed to call RequestName")?;
+    if request_result != zbus::fdo::RequestNameReply::PrimaryOwner {
+        return Err(AmpError::DBusNameTaken.into());
+    }
+    info!("D-Bus name org.speaker.AudioManager acquired");
+
+    let (cmd_tx, cmd_rx) = mpsc::channel::<AmpCommand>(32);
+    let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
+
+    let mirror = controller.mirror();
+    let interface =
+        AudioManagerInterface::with_commands(mirror.clone(), state_file.clone(), cmd_tx.clone());
+    connection
+        .object_server()
+        .at("/org/speaker/amp", interface)
+        .await
+        .context("Failed to export D-Bus object")?;
+
+    sd_notify::notify(true, &[sd_notify::NotifyState::Ready])
+        .context("Failed to notify systemd READY=1")?;
+    info!("Audio manager ready (i2c mode), entering event loop");
+
+    // 7. Run the controller event loop (drives everything) with a signal
+    //    watcher feeding the shutdown channel.
+    let signal_task = tokio::spawn(async move {
+        let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT handler");
+        tokio::select! {
+            _ = sigterm.recv() => info!("Received SIGTERM, shutting down gracefully"),
+            _ = sigint.recv() => info!("Received SIGINT, shutting down gracefully"),
+        }
+        let _ = shutdown_tx.send(()).await;
+    });
+
+    controller
+        .run(cmd_rx, edge_rx, shutdown_rx, config.safety_tick)
+        .await;
+    signal_task.abort();
+
+    // 8. Graceful shutdown: persist state and release the D-Bus name.
+    let final_state = *mirror.lock().await;
+    state_file.save(&final_state).await?;
+    fdo.release_name(name_for_release).await?;
+    sd_notify::notify(true, &[sd_notify::NotifyState::Stopping])
+        .context("Failed to notify systemd STOPPING=1")?;
+
+    info!("Audio manager stopped cleanly (i2c mode)");
+    Ok(())
+}
+
+/// Legacy alsa mode (kernel-driver mixer + I2C serial mute).
+async fn run_alsa_mode(config: Config) -> anyhow::Result<()> {
     // 1. Validate hardware before claiming D-Bus name
     let backend = RealAmpBackend::open(&config.alsa_card)
         .await
@@ -126,11 +278,6 @@ async fn run_daemon(config: Config) -> anyhow::Result<()> {
         _ = sigint.recv() => {
             info!("Received SIGINT, shutting down gracefully");
         }
-        // The zbus connection will naturally end if the bus goes away;
-        // we don't need to explicitly await it because the connection
-        // is held by the object_server and interface. If the bus closes,
-        // the select will hang until a signal arrives, which is fine:
-        // systemd will kill us and restart.
     }
 
     // 9. Graceful shutdown: persist state and release name

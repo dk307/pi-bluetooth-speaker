@@ -1215,6 +1215,11 @@ struct MockState {
     mock_pm_profile: u8,
     mock_i2s_format: u8,
     mock_audio_in_mode: u8,
+    // Phase 2 (Stage A): full-register mock fidelity for the VLP/limiter
+    // enable bits — stores the complete `0x35` / `0x36` register values.
+    mock_i2s_format_reg: u8,
+    mock_audio_proc_reg: u8,
+    mock_limiter_thresholds_dbfs: i16,
 }
 
 impl AmpDeviceMock {
@@ -1240,6 +1245,9 @@ impl AmpDeviceMock {
                 mock_pm_profile: 2, // PMP2
                 mock_i2s_format: 0, // Standard I2S
                 mock_audio_in_mode: 0, // 20dB gain
+                mock_i2s_format_reg: 0x00, // VLP bypassed (reset default)
+                mock_audio_proc_reg: 0x01, // bit0 set (live reset default)
+                mock_limiter_thresholds_dbfs: -15, // driver probe default
             })),
         }
     }
@@ -1428,7 +1436,80 @@ impl AmpDeviceMock {
         Ok(())
     }
 
+    fn enable_audio_processor(&self) -> Result<(), AmpError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(AmpError::mock_fault(fault.clone()));
+        }
+        state.mock_i2s_format_reg |= AUDIO_PROC_ENABLE_MASK;
+        Ok(())
+    }
+
+    fn enable_limiter(&self) -> Result<(), AmpError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(AmpError::mock_fault(fault.clone()));
+        }
+        state.mock_audio_proc_reg |= LIMITER_ENABLE_MASK;
+        Ok(())
+    }
+
+    fn write_limiter_thresholds(&self, dbfs: i16) -> Result<(), AmpError> {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(AmpError::mock_fault(fault.clone()));
+        }
+        if !(-144..=0).contains(&dbfs) {
+            return Err(AmpError::invalid_argument(
+                "limiter_threshold_dbfs",
+                dbfs.unsigned_abs(),
+            ));
+        }
+        state.mock_limiter_thresholds_dbfs = dbfs;
+        Ok(())
+    }
+
     // === Mock state setters for test inspection (Phase 1.5) ===
+
+    /// Returns `true` when the mocked VLP is enabled (`0x35` bit 3).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    #[must_use]
+    pub fn mock_vlp_enabled(&self) -> bool {
+        self.state
+            .read()
+            .expect("mock lock poisoned")
+            .mock_i2s_format_reg
+            & AUDIO_PROC_ENABLE_MASK
+            != 0
+    }
+
+    /// Returns `true` when the mocked limiter is enabled (`0x36` bit 6).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    #[must_use]
+    pub fn mock_limiter_enabled(&self) -> bool {
+        self.state
+            .read()
+            .expect("mock lock poisoned")
+            .mock_audio_proc_reg
+            & LIMITER_ENABLE_MASK
+            != 0
+    }
+
+    /// Gets the mocked limiter threshold (dBFS).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    #[must_use]
+    pub fn mock_limiter_thresholds(&self) -> i16 {
+        self.state
+            .read()
+            .expect("mock lock poisoned")
+            .mock_limiter_thresholds_dbfs
+    }
 
     /// Get the mocked master volume raw value.
     ///
@@ -1758,7 +1839,14 @@ where
     }
 
     /// RMW of serial mute register 0x36 bit 7 with verify-by-re-read.
-    /// Live-verified implementation ported from audio-manager/i2c_mute.rs.
+    ///
+    /// The serial bit is the only software mute the appliance relies on:
+    /// `/MUTE` (GPIO15) is boot-time wiring only, the kernel-era `ma120x0p`
+    /// driver never rewrote `0x36`, and live verification on the Pi
+    /// (2026-11) confirmed a read-modify-write of bit 7 mutes/restores
+    /// playback mid-stream and persists. The bit resets to the unmuted
+    /// power-on default on an amp power cycle; the next write re-applies
+    /// it. The RMW preserves limiter bit 6 and all other `0x36` bits.
     ///
     /// # Errors
     /// Returns [`AmpError`] if communication fails or read-back verification fails.
@@ -2275,6 +2363,99 @@ impl AmpDevice {
             this.write_audio_in_mode(gain)
         })
         .await
+    }
+
+    /// Asynchronously enable the VLP (`0x35` bit 3 `audio_proc_enable`).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics.
+    pub async fn enable_audio_processor_async(&self) -> Result<(), AmpError> {
+        let this = self.clone();
+        run_blocking("MA12070P enable audio processor", move || {
+            this.enable_audio_processor()
+        })
+        .await
+    }
+
+    /// Asynchronously enable the VLP output limiter (`0x36` bit 6).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics.
+    pub async fn enable_limiter_async(&self) -> Result<(), AmpError> {
+        let this = self.clone();
+        run_blocking("MA12070P enable limiter", move || this.enable_limiter()).await
+    }
+
+    /// Asynchronously write limiter thresholds (all four channels).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails or `dbfs` is out of range.
+    ///
+    /// # Panics
+    /// Panics if the underlying blocking task panics.
+    pub async fn write_limiter_thresholds_async(&self, dbfs: i16) -> Result<(), AmpError> {
+        let this = self.clone();
+        run_blocking("MA12070P write limiter thresholds", move || {
+            this.write_limiter_thresholds(dbfs)
+        })
+        .await
+    }
+
+    /// Enable the VLP (`0x35` bit 3 `audio_proc_enable`).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
+    pub fn enable_audio_processor(&self) -> Result<(), AmpError> {
+        match self.inner.as_ref() {
+            Backend::Hardware { device, .. } => device
+                .lock()
+                .expect("hardware device lock poisoned")
+                .enable_audio_processor(),
+            Backend::Mock(mock) => mock.enable_audio_processor(),
+        }
+    }
+
+    /// Enable the VLP output limiter (`0x36` bit 6).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
+    pub fn enable_limiter(&self) -> Result<(), AmpError> {
+        match self.inner.as_ref() {
+            Backend::Hardware { device, .. } => device
+                .lock()
+                .expect("hardware device lock poisoned")
+                .enable_limiter(),
+            Backend::Mock(mock) => mock.enable_limiter(),
+        }
+    }
+
+    /// Write limiter thresholds (all four channels).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails or `dbfs` is out of range.
+    ///
+    /// # Panics
+    /// Panics if an internal mutex lock is poisoned.
+    pub fn write_limiter_thresholds(&self, dbfs: i16) -> Result<(), AmpError> {
+        match self.inner.as_ref() {
+            Backend::Hardware { device, .. } => device
+                .lock()
+                .expect("hardware device lock poisoned")
+                .write_limiter_thresholds(dbfs),
+            Backend::Mock(mock) => mock.write_limiter_thresholds(dbfs),
+        }
     }
 }
 

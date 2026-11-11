@@ -11,6 +11,14 @@ pub enum AmpError {
     #[error("I2C error: {0}")]
     I2c(#[from] rppal::i2c::Error),
 
+    /// GPIO error (rppal gpiochip access), `source` preserved.
+    #[error("GPIO error: {0}")]
+    Gpio(#[from] rppal::gpio::Error),
+
+    /// Hardware crate (MA12070P driver) error, `source` preserved.
+    #[error("Amp hardware error: {0}")]
+    Hardware(#[from] speaker_hardware::AmpError),
+
     /// I/O error (state file, etc.).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

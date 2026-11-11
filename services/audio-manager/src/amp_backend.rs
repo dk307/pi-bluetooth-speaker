@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use alsa::mixer::{Mixer, SelemChannelId, SelemId};
 use anyhow::Context;
 use async_trait::async_trait;
+use speaker_hardware::{AmpDevice, AmpDeviceMock, AmpI2cAddress};
 use tracing::{debug, info, warn};
 
 use crate::amp_state::AmpState;
@@ -53,8 +54,10 @@ pub trait AmpBackend: Send + Sync {
     /// Read the serial mute register state.
     async fn read_serial_mute(&self) -> AmpResult<bool>;
 
-    /// Get the ALSA card name this backend operates on.
-    fn card_name(&self) -> &str;
+    /// Backend identifier for logs/diagnostics (e.g. the ALSA card name,
+    /// `"i2c-ma12070p@0x20"`, or `"mock"`). The I2S playback card
+    /// (`sndrpihifiberry`) is pipeline configuration and never a backend id.
+    fn backend_id(&self) -> &str;
 }
 
 /// Production ALSA + I2C backend for the Merus MA12070P amplifier.
@@ -63,8 +66,8 @@ pub struct RealAmpBackend {
     // Mixer operations are blocking; we run them in a blocking task.
     // The mixer handle is kept open for the backend lifetime.
     mixer: Arc<Mutex<Mixer>>,
-    // Serial mute register access (0x36 bit 7) via /dev/i2c-1 @ 0x20.
-    i2c: Arc<Mutex<rppal::i2c::I2c>>,
+    // Serial mute register access (0x36 bit 7) via the Phase 1.5 AmpDevice.
+    amp: Arc<AmpDevice>,
 }
 
 impl RealAmpBackend {
@@ -81,9 +84,14 @@ impl RealAmpBackend {
 
         // Open the I2C bus for the serial mute register (fails fast: mute
         // would be silently broken if the bus were unavailable).
-        let i2c = tokio::task::spawn_blocking(crate::i2c_mute::open_amp_i2c)
-            .await
-            .context("I2C open task panicked")??;
+        let amp = tokio::task::spawn_blocking(|| {
+            speaker_hardware::AmpDevice::with_bus_and_address(
+                speaker_hardware::MA12070P_DEFAULT_I2C_BUS,
+                AmpI2cAddress::default(),
+            )
+        })
+        .await
+        .context("AmpDevice open task panicked")??;
 
         // Validate the control exists and has expected range
         Self::validate_control(&mixer, &card_name).await?;
@@ -92,7 +100,7 @@ impl RealAmpBackend {
         Ok(Self {
             card_name,
             mixer: Arc::new(Mutex::new(mixer)),
-            i2c: Arc::new(Mutex::new(i2c)),
+            amp: Arc::new(amp),
         })
     }
 
@@ -195,13 +203,7 @@ impl AmpBackend for RealAmpBackend {
     }
 
     async fn set_serial_mute(&self, muted: bool) -> AmpResult<()> {
-        let i2c = self.i2c.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut guard = i2c.lock().map_err(|e| AmpError::internal(e.to_string()))?;
-            crate::i2c_mute::set_serial_mute_blocking(&mut guard, muted)
-        })
-        .await
-        .context("Serial mute task panicked")??;
+        self.amp.write_serial_mute_async(muted).await?;
         // Written on every SetLevel too (bit rewrite); the user-visible
         // lifecycle is logged at info! by the D-Bus layer.
         debug!(muted, "Serial mute register updated");
@@ -209,14 +211,11 @@ impl AmpBackend for RealAmpBackend {
     }
 
     async fn read_serial_mute(&self) -> AmpResult<bool> {
-        let i2c = self.i2c.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut guard = i2c.lock().map_err(|e| AmpError::internal(e.to_string()))?;
-            let reg = crate::i2c_mute::read_audio_proc_reg_blocking(&mut guard)?;
-            Ok(crate::i2c_mute::is_muted_bit(reg))
-        })
-        .await
-        .context("Serial mute read task panicked")?
+        self.amp
+            .read_settings_async()
+            .await
+            .map_err(AmpError::from)
+            .map(|s| s.serial_muted)
     }
 
     async fn validate(&self) -> AmpResult<()> {
@@ -232,7 +231,7 @@ impl AmpBackend for RealAmpBackend {
         .context("Validate task panicked")?
     }
 
-    fn card_name(&self) -> &str {
+    fn backend_id(&self) -> &str {
         &self.card_name
     }
 }
@@ -415,7 +414,112 @@ impl AmpBackend for MockAmpBackend {
         Ok(guard.serial_muted)
     }
 
-    fn card_name(&self) -> &str {
+    fn backend_id(&self) -> &str {
         "mock"
+    }
+}
+
+/// Production I2C-only backend for the Phase 2 `hifiberry-dac` mode.
+///
+/// Wraps the Phase 1.5 [`AmpDevice`] write path (speaker-hardware crate):
+/// volume is the VLP master register `0x40` (`reg = 168 − raw`, live-verified
+/// 2026-11-11) and mute is the serial bit `0x36` bit 7. Serial mute remains
+/// the primary mute; `/MUTE` (GPIO15) is boot-time wiring owned by
+/// [`crate::amp_gpio`], not by this backend.
+///
+/// # Errors
+/// Backend constructors return [`AmpError::I2c`] if the bus or device cannot
+/// be opened; every operation maps hardware faults through the canonical
+/// [`AmpError`] with `source` preservation.
+pub struct I2cAmpBackend {
+    amp: Arc<AmpDevice>,
+    id: String,
+}
+
+impl I2cAmpBackend {
+    /// Open the hardware I2C backend (non-destructive validation read).
+    ///
+    /// Note: with `dtoverlay=hifiberry-dac`, the amp boots in `/ENABLE`
+    /// reset until the GPIO bring-up ([`crate::amp_gpio::AmpGpio::wake`])
+    /// drives GPIO14 low — I2C **writes** NACK in that state. Boot
+    /// ordering in `main.rs` is: wake → this backend → register init.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if the I2C bus/device cannot be opened.
+    pub async fn open(bus: u8, address: AmpI2cAddress) -> AmpResult<Self> {
+        let amp =
+            tokio::task::spawn_blocking(move || AmpDevice::with_bus_and_address(bus, address))
+                .await
+                .context("AmpDevice open task panicked")??;
+        let id = format!("i2c-ma12070p@{address}");
+        info!(backend = %id, "I2cAmpBackend opened");
+        Ok(Self {
+            amp: Arc::new(amp),
+            id,
+        })
+    }
+
+    /// Open the mocked backend pair for tests
+    /// (`new_mocked() -> (Self, Ctrl)` per M-MOCKABLE-SYSCALLS).
+    #[must_use]
+    pub fn new_mocked() -> (Self, AmpDeviceMock) {
+        let (amp, mock) = AmpDevice::new_mocked();
+        (
+            Self {
+                amp: Arc::new(amp),
+                id: "i2c-ma12070p@0x20".to_string(),
+            },
+            mock,
+        )
+    }
+
+    /// Direct access to the underlying device for the controller's
+    /// register-level operations (PLL handshake, VLP init, fault recovery).
+    #[must_use]
+    pub fn device(&self) -> &Arc<AmpDevice> {
+        &self.amp
+    }
+}
+
+#[async_trait]
+impl AmpBackend for I2cAmpBackend {
+    async fn write_state(&self, state: &AmpState) -> AmpResult<AmpState> {
+        // Serial mute FIRST (transactional: a mute failure leaves the
+        // hardware untouched); volume second (VLP master register).
+        self.set_serial_mute(state.muted).await?;
+        self.amp.write_master_volume_async(state.level_raw).await?;
+        Ok(*state)
+    }
+
+    async fn read_state(&self) -> AmpResult<AmpState> {
+        let this = self;
+        let amp = Arc::clone(&this.amp);
+        tokio::task::spawn_blocking(move || amp.read_settings())
+            .await
+            .context("Amp settings read task panicked")?
+            .map_err(crate::error::AmpError::from)
+            .map(|settings| AmpState {
+                level_raw: settings.master_volume_raw,
+                muted: settings.serial_muted,
+            })
+    }
+
+    async fn validate(&self) -> AmpResult<()> {
+        self.read_state().await.map(|_| ())
+    }
+
+    async fn set_serial_mute(&self, muted: bool) -> AmpResult<()> {
+        self.amp.write_serial_mute_async(muted).await?;
+        debug!(muted, "Serial mute register updated");
+        Ok(())
+    }
+
+    async fn read_serial_mute(&self) -> AmpResult<bool> {
+        let settings = self.read_state().await;
+        settings.map(|s| s.muted)
+    }
+
+    fn backend_id(&self) -> &str {
+        &self.id
     }
 }

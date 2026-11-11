@@ -7,6 +7,7 @@ use zbus::fdo::Error as ZBusError;
 use zbus::{Connection, interface};
 
 use crate::amp_backend::AmpBackend;
+use crate::amp_controller::{AmpCommand, AmpCommandKind};
 use crate::amp_state::AmpState;
 use crate::state_file::StateFile;
 use amp_curve::PERCENT_TO_RAW;
@@ -14,8 +15,10 @@ use amp_curve::PERCENT_TO_RAW;
 /// The D-Bus interface implementation.
 pub struct AudioManagerInterface {
     state: Arc<tokio::sync::Mutex<AmpState>>,
-    backend: Arc<dyn AmpBackend>,
+    backend: Option<Arc<dyn AmpBackend>>,
     state_file: StateFile,
+    /// Phase 2 i2c mode: commands flow through the [`AmpController`] loop.
+    commands: Option<tokio::sync::mpsc::Sender<AmpCommand>>,
 }
 
 impl AudioManagerInterface {
@@ -26,9 +29,45 @@ impl AudioManagerInterface {
     ) -> Self {
         Self {
             state,
-            backend,
+            backend: Some(backend),
             state_file,
+            commands: None,
         }
+    }
+
+    /// Phase 2 i2c-mode constructor: the controller loop owns the backend;
+    /// D-Bus calls are enqueued (with a reply channel) and the shared state
+    /// mirror serves property reads.
+    #[must_use]
+    pub fn with_commands(
+        mirror: Arc<tokio::sync::Mutex<AmpState>>,
+        state_file: StateFile,
+        commands: tokio::sync::mpsc::Sender<AmpCommand>,
+    ) -> Self {
+        Self {
+            state: mirror,
+            backend: None,
+            state_file,
+            commands: Some(commands),
+        }
+    }
+
+    /// Send a command and await the controller's hardware result.
+    async fn dispatch(&self, kind: AmpCommandKind) -> Result<(), ZBusError> {
+        let Some(tx) = self.commands.as_ref() else {
+            return Err(ZBusError::Failed("i2c command channel unavailable".into()));
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(AmpCommand {
+            kind,
+            reply: Some(reply_tx),
+        })
+        .await
+        .map_err(|e| ZBusError::Failed(format!("controller command channel closed: {e}")))?;
+        reply_rx
+            .await
+            .map_err(|e| ZBusError::Failed(format!("controller dropped the reply: {e}")))?
+            .map_err(ZBusError::Failed)
     }
 }
 
@@ -47,11 +86,19 @@ impl AudioManagerInterface {
             )));
         }
 
+        // Phase 2 i2c mode: the controller owns hardware + persistence.
+        if self.commands.is_some() {
+            return self.dispatch(AmpCommandKind::SetLevel(percent)).await;
+        }
+
+        let backend = self
+            .backend
+            .as_ref()
+            .ok_or_else(|| ZBusError::Failed("no backend configured".into()))?;
         let mut state_guard = self.state.lock().await;
         let new_state = state_guard.with_percent(percent, &PERCENT_TO_RAW);
 
-        let applied = self
-            .backend
+        let applied = backend
             .write_state(&new_state)
             .await
             .map_err(|e| ZBusError::Failed(e.to_string()))?;
@@ -75,6 +122,15 @@ impl AudioManagerInterface {
 
     /// Set mute state (serial mute register; the mixer level is untouched).
     pub async fn set_mute(&self, muted: bool) -> Result<(), ZBusError> {
+        // Phase 2 i2c mode: the controller owns the mute state machine.
+        if self.commands.is_some() {
+            return self.dispatch(AmpCommandKind::SetMute(muted)).await;
+        }
+
+        let backend = self
+            .backend
+            .as_ref()
+            .ok_or_else(|| ZBusError::Failed("no backend configured".into()))?;
         let mut state_guard = self.state.lock().await;
         let new_state = if muted {
             state_guard.mute()
@@ -82,8 +138,7 @@ impl AudioManagerInterface {
             state_guard.unmute()
         };
 
-        let applied = self
-            .backend
+        let applied = backend
             .write_state(&new_state)
             .await
             .map_err(|e| ZBusError::Failed(e.to_string()))?;

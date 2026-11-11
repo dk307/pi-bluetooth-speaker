@@ -1007,6 +1007,56 @@ mod hardware_device_tests {
     }
 }
 
+// === Phase 2 (Stage A) VLP / limiter mock-path tests ===
+
+#[test]
+fn mock_enable_vlp_and_limiter_round_trip() {
+    let (amp, mock) = AmpDevice::new_mocked();
+    assert!(!mock.mock_vlp_enabled());
+    assert!(!mock.mock_limiter_enabled());
+    assert_eq!(mock.mock_limiter_thresholds(), -15);
+
+    amp.enable_audio_processor().unwrap();
+    amp.enable_limiter().unwrap();
+    amp.write_limiter_thresholds(-15).unwrap();
+
+    assert!(mock.mock_vlp_enabled());
+    assert!(mock.mock_limiter_enabled());
+    assert_eq!(mock.mock_limiter_thresholds(), -15);
+
+    assert!(
+        amp.write_limiter_thresholds(1)
+            .unwrap_err()
+            .is_invalid_argument()
+    );
+    assert!(
+        amp.write_limiter_thresholds(-145)
+            .unwrap_err()
+            .is_invalid_argument()
+    );
+
+    // Fault injection covers the error path.
+    mock.set_fault(Some("simulated bus failure".into()));
+    assert!(amp.enable_audio_processor().unwrap_err().is_mock_fault());
+    assert!(amp.enable_limiter().unwrap_err().is_mock_fault());
+    assert!(
+        amp.write_limiter_thresholds(-15)
+            .unwrap_err()
+            .is_mock_fault()
+    );
+}
+
+#[tokio::test]
+async fn mock_async_vlp_and_limiter_writes() {
+    let (amp, mock) = AmpDevice::new_mocked();
+    amp.enable_audio_processor_async().await.unwrap();
+    amp.enable_limiter_async().await.unwrap();
+    amp.write_limiter_thresholds_async(-15).await.unwrap();
+    assert!(mock.mock_vlp_enabled());
+    assert!(mock.mock_limiter_enabled());
+    assert_eq!(mock.mock_limiter_thresholds(), -15);
+}
+
 // === Phase 1.5 settings read-path tests ===
 
 #[test]
