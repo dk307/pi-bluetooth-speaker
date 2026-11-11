@@ -1,0 +1,10 @@
+[package]
+name = "amp-curve"
+version = "2.0.0"
+edition = "2024"
+authors = ["Audio Appliance Team"]
+license = "Apache-2.0"
+description = "Shared perceptual volume curve for Merus MA12070P amplifier"
+publish = false
+
+[dependencies]

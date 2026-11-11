@@ -273,12 +273,7 @@ pub fn format_volume_bytes(
         .join(" ");
 
     let avg_level = f64::from(total_level) / (bytes.len() as f64);
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "percentage clamped 0.0..=100.0 fits in u8"
-    )]
-    let percent = ((avg_level / 127.0) * 100.0).round().clamp(0.0, 100.0) as u8;
+    let percent = amp_curve::avrcp_avg_to_percent(avg_level);
 
     (Some(volume.into()), muted, Some(percent))
 }

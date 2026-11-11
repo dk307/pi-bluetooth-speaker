@@ -643,7 +643,7 @@ pub fn main() -> ExitCode {
         Err(code) => return code,
     };
 
-    let device = match BluetoothDevice::new() {
+    let device = match BluetoothDevice::new_blocking() {
         Ok(d) => d,
         Err(err) => {
             if opts.common.format == OutputFormat::Json {
