@@ -168,9 +168,26 @@ async fn stream_stopping_mutes_across_transition() {
         .await
         .unwrap();
     assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
-    assert!(f.controller.state().muted);
-    // GPIO hardware mute is re-asserted while idle (pop-free standby).
+    // Hardware is muted (serial bit + GPIO /MUTE LOW, pop-free standby)...
+    assert!(f.amp_mock.mock_serial_muted());
     assert!(f.gpio_mock.mute_pin_low());
+    // ...but the USER's mute intent is untouched (no A5 regression): the
+    // next stream must auto-resume playback.
+    assert!(
+        !f.controller.state().muted,
+        "transient mute must not persist as user intent"
+    );
+    assert!(!f.state_file.load().unwrap().muted);
+
+    // Restart: plays again at the user level without any SetMute call.
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert!(!f.amp_mock.mock_serial_muted());
+    assert!(!f.gpio_mock.mute_pin_low());
+    assert_eq!(f.amp_mock.mock_master_volume_raw(), 60);
 }
 
 #[tokio::test]
@@ -217,6 +234,14 @@ async fn critical_fault_recovers_and_returns_to_muted() {
         .await
         .unwrap();
     assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert!(!f.amp_mock.mock_serial_muted());
+
+    // Model the /ENABLE register wipe: the reset pulse clears the serial
+    // mute bit on the real device. The controller must re-assert it.
+    f.gpio_mock.set_reset_hook(Some(Arc::new({
+        let amp_mock = f.amp_mock.clone();
+        move || amp_mock.set_mock_serial_muted(false)
+    })));
 
     f.amp_mock
         .set_live_errors(fault_flags(AmpFault::OvercurrentProtect));
@@ -224,7 +249,16 @@ async fn critical_fault_recovers_and_returns_to_muted() {
 
     // Recovery re-initialized the registers and left the amp muted.
     assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
-    assert!(f.controller.state().muted);
+    assert!(
+        f.amp_mock.mock_serial_muted(),
+        "serial mute must be re-asserted after the register wipe"
+    );
+    assert!(
+        f.gpio_mock.mute_pin_low(),
+        "GPIO /MUTE must be LOW after recovery"
+    );
+    // Transient mute: the user's unmuted intent survives recovery.
+    assert!(!f.controller.state().muted);
     assert!(
         f.amp_mock.mock_vlp_enabled(),
         "VLP re-enabled during recovery"
@@ -429,4 +463,168 @@ async fn closed_edge_channel_does_not_hot_spin() {
         .expect("loop must not hang after edge-channel close")
         .unwrap();
     assert_eq!(mirror.lock().await.level_raw, 144);
+}
+
+#[tokio::test]
+async fn stream_restart_after_pll_loss_resumes() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+
+    // PLL clock loss during playback: transient mute, stream dead.
+    f.amp_mock
+        .set_live_errors(fault_flags(AmpFault::PllClockLoss));
+    f.controller.handle_error_edge().await.unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
+    assert!(f.amp_mock.mock_serial_muted());
+    assert!(
+        !f.controller.state().muted,
+        "PLL-loss mute must not persist as user intent"
+    );
+
+    // Next stream (PLL locked): auto-resumes at the user level.
+    f.amp_mock.set_live_errors(AmpErrorFlags::NONE);
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert!(!f.amp_mock.mock_serial_muted());
+    assert_eq!(f.amp_mock.mock_master_volume_raw(), 60);
+}
+
+#[tokio::test]
+async fn stream_restart_after_fault_recovery_resumes() {
+    let mut f = fixture();
+    f.gpio_mock.set_reset_hook(Some(Arc::new({
+        let amp_mock = f.amp_mock.clone();
+        move || amp_mock.set_mock_serial_muted(false)
+    })));
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+
+    // Critical fault mid-playback → full recovery, ends muted (hardware).
+    f.amp_mock
+        .set_live_errors(fault_flags(AmpFault::UndervoltagePvdd));
+    f.controller.handle_error_edge().await.unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
+    assert!(f.amp_mock.mock_serial_muted());
+
+    // Next stream auto-resumes: recovery's mute was transient only.
+    f.amp_mock.set_live_errors(AmpErrorFlags::NONE);
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert!(!f.amp_mock.mock_serial_muted());
+    assert!(!f.gpio_mock.mute_pin_low());
+    assert_eq!(f.amp_mock.mock_master_volume_raw(), 60);
+}
+
+#[tokio::test]
+async fn stop_then_reboot_keeps_unmuted_user_intent() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("amp-state.json");
+
+    // Session 1: play, then a normal stream stop; the state file is
+    // written after the stop.
+    let (backend, _amp_mock) = I2cAmpBackend::new_mocked();
+    let (gpio, _gpio_mock) = AmpGpio::new_mocked();
+    let state_file = StateFile::new(state_path.clone());
+    let device = backend.device().clone();
+    let mut controller = AmpController::new(
+        Arc::new(backend),
+        device,
+        gpio,
+        state_file.clone(),
+        AmpState::default(),
+    );
+    controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    controller
+        .handle_command(AmpCommandKind::StreamStopping)
+        .await
+        .unwrap();
+    assert!(
+        !state_file.load().unwrap().muted,
+        "persisted intent after a stop must be the user's unmuted request"
+    );
+
+    // Session 2 (reboot): boot from the same file; the user intent is
+    // still unmuted, so the next stream plays without any SetMute call.
+    let (backend, amp_mock) = I2cAmpBackend::new_mocked();
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    let state_file = StateFile::new(state_path);
+    let device = backend.device().clone();
+    let mut controller = AmpController::new(
+        Arc::new(backend),
+        device,
+        gpio,
+        state_file.clone(),
+        state_file.load().unwrap(),
+    );
+    controller.boot_init(controller.state()).await.unwrap();
+    controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(controller.ctrl_state(), CtrlState::Playing);
+    assert!(!amp_mock.mock_serial_muted());
+    assert!(!gpio_mock.mute_pin_low());
+}
+
+#[tokio::test]
+async fn thermal_warning_at_stream_start_throttles_without_reset() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(100, false).unwrap())
+        .await
+        .unwrap();
+
+    // Warm amp (HighTempWarning live) at stream start: throttle -6 dB,
+    // NOT a full fault recovery reset.
+    f.amp_mock
+        .set_live_errors(fault_flags(AmpFault::HighTempWarning));
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert_eq!(
+        f.amp_mock.mock_master_volume_raw(),
+        94,
+        "-6 dB throttle applied at stream start (raw 100 -> 94)"
+    );
+    assert_eq!(f.controller.state().level_raw, 100, "user level preserved");
+    assert!(!f.controller.state().muted);
+    assert!(
+        !f.amp_mock.mock_serial_muted(),
+        "no transient mute for a thermal warning"
+    );
+    assert_eq!(
+        f.gpio_mock.reset_calls(),
+        0,
+        "thermal warning must never trigger an /ENABLE reset"
+    );
 }

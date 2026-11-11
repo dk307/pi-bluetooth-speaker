@@ -19,6 +19,7 @@
 //! then polls it in a dedicated thread (no async GPIO API exists in rppal
 //! 0.22; see plan §5.3 — no new crates without user approval).
 
+use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -70,7 +71,7 @@ const EDGE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Shared mock state behind [`AmpGpioMock`]. The mute state is stored as the
 /// **electrical pin level** (`mute_low`), not the logical intent, so an
 /// inverted write can never pass a mock assertion unnoticed.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct MockGpioState {
     awake: bool,
     /// `true` = `/MUTE` pin driven LOW = electrically muted.
@@ -81,6 +82,10 @@ struct MockGpioState {
     reset_calls: u32,
     power_up_calls: u32,
     mute_calls: u32,
+    /// Test-only hook fired when a mock `reset()` completes, modeling the
+    /// register wipe the `/ENABLE` pulse causes on the I2C device (e.g.
+    /// clearing the mock serial mute bit). `None` in normal tests.
+    reset_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Lock a mock-state mutex with poisoned-data recovery (M-POISONED-MUTEX).
@@ -89,6 +94,23 @@ fn mock_lock(state: &Mutex<MockGpioState>) -> MutexGuard<'_, MockGpioState> {
         warn!("GPIO mock state lock poisoned; recovering data");
         p.into_inner()
     })
+}
+
+/// Manual `Debug` impl: the reset hook is not `Debug`.
+impl fmt::Debug for MockGpioState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MockGpioState")
+            .field("awake", &self.awake)
+            .field("mute_low", &self.mute_low)
+            .field("booster_on", &self.booster_on)
+            .field("error_active", &self.error_active)
+            .field("wake_calls", &self.wake_calls)
+            .field("reset_calls", &self.reset_calls)
+            .field("power_up_calls", &self.power_up_calls)
+            .field("mute_calls", &self.mute_calls)
+            .field("reset_hook", &self.reset_hook.is_some())
+            .finish()
+    }
 }
 
 /// Controller for the mocked GPIO backend (`new_mocked()` pairing).
@@ -143,6 +165,13 @@ impl AmpGpioMock {
     #[must_use]
     pub fn mute_calls(&self) -> u32 {
         mock_lock(&self.state).mute_calls
+    }
+
+    /// Install a hook fired after each mock `reset()` completes, modeling
+    /// the `/ENABLE` register wipe on the I2C device (e.g. clearing the
+    /// mock serial mute bit). Pass `None` to remove.
+    pub fn set_reset_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        mock_lock(&self.state).reset_hook = hook;
     }
 }
 
@@ -291,9 +320,11 @@ impl AmpGpio {
     }
 
     /// `/ENABLE` reset cycle (blocking; call via `spawn_blocking`): HIGH
-    /// pulse wipes all registers, then LOW + settle wakes the amp. Used by
-    /// fault recovery so the "full register re-init" starts from true
-    /// reset defaults.
+    /// pulse wipes all registers, then LOW + settle wakes the amp. The
+    /// `/MUTE` line is forced LOW for the whole cycle (a register wipe
+    /// clears the serial mute bit, so the GPIO line is the only guaranteed
+    /// audio-path gate during and after the pulse). Used by fault recovery
+    /// so the "full register re-init" starts from true reset defaults.
     ///
     /// # Errors
     /// Returns [`AmpError::Gpio`] on hardware faults.
@@ -301,20 +332,36 @@ impl AmpGpio {
         {
             let mut seam = self.seam_lock();
             match &mut *seam {
-                GpioSeam::Hardware(pins) => pins.enable.write(Level::High),
-                GpioSeam::Mock { state } => mock_lock(state).awake = false,
+                GpioSeam::Hardware(pins) => {
+                    pins.enable.write(Level::High);
+                    pins.mute.write(Level::Low);
+                }
+                GpioSeam::Mock { state } => {
+                    let mut s = mock_lock(state);
+                    s.awake = false;
+                    s.mute_low = true;
+                }
             }
         }
         std::thread::sleep(RESET_PULSE);
         {
             let mut seam = self.seam_lock();
-            match &mut *seam {
-                GpioSeam::Hardware(pins) => pins.enable.write(Level::Low),
+            let fired = match &mut *seam {
+                GpioSeam::Hardware(pins) => {
+                    pins.enable.write(Level::Low);
+                    None
+                }
                 GpioSeam::Mock { state } => {
                     let mut s = mock_lock(state);
                     s.awake = true;
                     s.reset_calls += 1;
+                    s.reset_hook.clone()
                 }
+            };
+            // Fire the test hook outside the lock (a register wipe clears
+            // the serial mute bit; mocks model this via the hook).
+            if let Some(hook) = fired {
+                hook();
             }
         }
         std::thread::sleep(RESET_SETTLE);

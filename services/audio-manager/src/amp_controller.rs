@@ -96,6 +96,12 @@ impl AmpCommand {
 }
 
 /// Controller owning backend + GPIO + persisted state.
+///
+/// Mute state is split in two: `state.muted` is the **persisted user
+/// intent** (survives reboot; drives the state file), while
+/// `hardware_muted` is the **actual electrical mute** of the audio path.
+/// Transient mutes (stream stop, PLL loss, fault recovery) drive only the
+/// hardware; the user intent survives so the next stream auto-resumes.
 pub struct AmpController {
     backend: Arc<dyn AmpBackend>,
     device: Arc<speaker_hardware::AmpDevice>,
@@ -108,6 +114,12 @@ pub struct AmpController {
     ctrl: CtrlState,
     /// Remembered unmute request while no stream is running.
     pending_unmute: bool,
+    /// Actual electrical mute state of the audio path (serial bit + GPIO
+    /// `/MUTE`). Transient mutes (stream stop, PLL loss, fault recovery)
+    /// drive this WITHOUT touching the persisted user intent in
+    /// [`Self::state::muted`], so the next stream auto-resumes at the
+    /// user's level. [`Self::state`] `muted` is the *user's* mute request.
+    hardware_muted: bool,
     /// `true` while a downstream stream is live (between `StreamStarting`
     /// and `StreamStopping`). A user mute during playback drops the
     /// controller to `Muted` WITHOUT ending the stream, so a later
@@ -119,6 +131,22 @@ pub struct AmpController {
     thermal_offset_raw: u16,
     /// Read-only mirror of [`Self::state`] for D-Bus property reads.
     mirror: Arc<tokio::sync::Mutex<AmpState>>,
+}
+
+/// Critical faults that warrant a full `/ENABLE` reset recovery (plan
+/// §3.1): OCP, DC offset, flying-cap overvoltage, thermal shutdown, pin
+/// short, PVDD undervoltage. Evaluated FIRST in every fault triage so a
+/// thermal warning can never mask them.
+fn has_critical_fault(flags: speaker_hardware::AmpErrorFlags) -> bool {
+    const CRITICAL: [AmpFault; 6] = [
+        AmpFault::OvercurrentProtect,
+        AmpFault::DcOffsetProtect,
+        AmpFault::FlyingCapOvervoltage,
+        AmpFault::ThermalShutdown,
+        AmpFault::PinShortCircuit,
+        AmpFault::UndervoltagePvdd,
+    ];
+    CRITICAL.iter().any(|f| flags.has_fault(*f))
 }
 
 impl AmpController {
@@ -140,6 +168,9 @@ impl AmpController {
             state: initial,
             ctrl: CtrlState::Muted,
             pending_unmute: false,
+            // Boot brings the amp up muted (mute-first); the user intent
+            // lives in `initial.muted`.
+            hardware_muted: true,
             stream_live: false,
             thermal_offset_raw: 0,
             mirror: Arc::new(tokio::sync::Mutex::new(initial)),
@@ -153,7 +184,9 @@ impl AmpController {
         Arc::clone(&self.mirror)
     }
 
-    /// Current logical amp state (level + muted).
+    /// Current logical amp state (level + the **user's mute intent**;
+    /// transient hardware mutes are not reflected here — see
+    /// [`Self::hardware_muted`] in the struct docs).
     #[must_use]
     pub fn state(&self) -> AmpState {
         self.state
@@ -209,7 +242,9 @@ impl AmpController {
         }
         self.backend.write_state(&persisted).await?;
         // 5. GPIO /MUTE stays LOW (hardware muted) until the first PLL
-        //    handshake releases it; serial mute governs the audio path.
+        //    handshake releases it; serial mute governs the audio path and
+        //    mirrors the persisted user intent that write_state just set.
+        self.hardware_muted = persisted.muted;
         self.state = persisted;
         self.ctrl = CtrlState::Muted;
         *self.mirror.lock().await = persisted;
@@ -226,10 +261,11 @@ impl AmpController {
         match cmd {
             AmpCommandKind::SetLevel(percent) => {
                 let new_state = self.state.with_percent(percent, &PERCENT_TO_RAW);
-                // Hardware receives the thermally effective level; the user
-                // level is what we keep and persist.
+                // Hardware receives the thermally effective level and the
+                // ACTUAL hardware mute (transient mutes are separate from
+                // the persisted user intent).
                 let effective = new_state.level_raw.saturating_sub(self.thermal_offset_raw);
-                let hw_state = AmpState::new(effective, new_state.muted)?;
+                let hw_state = AmpState::new(effective, self.hardware_muted)?;
                 self.backend.write_state(&hw_state).await?;
                 self.state = new_state;
                 self.persist(&new_state).await;
@@ -268,12 +304,14 @@ impl AmpController {
                 // In AwaitingClock the handshake outcome governs.
             }
             AmpCommandKind::StreamStopping => {
-                self.apply_muted(true).await?;
+                // Transient mute: hardware only — the user's mute intent is
+                // untouched so the next stream auto-resumes at full level.
+                self.mute_hardware().await?;
                 self.ctrl = CtrlState::Muted;
                 self.stream_live = false;
                 // Re-assert GPIO /MUTE for a pop-free standby.
                 self.gpio.set_hardware_mute(true)?;
-                debug!("StreamStopping applied (muted)");
+                debug!("StreamStopping applied (hardware muted, user intent preserved)");
             }
             AmpCommandKind::StreamStarting => {
                 self.start_stream().await?;
@@ -336,15 +374,7 @@ impl AmpController {
             return Ok(());
         }
         // 1. Critical faults → full recovery (priority over thermal warn).
-        let critical = [
-            AmpFault::OvercurrentProtect,
-            AmpFault::DcOffsetProtect,
-            AmpFault::FlyingCapOvervoltage,
-            AmpFault::ThermalShutdown,
-            AmpFault::PinShortCircuit,
-            AmpFault::UndervoltagePvdd,
-        ];
-        if critical.iter().any(|f| flags.has_fault(*f)) {
+        if has_critical_fault(flags) {
             warn!(?flags, "Critical amp fault; entering fault recovery");
             self.ctrl = CtrlState::Faulted;
             self.stream_live = false;
@@ -356,7 +386,7 @@ impl AmpController {
         //    the gap; the next StreamStarting runs the handshake again.
         if flags.has_fault(AmpFault::PllClockLoss) && self.ctrl == CtrlState::Playing {
             warn!("PLL clock lost during playback; muting until the stream restarts");
-            self.apply_muted(true).await?;
+            self.mute_hardware().await?;
             self.ctrl = CtrlState::Muted;
             self.stream_live = false;
             return Ok(());
@@ -380,19 +410,28 @@ impl AmpController {
     }
 
     /// Fault recovery: mute → `/ENABLE` reset pulse (HIGH→LOW wipes all
-    /// registers) → full register re-init → muted. Without the HIGH pulse
-    /// the registers are never wiped and "re-init" is a no-op.
+    /// registers) → serial mute re-asserted (the wipe clears the mute bit)
+    /// → full register re-init → muted. Without the HIGH pulse the
+    /// registers are never wiped and "re-init" is a no-op.
+    ///
+    /// The mute is **transient**: the persisted user intent (`state.muted`)
+    /// is untouched, so the next `StreamStarting` auto-resumes playback.
     ///
     /// # Errors
     /// Returns [`AmpError`] if any recovery step fails.
     pub async fn fault_recovery(&mut self) -> AmpResult<()> {
         // Serial mute first (audio path off even if recovery fails).
-        self.apply_muted(true).await?;
+        self.mute_hardware().await?;
+        self.gpio.set_hardware_mute(true)?;
         // /ENABLE reset cycle: registers return to true reset defaults.
+        // The reset itself drives /MUTE LOW (pop-safe during the pulse).
         let gpio = self.gpio.clone();
         tokio::task::spawn_blocking(move || gpio.reset())
             .await
             .context("GPIO reset task panicked")??;
+        // The /ENABLE wipe cleared the serial mute bit: re-assert it BEFORE
+        // re-init so the audio path never comes back unmuted at 0 dB.
+        self.mute_hardware().await?;
         self.reinit_registers().await?;
         // Restore the user's (thermally effective) volume; keep muted until
         // the next StreamStarting.
@@ -449,17 +488,39 @@ impl AmpController {
             self.ctrl = CtrlState::Muted;
             return Ok(());
         }
-        // Re-check live critical faults before releasing the audio path:
-        // never unmute into an OCP/DC/flying-cap/thermal condition.
+        // Re-check live faults before releasing the audio path, in
+        // priority order: never unmute into a fault condition.
         let flags = self.device.read_live_errors_async().await?;
-        if flags != speaker_hardware::AmpErrorFlags::NONE {
+        if flags.has_fault(AmpFault::PllClockLoss) {
             warn!(
                 ?flags,
-                "Live faults at stream start; running fault recovery instead of unmute"
+                "PLL clock loss still live at stream start; staying muted"
+            );
+            self.ctrl = CtrlState::Muted;
+            return Ok(());
+        }
+        if has_critical_fault(flags) {
+            warn!(
+                ?flags,
+                "Critical fault at stream start; running fault recovery instead of unmute"
             );
             self.fault_recovery().await?;
             self.ctrl = CtrlState::Muted;
             return Ok(());
+        }
+        if flags.has_fault(AmpFault::HighTempWarning) {
+            // Warm amp at stream start: apply the -6 dB throttle instead of
+            // a full reset (a reset would not cool the silicon anyway).
+            if self.thermal_offset_raw == 0 {
+                self.thermal_offset_raw = 6;
+                let effective = self.effective_raw();
+                info!(
+                    user_level = self.state.level_raw,
+                    effective, "Thermal warning at stream start; throttling -6 dB (not persisted)"
+                );
+                self.write_hw_level(effective).await?;
+            }
+            self.device.clear_latched_errors_async().await?;
         }
         // Decide from USER INTENT captured BEFORE any mutation: a user
         // mute is never overridden, but a normally unmuted boot state
@@ -504,7 +565,10 @@ impl AmpController {
         }
     }
 
-    /// Apply the serial mute bit (audio-path mute; level untouched).
+    /// Apply the serial mute bit (audio-path mute; level untouched) AND
+    /// record the user's mute intent: `state.muted` is updated and
+    /// persisted. Used for explicit `SetMute` commands and the stream-start
+    /// unmute; transient mutes use [`Self::mute_hardware`] instead.
     ///
     /// # Errors
     /// Returns [`AmpError`] on hardware faults; state unchanged on failure.
@@ -516,7 +580,21 @@ impl AmpController {
         };
         self.backend.set_serial_mute(muted).await?;
         self.state = new_state;
+        self.hardware_muted = muted;
         self.persist(&new_state).await;
+        Ok(())
+    }
+
+    /// Transient hardware-only mute: asserts the serial mute bit and marks
+    /// the audio path muted WITHOUT changing or persisting the user's mute
+    /// intent (`state.muted`). Used by stream stop, PLL loss, and fault
+    /// recovery so the next stream auto-resumes at the user's level.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] on hardware faults.
+    async fn mute_hardware(&mut self) -> AmpResult<()> {
+        self.backend.set_serial_mute(true).await?;
+        self.hardware_muted = true;
         Ok(())
     }
 
@@ -534,7 +612,7 @@ impl AmpController {
     /// # Errors
     /// Returns [`AmpError`] on hardware faults.
     async fn write_hw_level(&mut self, raw: u16) -> AmpResult<()> {
-        let hw_state = AmpState::new(raw, self.state.muted)?;
+        let hw_state = AmpState::new(raw, self.hardware_muted)?;
         self.backend.write_state(&hw_state).await?;
         Ok(())
     }
