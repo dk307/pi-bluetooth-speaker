@@ -628,3 +628,106 @@ async fn thermal_warning_at_stream_start_throttles_without_reset() {
         "thermal warning must never trigger an /ENABLE reset"
     );
 }
+
+#[tokio::test]
+async fn boot_init_forces_serial_mute_while_preserving_user_unmute_intent() {
+    let mut f = fixture();
+    // User left the speaker UNMUTED before the reboot. Boot must still
+    // force the serial mute (0x36 bit 7): the audio path stays off until
+    // the first PLL handshake, regardless of user intent.
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    assert!(
+        f.amp_mock.mock_serial_muted(),
+        "serial mute must be forced ON at boot even when the user intent is unmuted"
+    );
+    assert!(
+        f.gpio_mock.mute_pin_low(),
+        "GPIO /MUTE stays LOW until the first handshake"
+    );
+    // ...while the USER mute intent is preserved verbatim for start_stream.
+    assert!(
+        !f.controller.state().muted,
+        "persisted user intent must not be overwritten by the boot mute"
+    );
+
+    // The first stream start (PLL locked) releases both mutes normally.
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert!(!f.amp_mock.mock_serial_muted());
+    assert!(!f.gpio_mock.mute_pin_low());
+}
+
+#[tokio::test]
+async fn pll_loss_while_playing_asserts_gpio_mute() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert!(!f.gpio_mock.mute_pin_low());
+
+    // BCLK dies mid-stream: BOTH mute paths must engage — the serial bit
+    // (I2C) AND the electrical /MUTE (GPIO), which works even if the
+    // synchronous digital domain can no longer clock the register mute.
+    f.amp_mock
+        .set_live_errors(fault_flags(AmpFault::PllClockLoss));
+    f.controller.handle_error_edge().await.unwrap();
+
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
+    assert!(f.amp_mock.mock_serial_muted());
+    assert!(
+        f.gpio_mock.mute_pin_low(),
+        "GPIO /MUTE must be asserted on PLL clock loss (parity with StreamStopping)"
+    );
+}
+
+#[tokio::test]
+async fn pll_loss_while_user_muted_clears_stream_live() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, true).unwrap())
+        .await
+        .unwrap();
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    // Stream live but user-muted: ready, staying muted.
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
+
+    // Clock dies while the user is muted. `stream_live` must be cleared
+    // even though ctrl is already Muted — otherwise a later SetMute(false)
+    // would unmute into the dead clock without a handshake.
+    f.amp_mock
+        .set_live_errors(fault_flags(AmpFault::PllClockLoss));
+    f.controller.handle_error_edge().await.unwrap();
+    assert!(f.amp_mock.mock_serial_muted());
+    assert!(f.gpio_mock.mute_pin_low());
+
+    // The subsequent unmute must NOT restore audio (dead clock): it goes
+    // pending until the next real StreamStarting handshake.
+    f.controller
+        .handle_command(AmpCommandKind::SetMute(false))
+        .await
+        .unwrap();
+    assert!(
+        f.amp_mock.mock_serial_muted(),
+        "unmute into a dead clock must be deferred, not applied"
+    );
+    assert!(
+        f.gpio_mock.mute_pin_low(),
+        "GPIO /MUTE must stay asserted after the deferred unmute"
+    );
+}

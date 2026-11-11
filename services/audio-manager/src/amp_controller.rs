@@ -228,8 +228,8 @@ impl AmpController {
         //    VLP enabled, limiter enabled with -15 dBFS thresholds.
         self.reinit_registers().await?;
         // 4. Reconcile: log the hardware snapshot for diagnostics, then
-        //    ALWAYS write the persisted user intent. Treating a failed read
-        //    as "defaults" would skip the write and leave reset defaults
+        //    ALWAYS write the hardware state. Treating a failed read as
+        //    "defaults" would skip the write and leave reset defaults
         //    (0 dB, unmuted) live — a speaker-damaging failure mode.
         match self.backend.read_state().await {
             Ok(hw) => debug!(
@@ -240,11 +240,19 @@ impl AmpController {
             ),
             Err(e) => warn!(error = %e, "Boot telemetry read failed; forcing state write"),
         }
-        self.backend.write_state(&persisted).await?;
+        // The SERIAL mute is forced ON at boot regardless of the user's
+        // mute intent: `persisted.muted == false` is user intent for the
+        // NEXT stream, not a license to unmute the audio path while no
+        // clock is running. Only the first PLL handshake releases it.
+        // (Writing `persisted` directly would clear 0x36 bit 7 and leave
+        // the DSP unmuted without a locked PLL until the first stream.)
+        let boot_hw = AmpState::new(persisted.level_raw, true)?;
+        self.backend.write_state(&boot_hw).await?;
         // 5. GPIO /MUTE stays LOW (hardware muted) until the first PLL
-        //    handshake releases it; serial mute governs the audio path and
-        //    mirrors the persisted user intent that write_state just set.
-        self.hardware_muted = persisted.muted;
+        //    handshake releases it; the serial mute mirrors the boot mute,
+        //    NOT the persisted user intent (kept verbatim in `self.state`
+        //    so `start_stream()` resumes at the user's mute preference).
+        self.hardware_muted = true;
         self.state = persisted;
         self.ctrl = CtrlState::Muted;
         *self.mirror.lock().await = persisted;
@@ -382,11 +390,22 @@ impl AmpController {
             self.ctrl = CtrlState::Muted;
             return Ok(());
         }
-        // 2. PLL clock loss while playing = the stream died: mute across
-        //    the gap; the next StreamStarting runs the handshake again.
-        if flags.has_fault(AmpFault::PllClockLoss) && self.ctrl == CtrlState::Playing {
+        // 2. PLL clock loss while a stream is live (playing OR user-muted
+        //    mid-stream) = the stream died: mute across the gap; the next
+        //    StreamStarting runs the handshake again. `stream_live` must be
+        //    cleared in BOTH cases — a stale `stream_live` would let a later
+        //    `SetMute(false)` unmute into the dead clock without a
+        //    handshake. GPIO /MUTE is asserted alongside the serial bit:
+        //    with the PLL unlocked the synchronous digital domain cannot be
+        //    trusted to propagate the register mute cleanly, and the
+        //    electrical mute is the only path that cannot fail.
+        if flags.has_fault(AmpFault::PllClockLoss)
+            && (self.ctrl == CtrlState::Playing
+                || (self.ctrl == CtrlState::Muted && self.stream_live))
+        {
             warn!("PLL clock lost during playback; muting until the stream restarts");
             self.mute_hardware().await?;
+            self.gpio.set_hardware_mute(true)?;
             self.ctrl = CtrlState::Muted;
             self.stream_live = false;
             return Ok(());
