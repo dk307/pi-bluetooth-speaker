@@ -495,3 +495,95 @@ before implementation.
   (`PowerModeProfile`, now 0-5).
 - CLI `--set-i2s` rejects reserved 2/3; `--set-gain` replaced by
   `--set-audio-mode <0-5>`; `--set-profile` range 0-5.
+
+## 11. Cross-Check Record & Stream-Lifecycle Producer Plan (2026-11-11, post-§10)
+
+### 11.1 Master volume register direction — final verification
+
+An external review proposal claimed `0xA8` = −144 dB was wrong ("dangerously
+inverted"); the counter-claim (`0xA8` = 0 dB) was itself wrong. The
+authoritative chain, now triple-confirmed:
+
+- **Silicon/kernel:** `ma120x0p.h` `ma_vol_db_master__reset = 0x18` — the
+  chip's `0x40` resets to `0x18`, and the Merus reset default is 0 dB
+  (the mute-first boot design depends on this). Therefore **`0x18` (24) =
+  0 dB, `0xA8` (168) = −144 dB** (datasheet Table 8-9: `reg = 24 − dB`).
+- **Kernel ALSA control:** `SOC_SINGLE_RANGE_TLV(..., 0, 0x18, 0xA8, 1, ...)`
+  (invert = 1): ALSA index 0 → `0xA8` (−144 dB), index 144 → `0x18` (0 dB).
+  Same convention as the appliance user-scale `raw` (0..144, raw = −dB).
+- **Transform:** `reg = 168 − raw`, `dB = raw − 144`. Audited every site —
+  applied **exactly once per direction** (write `amp.rs` write_master_volume;
+  mock encode/decode round-trip; read decode), and the serial-mute path
+  (`0x36` bit 7) touches no volume transform. No double inversion.
+
+Consequence fixes (commit `adfb36a`): `VLP_ZERO_DB_REG` (misnomer — 168
+anchors the −144 dB end) renamed `VLP_NEG144_DB_REG` with corrected docs;
+`AmpSettings` Display and the amp CLI `master_volume_db` used the inverted
+`−raw` dB label (full volume displayed as "−144 dB"); both now use
+`dB = raw − 144` with a display-direction regression test.
+
+### 11.2 Kernel-managed stream-transition mute (max98357a) — evaluated, rejected
+
+A proposal to replace `hifiberry-dac` with the upstream `max98357a` codec
+driver (kernel-owned `/MUTE` via `sdmode-gpios`) was cross-checked against
+upstream `sound/soc/codecs/max98357a.c` and the Pi overlay README:
+
+Verified true: the trigger hook drives `sdmode` HIGH on `TRIGGER_START`
+(after `mdelay(sdmode_delay)`) and LOW on `TRIGGER_STOP`/`PAUSE_PUSH`;
+polarity coincidentally matches `/MUTE` (LOW = muted); the stock overlay's
+`sdmode-pin` parameter exists; `pcm5102a` has no mute GPIO handler.
+
+Rejected for cause:
+1. **96 kHz DAI cap** (`SNDRV_PCM_RATE_8000_96000`) — `pcm5102a` supports up
+   to 192 kHz; the switch would narrow the pipeline's supported rates.
+2. **`pmdown_time` claim false:** the GPIO mute is immediate at
+   `TRIGGER_STOP`; the DAPM `SD_MODE` widget only gates `sdmode_switch`
+   (re-unmute), so the `pmdown_time=100` tuning proposal changes the wrong
+   behavior.
+3. **Blind delay instead of PLL gating:** `mdelay(sdmode_delay)` busy-spins
+   in atomic trigger context with no `0x7C` `PLL_UNLOCK` check; the bounded
+   userspace handshake is strictly safer.
+4. **Loss of the out-of-band electrical mute:** the kernel only mutes at
+   stream transitions; a mid-stream OCP/thermal fault or wedged I2C bus
+   leaves no mute path at all. GPIO `/MUTE` is the only mute that works when
+   I2C does not.
+5. **Does not remove the lifecycle requirement:** the controller still needs
+   stream edges for PLL-loss handling, thermal-throttle restore, fault
+   recovery re-arm, and `stream_live` — and with kernel-owned mute those
+   events become invisible to userspace, forcing a redesign of the just-
+   completed state machine (large blast radius).
+
+Decision: **keep `hifiberry-dac` + full userspace GPIO/register ownership.**
+
+### 11.3 Stream-lifecycle producer — selected design (Phase 4, pending implementation)
+
+The plan's Q3 systemd-unit-watch choice is dead on arrival: `camilladsp.service`
+is `Restart=always` and runs from boot; unit state never reflects streams.
+The real signal is CamillaDSP's engine `ProcessingState` over WebSocket
+(:1234), already decoded by `crates/dsp` (`DspDevice::read_status_async`,
+`MockDsp`).
+
+Design — **CamillaDSP engine-state watcher** (new `dsp_watch` module in
+audio-manager):
+- Poll task (injectable `DspDevice` seam, `new_mocked() -> (Self, Ctrl)`);
+  edges only: `Running` → `StreamStarting`, `Paused`/`Inactive` →
+  `StreamStopping`; `Stalled` → treated as stop (PLL is dead if the engine
+  stalled hard); `Unknown`/read failure → hold last state (`warn!`, bounded
+  backoff — §4.5 no-flap rule).
+- **Adaptive interval:** 250 ms while Playing (stop edge can arrive), 500 ms
+  otherwise; configurable (`dsp_poll_interval_ms`, `dsp_watch_enabled`).
+- **Start-direction latency is irrelevant:** BT A2DP + camilladsp pipeline
+  startup dominate; +250..500 ms is imperceptible.
+- **Stop-direction latency is backstopped by hardware:** if BCLK dies before
+  the poll lands, the existing PLL-loss path mutes immediately via `0x7C`.
+  Watcher = graceful pre-mute; PLL-loss handler = fast backstop.
+- `start_stream()`'s bounded PLL handshake remains the authoritative clock
+  gate regardless of watcher timeliness.
+
+**Open bench question (Phase 5, decides final intervals):** does a stop
+without pre-mute (BCLK death while unmuted) audibly pop on this board?
+If clean → relax polling; if audible → 100 ms polls while Playing.
+
+Deferred alternatives: true event push (camilladsp does not push unsolicited
+stream-state events in this deployment; `crates/dsp` client is
+request/response) and a systemd D-Bus unit watch (rejected above).
