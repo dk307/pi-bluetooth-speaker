@@ -291,6 +291,77 @@ end-to-end (already the merged architecture in #53).
   `audio_manager_plan.md` §7).
 - No refactor of sibling drivers (`light.rs`, `temp.rs`, `encoder.rs`).
 
+## 6.1 Phase 0 — Ground-Truth Results (live on the Pi, 2026-11-11)
+
+All findings below were verified on the live appliance (`root@192.168.2.120`)
+with the `hifiberry-dac` overlay active. This section is the authoritative
+register/hardware model for Phase 2 and supersedes any conflicting statements
+above.
+
+### Hardware & GPIO pinout (from on-disk `merus-amp.dtbo` + live `pinctrl`)
+
+| Signal | BCM GPIO | Notes |
+|---|---|---|
+| `/ENABLE` | **GPIO 14** (`enable_gp`) | Active-LOW; idle TXD0 = HIGH ⇒ amp in hardware reset after hifiberry boot |
+| `/MUTE` | **GPIO 15** (`mute_gp`) | Active-LOW; must be driven HIGH (or held muted by serial mute) |
+| `booster_gp` | **GPIO 17** | Already output-high at boot on this unit |
+| `error_gp` | **GPIO 23** | Input, fault indicator |
+
+- **Cold-boot reset confirmed:** after reboot with `hifiberry-dac`, the amp
+  ACKs reads on a reset-state mirror address (`0x23`) but **NACKs all writes**
+  and returns reset defaults. Driving GPIO14 LOW wakes the chip; the real
+  control address is **`0x20`** (both `0x20` and `0x23` ACK while awake;
+  `0x20` is authoritative — matches the overlay `reg = <0x20>`).
+- **No sound root cause (recorded):** boot reset defaults left the amp
+  muted-by-reset and the VLP bypassed. Recovery required: GPIO14 LOW,
+  GPIO15 HIGH, `0x35` bit3 `audio_proc_enable` set, standard-I2S format.
+
+### Register model corrections (authoritative source: Infineon
+`merus-audio-amp-hat-zw` → `merus_linux_audio_driver_pi3/.../ma120x0p.{c,h}`
++ MA12070P datasheet v1.1 Table 8-9, live-verified 2026-11-11)
+
+1. **Master volume `0x40` uses the VLP `24 − dB` mapping**, NOT raw = −dB:
+   register `0x18` (24) = 0.00 dB, register `0xA8` (168) = −144.00 dB
+   (Table 8-9: reg = 24 − dB; reg < 24 = boost up to +24 dB).
+   **Live-verified:** writing `0xA8` cut playback; restoring `0x30` (−24 dB)
+   changed loudness. Conversion for the user-scale raw (0..144, raw = −dB):
+   **`reg = 168 − raw`**; fractional `0x41` stays 0.
+2. **Register `0x35` bit 3 = `audio_proc_enable` (VLP bypass mux).** When
+   LOW the entire VLP (master/channel volume + limiter) is bypassed and
+   `0x40` writes have **no audible effect**. Bit 3 is NOT part of the I2S
+   format field (bits 2:0). `0x35` write masks must preserve bits 7:3
+   (attack bits 7:6, release bits 5:4, VLP enable bit 3). The Phase 1.5
+   `0xF8` mask is a **bug** — it silently disables the VLP.
+3. **The original kernel driver `probe()` configuration** (to be replicated
+   by audio-manager boot init):
+   - `0x35 = 0x08` (standard I2S + VLP enabled), then attack bits 7:6 = fast
+     ⇒ final `0x88`; release bits 5:4 = slow (`0x00`).
+   - `0x36` |= `0x40` (limiter enabled).
+   - Master volume `0x40 = 0x18` (0 dB); limiter thresholds ch0/ch1
+     `0x47`/`0x48 = 0x27` (−15 dBFS; thr mapping also `24 − dBFS`).
+4. **PM_CTRL `0x00` (manualPM bit 6, `PM_man` bits 5:4) and PM_PROFILE
+   `0x1D` (bits 2:0, presets 0-4) confirmed** against the driver header
+   (`ma_manualpm__a 0`, `ma_pmprofile__a 29`). Post-reset live value
+   `0x00 = 0x3D` (manualPM=1, `PM_man`=3). The earlier draft claim that
+   `0x00` holds PMP presets `0x38..0x3D` is **wrong** (that's a monitor-
+   register interpretation).
+5. **Monitor register layout (driver header, decimal = dec):**
+   `0x60` = dcu_mon0 `pm_mon` bits 1:0 / freqmode / pps (repo
+   `REG_POWER_MODE` decodes ch0 power-mode monitor — naming off, function
+   OK); `0x61` = dcu0 status (ocp/vcfly/pvdd/vdd/mute); `0x62` = dcu0
+   `m_mon`; **dcu1 status is `0x65`, m_mon1 `0x66`** (repo `REG_DCU_MON1 =
+   0x62` is wrong for a per-channel pair); `0x74` = audio_in_mode_mon;
+   `0x75` = `msel_mon` (live: 1 = 1×BTL + 2×SE); `0x7E` = clip/limiter mon.
+6. **Serial mute `0x36` bit 7 re-confirmed** (live-verified again; register
+   RMW preserves limiter bit 6).
+
+### Open questions resolved by Phase 0
+- Q1: `/ENABLE` IS wired to **GPIO14** (software-reachable recovery).
+- Q2: `/MUTE` wired on **GPIO15**; serial mute remains the primary mute,
+  GPIO15 managed at boot only.
+- Q3: stream lifecycle hook: D-Bus/systemd watch (CamillaDSP websocket not
+  enabled in this deployment).
+
 ## 7. Open Questions (blocked on Phase 0)
 1. Is `/ENABLE` wired to a BCM GPIO on this unit (which one), or hard-strapped
    enabled? Decides whether the recovery cycle is software-reachable.

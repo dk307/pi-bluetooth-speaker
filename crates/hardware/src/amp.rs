@@ -48,14 +48,19 @@ pub const REG_AUDIO_IN: u8 = 0x1B;
 /// MA12070P error handling and latch clear register address.
 pub const REG_EH_CLEAR: u8 = 0x2D;
 
-/// MA12070P power mode profile register address.
+/// MA12070P DCU channel 0 power-mode monitor register address
+/// (`pm_mon` bits 1:0, `freqmode_mon` bits 6:4, `pps_passed` bit 7).
 pub const REG_POWER_MODE: u8 = 0x60;
 
-/// MA12070P DCU monitor channel 0 register address.
+/// MA12070P DCU channel 0 status register address
+/// (ocp / `vcfly1` / `vcfly2` / `pvdd_ok` / `vdd_ok` bit 4 / mute monitor).
 pub const REG_DCU_MON0: u8 = 0x61;
 
-/// MA12070P DCU monitor channel 1 register address.
-pub const REG_DCU_MON1: u8 = 0x62;
+/// MA12070P DCU channel 1 status register address (same layout as 0x61).
+///
+/// Phase 0 correction: the driver header places `dcu_mon1` status at 0x65
+/// (0x62 is dcu0 `m_mon`, 0x63/0x64 dcu1 `pm_mon`/`freqmode`).
+pub const REG_DCU_MON1: u8 = 0x65;
 
 /// MA12070P latched historical error accumulation register address.
 pub const REG_ERROR_ACC: u8 = 0x6D;
@@ -108,6 +113,16 @@ pub const REG_THR_DB_CH0: u8 = 0x47;
 /// Bits 1:0 per channel (0, 0.25, 0.5, 0.75 dB).
 pub const REG_THR_LSB_CH: u8 = 0x4B;
 
+/// VLP register value for 0 dB gain (datasheet Table 8-9: `reg = 24 − dB`;
+/// user-scale raw = −dB maps `0x40` to `168 − raw`, range 0x18..=0xA8).
+pub const VLP_ZERO_DB_REG: u16 = 168;
+
+/// `0x35` bit 3 `audio_proc_enable` (VLP bypass mux; 1 = VLP active).
+pub const AUDIO_PROC_ENABLE_MASK: u8 = 0x08;
+
+/// `0x36` bit 6 `audio_proc_limiterEnable` (output limiter bypass mux).
+pub const LIMITER_ENABLE_MASK: u8 = 0x40;
+
 /// Pure helper: apply or clear the serial mute bit (0x36 bit 7) in a register value.
 #[must_use]
 pub fn apply_mute_bit(reg: u8, muted: bool) -> u8 {
@@ -122,6 +137,21 @@ pub fn apply_mute_bit(reg: u8, muted: bool) -> u8 {
 #[must_use]
 pub const fn is_muted_bit(reg: u8) -> bool {
     reg & (1 << 7) != 0
+}
+
+/// Decodes a VLP `0x40` register value (`24 − dB` encoding) to the appliance
+/// user-scale raw (raw = −dB, 0..=144).
+///
+/// Values below the 0 dB register (boost) clamp to 144; values above the
+/// −144 dB register clamp to 0.
+#[must_use]
+pub const fn decode_vlp_raw(reg: u16) -> u16 {
+    if reg >= VLP_ZERO_DB_REG {
+        0
+    } else {
+        let diff = VLP_ZERO_DB_REG - reg;
+        if diff > 144 { 144 } else { diff }
+    }
 }
 
 /// Validated 7-bit I2C slave address for the MA12070P amplifier (`0x20..=0x23`).
@@ -844,8 +874,15 @@ impl AmpSettings {
             vol_frac,
         ] = regs;
         Self {
-            // `as` cast required inside const blocks (From is not const fn); u8 -> u16 is lossless.
-            master_volume_raw: vol_int as u16,
+            // `as` casts required inside const blocks (From is not const fn);
+            // u8 -> u16 is lossless. VLP register decode: raw = 168 − reg,
+            // clamped to the user scale 0..=144 (reg < 24 = boost).
+            master_volume_raw: if vol_int >= VLP_ZERO_DB_REG as u8 {
+                0
+            } else {
+                let diff = VLP_ZERO_DB_REG - vol_int as u16;
+                if diff > 144 { 144 } else { diff }
+            },
             master_volume_frac: vol_frac & 0x03,
             serial_muted: is_muted_bit(audio_proc),
             pm_ctrl_pm: (pm_ctrl >> 4) & 0x03,
@@ -1170,8 +1207,9 @@ struct MockState {
     live_errors: AmpErrorFlags,
     latched_errors: AmpErrorFlags,
     fault: Option<Box<str>>,
-    // Write-path mock state (Phase 1.5)
-    mock_master_volume_raw: u16,
+    // Write-path mock state (Phase 1.5). Stores the hardware `0x40` VLP
+    // register encoding (24 − dB) to mirror `HardwareDevice` fidelity.
+    mock_master_volume_reg: u16,
     mock_serial_muted: bool,
     mock_pm_ctrl: u8,
     mock_pm_profile: u8,
@@ -1196,7 +1234,7 @@ impl AmpDeviceMock {
                 latched_errors: AmpErrorFlags::NONE,
                 fault: None,
                 // Write-path defaults
-                mock_master_volume_raw: 116, // ≈ -28 dB (raw = 144 + dB)
+                mock_master_volume_reg: 168 - 116, // ≈ -28 dB (raw 116 ⇒ reg 52)
                 mock_serial_muted: false,
                 mock_pm_ctrl: 0x60, // manualPM=1 (bit6), PM_man=2 (bits5:4) -> PMP2
                 mock_pm_profile: 2, // PMP2
@@ -1307,7 +1345,7 @@ impl AmpDeviceMock {
             return Err(AmpError::mock_fault(fault.clone()));
         }
         Ok(AmpSettings {
-            master_volume_raw: state.mock_master_volume_raw,
+            master_volume_raw: decode_vlp_raw(state.mock_master_volume_reg),
             master_volume_frac: 0,
             serial_muted: state.mock_serial_muted,
             pm_ctrl_pm: (state.mock_pm_ctrl >> 4) & 0x03,
@@ -1325,8 +1363,8 @@ impl AmpDeviceMock {
         if raw > 144 {
             return Err(AmpError::invalid_argument("master_volume_raw", raw));
         }
-        // Store the same encoded register values as hardware: int = raw, frac = 0
-        state.mock_master_volume_raw = raw;
+        // Store the same encoded register value as hardware: int = 168 − raw, frac = 0
+        state.mock_master_volume_reg = 168 - raw;
         Ok(())
     }
 
@@ -1398,10 +1436,12 @@ impl AmpDeviceMock {
     /// Panics if the mock state lock is poisoned.
     #[must_use]
     pub fn mock_master_volume_raw(&self) -> u16 {
-        self.state
-            .read()
-            .expect("mock lock poisoned")
-            .mock_master_volume_raw
+        decode_vlp_raw(
+            self.state
+                .read()
+                .expect("mock lock poisoned")
+                .mock_master_volume_reg,
+        )
     }
 
     /// Get the mocked serial mute state.
@@ -1472,7 +1512,7 @@ impl AmpDeviceMock {
         self.state
             .write()
             .expect("mock lock poisoned")
-            .mock_master_volume_raw = raw;
+            .mock_master_volume_reg = 168 - raw;
     }
 
     /// Set the mocked serial mute state directly (for test setup).
@@ -1640,8 +1680,18 @@ where
 
     // === Write operations (Phase 1.5) ===
 
-    /// Write master volume (0x40 integer dB, 0x41 fractional 0.25 dB).
-    /// Raw = -dB (0 = -144 dB mute, 144 = 0 dB). Fractional in bits 1:0 of 0x41.
+    /// Write master volume (user-scale raw = −dB, 0 = −144 dB mute, 144 = 0 dB).
+    ///
+    /// The MA12070P VLP encodes gain as `register = 24 − dB` (datasheet
+    /// Table 8-9: 0x18 = 0.00 dB, 0xA8 = −144.00 dB, boost below 0x18), so the
+    /// appliance user-scale raw (raw = −dB) maps to **`reg = 168 − raw`**.
+    /// Live-verified on the Pi (2026-11-11): `0xA8` cuts playback, `0x30`
+    /// (−24 dB) audibly attenuates. The fractional register 0x41 stays 0
+    /// (`amp_curve` produces integer dB).
+    ///
+    /// Requires the VLP to be enabled (`0x35` bit 3 `audio_proc_enable`,
+    /// see [`Self::enable_audio_processor`]) — writes have no audible effect
+    /// while the VLP is bypassed.
     ///
     /// # Errors
     /// Returns [`AmpError`] if communication fails or `raw > 144`.
@@ -1650,9 +1700,61 @@ where
         if raw > RAW_MAX {
             return Err(AmpError::invalid_argument("master_volume_raw", raw));
         }
-        let int_reg = raw as u8;
+        let int_reg = (VLP_ZERO_DB_REG - raw) as u8;
         let frac_reg = 0; // amp_curve produces integer dB; frac reg reserved for 0.25 dB steps
         self.write_regs(&[(REG_VOL_DB_MASTER, int_reg), (REG_VOL_LSB_MASTER, frac_reg)])
+    }
+
+    /// Enable the VLP (Volume & Limiter Processor): RMW set `0x35` bit 3
+    /// (`audio_proc_enable`). The VLP must be enabled for master/channel
+    /// volume and limiter settings to reach the audio path; the original
+    /// kernel driver `probe()` always set this bit.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    pub fn enable_audio_processor(&mut self) -> Result<(), AmpError> {
+        let reg = self.read_reg(REG_I2S_FORMAT)?;
+        self.write_reg(REG_I2S_FORMAT, reg | AUDIO_PROC_ENABLE_MASK)
+    }
+
+    /// Enable the VLP output limiter: RMW set `0x36` bit 6
+    /// (`audio_proc_limiterEnable`). Reduces gain when the output approaches
+    /// the programmed threshold (protects the loudspeakers from clipping).
+    /// The original kernel driver enabled it with −15 dBFS thresholds.
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails.
+    pub fn enable_limiter(&mut self) -> Result<(), AmpError> {
+        let reg = self.read_reg(REG_AUDIO_PROC)?;
+        self.write_reg(REG_AUDIO_PROC, reg | LIMITER_ENABLE_MASK)
+    }
+
+    /// Write the limiter threshold for all four channels (0x47..0x4A).
+    ///
+    /// `dbfs` is the limiter threshold in dBFS (0 ..= −144); the register
+    /// uses the same `24 − dB` VLP mapping (driver default −15 dBFS ⇒ 0x27).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] if communication fails or `dbfs` is out of range.
+    pub fn write_limiter_thresholds(&mut self, dbfs: i16) -> Result<(), AmpError> {
+        if !(-144..=0).contains(&dbfs) {
+            return Err(AmpError::invalid_argument(
+                "limiter_threshold_dbfs",
+                dbfs.unsigned_abs(),
+            ));
+        }
+        #[expect(
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation,
+            reason = "range-checked above: 24 - dbfs is 24..=168, fits u8"
+        )]
+        let reg = (24 - dbfs) as u8;
+        self.write_regs(&[
+            (REG_THR_DB_CH0, reg),
+            (REG_THR_DB_CH0 + 1, reg),
+            (REG_THR_DB_CH0 + 2, reg),
+            (REG_THR_DB_CH0 + 3, reg),
+        ])
     }
 
     /// RMW of serial mute register 0x36 bit 7 with verify-by-re-read.
@@ -1694,7 +1796,12 @@ where
         self.write_reg(REG_PM_PROFILE, desired)
     }
 
-    /// RMW of I2S format register 0x35 bits 2:0.
+    /// RMW of I2S format register 0x35 **bits 2:0 only**.
+    ///
+    /// Bits 7:3 of `0x35` hold limiter attack (7:6), limiter release (5:4),
+    /// and `audio_proc_enable` (bit 3, the VLP bypass mux) — clearing any of
+    /// them silently bypasses volume control and misconfigures the limiter.
+    /// (Phase 0 live finding: the original `0xF8` mask disabled the VLP.)
     ///
     /// # Errors
     /// Returns [`AmpError`] if communication fails or `format > 4`.

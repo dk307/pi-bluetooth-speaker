@@ -789,7 +789,7 @@ mod hardware_device_tests {
     use super::eh_mock_bus::MockBus;
     use speaker_hardware::amp::{
         AmpI2cAddress, REG_AUDIO_IN_MODE, REG_AUDIO_PROC, REG_I2S_FORMAT, REG_PM_CTRL,
-        REG_PM_PROFILE, REG_VOL_DB_MASTER, REG_VOL_LSB_MASTER,
+        REG_PM_PROFILE, REG_THR_DB_CH0, REG_VOL_DB_MASTER, REG_VOL_LSB_MASTER,
     };
     use speaker_hardware::amp_test_helpers::HardwareDevice;
 
@@ -802,10 +802,10 @@ mod hardware_device_tests {
         let bus = MockBus::new();
         let mut dev = HardwareDevice::new(bus.clone(), addr());
 
-        // Write raw = 100 (0x64) -> int_reg = 0x64, frac_reg = 0
+        // Write raw = 100 (−100 dB) -> VLP reg = 168 − 100 = 68 (0x44), frac = 0
         dev.write_master_volume(100).unwrap();
 
-        assert_eq!(bus.get_register(REG_VOL_DB_MASTER), Some(100));
+        assert_eq!(bus.get_register(REG_VOL_DB_MASTER), Some(68));
         assert_eq!(bus.get_register(REG_VOL_LSB_MASTER), Some(0));
     }
 
@@ -900,10 +900,63 @@ mod hardware_device_tests {
     }
 
     #[test]
+    fn hardware_device_write_limiter_thresholds_all_channels() {
+        // Driver-default −15 dBFS: VLP reg = 24 − (−15) = 39 (0x27)
+        let bus = MockBus::new();
+        let mut dev = HardwareDevice::new(bus.clone(), addr());
+
+        dev.write_limiter_thresholds(-15).unwrap();
+        for ch in 0..4u8 {
+            assert_eq!(bus.get_register(REG_THR_DB_CH0 + ch), Some(0x27), "ch{ch}");
+        }
+
+        let err = dev.write_limiter_thresholds(1).unwrap_err();
+        assert!(err.is_invalid_argument());
+        let err = dev.write_limiter_thresholds(-145).unwrap_err();
+        assert!(err.is_invalid_argument());
+    }
+
+    #[test]
+    fn hardware_device_enable_audio_processor_and_limiter_rmw() {
+        // Live-reset-typical values: 0x35 = 0x00 (VLP bypassed), 0x36 = 0x01
+        let bus = MockBus::new()
+            .with_register(REG_I2S_FORMAT, 0x00)
+            .with_register(REG_AUDIO_PROC, 0x01);
+        let mut dev = HardwareDevice::new(bus.clone(), addr());
+
+        dev.enable_audio_processor().unwrap();
+        assert_eq!(bus.get_register(REG_I2S_FORMAT), Some(0x08));
+
+        dev.enable_limiter().unwrap();
+        assert_eq!(bus.get_register(REG_AUDIO_PROC), Some(0x41));
+    }
+
+    #[test]
+    fn hardware_device_enable_audio_processor_preserves_other_bits() {
+        // Bits 7:3 (attack/release/VLP) and bits 2:0 (format) must survive.
+        let bus = MockBus::new().with_register(REG_I2S_FORMAT, 0x83);
+        let mut dev = HardwareDevice::new(bus.clone(), addr());
+
+        dev.enable_audio_processor().unwrap();
+        assert_eq!(bus.get_register(REG_I2S_FORMAT), Some(0x8B));
+    }
+
+    #[test]
+    fn hardware_device_write_i2s_format_preserves_vlp_and_limiter_bits() {
+        // Phase 0 regression guard: the 0x35 mask must touch bits 2:0 only.
+        let bus = MockBus::new().with_register(REG_I2S_FORMAT, 0x88);
+        let mut dev = HardwareDevice::new(bus.clone(), addr());
+
+        dev.write_i2s_format(1).unwrap();
+        assert_eq!(bus.get_register(REG_I2S_FORMAT), Some(0x89));
+    }
+
+    #[test]
     fn hardware_device_read_settings_decodes_registers() {
         // Reset-typical snapshot: PM_CTRL manualPM|PM_man=2, PM_PROFILE=2,
         // AUDIO_IN_MODE bit7 set (gain 0), I2S format 3, muted (0x36 bit 7),
-        // volume raw 116 with fractional 0.25 dB steps value 2.
+        // VLP volume reg 116 (raw = 168 − 116 = 52, ≈ −52 dB) with
+        // fractional 0.25 dB steps value 2.
         let bus = MockBus::new()
             .with_register(REG_PM_CTRL, 0x60)
             .with_register(REG_PM_PROFILE, 0x02)
@@ -915,7 +968,7 @@ mod hardware_device_tests {
         let mut dev = HardwareDevice::new(bus, addr());
 
         let s = dev.read_settings().unwrap();
-        assert_eq!(s.master_volume_raw, 116);
+        assert_eq!(s.master_volume_raw, 52);
         assert_eq!(s.master_volume_frac, 2);
         assert!(s.serial_muted);
         assert_eq!(s.pm_ctrl_pm, 2);
@@ -955,6 +1008,19 @@ mod hardware_device_tests {
 }
 
 // === Phase 1.5 settings read-path tests ===
+
+#[test]
+fn decode_vlp_raw_boundaries() {
+    use speaker_hardware::amp::decode_vlp_raw;
+    // 0x18 (24) = 0 dB -> raw 144; 0xA8 (168) = −144 dB -> raw 0.
+    assert_eq!(decode_vlp_raw(24), 144);
+    assert_eq!(decode_vlp_raw(168), 0);
+    // Mid-scale: reg 68 (−44 dBFS offset) -> raw 100.
+    assert_eq!(decode_vlp_raw(68), 100);
+    // Boost range (reg < 24) clamps to full volume; > 0xA8 clamps to mute.
+    assert_eq!(decode_vlp_raw(0), 144);
+    assert_eq!(decode_vlp_raw(200), 0);
+}
 
 #[test]
 fn mock_read_settings_defaults() {
@@ -999,8 +1065,9 @@ fn mock_read_settings_fault_injection() {
 
 #[test]
 fn settings_from_raw_registers_decodes() {
+    // VLP volume reg 116 decodes to user raw = 168 − 116 = 52.
     let s = AmpSettings::from_raw_registers([0x60, 0x02, 0x80, 0x03, 0x80, 116, 0x02]);
-    assert_eq!(s.master_volume_raw, 116);
+    assert_eq!(s.master_volume_raw, 52);
     assert_eq!(s.master_volume_frac, 2);
     assert!(s.serial_muted);
     assert_eq!(s.pm_ctrl_pm, 2);
@@ -1008,10 +1075,10 @@ fn settings_from_raw_registers_decodes() {
     assert_eq!(s.i2s_format, 3);
     assert_eq!(s.audio_in_gain, 0);
 
-    // Unmuted, minimum volume; raw reads are masked but not range-clamped,
-    // so out-of-spec register values (0x07 profile, gain 3) still decode.
+    // Unmuted; VLP reg 0 is the +24 dB boost rail and clamps to full volume
+    // (raw 144); out-of-spec register values (0x07 profile, gain 3) still decode.
     let s = AmpSettings::from_raw_registers([0x40, 0x07, 0x7F, 0x07, 0x00, 0, 0x00]);
-    assert_eq!(s.master_volume_raw, 0);
+    assert_eq!(s.master_volume_raw, 144);
     assert_eq!(s.master_volume_frac, 0);
     assert!(!s.serial_muted);
     assert_eq!(s.pm_ctrl_pm, 0);

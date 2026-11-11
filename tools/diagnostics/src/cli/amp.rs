@@ -89,7 +89,7 @@ fn parse_u8_in_range(value: &str, name: &str, max: u8) -> Result<u8, String> {
         Err(_) => {
             return Err(format!(
                 "Invalid {name} value '{value}': expected an integer 0-{max}"
-            ))
+            ));
         }
     };
     if parsed > max {
@@ -103,7 +103,11 @@ fn parse_volume_raw(value: &str) -> Result<u16, String> {
     let trimmed = value.trim();
     let parsed: u16 = match trimmed.parse() {
         Ok(v) => v,
-        Err(_) => return Err(format!("Invalid volume value '{value}': expected an integer 0-144")),
+        Err(_) => {
+            return Err(format!(
+                "Invalid volume value '{value}': expected an integer 0-144"
+            ));
+        }
     };
     if parsed > 144 {
         return Err(format!("Invalid volume value '{value}': expected 0-144"));
