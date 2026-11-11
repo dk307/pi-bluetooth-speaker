@@ -64,10 +64,12 @@ async fn boot_init_wakes_configures_and_reconciles() {
         "Limiter must be enabled at boot"
     );
     assert_eq!(f.amp_mock.mock_limiter_thresholds(), -15);
-    // Amp was woken (GPIO /ENABLE LOW) exactly once.
-    assert_eq!(f.gpio_mock.wake_calls(), 1);
+    // Kernel-parity power-up ran (booster + enable + settles).
+    assert_eq!(f.gpio_mock.power_up_calls(), 1);
+    assert!(f.gpio_mock.booster_on());
+    assert!(f.gpio_mock.amp_awake());
     // Hardware /MUTE stays LOW (muted) until the first PLL handshake.
-    assert!(f.gpio_mock.hardware_muted());
+    assert!(f.gpio_mock.mute_pin_low());
     // Controller is muted awaiting first stream; level reconciled.
     assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
     assert_eq!(f.controller.state().level_raw, 60);
@@ -145,7 +147,7 @@ async fn unmute_without_stream_is_pending_until_stream_start() {
         .unwrap();
     assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
     assert!(!f.controller.state().muted);
-    assert!(!f.gpio_mock.hardware_muted(), "GPIO /MUTE released on play");
+    assert!(!f.gpio_mock.mute_pin_low(), "GPIO /MUTE released on play");
 }
 
 #[tokio::test]
@@ -168,7 +170,7 @@ async fn stream_stopping_mutes_across_transition() {
     assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
     assert!(f.controller.state().muted);
     // GPIO hardware mute is re-asserted while idle (pop-free standby).
-    assert!(f.gpio_mock.hardware_muted());
+    assert!(f.gpio_mock.mute_pin_low());
 }
 
 #[tokio::test]
@@ -187,9 +189,20 @@ async fn thermal_warning_throttles_minus_six_db() {
         .set_live_errors(fault_flags(AmpFault::HighTempWarning));
     f.controller.handle_error_edge().await.unwrap();
 
-    // -6 dB throttle: raw 100 -> 106; still Playing (not muted).
-    assert_eq!(f.controller.state().level_raw, 106);
+    // -6 dB throttle: raw 100 -> 94 (raw is dB attenuation); still Playing.
+    assert_eq!(f.amp_mock.mock_master_volume_raw(), 94);
+    assert_eq!(f.controller.state().level_raw, 100, "user level preserved");
     assert!(!f.controller.state().muted);
+
+    // Repeated edges while the warning is active must not re-apply.
+    f.controller.handle_error_edge().await.unwrap();
+    assert_eq!(f.amp_mock.mock_master_volume_raw(), 94, "no ratchet");
+    assert_eq!(f.controller.state().level_raw, 100);
+
+    // Safety tick with the warning cleared restores the user level.
+    f.amp_mock.set_live_errors(AmpErrorFlags::from_bits(0));
+    f.controller.handle_safety_tick().await.unwrap();
+    assert_eq!(f.amp_mock.mock_master_volume_raw(), 100, "restored");
 }
 
 #[tokio::test]
@@ -221,8 +234,8 @@ async fn critical_fault_recovers_and_returns_to_muted() {
         "Limiter re-enabled during recovery"
     );
     assert_eq!(f.amp_mock.mock_master_volume_raw(), 100, "volume restored");
-    // /ENABLE cycled (wake count grew by one).
-    assert_eq!(f.gpio_mock.wake_calls(), 2);
+    // A real /ENABLE reset pulse (HIGH->LOW) wiped the registers.
+    assert_eq!(f.gpio_mock.reset_calls(), 1);
 }
 
 #[tokio::test]
@@ -295,7 +308,9 @@ async fn run_loop_processes_commands_until_close() {
 
     let controller = f.controller;
     let task = tokio::spawn(async move {
-        controller.run(cmd_rx, edge_rx, shutdown_rx, false).await;
+        controller
+            .run(cmd_rx, Some(edge_rx), shutdown_rx, false)
+            .await;
     });
 
     cmd_tx
@@ -310,4 +325,108 @@ async fn run_loop_processes_commands_until_close() {
     let mirrored = *mirror.lock().await;
     assert_eq!(mirrored.level_raw, 144);
     assert_eq!(f.amp_mock.mock_master_volume_raw(), 144);
+}
+
+#[tokio::test]
+async fn idle_user_mute_survives_stream_start() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    // User mutes while idle.
+    f.controller
+        .handle_command(AmpCommandKind::SetMute(true))
+        .await
+        .unwrap();
+    // Stream starts with a locked PLL: user mute is never overridden.
+    f.amp_mock.set_live_errors(AmpErrorFlags::from_bits(0));
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
+    assert!(f.controller.state().muted);
+    assert!(f.amp_mock.mock_serial_muted());
+    assert!(f.gpio_mock.mute_pin_low());
+
+    // Explicit unmute (pending) + next stream start plays.
+    f.controller
+        .handle_command(AmpCommandKind::SetMute(false))
+        .await
+        .unwrap();
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert!(!f.amp_mock.mock_serial_muted());
+    assert!(
+        !f.gpio_mock.mute_pin_low(),
+        "electrical LOW = muted; must be released"
+    );
+}
+
+#[tokio::test]
+async fn set_mute_while_playing_mirrors_both_directions() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    f.amp_mock.set_live_errors(AmpErrorFlags::from_bits(0));
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert!(!f.gpio_mock.mute_pin_low());
+
+    f.controller
+        .handle_command(AmpCommandKind::SetMute(true))
+        .await
+        .unwrap();
+    assert!(f.gpio_mock.mute_pin_low());
+    f.controller
+        .handle_command(AmpCommandKind::SetMute(false))
+        .await
+        .unwrap();
+    assert!(!f.gpio_mock.mute_pin_low(), "unmute must release /MUTE too");
+}
+
+#[tokio::test]
+async fn closed_edge_channel_does_not_hot_spin() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    let mirror = f.controller.mirror();
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
+    let (edge_tx, edge_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel(1);
+
+    let controller = f.controller;
+    let task = tokio::spawn(async move {
+        controller
+            .run(cmd_rx, Some(edge_rx), shutdown_rx, false)
+            .await;
+    });
+
+    // Close the edge channel: the loop must keep processing commands.
+    drop(edge_tx);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cmd_tx
+        .send(AmpCommand::fire_and_forget(AmpCommandKind::SetLevel(100)))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(cmd_tx);
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("loop must not hang after edge-channel close")
+        .unwrap();
+    assert_eq!(mirror.lock().await.level_raw, 144);
 }

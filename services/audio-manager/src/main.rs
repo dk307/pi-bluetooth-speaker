@@ -91,6 +91,7 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
     let gpio_cfg = AmpGpioConfig {
         enable: config.enable_gpio_pin,
         mute: config.mute_gpio_pin,
+        booster: config.booster_gpio_pin,
         error: config.error_gpio_pin,
     };
     let gpio = tokio::task::spawn_blocking(move || crate::amp_gpio::AmpGpio::open(gpio_cfg))
@@ -185,7 +186,7 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
     });
 
     controller
-        .run(cmd_rx, edge_rx, shutdown_rx, config.safety_tick)
+        .run(cmd_rx, Some(edge_rx), shutdown_rx, config.safety_tick)
         .await;
     signal_task.abort();
 

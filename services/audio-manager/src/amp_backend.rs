@@ -484,10 +484,16 @@ impl I2cAmpBackend {
 #[async_trait]
 impl AmpBackend for I2cAmpBackend {
     async fn write_state(&self, state: &AmpState) -> AmpResult<AmpState> {
-        // Serial mute FIRST (transactional: a mute failure leaves the
-        // hardware untouched); volume second (VLP master register).
-        self.set_serial_mute(state.muted).await?;
-        self.amp.write_master_volume_async(state.level_raw).await?;
+        // Pop-free ordering: muting → mute first, then the volume;
+        // unmuting → write the volume while still muted, then clear the
+        // mute bit last (never expose the reset-default 0x18 = 0 dB level).
+        if state.muted {
+            self.amp.write_serial_mute_async(true).await?;
+            self.amp.write_master_volume_async(state.level_raw).await?;
+        } else {
+            self.amp.write_master_volume_async(state.level_raw).await?;
+            self.amp.write_serial_mute_async(false).await?;
+        }
         Ok(*state)
     }
 

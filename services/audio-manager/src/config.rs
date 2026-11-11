@@ -31,6 +31,10 @@ pub struct Config {
     #[serde(default = "default_error_pin")]
     pub error_gpio_pin: u8,
 
+    /// Booster-converter enable BCM GPIO pin (kernel `booster_gp`: 17).
+    #[serde(default = "default_booster_pin")]
+    pub booster_gpio_pin: u8,
+
     /// Enable the low-frequency safety tick (telemetry diagnostics; the
     /// event paths are always the primary mechanism).
     #[serde(default = "default_safety_tick")]
@@ -63,6 +67,10 @@ fn default_mute_pin() -> u8 {
 
 fn default_error_pin() -> u8 {
     23
+}
+
+fn default_booster_pin() -> u8 {
+    17
 }
 
 fn default_safety_tick() -> bool {
@@ -121,6 +129,7 @@ impl Default for Config {
             enable_gpio_pin: default_enable_pin(),
             mute_gpio_pin: default_mute_pin(),
             error_gpio_pin: default_error_pin(),
+            booster_gpio_pin: default_booster_pin(),
             safety_tick: default_safety_tick(),
             state_path: default_state_path(),
             log_level: None,

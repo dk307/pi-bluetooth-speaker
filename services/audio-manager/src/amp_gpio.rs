@@ -1,22 +1,28 @@
-//! GPIO ownership of the MA12070P `/ENABLE`, `/MUTE`, and `error` lines.
+//! GPIO ownership of the MA12070P `/ENABLE`, `/MUTE`, booster, and `error`
+//! lines.
 //!
 //! Pinout (Phase 0 ground truth, decompiled `merus-amp.dtbo` + live
-//! `pinctrl`, 2026-11-11): `/ENABLE` = BCM GPIO 14 (active-LOW, driving it
-//! LOW wakes the amp from hardware reset), `/MUTE` = BCM GPIO 15
-//! (active-LOW; boot-time wiring only — the serial mute bit `0x36` bit 7 is
-//! the runtime mute), `error` = BCM GPIO 23 (fault indicator; LOW = fault
-//! per the open-drain merus design).
+//! `pinctrl`, 2026-11-11): `/ENABLE` = BCM GPIO 14 (active-LOW: LOW wakes
+//! the amp from hardware reset), `/MUTE` = BCM GPIO 15 (active-LOW: LOW =
+//! muted — verified against `ma120x0p.c` `mute_stream` (`if (mute) val = 0`)
+//! and the `GPIOD_OUT_LOW` "make sure the device is muted" probe request),
+//! booster = BCM GPIO 17 (5 V→20 V boost converter enable, kernel parity:
+//! `booster_gp` high + 200 ms settle before `/ENABLE`), `error` = BCM GPIO 23
+//! (fault indicator; LOW = fault per the open-drain merus design).
 //!
 //! With `dtoverlay=hifiberry-dac` nothing else claims these lines, so this
-//! module is the sole owner. All Linux GPIO syscalls are blocking and are
-//! invoked from `spawn_blocking` tasks; the error-line edge watch runs a
-//! blocking `rppal` poll loop feeding an `mpsc` channel (no async GPIO API
-//! exists in `rppal` 0.22; see plan §5.3 — no new crates without approval).
+//! module is the sole owner. GPIO syscalls are blocking: callers that run in
+//! async context must invoke the sleeping operations ([`AmpGpio::power_up`],
+//! [`AmpGpio::reset`]) via `spawn_blocking`; the quick line writes
+//! ([`AmpGpio::wake`], [`AmpGpio::set_hardware_mute`]) are safe to call
+//! inline. The error-line edge watch arms a synchronous rppal interrupt and
+//! then polls it in a dedicated thread (no async GPIO API exists in rppal
+//! 0.22; see plan §5.3 — no new crates without user approval).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use rppal::gpio::{Gpio, InputPin, OutputPin};
+use rppal::gpio::{Gpio, InputPin, Level, OutputPin, Trigger};
 use tracing::{debug, info, warn};
 
 use crate::error::{AmpError, AmpResult};
@@ -28,6 +34,8 @@ pub struct AmpGpioConfig {
     pub enable: u8,
     /// `/MUTE` — active-LOW hardware mute line.
     pub mute: u8,
+    /// Booster-converter enable (kernel `booster_gp`).
+    pub booster: u8,
     /// `error` — fault indicator input (LOW = fault).
     pub error: u8,
 }
@@ -37,22 +45,50 @@ impl Default for AmpGpioConfig {
         Self {
             enable: 14,
             mute: 15,
+            booster: 17,
             error: 23,
         }
     }
 }
 
+/// Booster PVDD settle time (kernel parity: `msleep(200)` after booster on).
+const BOOSTER_SETTLE: Duration = Duration::from_millis(200);
+
+/// Post-enable settle time before the first I2C transaction (kernel parity:
+/// `msleep(50)` after claiming `/ENABLE`).
+const ENABLE_SETTLE: Duration = Duration::from_millis(50);
+
+/// `/ENABLE` HIGH pulse width for a reset cycle.
+const RESET_PULSE: Duration = Duration::from_millis(1);
+
+/// Post-reset settle time before register re-init.
+const RESET_SETTLE: Duration = Duration::from_millis(10);
+
 /// How long a single edge-watch poll blocks before re-checking shutdown.
 const EDGE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Shared mock state behind [`AmpGpioMock`].
+/// Shared mock state behind [`AmpGpioMock`]. The mute state is stored as the
+/// **electrical pin level** (`mute_low`), not the logical intent, so an
+/// inverted write can never pass a mock assertion unnoticed.
 #[derive(Debug, Default)]
 struct MockGpioState {
-    amp_awake: bool,
-    hardware_muted: bool,
+    awake: bool,
+    /// `true` = `/MUTE` pin driven LOW = electrically muted.
+    mute_low: bool,
+    booster_on: bool,
     error_active: bool,
     wake_calls: u32,
+    reset_calls: u32,
+    power_up_calls: u32,
     mute_calls: u32,
+}
+
+/// Lock a mock-state mutex with poisoned-data recovery (M-POISONED-MUTEX).
+fn mock_lock(state: &Mutex<MockGpioState>) -> MutexGuard<'_, MockGpioState> {
+    state.lock().unwrap_or_else(|p| {
+        warn!("GPIO mock state lock poisoned; recovering data");
+        p.into_inner()
+    })
 }
 
 /// Controller for the mocked GPIO backend (`new_mocked()` pairing).
@@ -64,25 +100,49 @@ pub struct AmpGpioMock {
 impl AmpGpioMock {
     /// Set whether the mock reports an active (LOW) error line.
     pub fn set_error_active(&self, active: bool) {
-        self.state.lock().unwrap().error_active = active;
+        mock_lock(&self.state).error_active = active;
     }
 
-    /// Assert the mock woke the amp (`wake_calls` >= 1).
+    /// Number of `wake()` calls (amp driven awake from reset).
     #[must_use]
     pub fn wake_calls(&self) -> u32 {
-        self.state.lock().unwrap().wake_calls
+        mock_lock(&self.state).wake_calls
     }
 
-    /// Assert the last hardware-mute state written.
+    /// Number of `reset()` calls (HIGH→LOW `/ENABLE` reset pulses).
     #[must_use]
-    pub fn hardware_muted(&self) -> bool {
-        self.state.lock().unwrap().hardware_muted
+    pub fn reset_calls(&self) -> u32 {
+        mock_lock(&self.state).reset_calls
     }
 
-    /// Get the mute-write call count.
+    /// Number of `power_up()` calls (booster + enable sequence).
+    #[must_use]
+    pub fn power_up_calls(&self) -> u32 {
+        mock_lock(&self.state).power_up_calls
+    }
+
+    /// `true` when the `/MUTE` pin is electrically LOW (muted).
+    #[must_use]
+    pub fn mute_pin_low(&self) -> bool {
+        mock_lock(&self.state).mute_low
+    }
+
+    /// `true` when the booster line is driven HIGH.
+    #[must_use]
+    pub fn booster_on(&self) -> bool {
+        mock_lock(&self.state).booster_on
+    }
+
+    /// `true` when the amp is awake (`/ENABLE` LOW).
+    #[must_use]
+    pub fn amp_awake(&self) -> bool {
+        mock_lock(&self.state).awake
+    }
+
+    /// Number of mute-line writes.
     #[must_use]
     pub fn mute_calls(&self) -> u32 {
-        self.state.lock().unwrap().mute_calls
+        mock_lock(&self.state).mute_calls
     }
 }
 
@@ -93,54 +153,60 @@ enum GpioSeam {
     Mock { state: Arc<Mutex<MockGpioState>> },
 }
 
-/// Claimed rppal line handles.
+/// Claimed rppal line handles. The `error` input is `Option` because the
+/// edge watch takes it out of the seam into its dedicated thread (the
+/// blocking `poll_interrupt` call must not hold the seam lock).
 struct HardwarePins {
     enable: OutputPin,
     mute: OutputPin,
-    error: InputPin,
+    booster: OutputPin,
+    error: Option<InputPin>,
 }
 
-/// Sole owner of the amplifier GPIO lines. Cloneable; all transactions are
-/// serialized by `rppal`'s internal gpiomem locking at the syscall layer.
+/// Sole owner of the amplifier GPIO lines. Cloneable; all line access is
+/// serialized through the seam mutex (short critical sections only — the
+/// blocking edge watch owns its pin outside the lock).
 #[derive(Clone)]
 pub struct AmpGpio {
     seam: Arc<Mutex<GpioSeam>>,
 }
 
 impl AmpGpio {
-    /// Claim the GPIO lines on `/dev/gpiochip0` (BCM numbering) and hold the
-    /// amp **awake** (GPIO `/ENABLE` LOW) and **hardware-muted** (GPIO15
-    /// LOW) — the safe boot orientation; the controller unmutes after the
-    /// PLL-lock handshake.
+    /// Claim the GPIO lines on `/dev/gpiochip0` (BCM numbering) with the
+    /// **safe orientation asserted at claim time** (not inherited by luck):
+    /// `/MUTE` LOW (electrically muted), booster LOW (off), `/ENABLE` HIGH
+    /// (amp in hardware reset — the hifiberry boot state).
     ///
     /// # Errors
     /// Returns [`AmpError::Gpio`] if the chip or any line cannot be claimed.
     pub fn open(config: AmpGpioConfig) -> AmpResult<Self> {
-        let gpio = Gpio::new().map_err(crate::error::AmpError::Gpio)?;
+        let gpio = Gpio::new().map_err(AmpError::Gpio)?;
         let enable = gpio
             .get(config.enable)
-            .map_err(crate::error::AmpError::Gpio)?
-            .into_output();
-        // Start LOW (muted) — never unmute hardware before the PLL handshake.
+            .map_err(AmpError::Gpio)?
+            .into_output_high();
         let mute = gpio
             .get(config.mute)
-            .map_err(crate::error::AmpError::Gpio)?
-            .into_output();
-        let error = gpio
-            .get(config.error)
-            .map_err(crate::error::AmpError::Gpio)?
-            .into_input();
+            .map_err(AmpError::Gpio)?
+            .into_output_low();
+        let booster = gpio
+            .get(config.booster)
+            .map_err(AmpError::Gpio)?
+            .into_output_low();
+        let error = gpio.get(config.error).map_err(AmpError::Gpio)?.into_input();
         info!(
             enable_pin = config.enable,
             mute_pin = config.mute,
+            booster_pin = config.booster,
             error_pin = config.error,
-            "GPIO lines claimed (amp awake, hardware muted)"
+            "GPIO lines claimed (amp in reset, hardware muted, booster off)"
         );
         Ok(Self {
             seam: Arc::new(Mutex::new(GpioSeam::Hardware(Box::new(HardwarePins {
                 enable,
                 mute,
-                error,
+                booster,
+                error: Some(error),
             })))),
         })
     }
@@ -148,7 +214,11 @@ impl AmpGpio {
     /// Mocked backend pair (`new_mocked() -> (Self, Ctrl)`).
     #[must_use]
     pub fn new_mocked() -> (Self, AmpGpioMock) {
-        let state = Arc::new(Mutex::new(MockGpioState::default()));
+        let state = Arc::new(Mutex::new(MockGpioState {
+            // Mock starts in the same safe orientation `open()` asserts.
+            mute_low: true,
+            ..MockGpioState::default()
+        }));
         let ctrl = AmpGpioMock {
             state: Arc::clone(&state),
         };
@@ -160,45 +230,114 @@ impl AmpGpio {
         )
     }
 
-    /// Drive `/ENABLE` LOW to wake the amp (recovery path / boot only).
-    /// Idempotent: the pin stays an output driven LOW afterwards.
+    /// Full kernel-parity power-up sequence (blocking; call via
+    /// `spawn_blocking` from async context):
+    /// booster HIGH → 200 ms PVDD settle → `/ENABLE` LOW → 50 ms settle.
+    /// Mirrors `ma120x0p_i2c_probe` so PVDD is stable before the amp exits
+    /// reset and before the first I2C transaction.
     ///
     /// # Errors
-    /// Returns [`AmpError::Gpio`] on hardware faults or [`AmpError::Poisoned`]
-    /// if the seam lock was poisoned by a panicked holder.
+    /// Returns [`AmpError::Gpio`] on hardware faults.
+    pub fn power_up(&self) -> AmpResult<()> {
+        {
+            let mut seam = self.seam_lock();
+            match &mut *seam {
+                GpioSeam::Hardware(pins) => {
+                    pins.booster.write(Level::High);
+                }
+                GpioSeam::Mock { state } => {
+                    mock_lock(state).booster_on = true;
+                }
+            }
+        }
+        std::thread::sleep(BOOSTER_SETTLE);
+        {
+            let mut seam = self.seam_lock();
+            match &mut *seam {
+                GpioSeam::Hardware(pins) => {
+                    pins.enable.write(Level::Low);
+                }
+                GpioSeam::Mock { state } => {
+                    let mut s = mock_lock(state);
+                    s.awake = true;
+                    s.power_up_calls += 1;
+                }
+            }
+        }
+        std::thread::sleep(ENABLE_SETTLE);
+        debug!("GPIO power-up complete (booster on, amp awake)");
+        Ok(())
+    }
+
+    /// Drive `/ENABLE` LOW to wake the amp (no booster/settle sequence —
+    /// used when power rails are known-good). Idempotent.
+    ///
+    /// # Errors
+    /// Returns [`AmpError::Gpio`] on hardware faults.
     pub fn wake(&self) -> AmpResult<()> {
-        let mut seam = self.seam_lock()?;
+        let mut seam = self.seam_lock();
         match &mut *seam {
             GpioSeam::Hardware(pins) => {
-                pins.enable.write(rppal::gpio::Level::Low);
+                pins.enable.write(Level::Low);
                 debug!("GPIO /ENABLE driven LOW (amp awake)");
             }
             GpioSeam::Mock { state } => {
-                let mut s = state.lock().expect("mock lock poisoned");
-                s.amp_awake = true;
+                let mut s = mock_lock(state);
+                s.awake = true;
                 s.wake_calls += 1;
             }
         }
         Ok(())
     }
 
-    /// Drive the `/MUTE` line: `true` = muted (LOW), `false` = unmuted
-    /// (HIGH). Called only after the PLL-lock handshake passes.
+    /// `/ENABLE` reset cycle (blocking; call via `spawn_blocking`): HIGH
+    /// pulse wipes all registers, then LOW + settle wakes the amp. Used by
+    /// fault recovery so the "full register re-init" starts from true
+    /// reset defaults.
     ///
     /// # Errors
-    /// Returns [`AmpError::Gpio`] on hardware faults or [`AmpError::Poisoned`]
-    /// if the seam lock was poisoned by a panicked holder.
+    /// Returns [`AmpError::Gpio`] on hardware faults.
+    pub fn reset(&self) -> AmpResult<()> {
+        {
+            let mut seam = self.seam_lock();
+            match &mut *seam {
+                GpioSeam::Hardware(pins) => pins.enable.write(Level::High),
+                GpioSeam::Mock { state } => mock_lock(state).awake = false,
+            }
+        }
+        std::thread::sleep(RESET_PULSE);
+        {
+            let mut seam = self.seam_lock();
+            match &mut *seam {
+                GpioSeam::Hardware(pins) => pins.enable.write(Level::Low),
+                GpioSeam::Mock { state } => {
+                    let mut s = mock_lock(state);
+                    s.awake = true;
+                    s.reset_calls += 1;
+                }
+            }
+        }
+        std::thread::sleep(RESET_SETTLE);
+        debug!("GPIO /ENABLE reset cycle complete");
+        Ok(())
+    }
+
+    /// Drive the `/MUTE` line. `true` = muted = pin **LOW** (active-LOW,
+    /// kernel-verified polarity).
+    ///
+    /// # Errors
+    /// Returns [`AmpError::Gpio`] on hardware faults.
     pub fn set_hardware_mute(&self, muted: bool) -> AmpResult<()> {
-        let mut seam = self.seam_lock()?;
+        let mut seam = self.seam_lock();
         match &mut *seam {
             GpioSeam::Hardware(pins) => {
-                // Active-LOW: LOW asserts mute.
-                pins.mute.write(muted.into());
-                debug!(muted, "GPIO /MUTE updated");
+                pins.mute
+                    .write(if muted { Level::Low } else { Level::High });
+                debug!(muted, "GPIO /MUTE updated (LOW = muted)");
             }
             GpioSeam::Mock { state } => {
-                let mut s = state.lock().expect("mock lock poisoned");
-                s.hardware_muted = muted;
+                let mut s = mock_lock(state);
+                s.mute_low = muted;
                 s.mute_calls += 1;
             }
         }
@@ -208,16 +347,20 @@ impl AmpGpio {
     /// Read the `error` line: `true` = fault active (LOW).
     ///
     /// # Errors
-    /// Returns [`AmpError::Gpio`] on hardware faults or [`AmpError::Poisoned`]
-    /// if the seam lock was poisoned by a panicked holder.
+    /// Returns [`AmpError::Gpio`] on hardware faults, or
+    /// [`AmpError::internal`] if the line was taken by the edge watch (the
+    /// watch + safety tick cover detection in that case).
     pub fn error_active(&self) -> AmpResult<bool> {
-        let mut seam = self.seam_lock()?;
+        let mut seam = self.seam_lock();
         match &mut *seam {
             GpioSeam::Hardware(pins) => {
+                let Some(error) = pins.error.as_mut() else {
+                    return Err(AmpError::internal("error line owned by the edge watch"));
+                };
                 // Active-LOW: reading LOW means fault asserted.
-                Ok(pins.error.read() == rppal::gpio::Level::Low)
+                Ok(error.read() == Level::Low)
             }
-            GpioSeam::Mock { state } => Ok(state.lock().expect("mock lock poisoned").error_active),
+            GpioSeam::Mock { state } => Ok(mock_lock(state).error_active),
         }
     }
 
@@ -225,54 +368,76 @@ impl AmpGpio {
     /// edge (fault asserted). The callback returns `false` to stop the
     /// watch (shutdown). Designed to be spawned inside a `spawn_blocking`
     /// task per plan §5.3.
-    /// spawned inside a `spawn_blocking` task per plan §5.3.
+    ///
+    /// On hardware, the synchronous interrupt is armed once
+    /// (`set_interrupt(Trigger::FallingEdge, None)` — `poll_interrupt` is a
+    /// no-op otherwise) and the `InputPin` is then **taken out of the seam**
+    /// so the blocking poll never holds the seam lock: concurrent
+    /// `wake()`/`set_hardware_mute()` calls proceed while polling.
     ///
     /// # Panics
-    /// Panics if the seam or mock state lock is poisoned (a panicked holder
-    /// is a bug; the watch thread dies and the safety tick covers detection).
+    /// Panics if the mock state lock is poisoned beyond recovery (a
+    /// panicked holder is a bug; the safety tick covers fault detection).
     pub fn watch_error_edges<F: FnMut() -> bool + Send>(&self, mut on_edge: F) {
-        let mut seam = match self.seam.lock() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        match &mut *seam {
-            GpioSeam::Hardware(pins) => loop {
-                match pins.error.poll_interrupt(true, Some(EDGE_POLL_INTERVAL)) {
-                    Ok(Some(_)) => {
-                        debug!("GPIO error line falling edge");
-                        if !on_edge() {
-                            return;
-                        }
-                    }
-                    Ok(None) => {
-                        // Poll timeout: cycle again; the next poll re-arms.
-                    }
-                    Err(e) => {
-                        // Transient OS-level watch faults: back off rather
-                        // than hot-spinning; the safety tick covers detection.
-                        warn!(error = %e, "GPIO error-line poll failed; backing off");
-                        std::thread::sleep(EDGE_POLL_INTERVAL);
-                    }
-                }
-            },
-            GpioSeam::Mock { state } => {
-                let state = Arc::clone(state);
-                drop(seam);
-                loop {
-                    let fire = state.lock().expect("mock lock poisoned").error_active;
-                    if fire && !on_edge() {
+        let (mock_state, hardware_pin) = {
+            let mut seam = match self.seam.lock() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            match &mut *seam {
+                GpioSeam::Mock { state } => (Some(Arc::clone(state)), None),
+                GpioSeam::Hardware(pins) => {
+                    // Arm the synchronous interrupt; poll_interrupt only
+                    // reports events after this configuration.
+                    let Some(error) = pins.error.as_mut() else {
+                        warn!("Error-line edge watch already running");
+                        return;
+                    };
+                    if let Err(e) = error.set_interrupt(Trigger::FallingEdge, None) {
+                        warn!(error = %e, "Failed to arm error-line interrupt; edge watch disabled");
                         return;
                     }
+                    (None, pins.error.take())
+                }
+            }
+        };
+        if let Some(state) = mock_state {
+            loop {
+                let fire = mock_lock(&state).error_active;
+                if fire && !on_edge() {
+                    return;
+                }
+                std::thread::sleep(EDGE_POLL_INTERVAL);
+            }
+        }
+        let Some(mut error) = hardware_pin else {
+            return;
+        };
+        loop {
+            match error.poll_interrupt(true, Some(EDGE_POLL_INTERVAL)) {
+                Ok(Some(_)) => {
+                    debug!("GPIO error line falling edge");
+                    if !on_edge() {
+                        return;
+                    }
+                }
+                Ok(None) => {
+                    // Poll timeout: cycle again; the next poll re-arms.
+                }
+                Err(e) => {
+                    // Transient OS-level watch faults: back off rather than
+                    // hot-spinning; the safety tick covers detection.
+                    warn!(error = %e, "GPIO error-line poll failed; backing off");
                     std::thread::sleep(EDGE_POLL_INTERVAL);
                 }
             }
         }
     }
 
-    fn seam_lock(&self) -> AmpResult<std::sync::MutexGuard<'_, GpioSeam>> {
-        self.seam.lock().map_err(|_p| {
+    fn seam_lock(&self) -> MutexGuard<'_, GpioSeam> {
+        self.seam.lock().unwrap_or_else(|p| {
             warn!("GPIO seam lock poisoned; recovering data (M-POISONED-MUTEX)");
-            AmpError::internal("gpio seam lock poisoned")
+            p.into_inner()
         })
     }
 }
