@@ -145,9 +145,14 @@ pub const REG_THR_DB_CH0: u8 = 0x47;
 /// Bits 1:0 per channel (0, 0.25, 0.5, 0.75 dB).
 pub const REG_THR_LSB_CH: u8 = 0x4B;
 
-/// VLP register value for 0 dB gain (datasheet Table 8-9: `reg = 24 − dB`;
-/// user-scale raw = −dB maps `0x40` to `168 − raw`, range 0x18..=0xA8).
-pub const VLP_ZERO_DB_REG: u16 = 168;
+/// VLP register value for the **−144 dB** (maximum attenuation) end of the
+/// master volume range. Datasheet Table 8-9: `reg = 24 − dB`, so 0 dB is
+/// register `0x18` = 24 and −144 dB is `0xA8` = 168.
+///
+/// The appliance user-scale raw = −dB maps `0x40` to `168 − raw`
+/// (raw 0 = −144 dB, raw 144 = 0 dB); this constant is that transform's
+/// anchor.
+pub const VLP_NEG144_DB_REG: u16 = 168;
 
 /// `0x35` bit 3 `audio_proc_enable` (VLP bypass mux; 1 = VLP active).
 pub const AUDIO_PROC_ENABLE_MASK: u8 = 0x08;
@@ -178,10 +183,10 @@ pub const fn is_muted_bit(reg: u8) -> bool {
 /// −144 dB register clamp to 0.
 #[must_use]
 pub const fn decode_vlp_raw(reg: u16) -> u16 {
-    if reg >= VLP_ZERO_DB_REG {
+    if reg >= VLP_NEG144_DB_REG {
         0
     } else {
-        let diff = VLP_ZERO_DB_REG - reg;
+        let diff = VLP_NEG144_DB_REG - reg;
         if diff > 144 { 144 } else { diff }
     }
 }
@@ -884,10 +889,10 @@ impl AmpSettings {
             // `as` casts required inside const blocks (From is not const fn);
             // u8 -> u16 is lossless. VLP register decode: raw = 168 − reg,
             // clamped to the user scale 0..=144 (reg < 24 = boost).
-            master_volume_raw: if vol_int >= VLP_ZERO_DB_REG as u8 {
+            master_volume_raw: if vol_int >= VLP_NEG144_DB_REG as u8 {
                 0
             } else {
-                let diff = VLP_ZERO_DB_REG - vol_int as u16;
+                let diff = VLP_NEG144_DB_REG - vol_int as u16;
                 if diff > 144 { 144 } else { diff }
             },
             master_volume_frac: vol_frac & 0x03,
@@ -902,10 +907,14 @@ impl AmpSettings {
 
 impl Display for AmpSettings {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // dB = raw − 144 (§10: raw = −dB user scale; raw 144 = 0 dB,
+        // raw 0 = −144 dB).
         writeln!(
             f,
-            "Master Volume         : -{} dB (raw {}, frac {})",
-            self.master_volume_raw, self.master_volume_raw, self.master_volume_frac
+            "Master Volume         : {} dB (raw {}, frac {})",
+            i32::from(self.master_volume_raw) - 144,
+            self.master_volume_raw,
+            self.master_volume_frac
         )?;
         writeln!(
             f,
@@ -1807,7 +1816,7 @@ where
         if raw > RAW_MAX {
             return Err(AmpError::invalid_argument("master_volume_raw", raw));
         }
-        let int_reg = (VLP_ZERO_DB_REG - raw) as u8;
+        let int_reg = (VLP_NEG144_DB_REG - raw) as u8;
         let frac_reg = 0; // amp_curve produces integer dB; frac reg reserved for 0.25 dB steps
         self.write_regs(&[(REG_VOL_DB_MASTER, int_reg), (REG_VOL_LSB_MASTER, frac_reg)])
     }

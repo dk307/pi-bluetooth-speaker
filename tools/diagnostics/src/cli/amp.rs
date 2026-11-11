@@ -367,7 +367,8 @@ pub fn output_json_settings(timestamp: &str, amp: &AmpDevice, settings: &AmpSett
         "i2c_address": amp.i2c_address().to_string(),
         "settings": {
             "master_volume_raw": settings.master_volume_raw,
-            "master_volume_db": -i64::from(settings.master_volume_raw),
+            // dB = raw − 144 (raw = −dB user scale; raw 144 = 0 dB).
+            "master_volume_db": i64::from(settings.master_volume_raw) - 144,
             "master_volume_frac": settings.master_volume_frac,
             "serial_muted": settings.serial_muted,
             "pm_ctrl_pm": settings.pm_ctrl_pm,

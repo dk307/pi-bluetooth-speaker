@@ -1127,6 +1127,11 @@ fn settings_from_raw_registers_decodes() {
     assert!(text.contains("Power Mode Profile"));
     assert!(text.contains("I2S Format Select"));
     assert!(text.contains("Audio Input Mode"));
+    // dB label direction (dB = raw − 144): raw 144 = 0 dB, NOT -144 dB.
+    assert!(
+        text.contains("Master Volume         : 0 dB (raw 144"),
+        "full volume must display as 0 dB, got: {text}"
+    );
 }
 
 #[tokio::test]
