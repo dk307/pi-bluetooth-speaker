@@ -29,7 +29,7 @@ use anyhow::Context;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use speaker_hardware::AmpFault;
+use speaker_hardware::{AmpFault, LimiterSlew};
 
 use crate::amp_backend::AmpBackend;
 use crate::amp_gpio::AmpGpio;
@@ -407,6 +407,11 @@ impl AmpController {
         self.device.write_i2s_format_async(0).await?;
         self.device.enable_audio_processor_async().await?;
         self.device.enable_limiter_async().await?;
+        // Kernel-parity limiter timing: fast attack, slow release
+        // (ma120x0p probe(): attack bits 7:6 = 0x80, release bits 5:4 = 0x00).
+        self.device
+            .configure_limiter_slew_async(LimiterSlew::Fast, LimiterSlew::Slow)
+            .await?;
         self.device.write_limiter_thresholds_async(-15).await?;
         Ok(())
     }

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use speaker_hardware::{
     AmpDevice, AmpError, AmpErrorFlags, AmpFault, AmpHardwareInfo, AmpI2cAddress, AmpSettings,
-    AmpStatus, AudioInConfig, AudioInputFormat, ClockRatio, DcuChannelStatus, DcuMonitor,
+    AmpStatus, DcuChannelStatus, DcuMonitor, Pm2Config, PowerModeMon,
     PowerModeProfile, amp_test_helpers,
 };
 
@@ -107,99 +107,63 @@ fn fault_flags_and_descriptions() {
 
 #[test]
 fn power_mode_profile_and_decoding() {
-    assert_eq!(PowerModeProfile::from_raw(0), PowerModeProfile::Pmp0);
-    assert_eq!(PowerModeProfile::from_raw(1), PowerModeProfile::Pmp1);
-    assert_eq!(PowerModeProfile::from_raw(2), PowerModeProfile::Pmp2);
-    assert_eq!(PowerModeProfile::from_raw(3), PowerModeProfile::Pmp3);
-    assert_eq!(PowerModeProfile::from_raw(0xFF), PowerModeProfile::Pmp3);
+    // Table-driven: register 0x1D bits 2:0 -> preset (0-5).
+    let profile_table = [
+        (0, PowerModeProfile::Pmp0),
+        (1, PowerModeProfile::Pmp1),
+        (2, PowerModeProfile::Pmp2),
+        (3, PowerModeProfile::Pmp3),
+        (4, PowerModeProfile::Pmp4),
+        (5, PowerModeProfile::Pmp5Custom),
+        (0xFF, PowerModeProfile::Pmp5Custom),
+    ];
+    for (raw, expected) in profile_table {
+        assert_eq!(PowerModeProfile::from_raw(raw), expected, "raw {raw:#x}");
+        assert_eq!(expected.as_u8(), expected.as_u8());
+    }
+    for (idx, profile) in [
+        PowerModeProfile::Pmp0,
+        PowerModeProfile::Pmp1,
+        PowerModeProfile::Pmp2,
+        PowerModeProfile::Pmp3,
+        PowerModeProfile::Pmp4,
+        PowerModeProfile::Pmp5Custom,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(profile.as_u8(), idx as u8);
+    }
 
-    assert_eq!(PowerModeProfile::Pmp0.as_u8(), 0);
-    assert_eq!(PowerModeProfile::Pmp1.as_u8(), 1);
-    assert_eq!(PowerModeProfile::Pmp2.as_u8(), 2);
-    assert_eq!(PowerModeProfile::Pmp3.as_u8(), 3);
-
-    assert_eq!(
-        PowerModeProfile::Pmp0.to_string(),
-        "PMP0 (High Audio Performance / Class D)"
-    );
-    assert_eq!(
-        PowerModeProfile::Pmp1.to_string(),
-        "PMP1 (Low Idle Power Optimization)"
-    );
-    assert_eq!(
-        PowerModeProfile::Pmp2.to_string(),
-        "PMP2 (Default Balanced / Dynamic Power Mode)"
-    );
-    assert_eq!(PowerModeProfile::Pmp3.to_string(), "PMP3 (Custom Profile)");
+    // Read-only live monitor register 0x60 bits 1:0 -> PM0-PM3.
+    let mon_table = [
+        (0, PowerModeMon::Pm0),
+        (1, PowerModeMon::Pm1),
+        (2, PowerModeMon::Pm2),
+        (3, PowerModeMon::Pm3),
+        (0xFF, PowerModeMon::Pm3),
+    ];
+    for (raw, expected) in mon_table {
+        assert_eq!(PowerModeMon::from_raw(raw), expected, "raw {raw:#x}");
+    }
 }
 
 #[test]
-fn audio_in_and_dcu_decoding() {
-    assert_eq!(
-        AudioInputFormat::from_raw(0b000),
-        AudioInputFormat::StandardI2s
-    );
-    assert_eq!(
-        AudioInputFormat::from_raw(0b001),
-        AudioInputFormat::LeftJustified
-    );
-    assert_eq!(
-        AudioInputFormat::from_raw(0b010),
-        AudioInputFormat::RightJustified16
-    );
-    assert_eq!(
-        AudioInputFormat::from_raw(0b011),
-        AudioInputFormat::RightJustified20
-    );
-    assert_eq!(
-        AudioInputFormat::from_raw(0b100),
-        AudioInputFormat::RightJustified24
-    );
-    assert_eq!(
-        AudioInputFormat::from_raw(0b101),
-        AudioInputFormat::Custom(5)
-    );
-    assert_eq!(
-        AudioInputFormat::StandardI2s.to_string(),
-        "Standard I2S (32-bit slot)"
-    );
-    assert_eq!(
-        AudioInputFormat::LeftJustified.to_string(),
-        "Left-Justified (LJ)"
-    );
-    assert_eq!(
-        AudioInputFormat::RightJustified16.to_string(),
-        "Right-Justified 16-bit (RJ-16)"
-    );
-    assert_eq!(
-        AudioInputFormat::RightJustified20.to_string(),
-        "Right-Justified 20-bit (RJ-20)"
-    );
-    assert_eq!(
-        AudioInputFormat::RightJustified24.to_string(),
-        "Right-Justified 24-bit (RJ-24)"
-    );
-    assert_eq!(AudioInputFormat::Custom(5).to_string(), "Custom Format");
-
-    assert_eq!(ClockRatio::from_raw(0b00 << 3), ClockRatio::AutoDetect);
-    assert_eq!(ClockRatio::from_raw(0b01 << 3), ClockRatio::Manual64x);
-    assert_eq!(ClockRatio::from_raw(0b10 << 3), ClockRatio::Manual128x);
-    assert_eq!(ClockRatio::from_raw(0b11 << 3), ClockRatio::Manual256x);
-    assert_eq!(
-        ClockRatio::AutoDetect.to_string(),
-        "Auto-detect clock ratio"
-    );
-    assert_eq!(ClockRatio::Manual64x.to_string(), "Manual Ratio (64x fs)");
-    assert_eq!(ClockRatio::Manual128x.to_string(), "Manual Ratio (128x fs)");
-    assert_eq!(ClockRatio::Manual256x.to_string(), "Manual Ratio (256x fs)");
-
-    let cfg = AudioInConfig::from_raw(0b0000_0000);
-    assert_eq!(cfg.format, AudioInputFormat::StandardI2s);
-    assert_eq!(cfg.ratio, ClockRatio::AutoDetect);
-    assert_eq!(
-        cfg.to_string(),
-        "Standard I2S (32-bit slot), Auto-detect clock ratio"
-    );
+fn pm2_config_and_dcu_decoding() {
+    // Table-driven: register 0x1B -> PM2 modulation configuration.
+    let cfg_table = [
+        (0b0000_0000, false, 0, 0),
+        (0b0100_0000, true, 0, 0),
+        (0b0001_1000, false, 3, 0),
+        (0b0100_1111, true, 1, 7),
+        (0xFF, true, 7, 7),
+    ];
+    for (raw, usespread, dtsteps, baltype) in cfg_table {
+        let cfg = Pm2Config::from_raw(raw);
+        assert_eq!(cfg.usespread, usespread, "raw {raw:#x} usespread");
+        assert_eq!(cfg.dtsteps, dtsteps, "raw {raw:#x} dtsteps");
+        assert_eq!(cfg.baltype, baltype, "raw {raw:#x} baltype");
+    }
 
     assert_eq!(DcuChannelStatus::from_raw(0x10), DcuChannelStatus::Active);
     assert_eq!(DcuChannelStatus::from_raw(0x00), DcuChannelStatus::Standby);
@@ -220,10 +184,11 @@ fn audio_in_and_dcu_decoding() {
 #[test]
 fn amp_status_display_and_formatting() {
     let status_ok = AmpStatus {
-        power_mode: PowerModeProfile::Pmp2,
-        audio_in: AudioInConfig {
-            format: AudioInputFormat::StandardI2s,
-            ratio: ClockRatio::AutoDetect,
+        pm_mon: PowerModeMon::Pm2,
+        pm2_config: Pm2Config {
+            usespread: false,
+            dtsteps: 3,
+            baltype: 1,
         },
         dcu_monitor: DcuMonitor {
             ch0: DcuChannelStatus::Active,
@@ -234,17 +199,18 @@ fn amp_status_display_and_formatting() {
     };
 
     let formatted = status_ok.to_string();
-    assert!(formatted.contains("Power Mode Profile    : PMP2"));
-    assert!(formatted.contains("Standard I2S (32-bit slot)"));
+    assert!(formatted.contains("PM Monitor (live)     : PM2"));
+    assert!(formatted.contains("PM2 Modulation Config : spread: off | dt: 3 steps | baltype: 1"));
     assert!(formatted.contains("Ch0: Active / Regulated | Ch1: Active / Regulated"));
     assert!(formatted.contains("[OK] Normal operation (No faults detected)"));
     assert!(formatted.contains("[OK] No errors logged since boot"));
 
     let status_fault = AmpStatus {
-        power_mode: PowerModeProfile::Pmp0,
-        audio_in: AudioInConfig {
-            format: AudioInputFormat::LeftJustified,
-            ratio: ClockRatio::Manual64x,
+        pm_mon: PowerModeMon::Pm0,
+        pm2_config: Pm2Config {
+            usespread: true,
+            dtsteps: 1,
+            baltype: 2,
         },
         dcu_monitor: DcuMonitor {
             ch0: DcuChannelStatus::Standby,
@@ -327,16 +293,17 @@ fn mock_device_operations_and_fault_injection() {
     let _ = format!("{amp:?}");
 
     let status = amp.read_status().unwrap();
-    assert_eq!(status.power_mode, PowerModeProfile::Pmp2);
+    assert_eq!(status.pm_mon, PowerModeMon::Pm2);
     assert!(status.live_errors.is_clear());
     assert!(status.latched_errors.is_clear());
 
     mock.set_live_errors(AmpErrorFlags::from_bits(1 << 0));
     mock.set_latched_errors(AmpErrorFlags::from_bits(1 << 2));
-    mock.set_power_mode(PowerModeProfile::Pmp0);
-    mock.set_audio_in(AudioInConfig {
-        format: AudioInputFormat::RightJustified24,
-        ratio: ClockRatio::Manual128x,
+    mock.set_pm_mon(PowerModeMon::Pm0);
+    mock.set_pm2_config(Pm2Config {
+        usespread: true,
+        dtsteps: 5,
+        baltype: 2,
     });
     mock.set_dcu_monitor(DcuMonitor {
         ch0: DcuChannelStatus::Standby,
@@ -344,9 +311,15 @@ fn mock_device_operations_and_fault_injection() {
     });
 
     let updated = amp.read_status().unwrap();
-    assert_eq!(updated.power_mode, PowerModeProfile::Pmp0);
-    assert_eq!(updated.audio_in.format, AudioInputFormat::RightJustified24);
-    assert_eq!(updated.audio_in.ratio, ClockRatio::Manual128x);
+    assert_eq!(updated.pm_mon, PowerModeMon::Pm0);
+    assert_eq!(
+        updated.pm2_config,
+        Pm2Config {
+            usespread: true,
+            dtsteps: 5,
+            baltype: 2,
+        }
+    );
     assert_eq!(updated.dcu_monitor.ch0, DcuChannelStatus::Standby);
     assert!(updated.live_errors.flying_cap_overvoltage());
     assert!(updated.latched_errors.pll_clock_loss());
@@ -381,7 +354,7 @@ async fn async_methods_read_from_mock_device() {
     let (amp, mock) = AmpDevice::new_mocked();
 
     let status = amp.read_status_async().await.unwrap();
-    assert_eq!(status.power_mode, PowerModeProfile::Pmp2);
+    assert_eq!(status.pm_mon, PowerModeMon::Pm2);
 
     mock.set_latched_errors(AmpErrorFlags::from_bits(1 << 3));
     assert!(
@@ -466,10 +439,17 @@ fn amp_device_live_and_latched_error_methods() {
     device.clear_latched_errors().unwrap();
 
     let decoded = AmpStatus::from_raw_registers([0x02, 0x08, 0x02, 0x05, 0x05, 0x08]);
-    assert_eq!(decoded.power_mode, PowerModeProfile::Pmp2);
+    assert_eq!(decoded.pm_mon, PowerModeMon::Pm2);
     assert!(decoded.live_errors.overcurrent_protect());
     assert!(decoded.latched_errors.undervoltage_pvdd());
-    assert_eq!(decoded.audio_in.format, AudioInputFormat::StandardI2s);
+    assert_eq!(
+        decoded.pm2_config,
+        Pm2Config {
+            usespread: false,
+            dtsteps: 1,
+            baltype: 0
+        }
+    );
     assert_eq!(decoded.dcu_monitor.ch0, DcuChannelStatus::Standby);
 
     assert_eq!(AmpStatus::eh_clear_pulse_sequence(0xFF), [0xFB, 0xFF, 0xFB]);
@@ -483,16 +463,12 @@ async fn shared_clones_and_async_polling_observe_mock_updates() {
 
     // Verify initial simulated reading
     let initial = amp.read_status_async().await.unwrap();
-    assert_eq!(initial.power_mode, PowerModeProfile::Pmp2);
+    assert_eq!(initial.pm_mon, PowerModeMon::Pm2);
     assert!(initial.live_errors.is_clear());
 
     // Update in mock controller
-    mock.set_power_mode(PowerModeProfile::Pmp0);
+    mock.set_pm_mon(PowerModeMon::Pm0);
     mock.set_live_errors(AmpErrorFlags::from_bits(1 << 1));
-    mock.set_audio_in(AudioInConfig {
-        format: AudioInputFormat::StandardI2s,
-        ratio: ClockRatio::AutoDetect,
-    });
     mock.set_dcu_monitor(DcuMonitor {
         ch0: DcuChannelStatus::Active,
         ch1: DcuChannelStatus::Active,
@@ -505,7 +481,7 @@ async fn shared_clones_and_async_polling_observe_mock_updates() {
     });
 
     let observed = handle.await.unwrap().unwrap();
-    assert_eq!(observed.power_mode, PowerModeProfile::Pmp0);
+    assert_eq!(observed.pm_mon, PowerModeMon::Pm0);
     assert!(observed.live_errors.overcurrent_protect());
     assert_eq!(
         observed.live_errors.faults(),
@@ -661,8 +637,8 @@ async fn async_write_methods_work_on_mock() {
     assert_eq!(mock.mock_pm_profile(), 3);
 
     // Test async write_i2s_format
-    amp.write_i2s_format_async(2).await.unwrap();
-    assert_eq!(mock.mock_i2s_format(), 2);
+    amp.write_i2s_format_async(4).await.unwrap();
+    assert_eq!(mock.mock_i2s_format(), 4);
 
     // Test async clear_latched_errors (aliased as clear_error_handler_async was removed)
     amp.clear_latched_errors_async().await.unwrap();
@@ -788,7 +764,7 @@ mod eh_mock_bus {
 mod hardware_device_tests {
     use super::eh_mock_bus::MockBus;
     use speaker_hardware::amp::{
-        AmpI2cAddress, REG_AUDIO_IN_MODE, REG_AUDIO_PROC, REG_I2S_FORMAT, REG_PM_CTRL,
+        AmpI2cAddress, LimiterSlew, REG_AUDIO_IN_MODE, REG_AUDIO_PROC, REG_I2S_FORMAT, REG_PM_CTRL,
         REG_PM_PROFILE, REG_THR_DB_CH0, REG_VOL_DB_MASTER, REG_VOL_LSB_MASTER,
     };
     use speaker_hardware::amp_test_helpers::HardwareDevice;
@@ -869,7 +845,7 @@ mod hardware_device_tests {
         dev.write_power_mode_profile(4).unwrap();
         assert_eq!(bus.get_register(REG_PM_PROFILE), Some(4));
 
-        let err = dev.write_power_mode_profile(5).unwrap_err();
+        let err = dev.write_power_mode_profile(6).unwrap_err();
         assert!(err.is_invalid_argument());
     }
 
@@ -878,11 +854,14 @@ mod hardware_device_tests {
         let bus = MockBus::new().with_register(REG_I2S_FORMAT, 0x00);
         let mut dev = HardwareDevice::new(bus.clone(), addr());
 
-        dev.write_i2s_format(3).unwrap();
-        assert_eq!(bus.get_register(REG_I2S_FORMAT), Some(3));
+        dev.write_i2s_format(7).unwrap();
+        assert_eq!(bus.get_register(REG_I2S_FORMAT), Some(7));
 
-        let err = dev.write_i2s_format(5).unwrap_err();
-        assert!(err.is_invalid_argument());
+        // Reserved encodings 2 and 3 must be rejected.
+        let err2 = dev.write_i2s_format(2).unwrap_err();
+        assert!(err2.is_invalid_argument());
+        let err3 = dev.write_i2s_format(3).unwrap_err();
+        assert!(err3.is_invalid_argument());
     }
 
     #[test]
@@ -891,11 +870,11 @@ mod hardware_device_tests {
         let bus = MockBus::new().with_register(REG_AUDIO_IN_MODE, 0x80);
         let mut dev = HardwareDevice::new(bus.clone(), addr());
 
-        dev.write_audio_in_mode(3).unwrap();
-        // Gain 3 -> bits 6:5 = 11, with bit 7 preserved -> 0x80 | 0x60 = 0xE0
-        assert_eq!(bus.get_register(REG_AUDIO_IN_MODE), Some(0xE0));
+        dev.write_audio_in_mode(5).unwrap();
+        // Mode 5 -> bits 7:5 = 101; lower bits preserved -> 0x80 | 0xA0 = 0xA0... 0x80&0x1F=0, so 0xA0
+        assert_eq!(bus.get_register(REG_AUDIO_IN_MODE), Some(0xA0));
 
-        let err = dev.write_audio_in_mode(4).unwrap_err();
+        let err = dev.write_audio_in_mode(6).unwrap_err();
         assert!(err.is_invalid_argument());
     }
 
@@ -974,7 +953,7 @@ mod hardware_device_tests {
         assert_eq!(s.pm_ctrl_pm, 2);
         assert_eq!(s.pm_profile, 2);
         assert_eq!(s.i2s_format, 3);
-        assert_eq!(s.audio_in_gain, 0);
+        assert_eq!(s.audio_in_mode, 4);
     }
 
     #[test]
@@ -987,7 +966,7 @@ mod hardware_device_tests {
             .with_register(REG_AUDIO_PROC, 0x00)
             .with_register(REG_VOL_DB_MASTER, 0)
             .with_register(REG_VOL_LSB_MASTER, 0);
-        let mut dev = HardwareDevice::new(bus, addr());
+        let mut dev = HardwareDevice::new(bus.clone(), addr());
 
         dev.write_master_volume(144).unwrap();
         dev.write_serial_mute(true).unwrap();
@@ -995,6 +974,8 @@ mod hardware_device_tests {
         dev.write_power_mode_profile(4).unwrap();
         dev.write_i2s_format(4).unwrap();
         dev.write_audio_in_mode(3).unwrap();
+        dev.configure_limiter_slew(LimiterSlew::Fast, LimiterSlew::Slow)
+            .unwrap();
 
         let s = dev.read_settings().unwrap();
         assert_eq!(s.master_volume_raw, 144);
@@ -1003,7 +984,9 @@ mod hardware_device_tests {
         assert_eq!(s.pm_ctrl_pm, 3);
         assert_eq!(s.pm_profile, 4);
         assert_eq!(s.i2s_format, 4);
-        assert_eq!(s.audio_in_gain, 3);
+        assert_eq!(s.audio_in_mode, 3);
+        // Fast attack (0x80) + slow release (0x00) in the 0x35 register.
+        assert_eq!(bus.get_register(REG_I2S_FORMAT), Some((4 & 0x07) | 0x80));
     }
 }
 
@@ -1082,7 +1065,7 @@ fn mock_read_settings_defaults() {
     assert_eq!(s.pm_ctrl_pm, 2);
     assert_eq!(s.pm_profile, 2);
     assert_eq!(s.i2s_format, 0);
-    assert_eq!(s.audio_in_gain, 0);
+    assert_eq!(s.audio_in_mode, 0);
 }
 
 #[test]
@@ -1092,7 +1075,7 @@ fn mock_read_settings_reflects_writes() {
     amp.write_serial_mute(true).unwrap();
     amp.write_power_mode_ctrl(3).unwrap();
     amp.write_power_mode_profile(4).unwrap();
-    amp.write_i2s_format(3).unwrap();
+    amp.write_i2s_format(4).unwrap();
     amp.write_audio_in_mode(2).unwrap();
 
     let s = amp.read_settings().unwrap();
@@ -1100,8 +1083,8 @@ fn mock_read_settings_reflects_writes() {
     assert!(s.serial_muted);
     assert_eq!(s.pm_ctrl_pm, 3);
     assert_eq!(s.pm_profile, 4);
-    assert_eq!(s.i2s_format, 3);
-    assert_eq!(s.audio_in_gain, 2);
+    assert_eq!(s.i2s_format, 4);
+    assert_eq!(s.audio_in_mode, 2);
 }
 
 #[test]
@@ -1123,10 +1106,10 @@ fn settings_from_raw_registers_decodes() {
     assert_eq!(s.pm_ctrl_pm, 2);
     assert_eq!(s.pm_profile, 2);
     assert_eq!(s.i2s_format, 3);
-    assert_eq!(s.audio_in_gain, 0);
+    assert_eq!(s.audio_in_mode, 4);
 
     // Unmuted; VLP reg 0 is the +24 dB boost rail and clamps to full volume
-    // (raw 144); out-of-spec register values (0x07 profile, gain 3) still decode.
+    // (raw 144); out-of-spec register values (0x07 profile, mode 7) still decode.
     let s = AmpSettings::from_raw_registers([0x40, 0x07, 0x7F, 0x07, 0x00, 0, 0x00]);
     assert_eq!(s.master_volume_raw, 144);
     assert_eq!(s.master_volume_frac, 0);
@@ -1134,7 +1117,7 @@ fn settings_from_raw_registers_decodes() {
     assert_eq!(s.pm_ctrl_pm, 0);
     assert_eq!(s.pm_profile, 7);
     assert_eq!(s.i2s_format, 7);
-    assert_eq!(s.audio_in_gain, 3);
+    assert_eq!(s.audio_in_mode, 3);
 
     // Display renders all six decoded settings.
     let text = s.to_string();
@@ -1143,7 +1126,7 @@ fn settings_from_raw_registers_decodes() {
     assert!(text.contains("Manual Power Mode"));
     assert!(text.contains("Power Mode Profile"));
     assert!(text.contains("I2S Format Select"));
-    assert!(text.contains("Audio Input Gain"));
+    assert!(text.contains("Audio Input Mode"));
 }
 
 #[tokio::test]
@@ -1155,5 +1138,5 @@ async fn async_settings_read_and_audio_in_mode_write() {
 
     amp.write_audio_in_mode_async(1).await.unwrap();
     assert_eq!(mock.mock_audio_in_mode(), 1);
-    assert_eq!(amp.read_settings_async().await.unwrap().audio_in_gain, 1);
+    assert_eq!(amp.read_settings_async().await.unwrap().audio_in_mode, 1);
 }

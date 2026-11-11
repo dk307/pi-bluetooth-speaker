@@ -274,11 +274,12 @@ fn amp_info_cli_argument_validation() {
             (&["--set-pm", "4"], "expected 0-3"),
             (&["--set-pm", "x"], "expected an integer 0-3"),
             (&["--set-profile"], "missing value for --set-profile"),
-            (&["--set-profile", "5"], "expected 0-4"),
+            (&["--set-profile", "6"], "expected 0-5"),
             (&["--set-i2s"], "missing value for --set-i2s"),
-            (&["--set-i2s", "5"], "expected 0-4"),
-            (&["--set-gain"], "missing value for --set-gain"),
-            (&["--set-gain", "4"], "expected 0-3"),
+            (&["--set-i2s", "2"], "2 and 3 are reserved"),
+            (&["--set-i2s", "8"], "expected 0-7"),
+            (&["--set-audio-mode"], "missing value for --set-audio-mode"),
+            (&["--set-audio-mode", "6"], "expected 0-5"),
         ],
     );
 }
@@ -694,8 +695,7 @@ fn amp_info_cli_argument_parsing_and_stats() {
         print_usage,
     };
     use speaker_hardware::{
-        AmpErrorFlags, AmpStatus, AudioInConfig, AudioInputFormat, ClockRatio, DcuChannelStatus,
-        DcuMonitor, PowerModeProfile,
+        AmpErrorFlags, AmpStatus, DcuChannelStatus, DcuMonitor, Pm2Config, PowerModeMon,
     };
 
     fn unwrap_options(parsed: Result<CliParse<CliOptions>, String>) -> CliOptions {
@@ -765,10 +765,11 @@ fn amp_info_cli_argument_parsing_and_stats() {
     assert_eq!(stats.samples.error_rate_percent(), 0.0);
 
     let ok_status = AmpStatus {
-        power_mode: PowerModeProfile::Pmp2,
-        audio_in: AudioInConfig {
-            format: AudioInputFormat::StandardI2s,
-            ratio: ClockRatio::AutoDetect,
+        pm_mon: PowerModeMon::Pm2,
+        pm2_config: Pm2Config {
+            usespread: false,
+            dtsteps: 3,
+            baltype: 1,
         },
         dcu_monitor: DcuMonitor {
             ch0: DcuChannelStatus::Active,

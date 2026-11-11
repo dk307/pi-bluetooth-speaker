@@ -58,12 +58,12 @@ pub struct SetValues {
     pub mute: Option<bool>,
     /// Manual power mode `PM_man` (0-3).
     pub pm: Option<u8>,
-    /// Power mode profile (0-4).
+    /// Power mode profile (0-5).
     pub profile: Option<u8>,
-    /// I2S format select (0-4).
+    /// I2S format select (valid 0, 1, 4, 5, 6, 7).
     pub i2s_format: Option<u8>,
-    /// Audio input gain select (0-3).
-    pub gain: Option<u8>,
+    /// Audio input mode (0-5).
+    pub audio_mode: Option<u8>,
 }
 
 impl SetValues {
@@ -75,8 +75,22 @@ impl SetValues {
             || self.pm.is_some()
             || self.profile.is_some()
             || self.i2s_format.is_some()
-            || self.gain.is_some()
+            || self.audio_mode.is_some()
     }
+}
+
+/// Valid I2S format selects (register 0x35 bits 2:0, datasheet Table 8-8).
+const VALID_I2S_FORMATS: [u8; 6] = [0, 1, 4, 5, 6, 7];
+
+/// Parses an I2S format CLI value; rejects the reserved encodings 2 and 3.
+fn parse_i2s_format(value: &str) -> Result<u8, String> {
+    let parsed = parse_u8_in_range(value, "I2S format", 7)?;
+    if !VALID_I2S_FORMATS.contains(&parsed) {
+        return Err(format!(
+            "Invalid I2S format value '{value}': 2 and 3 are reserved (valid: 0, 1, 4, 5, 6, 7)"
+        ));
+    }
+    Ok(parsed)
 }
 
 /// Parses an unsigned integer CLI value and enforces an inclusive upper bound.
@@ -144,9 +158,9 @@ pub fn print_usage(bin_name: &str) {
     println!("  --set-volume <RAW>       Master volume attenuation 0-144 (raw = -dB; 144 = 0 dB)");
     println!("  --set-mute <on|off>      Serial mute (register 0x36 bit 7)");
     println!("  --set-pm <0-3>           Manual power mode PM_man (0-3)");
-    println!("  --set-profile <0-4>      Power mode profile (0-4)");
-    println!("  --set-i2s <0-4>          I2S format select (0-4)");
-    println!("  --set-gain <0-3>         Audio input gain select (0-3)");
+    println!("  --set-profile <0-5>      Power mode profile preset (0-5; 5 = custom)");
+    println!("  --set-i2s <0|1|4-7>      I2S format select (2 and 3 reserved)");
+    println!("  --set-audio-mode <0-5>   Audio input mode select (0-5)");
     println!();
     println!(
         "  -v, --verbose            Display extended hardware diagnostics (human format only)"
@@ -199,23 +213,19 @@ where
                 opts.set.profile = Some(parse_u8_in_range(
                     &next_arg_value(args, "--set-profile")?,
                     "power mode profile",
-                    4,
+                    5,
                 )?);
                 Ok(true)
             }
             "--set-i2s" => {
-                opts.set.i2s_format = Some(parse_u8_in_range(
-                    &next_arg_value(args, "--set-i2s")?,
-                    "I2S format",
-                    4,
-                )?);
+                opts.set.i2s_format = Some(parse_i2s_format(&next_arg_value(args, "--set-i2s")?)?);
                 Ok(true)
             }
-            "--set-gain" => {
-                opts.set.gain = Some(parse_u8_in_range(
-                    &next_arg_value(args, "--set-gain")?,
-                    "audio input gain",
-                    3,
+            "--set-audio-mode" => {
+                opts.set.audio_mode = Some(parse_u8_in_range(
+                    &next_arg_value(args, "--set-audio-mode")?,
+                    "audio input mode",
+                    5,
                 )?);
                 Ok(true)
             }
@@ -332,13 +342,12 @@ pub fn output_json_status(timestamp: &str, amp: &AmpDevice, status: &AmpStatus) 
         "timestamp": timestamp,
         "i2c_bus": amp.i2c_bus(),
         "i2c_address": amp.i2c_address().to_string(),
-        "power_mode": format!("{:?}", status.power_mode),
-        "power_mode_description": status.power_mode.description(),
-        "audio_in": {
-            "format": format!("{:?}", status.audio_in.format),
-            "format_description": status.audio_in.format.description(),
-            "ratio": format!("{:?}", status.audio_in.ratio),
-            "ratio_description": status.audio_in.ratio.description(),
+        "pm_mon": format!("{:?}", status.pm_mon),
+        "pm_mon_description": status.pm_mon.description(),
+        "pm2_config": {
+            "usespread": status.pm2_config.usespread,
+            "dtsteps": status.pm2_config.dtsteps,
+            "baltype": status.pm2_config.baltype,
         },
         "dcu_monitor": {
             "ch0_active": status.dcu_monitor.ch0.is_active(),
@@ -364,7 +373,7 @@ pub fn output_json_settings(timestamp: &str, amp: &AmpDevice, settings: &AmpSett
             "pm_ctrl_pm": settings.pm_ctrl_pm,
             "pm_profile": settings.pm_profile,
             "i2s_format": settings.i2s_format,
-            "audio_in_gain": settings.audio_in_gain,
+            "audio_in_mode": settings.audio_in_mode,
         },
     });
     println!("{obj}");
@@ -457,7 +466,7 @@ pub fn handle_amp_iteration(
                             } else {
                                 "FAULT"
                             },
-                            format!("{:?}", status.power_mode),
+                            format!("{:?}", status.pm_mon),
                             format!("{:?}", status.dcu_monitor.ch0),
                             format!("{:?}", status.dcu_monitor.ch1),
                         );
@@ -584,8 +593,8 @@ fn handle_set(amp: &AmpDevice, opts: &CliOptions) -> ExitCode {
     {
         return ExitCode::FAILURE;
     }
-    if let Some(gain) = set.gain
-        && !report_write(amp, opts, "audio input gain", amp.write_audio_in_mode(gain))
+    if let Some(mode) = set.audio_mode
+        && !report_write(amp, opts, "audio input mode", amp.write_audio_in_mode(mode))
     {
         return ExitCode::FAILURE;
     }

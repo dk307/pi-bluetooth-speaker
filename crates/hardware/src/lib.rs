@@ -19,10 +19,11 @@ pub use pins::{BcmPin, GpioPinInfo, PhysicalPin, PinError};
 #[doc(inline)]
 pub use amp::{
     AmpDevice, AmpDeviceMock, AmpError, AmpErrorFlags, AmpFault, AmpHardwareInfo, AmpI2cAddress,
-    AmpSettings, AmpStatus, AudioInConfig, AudioInputFormat, ClockRatio, DcuChannelStatus,
-    DcuMonitor, MA12070P_DEFAULT_I2C_ADDR, MA12070P_DEFAULT_I2C_BUS, MA12070P_MAX_I2C_ADDR,
-    MA12070P_MIN_I2C_ADDR, PowerModeProfile, REG_AUDIO_IN, REG_DCU_MON0, REG_DCU_MON1,
-    REG_EH_CLEAR, REG_ERROR_ACC, REG_ERROR_LIVE, REG_POWER_MODE,
+    AmpSettings, AmpStatus, DcuChannelStatus, DcuMonitor, LimiterSlew, MA12070P_DEFAULT_I2C_ADDR,
+    MA12070P_DEFAULT_I2C_BUS, MA12070P_MAX_I2C_ADDR, MA12070P_MIN_I2C_ADDR, Pm2Config,
+    PowerModeMon, PowerModeProfile, REG_AUDIO_IN_MODE, REG_AUDIO_IN_MODE_EXT, REG_DCU_MON0,
+    REG_DCU_MON1, REG_DCU_PM_MON, REG_EH_CLEAR, REG_ERROR_ACC, REG_ERROR_LIVE, REG_I2S_FORMAT,
+    REG_PM2_CONFIG,
 };
 
 #[doc(inline)]

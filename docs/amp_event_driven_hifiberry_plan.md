@@ -340,11 +340,14 @@ above.
    - Master volume `0x40 = 0x18` (0 dB); limiter thresholds ch0/ch1
      `0x47`/`0x48 = 0x27` (−15 dBFS; thr mapping also `24 − dBFS`).
 4. **PM_CTRL `0x00` (manualPM bit 6, `PM_man` bits 5:4) and PM_PROFILE
-   `0x1D` (bits 2:0, presets 0-4) confirmed** against the driver header
-   (`ma_manualpm__a 0`, `ma_pmprofile__a 29`). Post-reset live value
-   `0x00 = 0x3D` (manualPM=1, `PM_man`=3). The earlier draft claim that
-   `0x00` holds PMP presets `0x38..0x3D` is **wrong** (that's a monitor-
-   register interpretation).
+   `0x1D` (bits 2:0, presets 0-5; 5 = custom) confirmed** against the
+   driver header (`ma_manualpm__a 0`, `ma_pmprofile__a 29`). Post-reset
+   live value `0x00 = 0x3D` decodes as manualPM=**0** (automatic power
+   mode management; 0x3D = 0b0011_1101, bit 6 clear), `PM_man`=3, bits
+   2/0 set (configuration bits). The earlier draft claim "manualPM=1"
+   and the earlier draft claim that `0x00` holds PMP presets
+   `0x38..0x3D` are both **wrong** (the latter is a monitor-register
+   interpretation).
 5. **Monitor register layout (driver header, decimal = dec):**
    `0x60` = dcu_mon0 `pm_mon` bits 1:0 / freqmode / pps (repo
    `REG_POWER_MODE` decodes ch0 power-mode monitor — naming off, function
@@ -440,3 +443,42 @@ above.
     only from tests/diagnostics.
   - Pi deployment (`scripts/deploy_binaries.sh`), service enablement in i2c
     mode, and the live Phase 5 validation matrix are pending user approval.
+
+## 10. External Code-Review Audit Fix Record (2026-11-11)
+
+Three-tier audit fix series on top of the Stage B event-driven controller.
+Every claim was verified against the authoritative sources
+(`ma120x0p.c`/`ma120x0p.h`, MA12070P datasheet v1.1, rppal 0.22.1 source)
+before implementation.
+
+### Tier 1 — critical hardware-correctness (commit `0fa555d`)
+- `/MUTE` polarity was INVERTED (kernel `mute_stream`: LOW = muted); mock
+  now stores the electrical pin level so invocations cannot pass unnoticed.
+- Boot now asserts serial mute FIRST (reset defaults are 0 dB unmuted) and
+  ALWAYS writes persisted state (a failed telemetry read must never leave
+  reset defaults live); kernel-parity `power_up()` (booster GPIO17 HIGH →
+  200 ms → `/ENABLE` LOW → 50 ms).
+- Edge watch armed the rppal interrupt and takes the `InputPin` out of the
+  seam (no deadlock); `SetMute` mirrors GPIO both directions while a stream
+  is live; `start_stream` decides from user intent captured BEFORE mutating;
+  thermal throttle corrected to attenuation (raw −6, write-time only, no
+  ratchet, restored on clear); fault recovery performs a real `/ENABLE`
+  reset pulse; critical-first fault priority + `UndervoltagePvdd`; PLL
+  clock loss during playback mutes; closed edge channel no longer hot-spins.
+
+### Tier 2 — register-model corrections
+- `0x25` `audio_in_mode` is mask `0xE0` (bits 7:5, values 0-5) and requires
+  the `audio_in_mode_ext` gate (register `0x27` bit 5) — the old "gain 0-3
+  bits 6:5" model was wrong.
+- `0x35` `i2s_format` valid set is {0, 1, 4, 5, 6, 7} per datasheet Table
+  8-8 (2/3 reserved); kernel-parity limiter timing added (fast attack
+  `0x80`, slow release `0x00`) via `configure_limiter_slew`.
+- `0x1B` relabeled `REG_PM2_CONFIG` (`usespread_pm2`/`dtsteps_pm2`/
+  `baltype_pm2`) — NOT an I2S input-format register; `AudioInConfig`/
+  `AudioInputFormat`/`ClockRatio` (modeled on nonexistent fields) replaced
+  by `Pm2Config`.
+- `0x60` relabeled `REG_DCU_PM_MON` (`dcu_mon0.pm_mon`, read-only
+  PM0-PM3 monitor, `PowerModeMon`); the writable preset is `0x1D`
+  (`PowerModeProfile`, now 0-5).
+- CLI `--set-i2s` rejects reserved 2/3; `--set-gain` replaced by
+  `--set-audio-mode <0-5>`; `--set-profile` range 0-5.
