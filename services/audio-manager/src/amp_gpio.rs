@@ -197,6 +197,76 @@ struct HardwarePins {
     error: Option<InputPin>,
 }
 
+/// Arms the falling-edge interrupt on the `/ERROR` input and takes the pin
+/// out of the seam for the dedicated watch thread. Returns `None` when the
+/// watch cannot start (pin already taken or interrupt arming failed).
+fn arm_error_interrupt(pins: &mut HardwarePins) -> Option<InputPin> {
+    // Arm the synchronous interrupt; poll_interrupt only reports events
+    // after this configuration.
+    let Some(error) = pins.error.as_mut() else {
+        warn!("Error-line edge watch already running");
+        return None;
+    };
+    if let Err(e) = error.set_interrupt(Trigger::FallingEdge, None) {
+        warn!(error = %e, "Failed to arm error-line interrupt; edge watch disabled");
+        return None;
+    }
+    pins.error.take()
+}
+
+/// Mock-backend edge watch: polls the in-memory error state.
+fn watch_mock_error_edges<F, K>(state: Arc<Mutex<MockGpioState>>, mut on_edge: F, keep_going: K)
+where
+    F: FnMut() -> bool + Send,
+    K: Fn() -> bool + Send,
+{
+    loop {
+        if !keep_going() {
+            return;
+        }
+        let fire = mock_lock(&state).error_active;
+        if fire && !on_edge() {
+            return;
+        }
+        std::thread::sleep(EDGE_POLL_INTERVAL);
+    }
+}
+
+/// Hardware edge watch: blocking rppal interrupt poll with backoff on
+/// transient OS-level watch faults (the safety tick covers detection).
+fn watch_hardware_error_edges<F, K>(error: &mut InputPin, mut on_edge: F, keep_going: K)
+where
+    F: FnMut() -> bool + Send,
+    K: Fn() -> bool + Send,
+{
+    loop {
+        match error.poll_interrupt(true, Some(EDGE_POLL_INTERVAL)) {
+            Ok(Some(_)) => {
+                debug!("GPIO error line falling edge");
+                if !on_edge() {
+                    return;
+                }
+            }
+            Ok(None) => {
+                // Poll timeout: cycle again (the next poll re-arms),
+                // unless the shutdown signal says to stop.
+                if !keep_going() {
+                    return;
+                }
+            }
+            Err(e) => {
+                // Transient OS-level watch faults: back off rather than
+                // hot-spinning; the safety tick covers detection.
+                warn!(error = %e, "GPIO error-line poll failed; backing off");
+                if !keep_going() {
+                    return;
+                }
+                std::thread::sleep(EDGE_POLL_INTERVAL);
+            }
+        }
+    }
+}
+
 /// Sole owner of the amplifier GPIO lines. Cloneable; all line access is
 /// serialized through the seam mutex (short critical sections only — the
 /// blocking edge watch owns its pin outside the lock).
@@ -433,7 +503,7 @@ impl AmpGpio {
     /// # Panics
     /// Panics if the mock state lock is poisoned beyond recovery (a
     /// panicked holder is a bug; the safety tick covers fault detection).
-    pub fn watch_error_edges<F, K>(&self, mut on_edge: F, keep_going: K)
+    pub fn watch_error_edges<F, K>(&self, on_edge: F, keep_going: K)
     where
         F: FnMut() -> bool + Send,
         K: Fn() -> bool + Send,
@@ -445,60 +515,19 @@ impl AmpGpio {
             };
             match &mut *seam {
                 GpioSeam::Mock { state } => (Some(Arc::clone(state)), None),
-                GpioSeam::Hardware(pins) => {
-                    // Arm the synchronous interrupt; poll_interrupt only
-                    // reports events after this configuration.
-                    let Some(error) = pins.error.as_mut() else {
-                        warn!("Error-line edge watch already running");
-                        return;
-                    };
-                    if let Err(e) = error.set_interrupt(Trigger::FallingEdge, None) {
-                        warn!(error = %e, "Failed to arm error-line interrupt; edge watch disabled");
-                        return;
-                    }
-                    (None, pins.error.take())
-                }
+                GpioSeam::Hardware(pins) => match arm_error_interrupt(pins) {
+                    Some(error) => (None, Some(error)),
+                    None => return,
+                },
             }
         };
-        if let Some(state) = mock_state {
-            loop {
-                if !keep_going() {
+        match mock_state {
+            Some(state) => watch_mock_error_edges(state, on_edge, keep_going),
+            None => {
+                let Some(mut error) = hardware_pin else {
                     return;
-                }
-                let fire = mock_lock(&state).error_active;
-                if fire && !on_edge() {
-                    return;
-                }
-                std::thread::sleep(EDGE_POLL_INTERVAL);
-            }
-        }
-        let Some(mut error) = hardware_pin else {
-            return;
-        };
-        loop {
-            match error.poll_interrupt(true, Some(EDGE_POLL_INTERVAL)) {
-                Ok(Some(_)) => {
-                    debug!("GPIO error line falling edge");
-                    if !on_edge() {
-                        return;
-                    }
-                }
-                Ok(None) => {
-                    // Poll timeout: cycle again (the next poll re-arms),
-                    // unless the shutdown signal says to stop.
-                    if !keep_going() {
-                        return;
-                    }
-                }
-                Err(e) => {
-                    // Transient OS-level watch faults: back off rather than
-                    // hot-spinning; the safety tick covers detection.
-                    warn!(error = %e, "GPIO error-line poll failed; backing off");
-                    if !keep_going() {
-                        return;
-                    }
-                    std::thread::sleep(EDGE_POLL_INTERVAL);
-                }
+                };
+                watch_hardware_error_edges(&mut error, on_edge, keep_going);
             }
         }
     }

@@ -120,6 +120,9 @@ fn power_mode_profile_and_decoding() {
     for (raw, expected) in profile_table {
         assert_eq!(PowerModeProfile::from_raw(raw), expected, "raw {raw:#x}");
         assert_eq!(expected.as_u8(), expected.as_u8());
+        // Every profile carries a non-empty human-readable description.
+        assert_ne!(expected.description(), "");
+        assert!(expected.description().starts_with("PMP"));
     }
     for (idx, profile) in [
         PowerModeProfile::Pmp0,

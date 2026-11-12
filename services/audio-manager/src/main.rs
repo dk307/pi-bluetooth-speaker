@@ -60,6 +60,7 @@ mod dsp_watch;
 mod error;
 mod state_file;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -105,6 +106,49 @@ async fn run_daemon(config: Config) -> anyhow::Result<()> {
     }
 }
 
+/// Requests the daemon's well-known D-Bus name on the system bus.
+///
+/// Shared by both control modes; returns the proxy (for name release on
+/// shutdown) and the claimed name.
+async fn claim_dbus_name<'conn>(
+    connection: &'conn zbus::Connection,
+) -> anyhow::Result<(zbus::fdo::DBusProxy<'conn>, WellKnownName<'conn>)> {
+    let fdo = zbus::fdo::DBusProxy::new(connection).await?;
+    let name: WellKnownName = "org.speaker.AudioManager"
+        .try_into()
+        .context("Invalid well-known name")?;
+    let request_result = fdo
+        .request_name(
+            name.clone(),
+            zbus::fdo::RequestNameFlags::AllowReplacement | zbus::fdo::RequestNameFlags::DoNotQueue,
+        )
+        .await
+        .context("Failed to call RequestName")?;
+    if request_result != zbus::fdo::RequestNameReply::PrimaryOwner {
+        return Err(AmpError::DBusNameTaken.into());
+    }
+    info!("D-Bus name org.speaker.AudioManager acquired");
+    Ok((fdo, name))
+}
+
+/// Loads the persisted amp state, falling back to defaults on failure.
+fn load_persisted_state(state_path: &Path) -> AmpState {
+    StateFile::new(state_path).load().unwrap_or_else(|e| {
+        warn!(error = %e, "Failed to load state file, using defaults");
+        AmpState::default()
+    })
+}
+
+/// Waits for SIGTERM or SIGINT and logs the shutdown reason.
+async fn wait_shutdown_signal() {
+    let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT handler");
+    tokio::select! {
+        _ = sigterm.recv() => info!("Received SIGTERM, shutting down gracefully"),
+        _ = sigint.recv() => info!("Received SIGINT, shutting down gracefully"),
+    }
+}
+
 /// Phase 2 i2c mode: event-driven sole hardware supervisor.
 async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
     // 1. Claim the GPIO lines and wake the amp BEFORE the first I2C write:
@@ -131,10 +175,7 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
 
     // 3. Load persisted state.
     let state_file = StateFile::new(&config.state_path);
-    let persisted = state_file.load().unwrap_or_else(|e| {
-        warn!(error = %e, "Failed to load state file, using defaults");
-        AmpState::default()
-    });
+    let persisted = load_persisted_state(&config.state_path);
 
     // 4. Boot bring-up: wake, probe-equivalent register init, reconcile.
     let mut controller = AmpController::new(
@@ -168,22 +209,8 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
     let connection = zbus::Connection::system()
         .await
         .context("Failed to connect to system D-Bus")?;
-    let fdo = zbus::fdo::DBusProxy::new(&connection).await?;
-    let name: WellKnownName = "org.speaker.AudioManager"
-        .try_into()
-        .context("Invalid well-known name")?;
-    let name_for_release = name.clone();
-    let request_result = fdo
-        .request_name(
-            name,
-            zbus::fdo::RequestNameFlags::AllowReplacement | zbus::fdo::RequestNameFlags::DoNotQueue,
-        )
-        .await
-        .context("Failed to call RequestName")?;
-    if request_result != zbus::fdo::RequestNameReply::PrimaryOwner {
-        return Err(AmpError::DBusNameTaken.into());
-    }
-    info!("D-Bus name org.speaker.AudioManager acquired");
+    let (fdo, name) = claim_dbus_name(&connection).await?;
+    let name_for_release = name;
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<AmpCommand>(32);
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
@@ -224,12 +251,7 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
     // 7. Run the controller event loop (drives everything) with a signal
     //    watcher feeding the shutdown channel.
     let signal_task = tokio::spawn(async move {
-        let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
-        let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT handler");
-        tokio::select! {
-            _ = sigterm.recv() => info!("Received SIGTERM, shutting down gracefully"),
-            _ = sigint.recv() => info!("Received SIGINT, shutting down gracefully"),
-        }
+        wait_shutdown_signal().await;
         let _ = shutdown_tx.send(()).await;
     });
 
@@ -257,29 +279,12 @@ async fn run_alsa_mode(config: Config) -> anyhow::Result<()> {
         .context("Failed to open ALSA backend for amp hardware validation")?;
     info!(card = %config.alsa_card, "Hardware validation passed");
 
-    // 2. Connect to system bus
+    // 2. Connect to system bus and request the well-known name
     let connection = zbus::Connection::system()
         .await
         .context("Failed to connect to system D-Bus")?;
-
-    // 3. Request the well-known name
-    let fdo = zbus::fdo::DBusProxy::new(&connection).await?;
-    let name: WellKnownName = "org.speaker.AudioManager"
-        .try_into()
-        .context("Invalid well-known name")?;
-    let name_for_release = name.clone();
-    let request_result = fdo
-        .request_name(
-            name,
-            zbus::fdo::RequestNameFlags::AllowReplacement | zbus::fdo::RequestNameFlags::DoNotQueue,
-        )
-        .await
-        .context("Failed to call RequestName")?;
-
-    if request_result != zbus::fdo::RequestNameReply::PrimaryOwner {
-        return Err(AmpError::DBusNameTaken.into());
-    }
-    info!("D-Bus name org.speaker.AudioManager acquired");
+    let (fdo, name) = claim_dbus_name(&connection).await?;
+    let name_for_release = name;
 
     // 4. Notify systemd we're ready (Type=dbus)
     sd_notify::notify(true, &[sd_notify::NotifyState::Ready])
@@ -287,10 +292,7 @@ async fn run_alsa_mode(config: Config) -> anyhow::Result<()> {
 
     // 5. Load persisted state and apply to hardware
     let state_file = StateFile::new(&config.state_path);
-    let persisted = state_file.load().unwrap_or_else(|e| {
-        warn!(error = %e, "Failed to load state file, using defaults");
-        AmpState::default()
-    });
+    let persisted = load_persisted_state(&config.state_path);
     backend
         .write_state(&persisted)
         .await
@@ -317,17 +319,7 @@ async fn run_alsa_mode(config: Config) -> anyhow::Result<()> {
     info!("Audio manager ready, entering event loop");
 
     // 8. Event loop: wait for D-Bus method calls or shutdown signal
-    let mut sigterm = signal(SignalKind::terminate())?;
-    let mut sigint = signal(SignalKind::interrupt())?;
-
-    tokio::select! {
-        _ = sigterm.recv() => {
-            info!("Received SIGTERM, shutting down gracefully");
-        }
-        _ = sigint.recv() => {
-            info!("Received SIGINT, shutting down gracefully");
-        }
-    }
+    wait_shutdown_signal().await;
 
     // 9. Graceful shutdown: persist state and release name
     let final_state = *state.lock().await;

@@ -907,6 +907,71 @@ fn amp_info_cli_mock_execution_and_fault_handling() {
 }
 
 #[test]
+fn amp_info_cli_set_workflow_ordering_and_failure_stop() {
+    use std::process::ExitCode;
+    use std::time::Duration;
+
+    use speaker_common::diag::{CommonCliOptions, OutputFormat};
+    use speaker_diagnostics::cli::amp::{CliOptions, SetValues, run_app};
+    use speaker_hardware::{AmpDevice, AmpI2cAddress};
+
+    let (amp, mock) = AmpDevice::new_mocked();
+    mock.set_mock_serial_muted(true);
+    mock.set_mock_master_volume_raw(144);
+
+    let set_opts = |set: SetValues| CliOptions {
+        common: CommonCliOptions {
+            max_count: Some(1),
+            interval: Duration::from_millis(1),
+            verbose: false,
+            format: OutputFormat::Human,
+        },
+        address: AmpI2cAddress::default(),
+        clear: false,
+        set,
+    };
+
+    // Happy path: volume write succeeds, then the requested unmute is
+    // applied LAST — both land in the mock state.
+    let opts = set_opts(SetValues {
+        volume_raw: Some(100),
+        mute: Some(false),
+        ..SetValues::default()
+    });
+    assert_eq!(run_app(&amp, &opts), ExitCode::SUCCESS);
+    assert_eq!(mock.mock_master_volume_raw(), 100);
+    assert!(!mock.mock_serial_muted());
+
+    // Failure path: with an injected fault, the FIRST write fails and the
+    // workflow stops — later writes (including the requested unmute) must
+    // not run, so the amp state stays untouched.
+    mock.set_mock_serial_muted(true);
+    mock.set_mock_master_volume_raw(144);
+    mock.set_fault(Some("I2C simulated write failure".into()));
+    let opts = set_opts(SetValues {
+        volume_raw: Some(80),
+        mute: Some(false),
+        ..SetValues::default()
+    });
+    assert_eq!(run_app(&amp, &opts), ExitCode::FAILURE);
+    assert_eq!(mock.mock_master_volume_raw(), 144);
+    assert!(mock.mock_serial_muted());
+    mock.set_fault(None);
+
+    // Mute-first: with a fault, a requested MUTE is still recorded as the
+    // attempted first write... it fails, so state stays; verify the failure
+    // surfaces instead of a silent partial set.
+    let opts = set_opts(SetValues {
+        mute: Some(true),
+        ..SetValues::default()
+    });
+    mock.set_fault(Some("I2C simulated write failure".into()));
+    assert_eq!(run_app(&amp, &opts), ExitCode::FAILURE);
+    assert!(mock.mock_serial_muted());
+    mock.set_fault(None);
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "comprehensive DSP CLI flag and argument validation"

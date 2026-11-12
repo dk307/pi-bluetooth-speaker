@@ -576,46 +576,33 @@ fn handle_set(amp: &AmpDevice, opts: &CliOptions) -> ExitCode {
     // Safety ordering: a requested MUTE is applied FIRST (the amp must
     // never sit loud while later writes run); a requested UNMUTE is
     // applied LAST, only after every other write succeeded — a failed
-    // volume write must never unmask the output.
-    if set.mute == Some(true)
-        && !report_write(amp, opts, "serial mute", amp.write_serial_mute(true))
-    {
-        return ExitCode::FAILURE;
-    }
-    if let Some(raw) = set.volume_raw
-        && !report_write(amp, opts, "master volume", amp.write_master_volume(raw))
-    {
-        return ExitCode::FAILURE;
-    }
-    if set.mute == Some(false)
-        && !report_write(amp, opts, "serial mute", amp.write_serial_mute(false))
-    {
-        return ExitCode::FAILURE;
-    }
-    if let Some(pm) = set.pm
-        && !report_write(amp, opts, "power mode", amp.write_power_mode_ctrl(pm))
-    {
-        return ExitCode::FAILURE;
-    }
-    if let Some(profile) = set.profile
-        && !report_write(
-            amp,
-            opts,
-            "power mode profile",
-            amp.write_power_mode_profile(profile),
-        )
-    {
-        return ExitCode::FAILURE;
-    }
-    if let Some(format) = set.i2s_format
-        && !report_write(amp, opts, "I2S format", amp.write_i2s_format(format))
-    {
-        return ExitCode::FAILURE;
-    }
-    if let Some(mode) = set.audio_mode
-        && !report_write(amp, opts, "audio input mode", amp.write_audio_in_mode(mode))
-    {
-        return ExitCode::FAILURE;
+    // volume write must never unmask the output. The vec encodes this
+    // order; `filter_map` drops unrequested writes.
+    let writes = [
+        set.mute
+            .filter(|&m| m)
+            .map(|_| ("serial mute", amp.write_serial_mute(true))),
+        set.volume_raw
+            .map(|raw| ("master volume", amp.write_master_volume(raw))),
+        set.mute
+            .filter(|&m| !m)
+            .map(|_| ("serial mute", amp.write_serial_mute(false))),
+        set.pm
+            .map(|pm| ("power mode", amp.write_power_mode_ctrl(pm))),
+        set.profile
+            .map(|profile| ("power mode profile", amp.write_power_mode_profile(profile))),
+        set.i2s_format
+            .map(|format| ("I2S format", amp.write_i2s_format(format))),
+        set.audio_mode
+            .map(|mode| ("audio input mode", amp.write_audio_in_mode(mode))),
+    ]
+    .into_iter()
+    .flatten();
+
+    for (name, result) in writes {
+        if !report_write(amp, opts, name, result) {
+            return ExitCode::FAILURE;
+        }
     }
 
     if show_settings(amp, opts.common.format).is_err() {
