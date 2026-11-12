@@ -3,8 +3,10 @@
 //! `<tmp>/host_render.raw` for offline band-structure analysis.
 
 use screen_manager::ui::{AppShell, Framebuffer, MainWindow, RgbaPremulPixel, ThemePreset};
+use slint::LogicalPosition;
 use slint::platform::software_renderer::LineBufferProvider;
 use slint::platform::software_renderer::TargetPixel;
+use slint::platform::{PointerEventButton, WindowEvent};
 
 const WIDTH: usize = Framebuffer::DEFAULT_WIDTH as usize;
 const HEIGHT: usize = Framebuffer::DEFAULT_HEIGHT as usize;
@@ -45,6 +47,7 @@ fn dump_single_frame_for_layout_analysis() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    let open_hud = std::env::var("RENDER_DUMP_HUD").ok().as_deref() == Some("1");
 
     let mut fb = Framebuffer::new_mocked().0;
     let window = fb.init_platform().expect("platform init");
@@ -58,6 +61,26 @@ fn dump_single_frame_for_layout_analysis() {
     );
     shell.set_playing(true);
     shell.set_tab(tab);
+    if open_hud {
+        // Open the HUD the way the touch UI does: tap the volume icon in the
+        // top-right of the status bar, then let the fade-in animation finish.
+        for ev in [
+            (WindowEvent::PointerPressed {
+                position: LogicalPosition::new(690.0, 30.0),
+                button: PointerEventButton::Left,
+            }),
+            (WindowEvent::PointerReleased {
+                position: LogicalPosition::new(690.0, 30.0),
+                button: PointerEventButton::Left,
+            }),
+        ] {
+            window.dispatch_event(ev);
+        }
+        for _ in 0..60 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            slint::platform::update_timers_and_animations();
+        }
+    }
 
     slint::platform::update_timers_and_animations();
     fb.set_marquee_rows(shell.marquee_row_specs());
