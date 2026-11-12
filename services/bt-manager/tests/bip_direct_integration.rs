@@ -1213,6 +1213,43 @@ fn bip_image_properties_parse_malformed() {
             formats: Vec::new(),
         })
     );
+
+    // Skips malformed variant tags while preserving valid formats
+    let mixed_xml = r#"<image-properties handle="0000001">
+        <variant encoding="WEBP" />
+        <native encoding="JPEG" pixel="200*200" />
+        <variant encoding="JPEG" pixel="invalid" />
+        <variant encoding="JPEG" pixel="640*480" />
+    </image-properties>"#;
+    let mixed = BipImageProperties::parse(mixed_xml).expect("must parse valid tags");
+    assert_eq!(mixed.formats.len(), 2);
+    assert_eq!(mixed.formats[0].pixel, BipPixel::Fixed(200, 200));
+    assert_eq!(mixed.formats[1].pixel, BipPixel::Fixed(640, 480));
+}
+
+#[test]
+fn bip_select_best_format_non_jpeg_native_does_not_downgrade() {
+    let props = BipImageProperties {
+        handle: "0000001".into(),
+        formats: vec![
+            BipImageFormat {
+                encoding: "PNG".into(),
+                pixel: BipPixel::Fixed(800, 800),
+                size: None,
+                is_native: true,
+            },
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(640, 480),
+                size: None,
+                is_native: false,
+            },
+        ],
+    };
+    assert_eq!(
+        select_best_format(&props, 360),
+        FormatSelection::NativeDefault
+    );
 }
 
 #[test]

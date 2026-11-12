@@ -960,9 +960,14 @@ impl BipImageProperties {
                 }
             } else if tag_trimmed.starts_with("native") || tag_trimmed.starts_with("variant") {
                 let is_native = tag_trimmed.starts_with("native");
-                let encoding = find_attr(tag, "encoding")?;
-                let pixel_str = find_attr(tag, "pixel")?;
-                let pixel = BipPixel::parse(pixel_str)?;
+                let (Some(encoding), Some(pixel_str)) =
+                    (find_attr(tag, "encoding"), find_attr(tag, "pixel"))
+                else {
+                    continue;
+                };
+                let Some(pixel) = BipPixel::parse(pixel_str) else {
+                    continue;
+                };
                 let size = find_attr(tag, "size").and_then(|s| s.parse::<u32>().ok());
                 formats.push(BipImageFormat {
                     encoding: Box::<str>::from(encoding),
@@ -996,7 +1001,7 @@ pub enum FormatSelection {
 pub fn select_best_format(properties: &BipImageProperties, target_min_dim: u32) -> FormatSelection {
     let mut native_dim = (0u32, 0u32);
     for f in &properties.formats {
-        if f.is_native && f.encoding.eq_ignore_ascii_case("JPEG") {
+        if f.is_native {
             let (w, h) = f.pixel.max_dimensions();
             if w > native_dim.0 {
                 native_dim = (w, h);
@@ -1013,21 +1018,26 @@ pub fn select_best_format(properties: &BipImageProperties, target_min_dim: u32) 
         if !f.is_native && f.encoding.eq_ignore_ascii_case("JPEG") {
             let (target_w, target_h) = match f.pixel {
                 BipPixel::Fixed(w, h) => {
-                    if w > MAX_COVER_DIMENSION || h > MAX_COVER_DIMENSION {
-                        let scale = f64::from(MAX_COVER_DIMENSION) / f64::from(w.max(h));
-                        #[expect(
-                            clippy::cast_possible_truncation,
-                            clippy::cast_sign_loss,
-                            reason = "scaled dimensions fit within MAX_COVER_DIMENSION bounds"
-                        )]
-                        let sw = (f64::from(w) * scale).round() as u32;
-                        #[expect(
-                            clippy::cast_possible_truncation,
-                            clippy::cast_sign_loss,
-                            reason = "scaled dimensions fit within MAX_COVER_DIMENSION bounds"
-                        )]
-                        let sh = (f64::from(h) * scale).round() as u32;
-                        (sw.max(1), sh.max(1))
+                    let max_dim = w.max(h);
+                    if max_dim > MAX_COVER_DIMENSION {
+                        let scale = f64::from(MAX_COVER_DIMENSION) / f64::from(max_dim);
+                        if scale.is_finite() && scale > 0.0 {
+                            #[expect(
+                                clippy::cast_possible_truncation,
+                                clippy::cast_sign_loss,
+                                reason = "scaled dimensions fit within MAX_COVER_DIMENSION bounds"
+                            )]
+                            let sw = (f64::from(w) * scale).round() as u32;
+                            #[expect(
+                                clippy::cast_possible_truncation,
+                                clippy::cast_sign_loss,
+                                reason = "scaled dimensions fit within MAX_COVER_DIMENSION bounds"
+                            )]
+                            let sh = (f64::from(h) * scale).round() as u32;
+                            (sw.max(1), sh.max(1))
+                        } else {
+                            (w, h)
+                        }
                     } else {
                         (w, h)
                     }
