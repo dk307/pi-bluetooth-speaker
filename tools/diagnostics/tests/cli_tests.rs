@@ -264,6 +264,22 @@ fn amp_info_cli_argument_validation() {
             (&["--address", "0x19"], "invalid MA12070P I2C address"),
             (&["--address", "0x24"], "invalid MA12070P I2C address"),
             (&["--address", "0x5C"], "invalid MA12070P I2C address"),
+            (&["--set-volume"], "missing value for --set-volume"),
+            (&["--set-volume", "abc"], "expected an integer 0-144"),
+            (&["--set-volume", "-5"], "expected an integer 0-144"),
+            (&["--set-volume", "145"], "expected 0-144"),
+            (&["--set-mute"], "missing value for --set-mute"),
+            (&["--set-mute", "maybe"], "expected 'on' or 'off'"),
+            (&["--set-pm"], "missing value for --set-pm"),
+            (&["--set-pm", "4"], "expected 0-3"),
+            (&["--set-pm", "x"], "expected an integer 0-3"),
+            (&["--set-profile"], "missing value for --set-profile"),
+            (&["--set-profile", "6"], "expected 0-5"),
+            (&["--set-i2s"], "missing value for --set-i2s"),
+            (&["--set-i2s", "2"], "2 and 3 are reserved"),
+            (&["--set-i2s", "8"], "expected 0-7"),
+            (&["--set-audio-mode"], "missing value for --set-audio-mode"),
+            (&["--set-audio-mode", "6"], "expected 0-5"),
         ],
     );
 }
@@ -679,8 +695,7 @@ fn amp_info_cli_argument_parsing_and_stats() {
         print_usage,
     };
     use speaker_hardware::{
-        AmpErrorFlags, AmpStatus, AudioInConfig, AudioInputFormat, ClockRatio, DcuChannelStatus,
-        DcuMonitor, PowerModeProfile,
+        AmpErrorFlags, AmpStatus, DcuChannelStatus, DcuMonitor, Pm2Config, PowerModeMon,
     };
 
     fn unwrap_options(parsed: Result<CliParse<CliOptions>, String>) -> CliOptions {
@@ -750,10 +765,11 @@ fn amp_info_cli_argument_parsing_and_stats() {
     assert_eq!(stats.samples.error_rate_percent(), 0.0);
 
     let ok_status = AmpStatus {
-        power_mode: PowerModeProfile::Pmp2,
-        audio_in: AudioInConfig {
-            format: AudioInputFormat::StandardI2s,
-            ratio: ClockRatio::AutoDetect,
+        pm_mon: PowerModeMon::Pm2,
+        pm2_config: Pm2Config {
+            usespread: false,
+            dtsteps: 3,
+            baltype: 1,
         },
         dcu_monitor: DcuMonitor {
             ch0: DcuChannelStatus::Active,
@@ -795,7 +811,7 @@ fn amp_info_cli_mock_execution_and_fault_handling() {
 
     use speaker_common::diag::{CommonCliOptions, OutputFormat};
     use speaker_diagnostics::cli::amp::{
-        AmpStats, CliOptions, handle_amp_iteration, print_header, run_app,
+        AmpStats, CliOptions, SetValues, handle_amp_iteration, print_header, run_app,
     };
     use speaker_hardware::{AmpDevice, AmpErrorFlags, AmpI2cAddress};
 
@@ -812,6 +828,7 @@ fn amp_info_cli_mock_execution_and_fault_handling() {
         },
         address: AmpI2cAddress::default(),
         clear: false,
+        set: SetValues::default(),
     };
     let code = run_app(&amp, &once_opts);
     assert_eq!(code, ExitCode::SUCCESS);
@@ -831,6 +848,7 @@ fn amp_info_cli_mock_execution_and_fault_handling() {
         },
         address: AmpI2cAddress::default(),
         clear: false,
+        set: SetValues::default(),
     };
     let code = run_app(&amp, &multi_opts);
     assert_eq!(code, ExitCode::SUCCESS);
@@ -858,6 +876,7 @@ fn amp_info_cli_mock_execution_and_fault_handling() {
         },
         address: AmpI2cAddress::default(),
         clear: false,
+        set: SetValues::default(),
     };
     let code = run_app(&amp, &json_opts);
     assert_eq!(code, ExitCode::SUCCESS);
@@ -885,6 +904,108 @@ fn amp_info_cli_mock_execution_and_fault_handling() {
     handle_amp_iteration(&amp, &once_opts, "12:00:00", &mut err_stats);
     handle_amp_iteration(&amp, &json_opts, "12:00:00", &mut err_stats);
     assert_eq!(err_stats.samples.errors(), 2);
+}
+
+#[test]
+fn amp_info_cli_set_workflow_ordering_and_failure_stop() {
+    use std::process::ExitCode;
+    use std::time::Duration;
+
+    use speaker_common::diag::{CommonCliOptions, OutputFormat};
+    use speaker_diagnostics::cli::amp::{CliOptions, SetValues, run_app};
+    use speaker_hardware::{AmpDevice, AmpI2cAddress};
+
+    let (amp, mock) = AmpDevice::new_mocked();
+    mock.set_mock_serial_muted(true);
+    mock.set_mock_master_volume_raw(144);
+
+    let set_opts = |set: SetValues| CliOptions {
+        common: CommonCliOptions {
+            max_count: Some(1),
+            interval: Duration::from_millis(1),
+            verbose: false,
+            format: OutputFormat::Human,
+        },
+        address: AmpI2cAddress::default(),
+        clear: false,
+        set,
+    };
+
+    // Happy path: volume write succeeds, then the requested unmute is
+    // applied LAST — both land in the mock state.
+    let opts = set_opts(SetValues {
+        volume_raw: Some(100),
+        mute: Some(false),
+        ..SetValues::default()
+    });
+    assert_eq!(run_app(&amp, &opts), ExitCode::SUCCESS);
+    assert_eq!(mock.mock_master_volume_raw(), 100);
+    assert!(!mock.mock_serial_muted());
+
+    // Failure path: with an injected fault, the FIRST write fails and the
+    // workflow stops — later writes (including the requested unmute) must
+    // not run, so the amp state stays untouched.
+    mock.set_mock_serial_muted(true);
+    mock.set_mock_master_volume_raw(144);
+    mock.set_fault(Some("I2C simulated write failure".into()));
+    let opts = set_opts(SetValues {
+        volume_raw: Some(80),
+        mute: Some(false),
+        ..SetValues::default()
+    });
+    assert_eq!(run_app(&amp, &opts), ExitCode::FAILURE);
+    assert_eq!(mock.mock_master_volume_raw(), 144);
+    assert!(mock.mock_serial_muted());
+    mock.set_fault(None);
+
+    // Partial-failure path (the hazardous one): a TRANSIENT volume-write
+    // failure (single NACK) must stop the workflow BEFORE the requested
+    // unmute runs — the amp must never end up unmuted by a failed set.
+    // With eager write evaluation the unmute would execute despite the
+    // volume failure.
+    mock.set_mock_serial_muted(true);
+    mock.set_mock_master_volume_raw(144);
+    mock.set_transient_write_failures(1);
+    let opts = set_opts(SetValues {
+        volume_raw: Some(80),
+        mute: Some(false),
+        ..SetValues::default()
+    });
+    assert_eq!(run_app(&amp, &opts), ExitCode::FAILURE);
+    assert_eq!(mock.mock_master_volume_raw(), 144);
+    assert!(mock.mock_serial_muted());
+
+    // Recovery: the transient failure was consumed; a retry succeeds.
+    assert_eq!(run_app(&amp, &opts), ExitCode::SUCCESS);
+    assert_eq!(mock.mock_master_volume_raw(), 80);
+    assert!(!mock.mock_serial_muted());
+
+    // Unmute-last across ALL other writes: a failed I2S-format write must
+    // stop before the requested unmute executes, even though the unmute is
+    // unrelated to the failing write.
+    mock.set_mock_serial_muted(true);
+    mock.set_transient_write_failures(1);
+    let opts = set_opts(SetValues {
+        i2s_format: Some(4),
+        mute: Some(false),
+        ..SetValues::default()
+    });
+    assert_eq!(run_app(&amp, &opts), ExitCode::FAILURE);
+    assert!(mock.mock_serial_muted());
+    assert_eq!(mock.mock_i2s_format(), 0);
+
+    // Mute-first: with a fault, a requested MUTE is still recorded as the
+    // attempted first write... it fails, so state stays; verify the failure
+    // surfaces instead of a silent partial set.
+    mock.set_mock_serial_muted(true);
+    let opts = set_opts(SetValues {
+        mute: Some(true),
+        ..SetValues::default()
+    });
+    mock.set_fault(Some("I2C simulated write failure".into()));
+    assert_eq!(run_app(&amp, &opts), ExitCode::FAILURE);
+    assert!(mock.mock_serial_muted());
+    mock.set_fault(None);
 }
 
 #[test]

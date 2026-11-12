@@ -1,0 +1,616 @@
+# Amp Manager Event-Driven Control Plan — hifiberry-dac Mode
+
+> Status: **draft** (branch `feat/amp-manager-event-driven`, cut from `origin/main`
+> at `447fdba`). Supersedes the merus-kernel-driver-dependent assumptions in
+> [`audio_manager_plan.md`](audio_manager_plan.md) §1–§2 (the `A.Mstr Vol` ALSA
+> mixer no longer exists in the new boot mode). Follows the event-driven design
+> agreed 2026-11-10.
+>
+> **⚠ Historical sections below are superseded:** §1–§8 and §6.1 were written
+> during planning/Phase 0 and contain register claims later corrected by
+> live verification and the audit record in **§9/§10**. Where they disagree,
+> §10 wins. Known-corrected claims: master volume `0x40` raw = **168 − raw**
+> (raw 0..144 = −0..−144 dB, NOT "raw = −dB" as a register value and NOT the
+> per-channel `24 − dB` formula); `0x1B` is **PM2 config** (`REG_PM2_CONFIG`),
+> not the input-format register; `0x25` is `audio_in_mode` mask `0xE0`
+> (bits 7:5, values 0-5) plus the `0x27` bit-5 `audio_in_mode_ext` gate, not
+> "gain bits 6:5"; `0x60` is the read-only **DCU power-mode monitor**
+> (`REG_DCU_PM_MON`, `dcu_mon0.pm_mon`), not the power-mode profile register
+> (that is `0x1D`, profiles 0-5); DCU per-channel status registers are
+> `0x61`/`0x65` (not `0x61`/`0x62` — `0x62` is `dcu_mon0.m_mon`).
+
+## 1. Context & Root Cause
+
+The current appliance boots with `dtoverlay=merus-amp-custom` (stock overlay
+with pinctrl stripped, see `baseline/boot/overlays/`). The upstream kernel
+codec `ma120x0p.c` has three structural defects that make this mode unreliable
+on the shifted Pi:
+
+1. **Regmap cache desync.** `ma120x0p` exposes `/ENABLE` and `/MUTE` as
+   user-togglable ALSA switches (`A.Enable`, `B.Mute`) but never calls
+   `regcache_mark_dirty()`/`regcache_sync()`. Any `/ENABLE` toggle resets all
+   chip registers to factory defaults while the kernel cache still believes the
+   old values — subsequent writes of the "same" value are silently dropped.
+2. **No PLL-lock gating.** `mute_stream` pulls `/MUTE` HIGH exactly at
+   `SNDRV_PCM_TRIGGER_START` with no settle delay and no verification that the
+   64×fs bit clock is present (`0x7C` bit 2 `PLL_UNLOCK`), so rate changes and
+   unmute-without-clock cause PLL unlock pops.
+3. **Rate restrictions as a patch.** RPi engineers limited sample rates in
+   `rpi-simple-soundcard.c` (`drvdata_merus_amp`) to work around (2) rather
+   than fixing the muting sequencing.
+
+**Decision:** remove the kernel codec from the data path entirely.
+`dtoverlay=hifiberry-dac` provides a clean, stateless I2S card
+(`sndrpihifiberry`); `audio-manager` (amp-manager) becomes the **sole
+supervisor** of the MA12070P over `/dev/i2c-1` @ `0x20` and (if wired on this
+board) the control GPIOs. Volume ownership already lives in audio-manager
+(`feat/audio-manager-volume-owner` → merged as #53); this plan moves the
+*transport* under the same owner.
+
+## 2. Design Principles
+
+1. **Event-driven all the way.** No runtime polling as the primary control
+   path. All state changes arrive as events (D-Bus calls, pipeline lifecycle
+   events, GPIO line edges). The only blocking poll is a bounded one-shot
+   PLL-lock handshake (~200 ms) inside the `AwaitingClock` state — a startup
+   handshake, not a loop.
+2. **Never toggle `/ENABLE` in normal operation.** The kernel driver's one
+   correct instinct: leave the chip powered and switching continuously so
+   volatile registers are never wiped. `/ENABLE` is boot-time + fault-recovery
+   only, and any recovery cycle MUST perform a full register re-init afterwards.
+3. **Serial mute as primary mute.** Register `0x36` bit 7 (`audio_proc_mute`)
+   via I2C — already live-verified in `services/audio-manager/src/amp_backend.rs`
+   (header docs). Instant, atomic RMW, independent of GPIO wiring, and cannot
+   unlock the PLL (pure register write, no clocking interaction).
+4. **Single writer.** With the `ma120x0p` kernel driver gone, audio-manager is
+   the only user-space writer of the MA12070P register space besides reads.
+   No ALSA mixer control exists anymore to fight with.
+5. **Reuse, no parallel register tables.** Register constants, error bitflags
+   (`AmpErrorFlags`), address newtypes (`AmpI2cAddress`) come from
+   `crates/hardware::amp`; the volume curve comes from `crates/amp_curve`.
+   **Note (audit):** `AmpDevice` currently exposes only read operations and 7
+   monitor/handler register constants; the volume (`0x40`/`0x41`), serial-mute
+   (`0x36`), and format (`0x35`) constants plus all write operations are added
+   to the hardware crate in Phase 1.5 before Phase 2 consumes them. The
+   externally-referenced register map in earlier discussion drafts contains
+   errors (power-mode profile is register `0x60`, **not** `0x00`; master volume
+   `0x40/0x41` raw = −dB, **not** the per-channel `24 − dB` formula) — the repo
+   driver's constants are authoritative. **Datasheet cross-check (§16 register map):**
+   - `0x00` = PM_CTRL (bit 6 `manualPM`, bits 5:4 `PM_man` 0-3) — **not** PMP_SELECT
+   - `0x1D` = PM_PROFILE (bits 2:0 `PMprofile` 0-4) — separate from PM_CTRL
+   - `0x35` = I2S format (bits 2:0)
+   - `0x36` = Audio processor (bit 7 `audio_proc_mute`) — live-verified
+   - `0x40`/`0x41` = Master volume (raw = −dB) — kernel + live-verified
+   - `0x6D` = Error accumulated (latched), `0x7C` = Error live — repo constants
+   - `0x60` = **unconfirmed** (repo's `REG_POWER_MODE`); Phase 1.5 verifies against full datasheet
+   **Third-party reuse (§5.1–5.2):** No MA12070P crate exists on crates.io
+   (`cargo search ma120|merus|infineon` → zero results). The repo's
+   `bh1750-embedded` driver uses `embedded-hal`; Phase 1.5 refactors
+   `HardwareDevice` to be generic over `embedded_hal::i2c::I2c` (with
+   `rppal::hal::I2c` in production) so the amp driver follows the same
+   ecosystem pattern and is testable with embedded-hal mocks — no reinventing
+   I2C primitives.
+
+## 3. Architecture
+
+```
+Event sources                          Core                          Sinks
+──────────────                         ────                          ─────
+D-Bus SetLevel/SetMute ──────┐
+AVRCP volume (via bt-manager)│        ┌──────────────────────┐   I2C writes:
+Pipeline lifecycle events ───┼──────► │ AmpController state  │──► 0x40/0x41 volume
+ (CamillaDSP events or       │        │ machine (single      │──► 0x36 bit7 mute
+  process-state watch)       │        │ Mutex, one event     │──► 0x2D eh_clear
+GPIO error/clip line edges ──┘        │ loop)                │──► 0x60 power mode
+  (async line-event watch)            └──────────────────────┘   GPIO (recovery only)
+State file (boot reconcile) ─────────► /ENABLE: boot + fault-recovery only
+Low-frequency safety tick ───────────► telemetry reads 0x6D/0x74/0x75/0x7C/0x7E
+ (configurable; not the primary path)
+```
+
+### 3.1 State machine
+
+```
+              SetMute(true) / StreamStopping
+  Playing ────────────────────────────────────► Muted
+     ▲                                           │ StreamStarting
+     │ PLL locked (bounded one-shot handshake)   ▼
+     └──────────────────────────────────── AwaitingClock
+                                                 │ handshake timeout
+                                                 ▼
+   Faulted ◄── GPIO error edge / I2C fault    Muted (warn!, stay muted)
+     │  recovery: mute → optional /ENABLE cycle
+     │  + full register re-init → Muted
+```
+
+Event semantics:
+
+| Event | Action |
+|---|---|
+| `SetLevel(p)` | Write `0x40`/`0x41` (raw = −dB, 0.25 dB steps, `amp_curve` mapping) + persist state file. Valid in every state; never touches mute. |
+| `SetMute(true)` | Serial mute `0x36` bit 7 immediately (atomic RMW). |
+| `SetMute(false)` | If pipeline running: `AwaitingClock` handshake, then clear mute; else remembered-unmute on next `StreamStarting`. |
+| `StreamStarting` | `AwaitingClock`: one bounded PLL handshake — poll `0x7C` bit 2 until `PLL_UNLOCK == 0` (≤200 ms in `spawn_blocking`), clear transient latch (`0x2D` bit 2), then clear serial mute → `Playing`. Timeout → stay `Muted`, single `warn!` with telemetry; next `StreamStarting` re-attempts. |
+| `StreamStopping` | Serial mute immediately. |
+| `RateChanged` | Modeled as `StreamStopping` + `StreamStarting` (mute across transition — no pop). |
+| GPIO `error_gp` falling edge | One telemetry read (`0x6D`/`0x7C`); thermal warn → −6 dB throttle (`info!`); critical (OC/DC/flying-cap/OT-shutdown) → mute → fault recovery path → `Muted`. |
+| Boot | Reconcile: read hardware mute bit + level, compare with state file, converge; leave `/ENABLE` LOW. |
+
+### 3.2 Unmute handshake is the kernel `mute_stream` superset
+
+The bounded one-shot handshake (not a persistent poll loop) replaces what the
+kernel driver lacked: it verifies an active 64×fs bit clock before releasing
+mute. Because there is no codec `mute_stream` callback in hifiberry mode, the
+*event* (`StreamStarting`) comes from the pipeline integration chosen in §5
+Phase 0; the handshake itself is self-contained and testable without a pipeline.
+
+## 4. Boot & Configuration Changes
+
+`baseline/boot/config.txt`:
+
+```diff
+-dtoverlay=merus-amp-custom
++dtoverlay=hifiberry-dac
+ dtparam=audio=off
+ dtparam=spi=off
+ dtparam=i2c_arm=on
++enable_uart=0        # only if verified pinout uses GPIO 14/15 (UART0)
+```
+
+- Expected ALSA card: **`sndrpihifiberry`** (was `sndrpimerusamp`). Update
+  asound.conf / CamillaDSP playback device. Keep **`S32_LE`** (keeps BCLK at
+  64×fs; verified by the PLL handshake live).
+- `baseline/alsa/asound.state`: no `A.Mstr Vol` anymore — volume/mute state is
+  owned by audio-manager's state file, not `alsactl`.
+- `bluealsa-aplay`: drop `-M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"`;
+  run `-S` full-scale (bit-perfect into CamillaDSP). amp-manager owns
+  AVRCP→I2C volume end-to-end via D-Bus `SetLevel`.
+
+## 5. Implementation Phases
+
+### Phase 0 — Ground truth on the shifted Pi (read-only, /tmp binaries only)
+1. `dmesg | grep -Ei 'ma120|asoc|hifiberry'`, `aplay -l`, device-tree model.
+2. `i2cdetect -y 1` (expect `0x20`); register dump via existing
+   `tools/diagnostics` `amp-info` (copy to `/tmp`).
+3. Decompile the **on-disk** overlay file (it exists on the boot partition
+   regardless of what is currently loaded in the live device tree):
+   `dtc -I dtb -O dts /boot/firmware/overlays/merus-amp.dtbo`
+   → **actual** `enable_gp`/`mute_gp`/`booster_gp`/`error_gp`/`clip_gp` pin
+   numbers for this board revision. Verify electrical wiring on the shifted unit.
+3b. **GPIO async strategy decision.** `rppal::gpio` edge detection is a
+   blocking `poll()`; it has no async API. If GPIO line watching is needed,
+   run it in a dedicated `spawn_blocking` task that sends events over an
+   `mpsc` channel (matching the plan's event source model). Do **not** add a
+   new crate (`gpiod`) unless the user explicitly approves it (§5.3).
+4. Check `A.Enable`/`B.Mute` positions in current mixer state (a flipped
+   `A.Enable` may be the immediate cause of the current failure) and whether
+   the chip is currently in standby.
+5. Determine the stream-lifecycle hook: CamillaDSP event/websocket interface in
+   our deployment, else `systemd` unit-state watch of `camilladsp`/
+   `bluealsa-aplay` via D-Bus (`GetUnit`; classify `NoSuchUnit` as absent unit,
+   not transport fault).
+
+**Exit criterion:** written pinout + card name + register dump + chosen
+lifecycle hook, recorded in this document.
+
+### Phase 1 — Boot config (small, verifiable PR)
+Apply §4 to `baseline/boot/config.txt` + playback config; verify card appears,
+no `ma120x0p` module, amp still answers at `0x20` after reboot.
+
+### Phase 1.5 — Extend `crates/hardware` with write path + register constants
+**Audit finding addressed:** `AmpDevice` today exposes only reads
+(`read_status`, `read_live_errors`, `read_latched_errors`,
+`clear_latched_errors`) and only 7 register constants (`0x1B`, `0x2D`, `0x60`,
+`0x61`, `0x62`, `0x6D`, `0x7C`). The volume, serial-mute, and format register
+constants and all write operations needed by Phase 2 must be added here first
+so the plan's "single source of truth" claim (§2.5) holds.
+
+**Third-party reuse (§5.1–5.2):** No MA12070P driver exists on crates.io
+(verified `cargo search ma120`, `cargo search merus`, `cargo search infineon`
+— zero results). The repo already uses `bh1750-embedded` (an `embedded-hal`
+driver) for the light sensor. **Refactor `HardwareDevice` to use
+`embedded-hal::i2c::I2c` trait** (with `rppal::hal::I2c` in production) so it
+follows the same ecosystem pattern as `bh1750-embedded` and is composable with
+embedded-hal test doubles — no reinventing I2C primitives.
+
+Changes in `crates/hardware/src/amp.rs` (all following the existing
+`HardwareDevice` + `Backend` + `AmpDeviceMock` patterns, but generic over
+`embedded-hal::i2c::I2c`):
+
+| Change | Detail |
+|---|---|
+| Register constants | Add `pub const` entries **from the datasheet register map** (Infineon MA12070P DS v1.1, §16): `REG_PM_CTRL = 0x00` (Power Mode Control: bit 6 `manualPM`, bits 5:4 `PM_man` 0-3), `REG_PM_PROFILE = 0x1D` (Power Mode Profile: bits 2:0 `PMprofile` 0-4), `REG_AUDIO_IN_MODE = 0x25` (bits 6:5 gain select), `REG_EH_CLEAR = 0x2D` (bit 2 `eh_clear` toggle), `REG_I2S_FORMAT = 0x35` (bits 2:0 format), `REG_AUDIO_PROC = 0x36` (bit 7 `audio_proc_mute`), `REG_VOL_DB_MASTER = 0x40`, `REG_VOL_LSB_MASTER = 0x41`, `REG_VOL_DB_CH0 = 0x42` (`0x42..=0x45`), `REG_VOL_LSB_CH = 0x46`, `REG_THR_DB_CH0 = 0x47` (`0x47..=0x4A`), `REG_THR_LSB_CH = 0x4B`. **Existing constants verified:** `REG_AUDIO_IN = 0x1B` (input format + clock ratio), `REG_POWER_MODE = 0x60` (needs full datasheet cross-check — Phase 1.5 will verify), `REG_DCU_MON0 = 0x61`, `REG_DCU_MON1 = 0x62`, `REG_ERROR_ACC = 0x6D`, `REG_ERROR_LIVE = 0x7C`. |
+| `HardwareDevice<I2C>` | Make the struct generic over `I2C: embedded_hal::i2c::I2c` (blocking). Production instantiates with `rppal::hal::I2c` (enabled by `rppal` `hal` feature, already in workspace). All I/O methods (`read_reg`, `write_reg`, `read_regs`, `write_regs`) delegate to the trait. |
+| `HardwareDevice::write_reg` / `write_regs` | Promote existing private `write_reg` to public trait-level; add `write_regs(&[(u8, u8)])` for the master vol int+frac pair (single transaction to avoid transient intermediate volumes). |
+| `HardwareDevice::write_serial_mute` | RMW of `0x36` bit 7 **with verify-by-re-read** (semantics ported verbatim from `services/audio-manager/src/i2c_mute.rs::set_serial_mute_blocking` — the live-verified implementation). After the port, `i2c_mute.rs`'s bus functions are deleted and its pure helpers (`apply_mute_bit`, `is_muted_bit`) move to `crates/hardware` (single source of truth). |
+| `HardwareDevice::write_master_volume` | Two-register write `0x40`/`0x41` (raw = −dB, 0..144, 0.25 dB fractional steps in `0x41` bits [1:0]). |
+| `HardwareDevice::write_power_mode_ctrl` | RMW of `0x00`: set bit 6 `manualPM` = 1, bits 5:4 `PM_man` from `PowerMode` (0-3). **Not** `0x60` — the datasheet puts manual PM control at `0x00`. |
+| `HardwareDevice::write_power_mode_profile` | Write `0x1D` bits 2:0 `PMprofile` (0-4). Distinct from PM_CTRL. |
+| `PowerMode` / `PowerModeProfile` type split (Phase 1.5) | The datasheet has two distinct concepts: **PM_CTRL at 0x00** (`manualPM` + `PM_man` 0-3) and **PM_PROFILE at 0x1D** (`PMprofile` 0-4). The repo's `PowerModeProfile` enum (4 variants, 0-3, from 0x60 bits [1:0]) matches 0x00's PM_man. Phase 1.5 will: (a) verify 0x60 in full datasheet; (b) if 0x60 is a monitor register, keep `PowerModeProfile` as the 0-3 decode from 0x60; (c) add a separate `PowerModeProfileSelect` (or similar) for 0x1D's 0-4 PMprofile; (d) rename `write_power_mode_ctrl` to take a `PowerMode` (0-3) and `write_power_mode_profile` to take `PowerModeProfileSelect` (0-4). |
+| `HardwareDevice::write_i2s_format` | RMW of `0x35` bits 2:0 (needed by the fault-recovery re-init path only). |
+| `HardwareDevice::write_audio_in_mode` | RMW of `0x25` bits 6:5 (gain select) — used if needed by recovery. |
+| `HardwareDevice::clear_error_handler` | Toggle `0x2D` bit 2 low→high→low (existing `AmpStatus::eh_clear_pulse_sequence`, already correct). |
+| `AmpDevice` async wrappers | `write_master_volume_async`, `write_serial_mute_async`, `write_power_mode_ctrl_async`, `write_power_mode_profile_async`, `write_i2s_format_async`, `clear_error_handler_async` via `run_blocking` (same pattern as existing async reads). |
+| `AmpDeviceMock` | Write-path support: `mock_master_volume_raw` / `mock_serial_muted` / `mock_pm_ctrl` / `mock_pm_profile` / `mock_i2s_format` state fields + `set_*` setters and fault injection (`set_fault` already exists) so `I2cAmpBackend` tests can drive and assert writes without hardware. |
+| Datasheet note | Document in module docs: **Master volume `0x40`/`0x41` raw = −dB (0 = −144 dB mute, 144 = 0 dB)** — matches kernel `A.Mstr Vol` 0..144 and `amp_curve`. The `24 − dB` formula (Table 8-9) applies **only** to per-channel registers `0x42..=0x45` (+24..−120 dB boost/attenuation), which the appliance does not use (§6 non-goals). **Power Mode** has two registers: `0x00` (PM_CTRL: manual enable + PM 0-3 selection) and `0x1D` (PM_PROFILE: PMP 0-4 selection). The repo's `REG_POWER_MODE = 0x60` and `PowerModeProfile::from_raw(reading 0x60 bits [1:0])` will be verified against the full datasheet in Phase 1.5 — if `0x60` is a different monitor register, the enum/decoding stays but the register address changes. |
+
+Unit tests for each new write method go under `crates/hardware/tests/`
+(mock-driven, plus existing invalid-address/bus probes). No behavior change to
+existing readers.
+
+### Phase 2 — `I2cAmpBackend` + event loop in audio-manager
+File-by-file (all under `services/audio-manager/src/`, tests under `tests/`):
+
+| File | Change |
+|---|---|
+| `amp_backend.rs` | Add `I2cAmpBackend: AmpBackend` implementing the existing trait (`write_state`, `read_state`, `set_serial_mute`, `read_serial_mute`, `validate`) over I2C only; backed by the Phase 1.5 `AmpDevice` write methods (now generic over `embedded_hal::i2c::I2c`). Volume: `0x40`/`0x41`, raw = −dB (0..144), `amp_curve` mapping. **`card_name()` decision (audit):** the trait's `card_name()` is meaningless for an I2C backend — rename it to `backend_id() -> &str` in a breaking but internal-only trait change (audio-manager is the sole crate importing it). `I2cAmpBackend` returns `"i2c-ma12070p@0x20"`, `RealAmpBackend` returns its ALSA card name, `MockAmpBackend` returns `"mock"`. The I2S playback card (`sndrpihifiberry`) is **not** the amp backend and must not leak into this trait; its validation belongs to the pipeline config, not audio-manager. `MockAmpBackend` stays the mock; add mock ctrl for I2C write faults per `new_mocked() -> (Self, Ctrl)`. |
+| `amp_state.rs` / `state_file.rs` | Unchanged semantics (level percent + muted). |
+| `config.rs` | `alsa_card` → playback card for validation only; add optional GPIO line config (`enable_pin`, `error_pin`, …) from Phase 0 pinout; add `pll_lock_timeout_ms` (production constant unconditional; tests use parameterized variant per §5.3 rule) and safety-tick interval (default enabled, can disable). |
+| `amp_controller.rs` (new) | Event-loop state machine §3.1. One `tokio::select!` over D-Bus commands, lifecycle events, GPIO edge channel, safety tick. GPIO edges consumed via async line-event watch task → `mpsc`; no polling. |
+| `i2c_mute.rs` | **Deleted** after Phase 1.5 (bus RMW moves to `crates/hardware`); pure helpers `apply_mute_bit`/`is_muted_bit` move there too. Keep its module doc's live-verification notes by porting them into the new `write_serial_mute` doc comment. |
+| `main.rs` / `dbus_api.rs` | Wire backend selection (`i2c` mode new default; `alsa` mode retained until cutover verified). Boot config fully logged at `info!` per logging discipline. |
+
+Rules applied: all I2C/GPIO in `spawn_blocking` (`speaker_common::runtime`),
+canonical errors with `source` preservation, `warn!` for transient faults /
+`info!` for state transitions / `debug!` for steady ticks, no `thread::sleep`
+in async paths, `/ENABLE` writes only in the recovery path, transactional state
+mutation (mutate in-memory state strictly after successful bus writes).
+
+### Phase 3 — BlueALSA playback path update
+Update `baseline` install/config for `-S` full-scale bluealsa-aplay (§4).
+Verify bt-manager `sync_volume` routes phone volume through D-Bus `SetLevel`
+end-to-end (already the merged architecture in #53).
+
+### Phase 4 — Tests & local gates
+- **DI-based coverage strategy (per AGENTS.md §3, §5.3):** All hardware-dependent
+  code is tested via the existing dependency-injection pattern:
+  - `AmpBackend` trait → `I2cAmpBackend` (production) + `MockAmpBackend` (tests)
+  - `AmpDevice` → `Backend::Hardware` (production) + `AmpDeviceMock` (tests)
+  - Both mocks expose `new_mocked() -> (Self, MockCtrl)` for fault injection
+    and call inspection (`MockAmpCtrl`, `AmpDeviceMock` setters) — **no
+    `#[cfg(test)]` in production code**, mocks are unconditionally compiled
+    (`M-TEST-UTIL` rule).
+- `crates/hardware/tests/` additions (Phase 1.5): each new write method
+  (master volume int+frac pair, serial-mute RMW with verify, power-mode RMW
+  bit-preservation, I2S format RMW) driven through `AmpDeviceMock`, including
+  fault injection on the write path; register-constant invariants.
+- `services/audio-manager/tests/` additions: state-machine transitions (each
+  table row of §3.1), volume encode boundaries (0, −144, 0.25 dB steps, clamp,
+  NaN guard), serial mute RMW failure injection, PLL-handshake timeout, GPIO
+  fault edge handling, boot reconcile convergence, `/ENABLE`-cycle recovery
+  asserting full re-init, `backend_id()` per-backend values.
+- **Coverage gates** (must pass locally before push, per AGENTS.md §4.1):
+  1. `cargo fmt --all -- --check`
+  2. `cargo clippy --workspace --all-targets -- -D warnings`
+  3. `cargo llvm-cov --workspace --target x86_64-unknown-linux-gnu --fail-under-lines 85 --fail-under-functions 85`
+  4. `cargo build --target aarch64-unknown-linux-gnu --release --bins`
+
+### Phase 5 — Live validation on the Pi
+1. Reboot with new config → `sndrpihifiberry` card present, no `ma120x0p`,
+   amp alive at `0x20`.
+2. Play `S32_LE` stream → handshake unmutes only after PLL lock (`amp-info`
+   telemetry confirms `0x7C` bit 2 = 0).
+3. Rate-switch test: 44.1 k → 48 k → 192 k while muted → no pop; unmute gated.
+4. D-Bus `SetLevel` sweep 0→100 → register `0x40` follows `amp_curve`; phone
+   AVRCP volume maps end-to-end.
+5. Mute/unmute, reboot persistence via state file, thermal throttle + fault
+   recovery under load, journal log discipline check.
+
+## 6. Explicit Non-Goals (scope containment)
+- No general-purpose multi-mode MA12070P abstractions (one-shot conversions,
+  resolution switching) — appliance needs only: volume, serial mute, PLL-gated
+  unmute, telemetry, fault recovery.
+- No source routing/handover (future `sources` module, see
+  `audio_manager_plan.md` §7).
+- No refactor of sibling drivers (`light.rs`, `temp.rs`, `encoder.rs`).
+
+## 6.1 Phase 0 — Ground-Truth Results (live on the Pi, 2026-11-11)
+
+All findings below were verified on the live appliance (`root@192.168.2.120`)
+with the `hifiberry-dac` overlay active. This section is the authoritative
+register/hardware model for Phase 2 and supersedes any conflicting statements
+above.
+
+### Hardware & GPIO pinout (from on-disk `merus-amp.dtbo` + live `pinctrl`)
+
+| Signal | BCM GPIO | Notes |
+|---|---|---|
+| `/ENABLE` | **GPIO 14** (`enable_gp`) | Active-LOW; idle TXD0 = HIGH ⇒ amp in hardware reset after hifiberry boot |
+| `/MUTE` | **GPIO 15** (`mute_gp`) | Active-LOW; must be driven HIGH (or held muted by serial mute) |
+| `booster_gp` | **GPIO 17** | Already output-high at boot on this unit |
+| `error_gp` | **GPIO 23** | Input, fault indicator |
+
+- **Cold-boot reset confirmed:** after reboot with `hifiberry-dac`, the amp
+  ACKs reads on a reset-state mirror address (`0x23`) but **NACKs all writes**
+  and returns reset defaults. Driving GPIO14 LOW wakes the chip; the real
+  control address is **`0x20`** (both `0x20` and `0x23` ACK while awake;
+  `0x20` is authoritative — matches the overlay `reg = <0x20>`).
+- **No sound root cause (recorded):** boot reset defaults left the amp
+  muted-by-reset and the VLP bypassed. Recovery required: GPIO14 LOW,
+  GPIO15 HIGH, `0x35` bit3 `audio_proc_enable` set, standard-I2S format.
+
+### Register model corrections (authoritative source: Infineon
+`merus-audio-amp-hat-zw` → `merus_linux_audio_driver_pi3/.../ma120x0p.{c,h}`
++ MA12070P datasheet v1.1 Table 8-9, live-verified 2026-11-11)
+
+1. **Master volume `0x40` uses the VLP `24 − dB` mapping**, NOT raw = −dB:
+   register `0x18` (24) = 0.00 dB, register `0xA8` (168) = −144.00 dB
+   (Table 8-9: reg = 24 − dB; reg < 24 = boost up to +24 dB).
+   **Live-verified:** writing `0xA8` cut playback; restoring `0x30` (−24 dB)
+   changed loudness. Conversion for the user-scale raw (0..144, raw = −dB):
+   **`reg = 168 − raw`**; fractional `0x41` stays 0.
+2. **Register `0x35` bit 3 = `audio_proc_enable` (VLP bypass mux).** When
+   LOW the entire VLP (master/channel volume + limiter) is bypassed and
+   `0x40` writes have **no audible effect**. Bit 3 is NOT part of the I2S
+   format field (bits 2:0). `0x35` write masks must preserve bits 7:3
+   (attack bits 7:6, release bits 5:4, VLP enable bit 3). The Phase 1.5
+   `0xF8` mask is a **bug** — it silently disables the VLP.
+3. **The original kernel driver `probe()` configuration** (to be replicated
+   by audio-manager boot init):
+   - `0x35 = 0x08` (standard I2S + VLP enabled), then attack bits 7:6 = fast
+     ⇒ final `0x88`; release bits 5:4 = slow (`0x00`).
+   - `0x36` |= `0x40` (limiter enabled).
+   - Master volume `0x40 = 0x18` (0 dB); limiter thresholds ch0/ch1
+     `0x47`/`0x48 = 0x27` (−15 dBFS; thr mapping also `24 − dBFS`).
+4. **PM_CTRL `0x00` (manualPM bit 6, `PM_man` bits 5:4) and PM_PROFILE
+   `0x1D` (bits 2:0, presets 0-5; 5 = custom) confirmed** against the
+   driver header (`ma_manualpm__a 0`, `ma_pmprofile__a 29`). Post-reset
+   live value `0x00 = 0x3D` decodes as manualPM=**0** (automatic power
+   mode management; 0x3D = 0b0011_1101, bit 6 clear), `PM_man`=3, bits
+   2/0 set (configuration bits). The earlier draft claim "manualPM=1"
+   and the earlier draft claim that `0x00` holds PMP presets
+   `0x38..0x3D` are both **wrong** (the latter is a monitor-register
+   interpretation).
+5. **Monitor register layout (driver header, decimal = dec):**
+   `0x60` = dcu_mon0 `pm_mon` bits 1:0 / freqmode / pps (repo
+   `REG_POWER_MODE` decodes ch0 power-mode monitor — naming off, function
+   OK); `0x61` = dcu0 status (ocp/vcfly/pvdd/vdd/mute); `0x62` = dcu0
+   `m_mon`; **dcu1 status is `0x65`, m_mon1 `0x66`** (repo `REG_DCU_MON1 =
+   0x62` is wrong for a per-channel pair); `0x74` = audio_in_mode_mon;
+   `0x75` = `msel_mon` (live: 1 = 1×BTL + 2×SE); `0x7E` = clip/limiter mon.
+6. **Serial mute `0x36` bit 7 re-confirmed** (live-verified again; register
+   RMW preserves limiter bit 6).
+
+### Open questions resolved by Phase 0
+- Q1: `/ENABLE` IS wired to **GPIO14** (software-reachable recovery).
+- Q2: `/MUTE` wired on **GPIO15**; serial mute remains the primary mute,
+  GPIO15 managed at boot only.
+- Q3: stream lifecycle hook: D-Bus/systemd watch (CamillaDSP websocket not
+  enabled in this deployment).
+
+## 7. Open Questions (blocked on Phase 0)
+1. Is `/ENABLE` wired to a BCM GPIO on this unit (which one), or hard-strapped
+   enabled? Decides whether the recovery cycle is software-reachable.
+2. Is `/MUTE` GPIO wired and needed, or is serial mute (`0x36` bit 7)
+   sufficient? Recommendation: serial mute only unless live testing says
+   otherwise.
+3. CamillaDSP event interface availability (lifecycle hook choice).
+4. **Resolved (design-time):** GPIO line watching, if needed, uses
+   `rppal::gpio` (already a workspace dependency) inside a dedicated
+   `spawn_blocking` task feeding an `mpsc` channel. `rppal`'s edge watch is a
+   blocking `poll()`; no async support — hence the task/channel bridge. No new
+   crate (`gpiod`) is added; per §5.3 that would require explicit user
+   approval, which has not been given.
+5. **Resolved (design-time):** `AmpBackend::card_name` → renamed
+   `backend_id()`; `I2cAmpBackend` reports `"i2c-ma12070p@0x20"`. The I2S
+   playback card name (`sndrpihifiberry`) is pipeline configuration, not an
+   amp-backend identifier, and is not returned by this trait.
+
+## 8. Audit Trail
+2026-11-10 audit addressed in this revision:
+- **Gap 1 (missing write path):** new Phase 1.5 adds write methods + mock
+  support to `crates/hardware::AmpDevice` before audio-manager consumes them.
+- **Gap 2 (missing register constants):** all volume/mute/format register
+  constants added to `crates/hardware/src/amp.rs` in Phase 1.5; `i2c_mute.rs`
+  is folded into the hardware crate (single source of truth).
+- **Gap 3 (`card_name()` semantics):** trait renamed to `backend_id()` with
+  per-backend values; I2S card name excluded from the amp backend trait.
+- **Datasheet cross-check (§16 register map, Infineon MA12070P DS v1.1):**
+  - Reference plan's `PMP_SELECT = 0x00` is **wrong** — datasheet `0x00` = PM_CTRL
+    (manualPM bit 6, PM_man bits 5:4 = 0-3); `0x1D` = PM_PROFILE (PMprofile bits 2:0 = 0-4).
+  - Repo's `REG_POWER_MODE = 0x60` + `PowerModeProfile` (0-3) is **unconfirmed** — Phase 1.5
+    verifies against full datasheet; may split into `PowerMode` (0-3, for 0x00) and
+    `PowerModeProfileSelect` (0-4, for 0x1D).
+  - Master volume `0x40`/`0x41` raw = −dB confirmed by kernel driver + live test.
+  - Serial mute `0x36` bit 7 confirmed live-verified.
+  - Error registers `0x6D` (latched), `0x7C` (live) match repo constants.
+- **Minor:** Phase 0 overlay-decompile wording corrected (file is on-disk,
+  independent of the loaded dtb); GPIO async strategy pinned to
+  `rppal` + `spawn_blocking` + `mpsc` (open question 4 resolved); test plan
+  split into hardware-crate and service-level test files.
+
+## 9. Implementation Status (2026-11-11)
+
+- **Stage A — committed (`35b7b94`):** driver corrections in
+  `crates/hardware/src/amp.rs` per §6.1 ground truth: VLP volume encoding
+  (`0x40` reg = `168 − raw`), `enable_audio_processor()` / `enable_limiter()` /
+  `write_limiter_thresholds()`, `0x35` RMW mask preserving bits 7:3,
+  `REG_DCU_MON1 = 0x65`, `decode_vlp_raw()` + mock fidelity
+  (`mock_i2s_format_reg` / `mock_audio_proc_reg` / `mock_limiter_thresholds_dbfs`).
+- **Stage B — committed (`ac4c385`):** Phase 2 implemented in audio-manager:
+  - `I2cAmpBackend` over the `AmpDevice` write path; `backend_id()` rename.
+  - `amp_gpio.rs`: sole owner of GPIO14 (/ENABLE) / 15 (/MUTE) / 23 (error);
+    blocking `poll_interrupt` edge watch in `spawn_blocking` → async mpsc
+    (callback returns `false` to stop).
+  - `amp_controller.rs`: full §3.1 state machine — boot wake +
+    probe()-equivalent init (standard I2S, VLP, limiter, −15 dBFS) +
+    state-file reconcile; bounded one-shot 200 ms PLL handshake (production
+    constant unconditional; tests inject short deadlines via the
+    parameterized `pll_lock_handshake`); thermal −6 dB throttle; critical
+    fault recovery (mute → /ENABLE cycle → full re-init → Muted); tokio
+    mutex state mirror; transactional mutation after successful writes.
+  - Config: `control_mode` (`"i2c"` default / `"alsa"` legacy), GPIO pins
+    (14/15/23 defaults), `safety_tick`.
+  - D-Bus: `with_commands()` i2c-mode constructor dispatches through the
+    controller loop with oneshot replies; legacy direct path retained.
+  - `i2c_mute.rs` deleted; alsa-mode `RealAmpBackend` mutes via `AmpDevice`
+    (single implementation of the `0x36` bit 7 RMW).
+  - Tests: `tests/amp_controller_integration.rs` (10) +
+    `tests/amp_backend_i2c_integration.rs` (7), fully mocked seams; all
+    local gates green.
+- **Open items (Phase 4/5 not yet done):**
+  - Production lifecycle events (`StreamStarting`/`StreamStopping`) are not
+    yet fed from a real source: the command channel + D-Bus dispatch exist,
+    but no systemd-unit or CamillaDSP watcher is wired in. Until then the
+    unmute path is exercisable via D-Bus `SetMute(false)` + `StreamStarting`
+    only from tests/diagnostics.
+  - Pi deployment (`scripts/deploy_binaries.sh`), service enablement in i2c
+    mode, and the live Phase 5 validation matrix are pending user approval.
+
+## 10. External Code-Review Audit Fix Record (2026-11-11)
+
+Three-tier audit fix series on top of the Stage B event-driven controller.
+Every claim was verified against the authoritative sources
+(`ma120x0p.c`/`ma120x0p.h`, MA12070P datasheet v1.1, rppal 0.22.1 source)
+before implementation.
+
+### Tier 1 — critical hardware-correctness (commit `0fa555d`)
+- `/MUTE` polarity was INVERTED (kernel `mute_stream`: LOW = muted); mock
+  now stores the electrical pin level so invocations cannot pass unnoticed.
+- Boot now asserts serial mute FIRST (reset defaults are 0 dB unmuted) and
+  ALWAYS writes persisted state (a failed telemetry read must never leave
+  reset defaults live); kernel-parity `power_up()` (booster GPIO17 HIGH →
+  200 ms → `/ENABLE` LOW → 50 ms).
+- Edge watch armed the rppal interrupt and takes the `InputPin` out of the
+  seam (no deadlock); `SetMute` mirrors GPIO both directions while a stream
+  is live; `start_stream` decides from user intent captured BEFORE mutating;
+  thermal throttle corrected to attenuation (raw −6, write-time only, no
+  ratchet, restored on clear); fault recovery performs a real `/ENABLE`
+  reset pulse; critical-first fault priority + `UndervoltagePvdd`; PLL
+  clock loss during playback mutes; closed edge channel no longer hot-spins.
+
+### Tier 2 — register-model corrections
+- `0x25` `audio_in_mode` is mask `0xE0` (bits 7:5, values 0-5) and requires
+  the `audio_in_mode_ext` gate (register `0x27` bit 5) — the old "gain 0-3
+  bits 6:5" model was wrong.
+- `0x35` `i2s_format` valid set is {0, 1, 4, 5, 6, 7} per datasheet Table
+  8-8 (2/3 reserved); kernel-parity limiter timing added (fast attack
+  `0x80`, slow release `0x00`) via `configure_limiter_slew`.
+- `0x1B` relabeled `REG_PM2_CONFIG` (`usespread_pm2`/`dtsteps_pm2`/
+  `baltype_pm2`) — NOT an I2S input-format register; `AudioInConfig`/
+  `AudioInputFormat`/`ClockRatio` (modeled on nonexistent fields) replaced
+  by `Pm2Config`.
+- `0x60` relabeled `REG_DCU_PM_MON` (`dcu_mon0.pm_mon`, read-only
+  PM0-PM3 monitor, `PowerModeMon`); the writable preset is `0x1D`
+  (`PowerModeProfile`, now 0-5).
+- CLI `--set-i2s` rejects reserved 2/3; `--set-gain` replaced by
+  `--set-audio-mode <0-5>`; `--set-profile` range 0-5.
+
+## 11. Cross-Check Record & Stream-Lifecycle Producer Plan (2026-11-11, post-§10)
+
+### 11.1 Master volume register direction — final verification
+
+An external review proposal claimed `0xA8` = −144 dB was wrong ("dangerously
+inverted"); the counter-claim (`0xA8` = 0 dB) was itself wrong. The
+authoritative chain, now triple-confirmed:
+
+- **Silicon/kernel:** `ma120x0p.h` `ma_vol_db_master__reset = 0x18` — the
+  chip's `0x40` resets to `0x18`, and the Merus reset default is 0 dB
+  (the mute-first boot design depends on this). Therefore **`0x18` (24) =
+  0 dB, `0xA8` (168) = −144 dB** (datasheet Table 8-9: `reg = 24 − dB`).
+- **Kernel ALSA control:** `SOC_SINGLE_RANGE_TLV(..., 0, 0x18, 0xA8, 1, ...)`
+  (invert = 1): ALSA index 0 → `0xA8` (−144 dB), index 144 → `0x18` (0 dB).
+  Same convention as the appliance user-scale `raw` (0..144, raw = −dB).
+- **Transform:** `reg = 168 − raw`, `dB = raw − 144`. Audited every site —
+  applied **exactly once per direction** (write `amp.rs` write_master_volume;
+  mock encode/decode round-trip; read decode), and the serial-mute path
+  (`0x36` bit 7) touches no volume transform. No double inversion.
+
+Consequence fixes (commit `adfb36a`): `VLP_ZERO_DB_REG` (misnomer — 168
+anchors the −144 dB end) renamed `VLP_NEG144_DB_REG` with corrected docs;
+`AmpSettings` Display and the amp CLI `master_volume_db` used the inverted
+`−raw` dB label (full volume displayed as "−144 dB"); both now use
+`dB = raw − 144` with a display-direction regression test.
+
+### 11.2 Kernel-managed stream-transition mute (max98357a) — evaluated, rejected
+
+A proposal to replace `hifiberry-dac` with the upstream `max98357a` codec
+driver (kernel-owned `/MUTE` via `sdmode-gpios`) was cross-checked against
+upstream `sound/soc/codecs/max98357a.c` and the Pi overlay README:
+
+Verified true: the trigger hook drives `sdmode` HIGH on `TRIGGER_START`
+(after `mdelay(sdmode_delay)`) and LOW on `TRIGGER_STOP`/`PAUSE_PUSH`;
+polarity coincidentally matches `/MUTE` (LOW = muted); the stock overlay's
+`sdmode-pin` parameter exists; `pcm5102a` has no mute GPIO handler.
+
+Rejected for cause:
+1. **96 kHz DAI cap** (`SNDRV_PCM_RATE_8000_96000`) — `pcm5102a` supports up
+   to 192 kHz; the switch would narrow the pipeline's supported rates.
+2. **`pmdown_time` claim false:** the GPIO mute is immediate at
+   `TRIGGER_STOP`; the DAPM `SD_MODE` widget only gates `sdmode_switch`
+   (re-unmute), so the `pmdown_time=100` tuning proposal changes the wrong
+   behavior.
+3. **Blind delay instead of PLL gating:** `mdelay(sdmode_delay)` busy-spins
+   in atomic trigger context with no `0x7C` `PLL_UNLOCK` check; the bounded
+   userspace handshake is strictly safer.
+4. **Loss of the out-of-band electrical mute:** the kernel only mutes at
+   stream transitions; a mid-stream OCP/thermal fault or wedged I2C bus
+   leaves no mute path at all. GPIO `/MUTE` is the only mute that works when
+   I2C does not.
+5. **Does not remove the lifecycle requirement:** the controller still needs
+   stream edges for PLL-loss handling, thermal-throttle restore, fault
+   recovery re-arm, and `stream_live` — and with kernel-owned mute those
+   events become invisible to userspace, forcing a redesign of the just-
+   completed state machine (large blast radius).
+
+Decision: **keep `hifiberry-dac` + full userspace GPIO/register ownership.**
+
+### 11.3 Stream-lifecycle producer — selected design (Phase 4, pending implementation)
+
+The plan's Q3 systemd-unit-watch choice is dead on arrival: `camilladsp.service`
+is `Restart=always` and runs from boot; unit state never reflects streams.
+The real signal is CamillaDSP's engine `ProcessingState` over WebSocket
+(:1234), already decoded by `crates/dsp` (`DspDevice::read_status_async`,
+`MockDsp`).
+
+Design — **CamillaDSP engine-state watcher** (new `dsp_watch` module in
+audio-manager), amended after the §11.3 design review:
+- Poll task (injectable `DspDevice` seam, `new_mocked() -> (Self, Ctrl)`).
+- **2-state collapse** — map `ProcessingState` into
+  `EmittedLifecycle::{Stopped, Running}` (`Running` = `Running`; everything
+  else = `Stopped`) and emit edges of THAT enum only: `Stopped→Running`
+  emits `StreamStarting`, `Running→Stopped` emits `StreamStopping`. This
+  structurally guarantees `Stalled→Paused→Inactive` (one stop, no
+  re-emission) and dedupes across intermediate engine states.
+- **Bootstrap:** `current_lifecycle = Stopped` at construction — first-poll
+  `Running` is a valid edge (one `StreamStarting`, boot-race solved);
+  first-poll `Paused`/`Inactive` emits nothing (stays boot-muted). Tests:
+  `first_poll_running_emits_stream_starting_once`,
+  `first_poll_paused_then_inactive_emits_nothing`.
+- **Stalled debounce:** `Stalled` is capture-side starvation (verified:
+  crates/dsp "Stalled (capture device starved)"); a transient BT stall
+  would bounce `Stalled→Running` and cause a full mute+handshake dropout.
+  Require **2 consecutive `Stopped` polls for `Stalled`-only stops**
+  (1-poll confirmation); `Paused`/`Inactive` remain 0-debounce immediate.
+- `Unknown`/WS read failure: do NOT mutate `current_lifecycle` — log
+  `warn!` with bounded backoff (§4.5 no-flap preserved structurally).
+- **Adaptive interval:** 250 ms while Playing (stop edge can arrive), 500 ms
+  otherwise; configurable (`dsp_poll_interval_ms`, `dsp_watch_enabled`).
+- **Start-direction latency is irrelevant:** BT A2DP + camilladsp pipeline
+  startup dominate; +250..500 ms is imperceptible.
+- **Stop-direction race (review-corrected):** no poll after `Paused` beats
+  BCLK death if camilladsp closes the pcm at the `Paused` transition — the
+  1 s PLL tick is a **state-consistency backstop** (mute register, user
+  intent), NOT a pop preventer. Pop prevention levers, in priority order:
+  1. `silence_timeout` in the camilladsp config — keeps BCLK running with
+     digital zeros after the signal drops, giving the watcher's pre-mute a
+     guaranteed window (config currently has NO `silence_timeout` set).
+  2. **Bench test (Phase 5): does `/ERROR` (GPIO23) assert on
+     `PLL_UNLOCK`?** The kernel `ma120x0p_irq_handler` mutes+disables on the
+     error-GPIO falling edge without reading registers (suggestive, not
+     proof). If the pin does assert on PLL unlock, the already-wired error
+     edge watch → PLL-loss mute becomes a µs-class backstop for free. If
+     false, rely on lever 1.
+  3. Bench question: does a stop without pre-mute audibly pop at all? If
+     clean → relax everything.
+- `start_stream()`'s bounded PLL handshake remains the authoritative clock
+  gate regardless of watcher timeliness.
+
+**Deployment blocker found during this review:** `baseline/etc/camilladsp/
+crossover.yml` still points playback at `hw:sndrpimerusamp,0` (the removed
+merus card). It must be updated to the hifiberry card (`sndrpihifiberry`)
+and `silence_timeout` added before any live deploy.
+
+Deferred alternatives: true event push (camilladsp does not push unsolicited
+stream-state events in this deployment; `crates/dsp` client is
+request/response) and a systemd D-Bus unit watch (rejected above).

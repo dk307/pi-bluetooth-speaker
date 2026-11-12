@@ -24,7 +24,6 @@ default = []
 test-util = []
 
 [dev-dependencies]
-speaker-hardware = { path = ".", features = ["test-util"] }
 tokio = { workspace = true }
 
 [lints]

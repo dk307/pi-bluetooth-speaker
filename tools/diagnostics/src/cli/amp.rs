@@ -15,7 +15,8 @@ use speaker_common::diag::{
     should_print_summary,
 };
 use speaker_hardware::{
-    AmpDevice, AmpError, AmpErrorFlags, AmpI2cAddress, AmpStatus, MA12070P_DEFAULT_I2C_BUS,
+    AmpDevice, AmpError, AmpErrorFlags, AmpI2cAddress, AmpSettings, AmpStatus,
+    MA12070P_DEFAULT_I2C_BUS,
 };
 
 /// Default polling interval between amplifier status checks (1.0 second).
@@ -30,6 +31,8 @@ pub struct CliOptions {
     pub address: AmpI2cAddress,
     /// Whether to clear latched error flags.
     pub clear: bool,
+    /// Pending Phase 1.5 setting changes to apply before reading.
+    pub set: SetValues,
 }
 
 impl Default for CliOptions {
@@ -38,7 +41,102 @@ impl Default for CliOptions {
             common: CommonCliOptions::with_default_interval(DEFAULT_POLL_INTERVAL),
             address: AmpI2cAddress::default(),
             clear: false,
+            set: SetValues::default(),
         }
+    }
+}
+
+/// Phase 1.5 setting changes requested on the command line.
+///
+/// Each `Some` value is written to the amplifier once, in field order, before
+/// the diagnostic read loop begins.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SetValues {
+    /// Master volume raw attenuation (0..=144; dB = raw − 144).
+    pub volume_raw: Option<u16>,
+    /// Serial mute state (register 0x36 bit 7).
+    pub mute: Option<bool>,
+    /// Manual power mode `PM_man` (0-3).
+    pub pm: Option<u8>,
+    /// Power mode profile (0-5).
+    pub profile: Option<u8>,
+    /// I2S format select (valid 0, 1, 4, 5, 6, 7).
+    pub i2s_format: Option<u8>,
+    /// Audio input mode (0-5).
+    pub audio_mode: Option<u8>,
+}
+
+impl SetValues {
+    /// Returns `true` if any setting change was requested.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.volume_raw.is_some()
+            || self.mute.is_some()
+            || self.pm.is_some()
+            || self.profile.is_some()
+            || self.i2s_format.is_some()
+            || self.audio_mode.is_some()
+    }
+}
+
+/// Valid I2S format selects (register 0x35 bits 2:0, datasheet Table 8-8).
+const VALID_I2S_FORMATS: [u8; 6] = [0, 1, 4, 5, 6, 7];
+
+/// Parses an I2S format CLI value; rejects the reserved encodings 2 and 3.
+fn parse_i2s_format(value: &str) -> Result<u8, String> {
+    let parsed = parse_u8_in_range(value, "I2S format", 7)?;
+    if !VALID_I2S_FORMATS.contains(&parsed) {
+        return Err(format!(
+            "Invalid I2S format value '{value}': 2 and 3 are reserved (valid: 0, 1, 4, 5, 6, 7)"
+        ));
+    }
+    Ok(parsed)
+}
+
+/// Parses an unsigned integer CLI value and enforces an inclusive upper bound.
+///
+/// Returns a clean, user-facing error message (no backtrace) on invalid input.
+fn parse_u8_in_range(value: &str, name: &str, max: u8) -> Result<u8, String> {
+    let trimmed = value.trim();
+    let parsed: u8 = match trimmed.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(format!(
+                "Invalid {name} value '{value}': expected an integer 0-{max}"
+            ));
+        }
+    };
+    if parsed > max {
+        return Err(format!("Invalid {name} value '{value}': expected 0-{max}"));
+    }
+    Ok(parsed)
+}
+
+/// Parses a master volume raw attenuation value (0-144; dB = raw − 144).
+fn parse_volume_raw(value: &str) -> Result<u16, String> {
+    let trimmed = value.trim();
+    let parsed: u16 = match trimmed.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(format!(
+                "Invalid volume value '{value}': expected an integer 0-144"
+            ));
+        }
+    };
+    if parsed > 144 {
+        return Err(format!("Invalid volume value '{value}': expected 0-144"));
+    }
+    Ok(parsed)
+}
+
+/// Parses an on/off mute value.
+fn parse_mute(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" => Ok(true),
+        "off" | "false" | "0" => Ok(false),
+        _ => Err(format!(
+            "Invalid mute value '{value}': expected 'on' or 'off'"
+        )),
     }
 }
 
@@ -55,6 +153,17 @@ pub fn print_usage(bin_name: &str) {
     println!("  -i, --interval <SECS>    Polling interval in seconds (default: 1.0)");
     println!("  -a, --address <HEX>      I2C address in hex: 0x20 (default) or 0x21..=0x23");
     println!("  -c, --clear              Clear historical latched error logs");
+    println!();
+    println!("Setting changes (applied once before reading, then exit):");
+    println!(
+        "  --set-volume <RAW>       Master volume attenuation 0-144 (dB = raw - 144; 144 = 0 dB)"
+    );
+    println!("  --set-mute <on|off>      Serial mute (register 0x36 bit 7)");
+    println!("  --set-pm <0-3>           Manual power mode PM_man (0-3)");
+    println!("  --set-profile <0-5>      Power mode profile preset (0-5; 5 = custom)");
+    println!("  --set-i2s <0|1|4-7>      I2S format select (2 and 3 reserved)");
+    println!("  --set-audio-mode <0-5>   Audio input mode select (0-5)");
+    println!();
     println!(
         "  -v, --verbose            Display extended hardware diagnostics (human format only)"
     );
@@ -83,6 +192,43 @@ where
             }
             "-c" | "--clear" => {
                 opts.clear = true;
+                Ok(true)
+            }
+            "--set-volume" => {
+                opts.set.volume_raw =
+                    Some(parse_volume_raw(&next_arg_value(args, "--set-volume")?)?);
+                Ok(true)
+            }
+            "--set-mute" => {
+                opts.set.mute = Some(parse_mute(&next_arg_value(args, "--set-mute")?)?);
+                Ok(true)
+            }
+            "--set-pm" => {
+                opts.set.pm = Some(parse_u8_in_range(
+                    &next_arg_value(args, "--set-pm")?,
+                    "power mode",
+                    3,
+                )?);
+                Ok(true)
+            }
+            "--set-profile" => {
+                opts.set.profile = Some(parse_u8_in_range(
+                    &next_arg_value(args, "--set-profile")?,
+                    "power mode profile",
+                    5,
+                )?);
+                Ok(true)
+            }
+            "--set-i2s" => {
+                opts.set.i2s_format = Some(parse_i2s_format(&next_arg_value(args, "--set-i2s")?)?);
+                Ok(true)
+            }
+            "--set-audio-mode" => {
+                opts.set.audio_mode = Some(parse_u8_in_range(
+                    &next_arg_value(args, "--set-audio-mode")?,
+                    "audio input mode",
+                    5,
+                )?);
                 Ok(true)
             }
             _ => Ok(false),
@@ -198,13 +344,12 @@ pub fn output_json_status(timestamp: &str, amp: &AmpDevice, status: &AmpStatus) 
         "timestamp": timestamp,
         "i2c_bus": amp.i2c_bus(),
         "i2c_address": amp.i2c_address().to_string(),
-        "power_mode": format!("{:?}", status.power_mode),
-        "power_mode_description": status.power_mode.description(),
-        "audio_in": {
-            "format": format!("{:?}", status.audio_in.format),
-            "format_description": status.audio_in.format.description(),
-            "ratio": format!("{:?}", status.audio_in.ratio),
-            "ratio_description": status.audio_in.ratio.description(),
+        "pm_mon": format!("{:?}", status.pm_mon),
+        "pm_mon_description": status.pm_mon.description(),
+        "pm2_config": {
+            "usespread": status.pm2_config.usespread,
+            "dtsteps": status.pm2_config.dtsteps,
+            "baltype": status.pm2_config.baltype,
         },
         "dcu_monitor": {
             "ch0_active": status.dcu_monitor.ch0.is_active(),
@@ -212,6 +357,27 @@ pub fn output_json_status(timestamp: &str, amp: &AmpDevice, status: &AmpStatus) 
         },
         "live_errors": faults_json(status.live_errors),
         "latched_errors": faults_json(status.latched_errors),
+    });
+    println!("{obj}");
+}
+
+/// Outputs Phase 1.5 settings in JSON format.
+pub fn output_json_settings(timestamp: &str, amp: &AmpDevice, settings: &AmpSettings) {
+    let obj = serde_json::json!({
+        "timestamp": timestamp,
+        "i2c_bus": amp.i2c_bus(),
+        "i2c_address": amp.i2c_address().to_string(),
+        "settings": {
+            "master_volume_raw": settings.master_volume_raw,
+            // dB = raw − 144 (user attenuation scale; raw 144 = 0 dB).
+            "master_volume_db": i64::from(settings.master_volume_raw) - 144,
+            "master_volume_frac": settings.master_volume_frac,
+            "serial_muted": settings.serial_muted,
+            "pm_ctrl_pm": settings.pm_ctrl_pm,
+            "pm_profile": settings.pm_profile,
+            "i2s_format": settings.i2s_format,
+            "audio_in_mode": settings.audio_in_mode,
+        },
     });
     println!("{obj}");
 }
@@ -303,7 +469,7 @@ pub fn handle_amp_iteration(
                             } else {
                                 "FAULT"
                             },
-                            format!("{:?}", status.power_mode),
+                            format!("{:?}", status.pm_mon),
                             format!("{:?}", status.dcu_monitor.ch0),
                             format!("{:?}", status.dcu_monitor.ch1),
                         );
@@ -329,11 +495,153 @@ pub fn handle_amp_iteration(
     }
 }
 
+/// Reads the Phase 1.5 configuration settings and prints them in the active output format.
+/// Reads back and reports the current settings.
+/// Returns `Err` when the settings readback fails (already reported), so
+/// automation can distinguish a completed readback from a failed one.
+fn show_settings(amp: &AmpDevice, format: OutputFormat) -> Result<(), AmpError> {
+    match amp.read_settings() {
+        Ok(settings) => match format {
+            OutputFormat::Json => output_json_settings(&format_timestamp(), amp, &settings),
+            OutputFormat::Human => {
+                println!("Configuration Settings:");
+                println!("{settings}");
+                println!("---------------------------------------------------------");
+            }
+        },
+        Err(err) => {
+            match format {
+                OutputFormat::Json => {
+                    output_json_error(&format_timestamp(), amp.i2c_bus(), amp.i2c_address(), &err);
+                }
+                OutputFormat::Human => {
+                    eprintln!("Failed to read configuration settings: {err}");
+                }
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// Reports a single setting write in the active output format.
+/// Returns `true` on success, `false` on failure (error already reported).
+fn report_write(
+    amp: &AmpDevice,
+    opts: &CliOptions,
+    name: &str,
+    result: Result<(), AmpError>,
+) -> bool {
+    match result {
+        Ok(()) => {
+            match opts.common.format {
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "timestamp": format_timestamp(),
+                            "i2c_bus": amp.i2c_bus(),
+                            "i2c_address": amp.i2c_address().to_string(),
+                            "set": name,
+                            "ok": true,
+                        })
+                    );
+                }
+                OutputFormat::Human => {
+                    println!("Set {name}: OK");
+                }
+            }
+            true
+        }
+        Err(err) => {
+            match opts.common.format {
+                OutputFormat::Json => {
+                    output_json_error(&format_timestamp(), amp.i2c_bus(), amp.i2c_address(), &err);
+                }
+                OutputFormat::Human => {
+                    eprintln!("Failed to set {name}: {err}");
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Applies requested Phase 1.5 setting changes, then reads back and reports the settings.
+///
+/// Stops at the first failed write to avoid cascading transactions on a misbehaving bus.
+/// A deferred write operation: its report label and the write itself. The
+/// closure form keeps the write unexecuted until `handle_set` reaches it in
+/// the safety-ordered sequence (no eager bus transactions).
+type PendingWrite<'a> = (&'static str, Box<dyn FnOnce() -> Result<(), AmpError> + 'a>);
+
+fn handle_set(amp: &AmpDevice, opts: &CliOptions) -> ExitCode {
+    let set = opts.set;
+
+    // Safety ordering: a requested MUTE is applied FIRST (the amp must
+    // never sit loud while later writes run); a requested UNMUTE is
+    // applied LAST, only after every other write succeeded — a failed
+    // volume write must never unmask the output. Ops are collected as
+    // DEFERRED closures in that order and executed one at a time, so a
+    // failure stops before any later transaction touches the bus.
+    let mut writes: Vec<PendingWrite<'_>> = Vec::new();
+    if set.mute == Some(true) {
+        writes.push(("serial mute", Box::new(|| amp.write_serial_mute(true))));
+    }
+    if let Some(raw) = set.volume_raw {
+        writes.push((
+            "master volume",
+            Box::new(move || amp.write_master_volume(raw)),
+        ));
+    }
+    if let Some(pm) = set.pm {
+        writes.push((
+            "power mode",
+            Box::new(move || amp.write_power_mode_ctrl(pm)),
+        ));
+    }
+    if let Some(profile) = set.profile {
+        writes.push((
+            "power mode profile",
+            Box::new(move || amp.write_power_mode_profile(profile)),
+        ));
+    }
+    if let Some(format) = set.i2s_format {
+        writes.push(("I2S format", Box::new(move || amp.write_i2s_format(format))));
+    }
+    if let Some(mode) = set.audio_mode {
+        writes.push((
+            "audio input mode",
+            Box::new(move || amp.write_audio_in_mode(mode)),
+        ));
+    }
+    // Unmute is pushed AFTER every other requested write: a failure in any
+    // of them must leave the amp muted (a failed set never unmasks output).
+    if set.mute == Some(false) {
+        writes.push(("serial mute", Box::new(|| amp.write_serial_mute(false))));
+    }
+
+    for (name, op) in writes {
+        if !report_write(amp, opts, name, op()) {
+            return ExitCode::FAILURE;
+        }
+    }
+
+    if show_settings(amp, opts.common.format).is_err() {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
 /// Runs the amplifier diagnostic polling or clearing workflow.
 #[must_use]
 pub fn run_app(amp: &AmpDevice, opts: &CliOptions) -> ExitCode {
     if opts.clear {
         return handle_clear(amp, opts);
+    }
+
+    if opts.set.any() {
+        return handle_set(amp, opts);
     }
 
     if opts.common.format == OutputFormat::Human {
@@ -342,6 +650,10 @@ pub fn run_app(amp: &AmpDevice, opts: &CliOptions) -> ExitCode {
             println!("Press Ctrl+C to stop monitoring.\n");
         }
     }
+    // A failed readback here cannot abort the monitoring session (reads
+    // follow their own error-rate accounting); keep the previous
+    // behavior for the poll path.
+    let _ = show_settings(amp, opts.common.format);
 
     let mut stats = AmpStats::default();
 

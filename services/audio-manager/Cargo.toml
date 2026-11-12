@@ -9,6 +9,8 @@ publish = false
 
 [dependencies]
 speaker-common = { path = "../../crates/common" }
+speaker-hardware = { path = "../../crates/hardware" }
+speaker-dsp = { path = "../../crates/dsp" }
 amp-curve = { workspace = true }
 rppal = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

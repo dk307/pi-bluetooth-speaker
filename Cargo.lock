@@ -399,6 +399,8 @@ dependencies = [
  "serde",
  "serde_json",
  "speaker-common",
+ "speaker-dsp",
+ "speaker-hardware",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -4927,7 +4929,6 @@ dependencies = [
  "serde",
  "serde_json",
  "speaker-common",
- "speaker-hardware",
  "tokio",
  "tracing",
 ]

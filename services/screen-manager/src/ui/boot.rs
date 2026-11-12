@@ -139,7 +139,7 @@ fn probe_amp() -> Result<Box<str>, Box<str>> {
     }
     Ok(format!(
         "mode: {} | latched faults: {}",
-        status.power_mode,
+        status.pm_mon,
         status.latched_errors.faults().len()
     )
     .into())
