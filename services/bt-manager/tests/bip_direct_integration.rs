@@ -1350,3 +1350,52 @@ async fn persistent_session_falls_back_to_native_when_variant_rejected() {
     // Properties GET (false), variant GET (true), fallback native GET (false)
     assert_eq!(*s.descriptor_history.lock().await, vec![false, true, false]);
 }
+
+#[tokio::test]
+async fn persistent_session_caches_unsupported_properties_across_fetches() {
+    let body_track1 = body_bytes(512, 0x11);
+    let body_track2 = body_bytes(512, 0x22);
+
+    // properties_xml is None, so any x-bt/img-properties query returns NotFound (404)
+    let stub = new_retry_stub(vec![Ok(body_track1.clone()), Ok(body_track2.clone())]);
+
+    let stub_clone = Arc::clone(&stub);
+    let mut session = PersistentBipSession::with_channel_factory(move |_| {
+        Box::new(CustomServingChannel(Arc::clone(&stub_clone)))
+    });
+
+    let address = test_address();
+
+    // First fetch: properties returns 404, falls back to native, sets properties_supported = false
+    let res1 = session
+        .fetch_image(
+            &address,
+            &BipTransport::SdpRfcomm,
+            BipImageType::Native,
+            "0000001",
+        )
+        .await
+        .expect("fetch 1 must fall back to native and succeed");
+    assert_eq!(res1, body_track1);
+
+    // Second fetch: properties_supported is false, so it immediately fetches native without query
+    let res2 = session
+        .fetch_image(
+            &address,
+            &BipTransport::SdpRfcomm,
+            BipImageType::Native,
+            "0000002",
+        )
+        .await
+        .expect("fetch 2 must skip properties query and succeed");
+    assert_eq!(res2, body_track2);
+
+    session.release();
+    let s = stub.lock().await;
+    // Exactly 3 requests total: [properties query (404), native fetch 1, native fetch 2]
+    // If caching failed, there would be 4 requests (properties query sent again before fetch 2).
+    assert_eq!(
+        *s.descriptor_history.lock().await,
+        vec![false, false, false]
+    );
+}

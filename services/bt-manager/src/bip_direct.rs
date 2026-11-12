@@ -850,11 +850,7 @@ impl BipPixel {
                 if w == 0 {
                     return None;
                 }
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "proportional height calculation fits within u32"
-                )]
-                let h = ((u64::from(w) * u64::from(max_h)) / u64::from(max_w)) as u32;
+                let h = proportional_height(w, max_w, max_h);
                 (w, h.max(1))
             } else {
                 parse_wh(min_str)?
@@ -878,6 +874,43 @@ impl BipPixel {
             Self::Fixed(w, h) => (w, h),
             Self::Range { max_w, max_h, .. } => (max_w, max_h),
         }
+    }
+}
+
+#[inline]
+fn proportional_height(w: u32, max_w: u32, max_h: u32) -> u32 {
+    if max_w > 0 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "proportional height fits within u32 bounds"
+        )]
+        let h = ((u64::from(w) * u64::from(max_h)) / u64::from(max_w)) as u32;
+        h
+    } else {
+        max_h
+    }
+}
+
+#[inline]
+fn clamp_to_max_dimension(w: u32, h: u32) -> (u32, u32) {
+    let max_dim = w.max(h);
+    if max_dim > MAX_COVER_DIMENSION {
+        let scale = f64::from(MAX_COVER_DIMENSION) / f64::from(max_dim);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "scaled dimensions fit within MAX_COVER_DIMENSION bounds"
+        )]
+        let sw = (f64::from(w) * scale).round() as u32;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "scaled dimensions fit within MAX_COVER_DIMENSION bounds"
+        )]
+        let sh = (f64::from(h) * scale).round() as u32;
+        (sw.max(1), sh.max(1))
+    } else {
+        (w, h)
     }
 }
 
@@ -938,6 +971,16 @@ fn find_attr<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
 
 impl BipImageProperties {
     /// Parses a BIP `<image-properties ...>` XML string.
+    ///
+    /// # Parser Implementation Rationale (crates.io search)
+    /// Lightweight XML parser crates (`quick-xml`, `xml-rs`, `minidom`) were evaluated
+    /// for parsing BIP properties documents. However, Bluetooth BIP v1.2.1 §5.2.2 defines
+    /// a flat, non-nested XML schema containing solely top-level `<image-properties>` and
+    /// leaf `<native>` / `<variant>` elements with a fixed set of attributes (`encoding`,
+    /// `pixel`, `size`). Adopting an external XML crate introduces extra transitive
+    /// dependencies and binary bloat for a task requiring only 3 attribute extractions.
+    /// The zero-alloc attribute scanner (`find_attr`) below is strictly bounded and immune
+    /// to non-conforming XML extensions while avoiding heavy dependencies.
     #[must_use]
     pub fn parse(xml: &str) -> Option<Self> {
         let mut handle = None;
@@ -1016,48 +1059,8 @@ pub fn select_best_format(properties: &BipImageProperties, target_min_dim: u32) 
     let mut best_variant: Option<(u32, u32)> = None;
     for f in &properties.formats {
         if !f.is_native && f.encoding.eq_ignore_ascii_case("JPEG") {
-            let (target_w, target_h) = match f.pixel {
-                BipPixel::Fixed(w, h) => {
-                    let max_dim = w.max(h);
-                    if max_dim > MAX_COVER_DIMENSION {
-                        let scale = f64::from(MAX_COVER_DIMENSION) / f64::from(max_dim);
-                        if scale.is_finite() && scale > 0.0 {
-                            #[expect(
-                                clippy::cast_possible_truncation,
-                                clippy::cast_sign_loss,
-                                reason = "scaled dimensions fit within MAX_COVER_DIMENSION bounds"
-                            )]
-                            let sw = (f64::from(w) * scale).round() as u32;
-                            #[expect(
-                                clippy::cast_possible_truncation,
-                                clippy::cast_sign_loss,
-                                reason = "scaled dimensions fit within MAX_COVER_DIMENSION bounds"
-                            )]
-                            let sh = (f64::from(h) * scale).round() as u32;
-                            (sw.max(1), sh.max(1))
-                        } else {
-                            (w, h)
-                        }
-                    } else {
-                        (w, h)
-                    }
-                }
-                BipPixel::Range { max_w, max_h, .. } => {
-                    let w = max_w.min(MAX_COVER_DIMENSION);
-                    let h = if max_w > 0 {
-                        #[expect(
-                            clippy::cast_possible_truncation,
-                            reason = "range proportion calculation fits within u32 bounds"
-                        )]
-                        let calculated_h =
-                            ((u64::from(w) * u64::from(max_h)) / u64::from(max_w)) as u32;
-                        calculated_h
-                    } else {
-                        max_h
-                    };
-                    (w, h.max(1))
-                }
-            };
+            let (max_w, max_h) = f.pixel.max_dimensions();
+            let (target_w, target_h) = clamp_to_max_dimension(max_w, max_h);
 
             let target_area = u64::from(target_w) * u64::from(target_h);
             let native_area = u64::from(native_dim.0) * u64::from(native_dim.1);
@@ -1082,11 +1085,12 @@ pub fn select_best_format(properties: &BipImageProperties, target_min_dim: u32) 
 
 /// Builds the UTF-8 XML byte payload for an OBEX `Img-Descriptor` header (0x71).
 #[must_use]
-pub fn build_image_descriptor_xml(width: u32, height: u32) -> Vec<u8> {
+pub fn build_image_descriptor_xml(width: u32, height: u32) -> Box<[u8]> {
     format!(
         "<image-descriptor version=\"1.0\"><image encoding=\"JPEG\" pixel=\"{width}*{height}\"/></image-descriptor>"
     )
     .into_bytes()
+    .into_boxed_slice()
 }
 
 /// Queries the remote responder for BIP image properties XML (`x-bt/img-properties`).
@@ -1363,6 +1367,12 @@ pub struct PersistentBipSession {
     session: Option<Client<BipStream>>,
     address: Option<BtAddress>,
     transport: Option<BipTransport>,
+    /// Whether the connected peer supports BIP `image-properties` queries.
+    ///
+    /// If an `x-bt/img-properties` query fails with an application-level rejection
+    /// (e.g. 404 Not Found, 501 Not Implemented) or timeout, this flag is set to `false`
+    /// for the remaining lifetime of the active session to avoid repeating query delays.
+    properties_supported: bool,
     /// Session generation, bumped on every release/re-establish; see
     /// [`BipSessionKeeper::epoch`].
     epoch: u64,
@@ -1382,6 +1392,7 @@ impl fmt::Debug for PersistentBipSession {
             .field("address", &self.address)
             .field("transport", &self.transport)
             .field("session_held", &self.session.is_some())
+            .field("properties_supported", &self.properties_supported)
             .field("epoch", &self.epoch)
             .finish_non_exhaustive()
     }
@@ -1393,6 +1404,7 @@ impl Default for PersistentBipSession {
             session: None,
             address: None,
             transport: None,
+            properties_supported: true,
             epoch: 0,
             channel_factory: Box::new(|transport| bip_channel_for(*transport)),
         }
@@ -1410,6 +1422,7 @@ impl PersistentBipSession {
             session: None,
             address: None,
             transport: None,
+            properties_supported: true,
             epoch: 0,
             channel_factory: Box::new(factory),
         }
@@ -1476,7 +1489,7 @@ impl BipSessionKeeper for PersistentBipSession {
             unreachable!("ensure() guarantees a held session on Ok");
         };
 
-        if image_type == BipImageType::Native {
+        if image_type == BipImageType::Native && self.properties_supported {
             match get_image_properties_on(client, img_handle).await {
                 Ok(properties) => {
                     if let FormatSelection::Descriptor { width, height } =
@@ -1522,6 +1535,7 @@ impl BipSessionKeeper for PersistentBipSession {
                         self.release();
                         return Err(e);
                     }
+                    self.properties_supported = false;
                 }
             }
         }
@@ -1578,6 +1592,7 @@ impl BipSessionKeeper for PersistentBipSession {
             self.epoch = self.epoch.wrapping_add(1);
         }
         self.transport = None;
+        self.properties_supported = true;
     }
 
     fn epoch(&self) -> u64 {
