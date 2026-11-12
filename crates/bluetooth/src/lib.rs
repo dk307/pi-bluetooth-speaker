@@ -24,10 +24,10 @@ pub use connection::test_helpers as bluetooth_test_helpers;
 
 #[doc(inline)]
 pub use transport::{
-    BT_NO_CONNECTION_TITLE, BlueAlsaPcm, BtPlaybackState, TransportCommand, TransportCommandQueue,
-    apply_mute_to_volume_bytes, decode_pcm_format, encode_volume_bytes, format_duration_ms,
-    format_volume_bytes, percent_to_bluealsa_level, playback_progress_ratio, seek_offset_us,
-    select_active_pcm,
+    AVRCP_MAX_VOLUME, BT_NO_CONNECTION_TITLE, BlueAlsaPcm, BtPlaybackState, TransportCommand,
+    TransportCommandQueue, apply_mute_to_volume_bytes, decode_pcm_format, encode_volume_bytes,
+    format_duration_ms, format_volume_bytes, percent_to_bluealsa_level, playback_progress_ratio,
+    seek_offset_us, select_active_pcm,
 };
 
 #[doc(inline)]

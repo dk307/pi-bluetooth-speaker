@@ -127,6 +127,9 @@ pub struct BtPlaybackState {
     pub phone_volume: Option<u16>,
 }
 
+/// Maximum AVRCP absolute volume value (0-127 per `BlueZ` `MediaPlayer1.Volume` spec).
+pub const AVRCP_MAX_VOLUME: u16 = 127;
+
 /// Placeholder title shown whenever no Bluetooth media player is connected.
 /// Single source of truth shared by the transport default state and the D-Bus
 /// property fallbacks in the connection module.
@@ -177,12 +180,14 @@ impl BtPlaybackState {
         format_duration_ms(self.duration_ms)
     }
 
-    /// Converts the reported AVRCP absolute volume (0-127) to a percentage
-    /// (0-100), rounded to nearest. `None` when no phone volume is reported.
+    /// Converts the AVRCP absolute volume (0-127) to a percentage (0-100),
+    /// rounded. `None` when no phone volume is reported.
     #[must_use]
     pub fn phone_volume_percent(&self) -> Option<u8> {
-        self.phone_volume
-            .map(|v| ((u32::from(v) * 100 + 63) / 127) as u8)
+        self.phone_volume.map(|v| {
+            ((u32::from(v) * 100 + u32::from(AVRCP_MAX_VOLUME) / 2) / u32::from(AVRCP_MAX_VOLUME))
+                as u8
+        })
     }
 }
 

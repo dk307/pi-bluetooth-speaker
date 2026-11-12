@@ -9,8 +9,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use speaker_bluetooth::{
-    BlueAlsaPcm, BluetoothDevice, BluetoothHardwareInfo, BluetoothStatus, BtAddress, BtDevice,
-    BtError,
+    AVRCP_MAX_VOLUME, BlueAlsaPcm, BluetoothDevice, BluetoothHardwareInfo, BluetoothStatus,
+    BtAddress, BtDevice, BtError,
 };
 use speaker_common::diag::{
     CliParse, CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads,
@@ -353,7 +353,8 @@ pub fn print_human_audio_pipeline(status: &BluetoothStatus, opts: &CliOptions) {
             p.format_position()
         );
         if let Some(vol) = p.phone_volume {
-            let pct = p.phone_volume_percent().unwrap_or_default();
+            let pct = ((u32::from(vol) * 100 + u32::from(AVRCP_MAX_VOLUME) / 2)
+                / u32::from(AVRCP_MAX_VOLUME)) as u8;
             println!("  ↳ Phone Volume    : {pct}% (AVRCP absolute: {vol})");
         }
         if let Some(ref path) = p.cover_art_path {

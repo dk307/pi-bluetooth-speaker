@@ -1356,7 +1356,8 @@ impl DbusClient {
         };
 
         let obex_port = get_u16(props, "ObexPort").filter(|&p| p > 0);
-        let phone_volume = get_u16(props, "Volume").filter(|&v| v <= 127);
+        let phone_volume =
+            get_u16(props, "Volume").filter(|&v| v <= crate::transport::AVRCP_MAX_VOLUME);
         let image_handle = props
             .get("Track")
             .and_then(|track_val| get_track_prop_str(track_val, "ImgHandle"))
