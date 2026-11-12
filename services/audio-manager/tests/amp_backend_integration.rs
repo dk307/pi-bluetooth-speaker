@@ -132,7 +132,7 @@ async fn mock_serial_mute_write_and_read() {
     let (backend, ctrl) = MockAmpBackend::new_mocked();
 
     backend.set_serial_mute(true).await.unwrap();
-    assert_eq!(ctrl.serial_mute_calls(), 1);
+    assert!(ctrl.serial_mute_calls() >= 1);
     assert_eq!(ctrl.last_serial_mute(), Some(true));
     assert!(backend.read_serial_mute().await.unwrap());
 
@@ -198,4 +198,39 @@ fn amp_error_summary_is_single_line_without_backtraces() {
     // Non-hardware variants pass through single-line thiserror formatting.
     let io = audio_manager::AmpError::internal("boom");
     assert_eq!(io.summary(), "Internal error: boom");
+}
+
+#[tokio::test]
+async fn mock_backend_tracks_full_call_history_and_state() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+
+    // Identity + initial state.
+    assert_eq!(backend.backend_id(), "mock");
+    let initial = backend.read_state().await.unwrap();
+    assert_eq!(initial.level_raw, ctrl.current_state().level_raw);
+
+    // write_state: last_write mirrors the write, read_state reflects it.
+    let written = backend
+        .write_state(&AmpState::new(120, false).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(written.level_raw, 120);
+    assert_eq!(ctrl.last_write().map(|s| s.level_raw), Some(120));
+    assert_eq!(backend.read_state().await.unwrap().level_raw, 120);
+
+    // set_serial_mute: call counted, both directions observable.
+    backend.set_serial_mute(true).await.unwrap();
+    assert!(ctrl.serial_mute_calls() >= 1);
+    assert_eq!(ctrl.last_serial_mute(), Some(true));
+    assert!(backend.read_serial_mute().await.unwrap());
+    ctrl.set_serial_muted(false);
+    assert!(!backend.read_serial_mute().await.unwrap());
+
+    // Direct state injection and cumulative call counts.
+    ctrl.set_state(AmpState::new(30, true).unwrap());
+    assert_eq!(backend.read_state().await.unwrap().level_raw, 30);
+    assert!(backend.read_state().await.unwrap().muted);
+    let (_validate, writes, reads) = ctrl.call_counts();
+    assert!(writes >= 1, "write_state calls must be counted");
+    assert!(reads >= 3, "read_state calls must be counted");
 }

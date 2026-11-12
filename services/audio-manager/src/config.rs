@@ -118,8 +118,14 @@ impl Config {
             info!("No config file at {}, using defaults", config_path);
         }
 
-        // 3. Environment variables with prefix AMP_MGR_
-        builder = builder.add_source(Environment::with_prefix("AMP_MGR").separator("_"));
+        // 3. Environment variables with prefix AMP_MGR_. NOTE: no
+        // `.separator("_")` — with a separator the crate nests the key
+        // (`AMP_MGR_CONTROL_MODE` → table `control.mode`), which serde then
+        // cannot map onto the flat `control_mode` field, silently dropping
+        // every override. Without a separator the suffix lowercases to the
+        // exact field name (`AMP_MGR_DSP_POLL_INTERVAL_MS` →
+        // `dsp_poll_interval_ms`).
+        builder = builder.add_source(Environment::with_prefix("AMP_MGR"));
 
         let settings = builder.build()?;
         let mut config: Config = settings.try_deserialize()?;

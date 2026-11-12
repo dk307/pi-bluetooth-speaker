@@ -35,7 +35,9 @@ use speaker_dsp::{DspDevice, ProcessingState};
 use crate::amp_controller::{AmpCommand, AmpCommandKind};
 
 /// Minimum effective poll interval (guards a zero/1 ms config value).
-const MIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Lower bound for the adaptive poll interval (exposed for the test suite,
+/// M-TEST-UTIL).
+pub const MIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Internal 2-state lifecycle (plan §11.3). Everything but engine
 /// `Running` collapses to [`EmittedLifecycle::Stopped`].
@@ -141,7 +143,11 @@ impl Default for LifecycleTracker {
 
 /// Effective poll interval for the current lifecycle (adaptive: half the
 /// idle interval while `Running`, floored at [`MIN_POLL_INTERVAL`]).
-fn poll_interval(idle: Duration, current: EmittedLifecycle) -> Duration {
+///
+/// Exposed unconditionally (M-TEST-UTIL): pure interval math used by the
+/// integration test suite to pin the adaptive-poll contract.
+#[must_use]
+pub fn poll_interval(idle: Duration, current: EmittedLifecycle) -> Duration {
     if current == EmittedLifecycle::Running {
         let half_ms = idle.as_millis() / 2;
         let floor = MIN_POLL_INTERVAL.as_millis();

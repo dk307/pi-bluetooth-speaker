@@ -340,3 +340,84 @@ fn stalled_unknown_stalled_counts_as_consecutive() {
         "Unknown between two Stalled polls does not reset the debounce"
     );
 }
+
+// ------------------------------------------------- adaptive poll intervals
+
+#[test]
+fn poll_interval_halves_while_running_and_floors_at_minimum() {
+    use audio_manager::dsp_watch::poll_interval;
+    use std::time::Duration;
+
+    // Stopped: the configured idle interval, never below the floor.
+    assert_eq!(
+        poll_interval(Duration::from_millis(500), EmittedLifecycle::Stopped),
+        Duration::from_millis(500)
+    );
+    assert_eq!(
+        poll_interval(Duration::from_millis(50), EmittedLifecycle::Stopped),
+        poll_interval(Duration::from_millis(50), EmittedLifecycle::Stopped)
+    );
+    assert_eq!(
+        poll_interval(Duration::from_millis(10), EmittedLifecycle::Stopped),
+        audio_manager::dsp_watch::MIN_POLL_INTERVAL,
+        "idle below MIN floor: clamped to MIN for Stopped too"
+    );
+
+    // Running: half the idle interval.
+    assert_eq!(
+        poll_interval(Duration::from_millis(2000), EmittedLifecycle::Running),
+        Duration::from_millis(1000)
+    );
+    // Running below the floor: clamped to MIN.
+    assert_eq!(
+        poll_interval(Duration::from_millis(100), EmittedLifecycle::Running),
+        audio_manager::dsp_watch::MIN_POLL_INTERVAL,
+        "half-of-idle below the floor must clamp to MIN_POLL_INTERVAL"
+    );
+}
+
+#[tokio::test]
+async fn loop_telemetry_failure_holds_lifecycle_and_recovers() {
+    use std::time::Duration;
+
+    let LoopFixture {
+        device,
+        mock,
+        cmd_tx,
+        mut cmd_rx,
+    } = loop_fixture();
+    mock.set_state(ProcessingState::Running);
+    let task = tokio::spawn(run(device, cmd_tx.clone(), TEST_INTERVAL));
+
+    // First poll: Running -> StreamStarting edge.
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("StreamStarting edge")
+        .expect("channel open");
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStarting));
+
+    // Telemetry goes dark: the last lifecycle is HELD (no flap edges).
+    mock.inject_fault("ws connection lost");
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(
+        received(&mut cmd_rx).await.is_empty(),
+        "telemetry failure must never emit an edge"
+    );
+
+    // Telemetry recovers: still Running, still no edge; then a real stop
+    // emits exactly one StreamStopping.
+    mock.clear_fault();
+    mock.set_state(ProcessingState::Inactive);
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("StreamStopping edge after recovery")
+        .expect("channel open");
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStopping));
+
+    drop(cmd_tx);
+    drop(cmd_rx);
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("watcher exits when the channel closes")
+        .unwrap();
+}

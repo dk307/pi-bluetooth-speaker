@@ -827,3 +827,170 @@ async fn pll_loss_while_user_muted_clears_stream_live() {
         "GPIO /MUTE must stay asserted after the deferred unmute"
     );
 }
+
+#[tokio::test]
+async fn error_edge_reports_latched_accumulation_and_mutes() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    f.amp_mock.set_live_errors(AmpErrorFlags::NONE);
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+
+    // PLL loss with historical (latched) accumulation riding along: the
+    // edge handler must log the accumulation and mute across the gap.
+    f.amp_mock
+        .set_live_errors(fault_flags(AmpFault::PllClockLoss));
+    f.amp_mock
+        .set_latched_errors(fault_flags(AmpFault::PllClockLoss));
+    f.controller.handle_error_edge().await.unwrap();
+
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
+    assert!(f.amp_mock.mock_serial_muted());
+    assert!(f.gpio_mock.mute_pin_low());
+}
+
+#[tokio::test]
+async fn stream_start_handshake_read_failure_fails_safe_to_muted() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    // The PLL handshake's telemetry READ fails with a transient I2C
+    // error: treated as UNLOCKED, the stream start returns Ok and the
+    // machine lands in Muted (fail-safe, never AwaitingClock, never
+    // unmuted into an unknown clock state).
+    f.amp_mock.set_fault(Some("i2c bus wedged".into()));
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
+    assert!(f.amp_mock.mock_serial_muted());
+
+    // Recovering the bus restores a normal handshake and playback.
+    f.amp_mock.set_fault(None);
+    f.amp_mock.set_live_errors(AmpErrorFlags::NONE);
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+}
+
+#[tokio::test]
+async fn critical_fault_at_stream_start_runs_recovery_instead_of_unmute() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    // A critical (OCP) fault is live when the stream starts: the audio
+    // path must NEVER be released — fault recovery (mute → /ENABLE reset
+    // pulse → re-mute) runs instead of the unmute, and the machine lands
+    // in Muted for the next StreamStarting retry.
+    f.amp_mock
+        .set_live_errors(fault_flags(AmpFault::OvercurrentProtect));
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
+    assert!(f.amp_mock.mock_serial_muted(), "stays serial-muted");
+    assert!(f.gpio_mock.mute_pin_low(), "stays GPIO-muted");
+    assert!(
+        f.gpio_mock.reset_calls() >= 1,
+        "fault recovery must run the /ENABLE reset pulse"
+    );
+    assert!(
+        !f.controller.state().muted,
+        "user intent untouched (transient recovery mute)"
+    );
+}
+
+#[tokio::test]
+async fn run_loop_replies_edge_close_errors_and_shutdown() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<AmpCommand>(8);
+    let (edge_tx, edge_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let task = tokio::spawn(f.controller.run(cmd_rx, Some(edge_rx), shutdown_rx, true));
+
+    // 1. Command with a reply: Ok result propagated to the caller.
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(AmpCommand {
+            kind: AmpCommandKind::SetLevel(80),
+            reply: Some(reply_tx),
+        })
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), reply_rx)
+            .await
+            .expect("reply must arrive")
+            .is_ok()
+    );
+    let raw80 = amp_curve::PERCENT_TO_RAW[80];
+    assert_eq!(f.state_file.load().unwrap().level_raw, raw80);
+
+    // 2. Failing command: reply carries the error summary and the loop
+    //    keeps running (prior state preserved).
+    f.amp_mock.set_fault(Some("i2c bus wedged".into()));
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(AmpCommand {
+            kind: AmpCommandKind::SetLevel(90),
+            reply: Some(reply_tx),
+        })
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(2), reply_rx)
+        .await
+        .expect("reply must arrive")
+        .expect("sender dropped without replying");
+    assert!(reply.is_err(), "hardware fault must surface in the reply");
+
+    // 3. Error-edge channel closing disables the edge arm without
+    //    killing the loop; commands still work afterwards.
+    drop(edge_tx);
+    f.amp_mock.set_fault(None);
+    f.amp_mock.set_live_errors(AmpErrorFlags::NONE);
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(AmpCommand {
+            kind: AmpCommandKind::SetLevel(70),
+            reply: Some(reply_tx),
+        })
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), reply_rx)
+            .await
+            .expect("reply must arrive")
+            .is_ok()
+    );
+    let raw70 = amp_curve::PERCENT_TO_RAW[70];
+    assert_eq!(f.state_file.load().unwrap().level_raw, raw70);
+
+    // 4. Shutdown signal ends the loop promptly.
+    shutdown_tx.send(()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("run loop must exit on shutdown")
+        .unwrap();
+}
