@@ -185,9 +185,25 @@ impl BtPlaybackState {
     ///
     /// # Panics
     ///
-    /// Panics if `phone_volume` is `Some` but `phone_volume_percent()` returns `None`
-    /// (logic invariant violation — should be impossible since the conversion always
-    /// returns `Some` when input is `Some`).
+    /// Panics in debug builds if `phone_volume` exceeds `AVRCP_MAX_VOLUME` (127),
+    /// indicating a violated domain invariant. Release builds clamp via `min(100)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use speaker_bluetooth::BtPlaybackState;
+    /// let mut s = BtPlaybackState::default();
+    /// s.phone_volume = Some(0);
+    /// assert_eq!(s.phone_volume_percent(), Some(0));
+    /// s.phone_volume = Some(64);
+    /// assert_eq!(s.phone_volume_percent(), Some(50));
+    /// s.phone_volume = Some(80);
+    /// assert_eq!(s.phone_volume_percent(), Some(63));
+    /// s.phone_volume = Some(127);
+    /// assert_eq!(s.phone_volume_percent(), Some(100));
+    /// s.phone_volume = None;
+    /// assert_eq!(s.phone_volume_percent(), None);
+    /// ```
     #[must_use]
     pub fn phone_volume_percent(&self) -> Option<u8> {
         self.phone_volume.map(|v| {
