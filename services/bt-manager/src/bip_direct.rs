@@ -51,6 +51,18 @@ pub const BIP_IMAGE_PULL_UUID16: u16 = 0x111B;
 /// from this header, not from the generic OBEX Name header.
 pub const IMG_HANDLE_HEADER_ID: u8 = 0x30;
 
+/// OBEX header identifier of the BIP `Img-Descriptor` header (0x71).
+pub const IMG_DESCRIPTOR_HEADER_ID: u8 = 0x71;
+
+/// OBEX MIME type for querying image properties XML.
+pub const MIME_IMAGE_PROPERTIES: &str = "x-bt/img-properties";
+
+/// Target minimum dimension for screen cover art display (matching 360x360 UI container).
+pub const TARGET_COVER_MIN_DIMENSION: u32 = 360;
+
+/// Maximum dimension to request, preventing excessive Bluetooth transfer latency and memory use.
+pub const MAX_COVER_DIMENSION: u32 = 1280;
+
 /// Largest accepted image-handle string (e.g. `0000001`).
 pub const IMG_HANDLE_MAX_LEN: usize = 64;
 
@@ -245,6 +257,25 @@ impl BipError {
             BipErrorKind::ImageRejected { response_code, .. } => Some(response_code),
             _ => None,
         }
+    }
+
+    /// Returns `true` if this error represents an underlying transport failure (broken connection,
+    /// timeout, EOF) rather than an application-level rejection or parse issue.
+    #[must_use]
+    pub fn is_transport_fault(&self) -> bool {
+        if let Some(obex_err) = self
+            .source
+            .as_ref()
+            .and_then(|s| s.downcast_ref::<ObexError>())
+        {
+            return obex_err.response_code().is_none();
+        }
+        matches!(
+            self.kind,
+            BipErrorKind::RfcommConnect { .. }
+                | BipErrorKind::L2capConnect { .. }
+                | BipErrorKind::SdpLookup { .. }
+        )
     }
 
     /// Returns the captured backtrace for this error.
@@ -689,6 +720,9 @@ const OBEX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// Deadline for a complete OBEX GET (CONNECT-for-GET through final body).
 const OBEX_GET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Deadline for an OBEX GET image properties round-trip.
+const OBEX_PROPERTIES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Deadline for the keepalive SETPATH round-trip.
 const OBEX_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -787,6 +821,370 @@ where
     get_image_on(&mut client, image_type, img_handle).await
 }
 
+/// Pixel dimensions for a BIP image format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BipPixel {
+    /// Fixed pixel dimensions `(width, height)`.
+    Fixed(u32, u32),
+    /// Pixel range with minimum and maximum bounds `(min_w, min_h, max_w, max_h)`.
+    Range {
+        min_w: u32,
+        min_h: u32,
+        max_w: u32,
+        max_h: u32,
+    },
+}
+
+impl BipPixel {
+    /// Parses a BIP pixel string like `"640*480"`, `"200*200-800*800"`, or `"200**-800*800"`.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if let Some((min_str, max_str)) = s.split_once('-') {
+            let (max_w, max_h) = parse_wh(max_str)?;
+            if max_w == 0 || max_h == 0 {
+                return None;
+            }
+            let (min_w, min_h) = if let Some(min_w_str) = min_str.trim().strip_suffix("**") {
+                let w = min_w_str.trim().parse::<u32>().ok()?;
+                if w == 0 {
+                    return None;
+                }
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "proportional height calculation fits within u32"
+                )]
+                let h = ((u64::from(w) * u64::from(max_h)) / u64::from(max_w)) as u32;
+                (w, h.max(1))
+            } else {
+                parse_wh(min_str)?
+            };
+            Some(Self::Range {
+                min_w,
+                min_h,
+                max_w,
+                max_h,
+            })
+        } else {
+            let (w, h) = parse_wh(s)?;
+            Some(Self::Fixed(w, h))
+        }
+    }
+
+    /// Returns the maximum dimensions `(width, height)` represented by this pixel specification.
+    #[must_use]
+    pub const fn max_dimensions(&self) -> (u32, u32) {
+        match *self {
+            Self::Fixed(w, h) => (w, h),
+            Self::Range { max_w, max_h, .. } => (max_w, max_h),
+        }
+    }
+}
+
+fn parse_wh(s: &str) -> Option<(u32, u32)> {
+    let (w_str, h_str) = s.trim().split_once('*')?;
+    let w = w_str.trim().parse::<u32>().ok()?;
+    let h = h_str.trim().parse::<u32>().ok()?;
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+/// One format entry in a BIP `image-properties` document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BipImageFormat {
+    /// Encoding format name (e.g. `"JPEG"`, `"PNG"`).
+    pub encoding: Box<str>,
+    /// Pixel dimensions.
+    pub pixel: BipPixel,
+    /// Optional file size in bytes, if advertised by responder.
+    pub size: Option<u32>,
+    /// Whether this is the native image format (`true`) or a variant (`false`).
+    pub is_native: bool,
+}
+
+/// Parsed BIP `image-properties` document describing available artwork formats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BipImageProperties {
+    /// Image handle the properties describe.
+    pub handle: Box<str>,
+    /// Formats offered by the responder.
+    pub formats: Vec<BipImageFormat>,
+}
+
+fn find_attr<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
+    let mut search = tag;
+    while let Some(idx) = search.find(attr) {
+        let is_boundary = idx == 0
+            || search.as_bytes()[idx - 1].is_ascii_whitespace()
+            || matches!(search.as_bytes()[idx - 1], b'<' | b'?');
+        if is_boundary {
+            let after = &search[idx + attr.len()..];
+            let trimmed = after.trim_start();
+            if let Some(rest) = trimmed.strip_prefix('=') {
+                let val_trimmed = rest.trim_start();
+                if let Some(quote) = val_trimmed.chars().next()
+                    && (quote == '"' || quote == '\'')
+                {
+                    let content = &val_trimmed[quote.len_utf8()..];
+                    if let Some(end_idx) = content.find(quote) {
+                        return Some(&content[..end_idx]);
+                    }
+                }
+            }
+        }
+        search = &search[idx + attr.len()..];
+    }
+    None
+}
+
+impl BipImageProperties {
+    /// Parses a BIP `<image-properties ...>` XML string.
+    #[must_use]
+    pub fn parse(xml: &str) -> Option<Self> {
+        let mut handle = None;
+        let mut formats = Vec::new();
+
+        let mut pos = 0;
+        while let Some(start) = xml[pos..].find('<') {
+            let abs_start = pos + start;
+            let Some(end) = xml[abs_start..].find('>') else {
+                break;
+            };
+            let abs_end = abs_start + end;
+            let tag = &xml[abs_start..=abs_end];
+            pos = abs_end + 1;
+
+            let tag_trimmed = tag.trim_start_matches('<').trim_start();
+            if tag_trimmed.starts_with("image-properties") {
+                if let Some(h) = find_attr(tag, "handle") {
+                    handle = Some(Box::<str>::from(h));
+                }
+            } else if tag_trimmed.starts_with("native") || tag_trimmed.starts_with("variant") {
+                let is_native = tag_trimmed.starts_with("native");
+                let encoding = find_attr(tag, "encoding")?;
+                let pixel_str = find_attr(tag, "pixel")?;
+                let pixel = BipPixel::parse(pixel_str)?;
+                let size = find_attr(tag, "size").and_then(|s| s.parse::<u32>().ok());
+                formats.push(BipImageFormat {
+                    encoding: Box::<str>::from(encoding),
+                    pixel,
+                    size,
+                    is_native,
+                });
+            }
+        }
+
+        let handle = handle?;
+        Some(Self { handle, formats })
+    }
+}
+
+/// Negotiated format selection for cover art download.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FormatSelection {
+    /// Request native image with NO `Img-Descriptor` header.
+    NativeDefault,
+    /// Request with `Img-Descriptor` specifying pixel dimensions `(width, height)`.
+    Descriptor { width: u32, height: u32 },
+}
+
+/// Evaluates available formats from `properties` and selects the best resolution.
+///
+/// If a higher resolution variant is offered (exceeding native and suitable for display),
+/// returns [`FormatSelection::Descriptor`]. If the native format is already high-resolution
+/// or no better format is offered, returns [`FormatSelection::NativeDefault`].
+#[must_use]
+pub fn select_best_format(properties: &BipImageProperties, target_min_dim: u32) -> FormatSelection {
+    let mut native_dim = (0u32, 0u32);
+    for f in &properties.formats {
+        if f.is_native && f.encoding.eq_ignore_ascii_case("JPEG") {
+            let (w, h) = f.pixel.max_dimensions();
+            if w > native_dim.0 {
+                native_dim = (w, h);
+            }
+        }
+    }
+
+    if native_dim.0 >= target_min_dim && native_dim.1 >= target_min_dim {
+        return FormatSelection::NativeDefault;
+    }
+
+    let mut best_variant: Option<(u32, u32)> = None;
+    for f in &properties.formats {
+        if !f.is_native && f.encoding.eq_ignore_ascii_case("JPEG") {
+            let (target_w, target_h) = match f.pixel {
+                BipPixel::Fixed(w, h) => {
+                    if w > MAX_COVER_DIMENSION || h > MAX_COVER_DIMENSION {
+                        let scale = f64::from(MAX_COVER_DIMENSION) / f64::from(w.max(h));
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "scaled dimensions fit within MAX_COVER_DIMENSION bounds"
+                        )]
+                        let sw = (f64::from(w) * scale).round() as u32;
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "scaled dimensions fit within MAX_COVER_DIMENSION bounds"
+                        )]
+                        let sh = (f64::from(h) * scale).round() as u32;
+                        (sw.max(1), sh.max(1))
+                    } else {
+                        (w, h)
+                    }
+                }
+                BipPixel::Range { max_w, max_h, .. } => {
+                    let w = max_w.min(MAX_COVER_DIMENSION);
+                    let h = if max_w > 0 {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            reason = "range proportion calculation fits within u32 bounds"
+                        )]
+                        let calculated_h =
+                            ((u64::from(w) * u64::from(max_h)) / u64::from(max_w)) as u32;
+                        calculated_h
+                    } else {
+                        max_h
+                    };
+                    (w, h.max(1))
+                }
+            };
+
+            if target_w > native_dim.0 {
+                if let Some((curr_w, curr_h)) = best_variant {
+                    if (u64::from(target_w) * u64::from(target_h))
+                        > (u64::from(curr_w) * u64::from(curr_h))
+                    {
+                        best_variant = Some((target_w, target_h));
+                    }
+                } else {
+                    best_variant = Some((target_w, target_h));
+                }
+            }
+        }
+    }
+
+    if let Some((width, height)) = best_variant {
+        FormatSelection::Descriptor { width, height }
+    } else {
+        FormatSelection::NativeDefault
+    }
+}
+
+/// Builds the UTF-8 XML byte payload for an OBEX `Img-Descriptor` header (0x71).
+#[must_use]
+pub fn build_image_descriptor_xml(width: u32, height: u32) -> Vec<u8> {
+    format!(
+        "<image-descriptor version=\"1.0\"><image encoding=\"JPEG\" pixel=\"{width}*{height}\"/></image-descriptor>"
+    )
+    .into_bytes()
+}
+
+/// Queries the remote responder for BIP image properties XML (`x-bt/img-properties`).
+///
+/// # Errors
+/// Returns [`BipError`] if the request fails, times out, or the response XML cannot be parsed.
+pub async fn get_image_properties_on<T>(
+    client: &mut Client<T>,
+    img_handle: &str,
+) -> Result<BipImageProperties, BipError>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    validate_img_handle(img_handle)?;
+    let started = Instant::now();
+    tracing::debug!(handle = img_handle, "BIP image properties query starting");
+
+    let get = with_obex_timeout(
+        "OBEX GET PROPERTIES",
+        OBEX_PROPERTIES_TIMEOUT,
+        client.get([
+            Header::Type(MIME_IMAGE_PROPERTIES.to_string()),
+            Header::Other {
+                id: IMG_HANDLE_HEADER_ID,
+                value: HeaderValue::Unicode(img_handle.to_string()),
+            },
+        ]),
+    )
+    .await;
+
+    match get {
+        Ok(response) => {
+            let xml = std::str::from_utf8(&response.body).map_err(|e| {
+                BipError::new(BipErrorKind::Obex {
+                    details: format!("invalid UTF-8 in image properties: {e}").into_boxed_str(),
+                })
+            })?;
+            tracing::debug!(
+                handle = img_handle,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                xml_len = xml.len(),
+                "BIP image properties received"
+            );
+            BipImageProperties::parse(xml).ok_or_else(|| {
+                BipError::new(BipErrorKind::Obex {
+                    details: "failed to parse image-properties XML".into(),
+                })
+            })
+        }
+        Err(e) => Err(map_obex_failure("OBEX GET PROPERTIES", e)),
+    }
+}
+
+/// Runs the BIP GET transaction on an already-connected OBEX `client`, optionally
+/// specifying an `Img-Descriptor` byte payload (header 0x71).
+///
+/// # Errors
+/// Returns [`BipError`] for invalid handles, OBEX transport/protocol failures
+/// and responder rejections (see [`BipError::response_code`]).
+pub async fn get_image_with_descriptor_on<T>(
+    client: &mut Client<T>,
+    image_type: BipImageType,
+    img_handle: &str,
+    descriptor: Option<&[u8]>,
+) -> Result<Vec<u8>, BipError>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    validate_img_handle(img_handle)?;
+
+    let started = Instant::now();
+    tracing::info!(
+        mime = image_type.mime(),
+        handle = img_handle,
+        has_descriptor = descriptor.is_some(),
+        "BIP image pull starting"
+    );
+
+    let mut headers = vec![
+        Header::Type(image_type.mime().to_string()),
+        Header::Other {
+            id: IMG_HANDLE_HEADER_ID,
+            value: HeaderValue::Unicode(img_handle.to_string()),
+        },
+    ];
+    if let Some(desc_bytes) = descriptor {
+        headers.push(Header::Other {
+            id: IMG_DESCRIPTOR_HEADER_ID,
+            value: HeaderValue::Bytes(desc_bytes.to_vec()),
+        });
+    }
+
+    let get = with_obex_timeout("OBEX GET", OBEX_GET_TIMEOUT, client.get(headers)).await;
+
+    match get {
+        Ok(response) => {
+            tracing::info!(
+                bytes = response.body.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                has_descriptor = descriptor.is_some(),
+                "BIP image received"
+            );
+            Ok(response.body)
+        }
+        Err(e) => Err(map_obex_failure("OBEX GET", e)),
+    }
+}
+
 /// Runs the BIP GET transaction (Type + Img-Handle headers) on an
 /// already-connected OBEX `client`.
 ///
@@ -811,39 +1209,7 @@ pub async fn get_image_on<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    validate_img_handle(img_handle)?;
-
-    let started = Instant::now();
-    tracing::info!(
-        mime = image_type.mime(),
-        handle = img_handle,
-        "BIP image pull starting"
-    );
-
-    let get = with_obex_timeout(
-        "OBEX GET",
-        OBEX_GET_TIMEOUT,
-        client.get([
-            Header::Type(image_type.mime().to_string()),
-            Header::Other {
-                id: IMG_HANDLE_HEADER_ID,
-                value: HeaderValue::Unicode(img_handle.to_string()),
-            },
-        ]),
-    )
-    .await;
-
-    match get {
-        Ok(response) => {
-            tracing::info!(
-                bytes = response.body.len(),
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "BIP image received"
-            );
-            Ok(response.body)
-        }
-        Err(e) => Err(map_obex_failure("OBEX GET", e)),
-    }
+    get_image_with_descriptor_on(client, image_type, img_handle, None).await
 }
 
 /// Validates the image handle against the BIP constraints.
@@ -1099,6 +1465,57 @@ impl BipSessionKeeper for PersistentBipSession {
         let Some(client) = self.session.as_mut() else {
             unreachable!("ensure() guarantees a held session on Ok");
         };
+
+        if image_type == BipImageType::Native {
+            match get_image_properties_on(client, img_handle).await {
+                Ok(properties) => {
+                    if let FormatSelection::Descriptor { width, height } =
+                        select_best_format(&properties, TARGET_COVER_MIN_DIMENSION)
+                    {
+                        tracing::info!(
+                            handle = img_handle,
+                            width,
+                            height,
+                            "requesting higher-resolution cover art variant"
+                        );
+                        let descriptor_xml = build_image_descriptor_xml(width, height);
+                        match get_image_with_descriptor_on(
+                            client,
+                            image_type,
+                            img_handle,
+                            Some(&descriptor_xml),
+                        )
+                        .await
+                        {
+                            Ok(body) => return Ok(body),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e.summary(),
+                                    handle = img_handle,
+                                    "higher-resolution variant GET rejected; falling back to native"
+                                );
+                                if e.is_transport_fault() {
+                                    self.release();
+                                    return Err(e);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e.summary(),
+                        handle = img_handle,
+                        "BIP image properties query failed; falling back to native format"
+                    );
+                    if e.is_transport_fault() {
+                        self.release();
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
         match get_image_on(client, image_type, img_handle).await {
             Ok(body) => Ok(body),
             Err(e) => {
