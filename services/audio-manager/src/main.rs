@@ -341,15 +341,16 @@ async fn run_alsa_mode(config: Config) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Initialize tracing first so the panic hook below can emit events.
+    // `init_daemon_logging` defaults to `info` when `RUST_LOG` is unset;
+    // a raw `EnvFilter::from_default_env()` yields an empty filter that
+    // silences the daemon entirely under systemd (no `RUST_LOG` set).
+    speaker_common::logging::init_daemon_logging();
+
     // Install panic hook to log panics with tracing
     std::panic::set_hook(Box::new(|info| {
         error!(panic = %info, "Panic occurred");
     }));
-
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
 
     let config = Config::load()?;
     info!(?config, "Starting audio-manager");
