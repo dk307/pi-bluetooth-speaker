@@ -1192,13 +1192,13 @@ fn playback_state_and_duration_formatting() {
     assert!((state.progress_ratio() - (125.0 / 415.0)).abs() < 1e-4);
 
     // AVRCP absolute volume → percentage conversion (0-127 → 0-100, rounded)
-    state.phone_volume = Some(0);
+    state.phone_volume = speaker_bluetooth::AvrcpVolume::new(0);
     assert_eq!(state.phone_volume_percent(), Some(0));
-    state.phone_volume = Some(127);
+    state.phone_volume = speaker_bluetooth::AvrcpVolume::new(127);
     assert_eq!(state.phone_volume_percent(), Some(100));
-    state.phone_volume = Some(64);
+    state.phone_volume = speaker_bluetooth::AvrcpVolume::new(64);
     assert_eq!(state.phone_volume_percent(), Some(50));
-    state.phone_volume = Some(80);
+    state.phone_volume = speaker_bluetooth::AvrcpVolume::new(80);
     assert_eq!(state.phone_volume_percent(), Some(63));
 
     state.status = "Playing".into();
@@ -1467,7 +1467,7 @@ fn parse_bluez_all_with_media_player() {
         Some("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0")
     );
     // MediaPlayer1.Volume (AVRCP absolute volume) parsed and converted
-    assert_eq!(pb.phone_volume, Some(96));
+    assert_eq!(pb.phone_volume, speaker_bluetooth::AvrcpVolume::new(96));
     assert_eq!(pb.phone_volume_percent(), Some(76));
 }
 

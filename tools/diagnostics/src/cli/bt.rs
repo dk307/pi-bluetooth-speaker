@@ -353,7 +353,10 @@ pub fn print_human_audio_pipeline(status: &BluetoothStatus, opts: &CliOptions) {
             p.format_position()
         );
         if let (Some(vol), Some(pct)) = (p.phone_volume, p.phone_volume_percent()) {
-            println!("  ↳ Phone Volume    : {pct}% (AVRCP absolute: {vol})");
+            println!(
+                "  ↳ Phone Volume    : {pct}% (AVRCP absolute: {})",
+                vol.get()
+            );
         }
         if let Some(ref path) = p.cover_art_path {
             println!("  ↳ BIP Cover Art   : {path}");

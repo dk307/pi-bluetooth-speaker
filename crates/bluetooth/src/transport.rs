@@ -124,11 +124,41 @@ pub struct BtPlaybackState {
     /// Local cache path to downloaded cover art image (e.g. `/var/cache/speaker-covers/...jpg`).
     pub cover_art_path: Option<Box<str>>,
     /// Phone/remote device volume (AVRCP absolute volume, 0-127), if reported by `MediaPlayer1`.
-    pub phone_volume: Option<u16>,
+    pub phone_volume: Option<AvrcpVolume>,
 }
 
 /// Maximum AVRCP absolute volume value (0-127 per `BlueZ` `MediaPlayer1.Volume` spec).
 pub const AVRCP_MAX_VOLUME: u16 = 127;
+
+/// AVRCP absolute volume (0-127) with validated construction.
+///
+/// `BlueZ` `MediaPlayer1.Volume` is a uint16 in the range 0-127 representing
+/// the remote device's volume level. This newtype enforces the invariant at
+/// construction time, preventing invalid values from propagating through the
+/// system (M-STRONG-TYPES-GUARD).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvrcpVolume(u16);
+
+impl AvrcpVolume {
+    /// Creates a new `AvrcpVolume` from a raw value, returning `None` if out of range.
+    #[must_use]
+    pub fn new(v: u16) -> Option<Self> {
+        (v <= AVRCP_MAX_VOLUME).then_some(Self(v))
+    }
+
+    /// Returns the raw volume value (0-127).
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+
+    /// Converts to percentage (0-100), rounded.
+    #[must_use]
+    pub fn to_percent(self) -> u8 {
+        ((u32::from(self.0) * 100 + u32::from(AVRCP_MAX_VOLUME) / 2) / u32::from(AVRCP_MAX_VOLUME))
+            as u8
+    }
+}
 
 /// Placeholder title shown whenever no Bluetooth media player is connected.
 /// Single source of truth shared by the transport default state and the D-Bus
@@ -183,38 +213,25 @@ impl BtPlaybackState {
     /// Converts the AVRCP absolute volume (0-127) to a percentage (0-100),
     /// rounded. `None` when no phone volume is reported.
     ///
-    /// # Panics
-    ///
-    /// Panics in debug builds if `phone_volume` exceeds `AVRCP_MAX_VOLUME` (127),
-    /// indicating a violated domain invariant. Release builds clamp via `min(100)`.
-    ///
     /// # Examples
     ///
     /// ```
-    /// use speaker_bluetooth::BtPlaybackState;
+    /// use speaker_bluetooth::{BtPlaybackState, AvrcpVolume};
     /// let mut s = BtPlaybackState::default();
-    /// s.phone_volume = Some(0);
+    /// s.phone_volume = AvrcpVolume::new(0);
     /// assert_eq!(s.phone_volume_percent(), Some(0));
-    /// s.phone_volume = Some(64);
+    /// s.phone_volume = AvrcpVolume::new(64);
     /// assert_eq!(s.phone_volume_percent(), Some(50));
-    /// s.phone_volume = Some(80);
+    /// s.phone_volume = AvrcpVolume::new(80);
     /// assert_eq!(s.phone_volume_percent(), Some(63));
-    /// s.phone_volume = Some(127);
+    /// s.phone_volume = AvrcpVolume::new(127);
     /// assert_eq!(s.phone_volume_percent(), Some(100));
     /// s.phone_volume = None;
     /// assert_eq!(s.phone_volume_percent(), None);
     /// ```
     #[must_use]
     pub fn phone_volume_percent(&self) -> Option<u8> {
-        self.phone_volume.map(|v| {
-            debug_assert!(
-                v <= AVRCP_MAX_VOLUME,
-                "AVRCP absolute volume {v} exceeds max {AVRCP_MAX_VOLUME}"
-            );
-            let pct = (u32::from(v) * 100 + u32::from(AVRCP_MAX_VOLUME) / 2)
-                / u32::from(AVRCP_MAX_VOLUME);
-            pct.min(100) as u8
-        })
+        self.phone_volume.map(AvrcpVolume::to_percent)
     }
 }
 
