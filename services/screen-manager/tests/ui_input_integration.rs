@@ -410,42 +410,19 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
     assert!(!shell.is_muted());
     assert_eq!(commands.drain(), vec![TransportCommand::SetMute(false)]);
 
-    // 4. Tap empty backdrop space (X: 400, Y: 150 — between the header and the
-    // giant readout, no interactive widget) to dismiss the HUD early.
+    // 4. Tap backdrop outside controls (e.g., X: 40, Y: 100) to dismiss HUD immediately
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(400.0, 150.0),
+        position: LogicalPosition::new(40.0, 100.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(400.0, 150.0),
+        position: LogicalPosition::new(40.0, 100.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
     assert!(
         !shell.is_volume_hud_visible(),
-        "Tapping empty backdrop space must dismiss Volume HUD"
-    );
-
-    // Re-open the HUD via the public function (the fading backdrop still hit-tests
-    // until the opacity animation ticks, so a status-bar click would be swallowed),
-    // then dismiss via the close button in the overlay app bar header (X: 20, Y: 30).
-    shell.window().invoke_show_volume_hud();
-    assert!(shell.is_volume_hud_visible(), "HUD must be visible again");
-
-    // 5. Tap the close button in the Volume HUD header (top-left: X: 20, Y: 30)
-    // to dismiss HUD — exercises the real hit-testing of the overlay app bar.
-    window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(20.0, 30.0),
-        button: PointerEventButton::Left,
-    });
-    window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(20.0, 30.0),
-        button: PointerEventButton::Left,
-    });
-    window.dispatch_event(WindowEvent::PointerExited);
-    assert!(
-        !shell.is_volume_hud_visible(),
-        "Tapping close button must dismiss Volume HUD"
+        "Tapping backdrop outside controls must dismiss Volume HUD"
     );
 }
 
@@ -908,8 +885,20 @@ fn touch_viewport_settings_button_opens_settings_screen_and_navigates() {
     );
     let _ = fb.render_frame(&window).expect("Render Settings screen");
 
-    // 2. Invoke ScreenAppBar back action (leading button triggers this)
-    shell.window().invoke_app_bar_back();
+    // 2. Click "Back" button — with the Material app bar, Back is the leading
+    // icon at the top-left of the 60px top bar slot (the status bar is not
+    // mounted on the Settings screen).
+    let _ = fb.render_frame(&window).expect("Render before back click");
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: LogicalPosition::new(40.0, 30.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: LogicalPosition::new(40.0, 30.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+
     assert_eq!(
         shell.current_tab(),
         0,

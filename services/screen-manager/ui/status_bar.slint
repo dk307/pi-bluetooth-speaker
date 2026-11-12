@@ -1,6 +1,25 @@
 import { MaterialPalette } from "@material/material.slint";
 import { MaterialStyleMetrics } from "@material/material.slint";
 
+// Single source of truth for codec specification display: codecs with fixed
+// bitrate/specifications per Bluetooth SIG & Qualcomm specs — Qualcomm aptX HD
+// (fixed 24-bit 48kHz 576kbps), aptX (fixed 16-bit 44.1kHz 352kbps), aptX LL.
+// For variable/scalable codecs (LDAC, aptX Adaptive, LHDC, SSC, SBC, AAC, LC3),
+// specs vary and are shown.
+export global CodecSpecs {
+    public pure function is-fixed-spec(codec: string) -> bool {
+        return codec == "aptX-HD" ||
+               codec == "aptX HD" ||
+               codec == "aptXHD" ||
+               codec == "aptx-hd" ||
+               codec == "aptX" ||
+               codec == "aptx" ||
+               codec == "aptX-LL" ||
+               codec == "aptX LL" ||
+               codec == "aptx-ll";
+    }
+}
+
 export component TopStatusBar inherits Rectangle {
     height: 60px;
     background: MaterialPalette.background;
@@ -13,23 +32,8 @@ export component TopStatusBar inherits Rectangle {
     in property <float> volume_value: 75.0;
     in property <bool> is_muted: false;
 
-    // Codecs with fixed bitrate/specifications per Bluetooth SIG & Qualcomm specs:
-    // Qualcomm aptX HD (fixed 24-bit 48kHz 576kbps), aptX (fixed 16-bit 44.1kHz 352kbps), aptX LL.
-    // For variable/scalable codecs (LDAC, aptX Adaptive, LHDC, SSC, SBC, AAC, LC3), specs vary and are shown.
-    property <bool> is_fixed_spec_codec: (
-        root.stream_codec == "aptX-HD" ||
-        root.stream_codec == "aptX HD" ||
-        root.stream_codec == "aptXHD" ||
-        root.stream_codec == "aptx-hd" ||
-        root.stream_codec == "aptX" ||
-        root.stream_codec == "aptx" ||
-        root.stream_codec == "aptX-LL" ||
-        root.stream_codec == "aptX LL" ||
-        root.stream_codec == "aptx-ll"
-    );
-
     // Display stream specs (sample rate & bit depth) only for codecs where specifications can vary
-    in property <bool> show_stream_specs: !root.is_fixed_spec_codec;
+    in property <bool> show_stream_specs: !CodecSpecs.is-fixed-spec(root.stream_codec);
 
     // Dynamic volume icon level (volume-0 … volume-4; 0 lowest, 4 highest)
     property <int> vol_level: volume_value <= 0.0 ? 0 :

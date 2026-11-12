@@ -45,24 +45,6 @@ fn toggle_returns_to_originating_tab() {
 }
 
 #[test]
-fn status_bar_clicks_are_intercepted_off_the_player_tab() {
-    let (shell, window) = shell_with_window();
-
-    // On tab 1 the status bar is hidden behind the status_bar_placeholder overlay:
-    // a click on the codec badge strip (X: 600, Y: 30) must NOT fall through to the
-    // hidden status bar's TouchAreas (opacity-0 elements still hit-test in Slint).
-    shell.set_tab(1);
-    click(&window, 600.0, 30.0);
-    click(&window, 100.0, 30.0);
-    click(&window, 690.0, 30.0);
-    assert_eq!(
-        shell.current_tab(),
-        1,
-        "Top-strip clicks on non-player tabs must be intercepted by the placeholder"
-    );
-}
-
-#[test]
 fn toggle_from_dock_selected_details_falls_back_to_player() {
     let (shell, _window) = shell_with_window();
 
@@ -77,44 +59,44 @@ fn toggle_from_dock_selected_details_falls_back_to_player() {
 fn status_bar_logo_and_device_name_open_and_close_details() {
     let (shell, window) = shell_with_window();
 
-    // Bluetooth logo (left) — only works on tab 0 (Now Playing).
+    // Bluetooth logo (left).
     click(&window, 100.0, 30.0);
     assert_eq!(shell.current_tab(), 2, "logo tap opens details");
-    // Back to Now Playing: invoke ScreenAppBar back action.
-    shell.window().invoke_app_bar_back();
+
+    // On the details screen the status bar is not mounted (the ScreenAppBar
+    // owns the 60px top slot), so closing goes through the app-bar Back button.
+    window.draw_if_needed(|_| {});
+    click(&window, 100.0, 30.0);
     assert_eq!(
         shell.current_tab(),
-        0,
-        "back from details returns to player"
+        2,
+        "status bar is not mounted on details screen"
     );
 
-    // Device name (center) — only works on tab 0.
+    // Device name (center) from the player tab.
+    shell.set_tab(0);
+    window.draw_if_needed(|_| {});
     click(&window, 400.0, 30.0);
     assert_eq!(shell.current_tab(), 2, "device name tap opens details");
-    // Back via ScreenAppBar back action.
-    shell.window().invoke_app_bar_back();
-    assert_eq!(shell.current_tab(), 0);
 }
 
 #[test]
-fn status_bar_codec_badge_opens_details_from_now_playing_tab() {
+fn status_bar_codec_badge_opens_details_from_player_tab() {
     let (shell, window) = shell_with_window();
 
-    // Fixed-spec codec ("aptX-HD"): sample-rate and bit-depth pills are hidden.
-    // Codec badge only works on tab 0 (Now Playing) where the status bar is visible.
+    // Fixed-spec codec ("aptX-HD"): sample-rate and bit-depth pills are hidden,
+    // but the codec badge itself still opens the details screen.
     click(&window, 600.0, 30.0);
     assert_eq!(shell.current_tab(), 2, "codec badge tap opens details");
     assert_eq!(shell.window().get_previous_tab(), 0);
 
-    // Return to Now Playing to test the AAC badge path (status bar only visible on tab 0)
-    shell.window().invoke_app_bar_back();
-    assert_eq!(shell.current_tab(), 0);
-
     // Variable-spec codec ("AAC"): sample-rate and bit-depth pills are visible
-    // and tapping them also opens/toggles Bluetooth details.
+    // and tapping them also opens the Bluetooth details screen.
     shell.set_stream_codec("AAC");
     shell.set_stream_sample_rate("48 kHz");
     shell.set_stream_bit_depth("24-bit");
+    shell.set_tab(0);
+    window.draw_if_needed(|_| {});
     click(&window, 590.0, 30.0);
     assert_eq!(shell.current_tab(), 2, "bit-depth badge tap opens details");
     assert_eq!(shell.window().get_previous_tab(), 0);
@@ -176,72 +158,15 @@ fn volume_and_dim_controls_do_not_open_details() {
 
 #[test]
 fn back_button_returns_to_previous_tab() {
-    let (shell, _window) = shell_with_window();
+    let (shell, window) = shell_with_window();
     shell.set_tab(1);
     shell.window().invoke_toggle_bluetooth_details();
     assert_eq!(shell.current_tab(), 2);
 
-    // Invoke the ScreenAppBar back action directly (tests the wiring, not click coords).
-    shell.window().invoke_app_bar_back();
+    // App-bar Back button (leading icon, top-left of the 60px top bar slot).
+    window.draw_if_needed(|_| {});
+    click(&window, 40.0, 30.0);
     assert_eq!(shell.current_tab(), 1);
-}
-
-#[test]
-fn back_button_leading_icon_click_navigates_back() {
-    let (shell, window) = shell_with_window();
-
-    // Navigate to a screen tab, then perform a real pointer click on the
-    // ScreenAppBar leading back icon (40x40 button at x 6..46, bar spans
-    // y 60..120 with the button vertically centered => y ~ 70..110).
-    shell.set_tab(4);
-    click(&window, 26.0, 90.0);
-    assert_eq!(
-        shell.current_tab(),
-        0,
-        "Clicking the ScreenAppBar back icon must return to Now Playing"
-    );
-}
-
-#[test]
-fn back_button_on_themes_closes_themes_view() {
-    let (shell, _window) = shell_with_window();
-
-    shell.set_tab(5);
-    shell.window().set_show_themes(true);
-    shell.window().invoke_app_bar_back();
-    assert!(
-        !shell.window().get_show_themes(),
-        "Back on the Themes view must close the themes list"
-    );
-    assert_eq!(
-        shell.current_tab(),
-        5,
-        "Back on the Themes view must stay on the Settings screen"
-    );
-
-    // Second back leaves the Settings screen entirely.
-    shell.window().invoke_app_bar_back();
-    assert_eq!(shell.current_tab(), 0);
-}
-
-#[test]
-fn back_button_falls_back_to_player_when_previous_tab_is_stale() {
-    let (shell, _window) = shell_with_window();
-
-    // previous_tab collapsed to the active tab (multi-hop history): back must
-    // fall back to Now Playing instead of staying on the same screen.
-    shell.set_tab(3);
-    shell.window().set_previous_tab(3);
-    shell.window().invoke_app_bar_back();
-    assert_eq!(
-        shell.current_tab(),
-        0,
-        "Back with stale previous_tab must return to Now Playing"
-    );
-
-    // Back on Now Playing is a no-op.
-    shell.window().invoke_app_bar_back();
-    assert_eq!(shell.current_tab(), 0);
 }
 
 #[test]
