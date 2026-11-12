@@ -1808,12 +1808,12 @@ fn bt_info_phone_volume_output_and_json() {
     use std::process::ExitCode;
 
     use speaker_bluetooth::{
-        AvrcpVolume, BluetoothDevice, BluetoothHardwareInfo, BluetoothServices,
-        BluetoothStatus, BtAddress, BtPlaybackState,
+        AvrcpVolume, BluetoothDevice, BluetoothHardwareInfo, BluetoothServices, BluetoothStatus,
+        BtAddress, BtPlaybackState,
     };
+    use speaker_common::diag::{OutputFormat, format_timestamp};
     use speaker_common::systemd::ServiceState;
-    use speaker_common::diag::{format_timestamp, OutputFormat};
-    use speaker_diagnostics::cli::bt::{run_app, CliOptions};
+    use speaker_diagnostics::cli::bt::{CliOptions, run_app};
 
     // Test human output with phone volume
     let (device, mock) = BluetoothDevice::new_mocked();
@@ -1885,5 +1885,9 @@ fn bt_info_phone_volume_output_and_json() {
         }),
     };
     let timestamp = format_timestamp();
-    speaker_diagnostics::cli::bt::output_json_status(&timestamp, &pcm_status, &CliOptions::default());
+    speaker_diagnostics::cli::bt::output_json_status(
+        &timestamp,
+        &pcm_status,
+        &CliOptions::default(),
+    );
 }

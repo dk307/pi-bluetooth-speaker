@@ -13,9 +13,9 @@ use speaker_bluetooth::{
     BtError,
 };
 use speaker_common::diag::{
-    env_args, exit_code_for_reads, format_timestamp, next_arg_value, parse_args_with_common,
-    resolve_cli_opts, run_poll_loop, should_print_summary, CliParse, CommonCliOptions,
-    NumericStats, OutputFormat,
+    CliParse, CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads,
+    format_timestamp, next_arg_value, parse_args_with_common, resolve_cli_opts, run_poll_loop,
+    should_print_summary,
 };
 
 /// Default polling interval between status checks (1.0 second).
