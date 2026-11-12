@@ -1061,6 +1061,14 @@ impl DspDevice {
     async fn query_state(host: DspHost, port: DspPort) -> Result<ProcessingState, DspError> {
         let mut ws = Self::connect_ws(&host, port).await?;
         let val = Self::send_command(&mut ws, "GetState").await?;
+        // Close with a proper WebSocket closing handshake: this poll runs at
+        // 2-4 Hz for the lifecycle watcher, and dropping the stream without a
+        // close frame makes the CamillaDSP socket server log a
+        // "Lost connection: Connection reset without closing handshake"
+        // warning per poll, flooding `/var/log/camilladsp/camilladsp.log`.
+        // Bound the handshake wait so an unresponsive server can never hang
+        // the lifecycle watcher's poll loop.
+        let _ = tokio::time::timeout(Duration::from_millis(500), ws.close(None)).await;
         let s = val
             .as_str()
             .ok_or_else(|| DspError::protocol_error("invalid GetState string response"))?;
