@@ -31,6 +31,7 @@ async fn sync_volume(
     bt: &BluetoothDevice,
     conn: &Connection,
     last_pcm_vol: &mut Option<u8>,
+    expect_am: &mut Option<u8>,
 ) -> Result<(), BtError> {
     // Read BlueALSA PCM volume (mirrors BlueZ transport volume)
     let pcm_vol = match bt.audio_pcms_async().await {
@@ -72,6 +73,9 @@ async fn sync_volume(
             "Volume sync: BlueALSA PCM -> audio-manager"
         );
         *last_pcm_vol = Some(pcm_vol);
+        // The resulting audio-manager `PropertiesChanged(Level)` is our own
+        // echo; the reverse arm must skip exactly this one signal.
+        *expect_am = Some(pcm_vol);
     } else {
         // No active PCM
         tracing::debug!("No active PCM for volume sync");
@@ -492,8 +496,9 @@ async fn sync_volume_logged(
     bt: &BluetoothDevice,
     conn: &Connection,
     last_pcm_vol: &mut Option<u8>,
+    expect_am: &mut Option<u8>,
 ) {
-    if let Err(e) = sync_volume(bt, conn, last_pcm_vol).await {
+    if let Err(e) = sync_volume(bt, conn, last_pcm_vol, expect_am).await {
         tracing::debug!(error = %e, "Volume sync failed");
     }
 }
@@ -522,6 +527,7 @@ pub fn volume_bytes_from_value(value: &zbus::zvariant::Value<'_>) -> Option<Vec<
 async fn apply_pcm_volume(
     conn: &Connection,
     last_pcm_vol: &mut Option<u8>,
+    expect_am: &mut Option<u8>,
     pcm_vol: u8,
 ) -> Result<(), BtError> {
     if *last_pcm_vol == Some(pcm_vol) {
@@ -546,6 +552,9 @@ async fn apply_pcm_volume(
         "Volume sync: BlueALSA PCM -> audio-manager"
     );
     *last_pcm_vol = Some(pcm_vol);
+    // The resulting audio-manager `PropertiesChanged(Level)` is our own
+    // echo; the reverse arm must skip exactly this one signal.
+    *expect_am = Some(pcm_vol);
     Ok(())
 }
 
@@ -577,6 +586,12 @@ async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
     // forward arm's SetLevel, both of which converge without a third write).
     let mut last_pushed_level: Option<u8> = None;
     let mut last_pushed_muted: Option<bool> = None;
+    // Echo suppression: the BlueALSA PCM level this task just applied to
+    // audio-manager. The audio-manager `PropertiesChanged(Level)` that
+    // follows is our own write bouncing back, not a speaker-side change —
+    // the reverse arm must skip exactly that one signal, otherwise the two
+    // sync directions fight each other with stale out-of-order pushes.
+    let mut expect_am: Option<u8> = None;
 
     let props_rule = match MatchRule::builder()
         .sender("org.bluealsa")
@@ -656,7 +671,7 @@ async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
             };
 
         // One-shot catch-up: apply the current volume on startup/reconnect.
-        sync_volume_logged(&bt, &conn, &mut last_pcm_vol).await;
+        sync_volume_logged(&bt, &conn, &mut last_pcm_vol, &mut expect_am).await;
 
         // Reverse-direction catch-up: the amp level may have changed (amp-cli,
         // thermal offset) while this task was down; seed the dedup cache from
@@ -730,7 +745,7 @@ async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
                             tracing::debug!("Volume property present but unparseable");
                             continue;
                         };
-                        if let Err(e) = apply_pcm_volume(&conn, &mut last_pcm_vol, pcm_vol).await {
+                        if let Err(e) = apply_pcm_volume(&conn, &mut last_pcm_vol, &mut expect_am, pcm_vol).await {
                             tracing::debug!(error = %e, "Volume sync failed");
                         }
                     }
@@ -764,24 +779,37 @@ async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
                         ) {
                             continue;
                         }
-                        if let Some(level) = props.get("Level").and_then(|v| v.try_into().ok())
-                            && last_pushed_level != Some(level) {
-                            last_pushed_level = Some(level);
-                            let bt_for_push = bt.clone();
-                            match tokio::task::spawn_blocking(move || bt_for_push.set_volume(level))
+                        if let Some(level) = props.get("Level").and_then(|v| v.try_into().ok()) {
+                            if expect_am == Some(level) {
+                                // Our own forward write bouncing back — skip.
+                                tracing::debug!(level, "Volume sync echo skipped");
+                                expect_am = None;
+                                continue;
+                            }
+                            expect_am = None;
+                            if last_pushed_level != Some(level) {
+                                last_pushed_level = Some(level);
+                                let bt_for_push = bt.clone();
+                                match tokio::task::spawn_blocking(move || {
+                                    bt_for_push.set_volume(level)
+                                })
                                 .await
-                            {
-                                Ok(Ok(())) => {
-                                    tracing::info!(
-                                        level,
-                                        "Volume sync: audio-manager -> BlueALSA"
-                                    );
-                                }
-                                Ok(Err(e)) => {
-                                    tracing::debug!(error = %e, "Reverse volume sync failed");
-                                }
-                                Err(e) => {
-                                    tracing::debug!(error = %e, "Reverse volume sync task panicked");
+                                {
+                                    Ok(Ok(())) => {
+                                        tracing::info!(
+                                            level,
+                                            "Volume sync: audio-manager -> BlueALSA"
+                                        );
+                                    }
+                                    Ok(Err(e)) => {
+                                        tracing::debug!(error = %e, "Reverse volume sync failed");
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            error = %e,
+                                            "Reverse volume sync task panicked"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -819,7 +847,7 @@ async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
                         // catch-up read so the amp matches the phone volume.
                         let path = signal.header().path().map(std::string::ToString::to_string);
                         if path.as_deref().is_some_and(|p| p.contains("a2dpsnk")) {
-                            sync_volume_logged(&bt, &conn, &mut last_pcm_vol).await;
+                            sync_volume_logged(&bt, &conn, &mut last_pcm_vol, &mut expect_am).await;
                         }
                     }
                     Some(Err(e)) => {
