@@ -1,21 +1,56 @@
 // Copyright © 2024
 // SPDX-License-Identifier: MIT
 
-import { SmallAppBar } from "@material/material.slint";
+import { IconButton, MaterialPalette, MaterialStyleMetrics } from "@material/material.slint";
 
-export component ScreenAppBar inherits Rectangle {
+// Centered-title app bar with the action icon on the RIGHT edge.
+// Used by the screen bars (tabs 1-5, Back on the right, primary title) and by
+// the Volume HUD overlay header (Close on the right, secondary title).
+component CenteredAppBar inherits Rectangle {
     height: 60px;
     in property <string> title;
-    in property <image> leading_icon;
-    in property <string> leading_tooltip: "Back";
-    callback leading_clicked();
+    in property <color> title_color: MaterialPalette.primary;
+    in property <image> trailing_icon;
+    in property <string> trailing_tooltip: "Back";
+    callback trailing_clicked();
 
-    SmallAppBar {
-        width: 100%;
-        height: 100%;
-        title: root.title;
-        show_background: true;
-        leading_button: { icon: root.leading_icon, tooltip: root.leading_tooltip, enabled: true };
-        leading_button_clicked => { root.leading_clicked(); }
+    background: MaterialPalette.surface_container;
+
+    // Title: absolutely centered in the bar so the trailing icon never skews it.
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        text: root.title;
+        color: root.title_color;
+        font-size: 20px;
+        font-weight: 700;
+        overflow: elide;
+        width: parent.width - 2 * MaterialStyleMetrics.padding_24 - MaterialStyleMetrics.size_40;
     }
+
+    // Trailing action icon (Back / Close), right-most with a 16px margin.
+    Rectangle {
+        x: parent.width - self.width - MaterialStyleMetrics.padding_16;
+        y: (parent.height - self.height) / 2;
+        width: MaterialStyleMetrics.size_40;
+        height: MaterialStyleMetrics.size_40;
+
+        IconButton {
+            width: 100%;
+            height: 100%;
+            icon: root.trailing_icon;
+            tooltip: root.trailing_tooltip;
+            clicked => { root.trailing_clicked(); }
+        }
+    }
+}
+
+export component ScreenAppBar inherits CenteredAppBar {
+    title_color: MaterialPalette.primary;
+    trailing_tooltip: "Back";
+}
+
+export component OverlayAppBar inherits CenteredAppBar {
+    title_color: MaterialPalette.secondary;
+    trailing_tooltip: "Close";
 }

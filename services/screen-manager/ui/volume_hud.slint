@@ -1,4 +1,5 @@
-import { MaterialPalette, SmallAppBar } from "@material/material.slint";
+import { MaterialPalette } from "@material/material.slint";
+import { OverlayAppBar } from "screen_app_bar.slint";
 
 export component VolumeHudOverlay inherits Rectangle {
     width: 100%;
@@ -35,17 +36,17 @@ export component VolumeHudOverlay inherits Rectangle {
 
     // Main content column: header (60px) + body (fills remaining)
     VerticalLayout {
-        // Overlay app bar header (60px) — title "Volume", leading close icon
+        // Overlay app bar header (60px) — title "Volume", close icon on the right
         Rectangle {
             height: 60px;
             width: 100%;
-            SmallAppBar {
+            OverlayAppBar {
                 width: 100%;
                 height: 100%;
                 title: "Volume";
-                show_background: true;
-                leading_button: { icon: @image-url("../../../assets/icons/close.svg"), tooltip: "Close", enabled: true };
-                leading_button_clicked => { root.dismiss_requested(); }
+                trailing_icon: @image-url("../../../assets/icons/close.svg");
+                trailing_tooltip: "Close";
+                trailing_clicked => { root.dismiss_requested(); }
             }
         }
 

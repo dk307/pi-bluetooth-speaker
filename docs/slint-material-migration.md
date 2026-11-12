@@ -1028,3 +1028,18 @@ Plan P5 gated ≥90% lines/functions; workspace is 89.16%/91.67% (repo gate 85% 
 
 ### Verification
 Host framebuffer probes: all 5 presets render distinct primaries on Settings; all Material tabs recolor on preset switch. Device: aarch64 release deployed, `screen-manager` active.
+
+### Known pitfall: stale Slint build cache masks `.slint` edits
+`slint-build` generated code lives under `target/<triple>/release/build/screen-manager-*/out`; incremental
+`cargo build` can ship a binary compiled from the **previous** `.slint` contents when only `.slint` files
+change (observed twice: deployed binaries silently kept the old UI while sources were already updated).
+Before deploying or debugging UI changes, force regeneration:
+
+```bash
+cargo clean -p screen-manager
+cargo build -p screen-manager --target aarch64-unknown-linux-gnu --release
+```
+
+A quick sanity check: run a clean `-p screen-manager` build and compare the binary sha256 against the
+cached one — if the clean rebuild produces a *different* hash, the cache was stale. Also note a failing
+`.slint` compile in a cached build dir only surfaces on `cargo clean`, so always build clean after UI edits.

@@ -192,8 +192,8 @@ export component MainWindow inherits Window {
                            root.active_tab == 3 ? "CD Player" :
                            root.active_tab == 4 ? "DSP & Tone" :
                            root.active_tab == 5 ? (root.show_themes ? "Themes" : "Settings") : "";
-                    leading_icon: @image-url("../../../assets/icons/back.svg");
-                    leading_clicked => { root.app_bar_back(); }
+                    trailing_icon: @image-url("../../../assets/icons/back.svg");
+                    trailing_clicked => { root.app_bar_back(); }
                 }
             }
 

@@ -163,9 +163,10 @@ fn back_button_returns_to_previous_tab() {
     shell.window().invoke_toggle_bluetooth_details();
     assert_eq!(shell.current_tab(), 2);
 
-    // App-bar Back button (leading icon, top-left of the 60px top bar slot).
+    // App-bar Back button (trailing icon, top-right of the 60px top bar slot:
+    // 40px icon at x 744..784 with a 16px right margin → center ≈ (764, 30)).
     window.draw_if_needed(|_| {});
-    click(&window, 40.0, 30.0);
+    click(&window, 764.0, 30.0);
     assert_eq!(shell.current_tab(), 1);
 }
 
