@@ -1,4 +1,5 @@
 import { MaterialPalette } from "@material/material.slint";
+import { OverlayAppBar } from "screen_app_bar.slint";
 
 export component VolumeHudOverlay inherits Rectangle {
     width: 100%;
@@ -33,173 +34,191 @@ export component VolumeHudOverlay inherits Rectangle {
         }
     }
 
+    // Main content column: header (60px) + body (fills remaining)
     VerticalLayout {
-        padding-top: 18px;
-        padding-bottom: 18px;
-        padding-left: 24px;
-        padding-right: 24px;
-        alignment: space-between;
-
-        // 1. Header Label
-        Text {
-            text: root.is_muted ? "VOLUME — MUTED" : "VOLUME";
-            color: root.is_muted ? MaterialPalette.error : MaterialPalette.secondary;
-            font-size: 16px;
-            font-weight: 800;
-            letter-spacing: 2px;
-            horizontal-alignment: center;
-        }
-
-        // 2. Giant Center Volume Readout (as big as possible in center)
+        // Overlay app bar header (60px) — title "Volume", close icon on the right
         Rectangle {
-            height: 148px;
-            background: transparent;
-
-            Text {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                text: root.is_muted ? "MUTE" : (Math.round(root.clamped_ratio * 100.0) + "%");
-                color: root.is_muted ? MaterialPalette.error : MaterialPalette.on_surface;
-                font-size: 128px;
-                font-weight: 800;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            height: 60px;
+            width: 100%;
+            OverlayAppBar {
+                width: 100%;
+                height: 100%;
+                title: "Volume";
+                trailing_icon: @image-url("../../../assets/icons/close.svg");
+                trailing_tooltip: "Close";
+                trailing_clicked => { root.dismiss_requested(); }
             }
         }
 
-        // 3. Interactive Horizontal Slider with Big Circular Thumb
-        Rectangle {
-            height: root.slider_touch_height;
-            background: transparent;
+        // Body content (fills remaining space)
+        VerticalLayout {
+            padding-top: 18px;
+            padding-bottom: 18px;
+            padding-left: 24px;
+            padding-right: 24px;
+            alignment: space-between;
 
-            slider_box := Rectangle {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: root.slider_width;
+            // 1. Header Label
+            Text {
+                text: root.is_muted ? "VOLUME — MUTED" : "VOLUME";
+                color: root.is_muted ? MaterialPalette.error : MaterialPalette.secondary;
+                font-size: 16px;
+                font-weight: 800;
+                letter-spacing: 2px;
+                horizontal-alignment: center;
+            }
+
+            // 2. Giant Center Volume Readout (as big as possible in center)
+            Rectangle {
+                height: 148px;
+                background: transparent;
+
+                Text {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    text: root.is_muted ? "MUTE" : (Math.round(root.clamped_ratio * 100.0) + "%");
+                    color: root.is_muted ? MaterialPalette.error : MaterialPalette.on_surface;
+                    font-size: 128px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            // 3. Interactive Horizontal Slider with Big Circular Thumb
+            Rectangle {
                 height: root.slider_touch_height;
                 background: transparent;
 
-                function update_from_touch(mx: length) {
-                    let eff_x = Math.max(0px, Math.min(track_bar.width, mx - track_bar.x));
-                    let pct = Math.round((eff_x / track_bar.width) * 100.0);
-                    root.volume_value = pct;
-                    root.interaction_activity();
-                    root.volume_changed(pct);
-                }
-
-                // Horizontal pill track inset by half the thumb diameter so the big circle
-                // never clips at 0% or 100%.
-                track_bar := Rectangle {
-                    x: root.thumb_diameter / 2;
+                slider_box := Rectangle {
+                    x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
-                    width: parent.width - root.thumb_diameter;
-                    height: root.track_height;
-                    border-radius: self.height / 2;
-                    background: MaterialPalette.surface_container_highest;
-                    border-width: 1px;
-                    border-color: MaterialPalette.outline_variant;
-                    clip: true;
+                    width: root.slider_width;
+                    height: root.slider_touch_height;
+                    background: transparent;
 
-                    // Active fill bar
-                    Rectangle {
-                        x: 0px;
-                        y: 0px;
-                        width: parent.width * root.clamped_ratio;
-                        height: parent.height;
-                        border-radius: self.height / 2;
-                        background: root.is_muted ? MaterialPalette.on_surface_variant : MaterialPalette.primary;
+                    function update_from_touch(mx: length) {
+                        let eff_x = Math.max(0px, Math.min(track_bar.width, mx - track_bar.x));
+                        let pct = Math.round((eff_x / track_bar.width) * 100.0);
+                        root.volume_value = pct;
+                        root.interaction_activity();
+                        root.volume_changed(pct);
                     }
-                }
 
-                // Big circular thumb handle
-                thumb_circle := Rectangle {
-                    width: root.thumb_diameter;
-                    height: root.thumb_diameter;
-                    border-radius: self.height / 2;
-                    x: track_bar.x + (track_bar.width * root.clamped_ratio) - (self.width / 2);
-                    y: (parent.height - self.height) / 2;
-                    background: root.is_muted ? MaterialPalette.surface : MaterialPalette.primary;
-                    border-width: 4px;
-                    border-color: MaterialPalette.on_surface;
-
-                    // High-contrast center dot inside the big circle
-                    Rectangle {
-                        width: 14px;
-                        height: 14px;
-                        border-radius: self.height / 2;
-                        x: (parent.width - self.width) / 2;
+                    // Horizontal pill track inset by half the thumb diameter so the big circle
+                    // never clips at 0% or 100%.
+                    track_bar := Rectangle {
+                        x: root.thumb_diameter / 2;
                         y: (parent.height - self.height) / 2;
-                        background: MaterialPalette.on_surface;
-                    }
-                }
+                        width: parent.width - root.thumb_diameter;
+                        height: root.track_height;
+                        border-radius: self.height / 2;
+                        background: MaterialPalette.surface_container_highest;
+                        border-width: 1px;
+                        border-color: MaterialPalette.outline_variant;
+                        clip: true;
 
-                slider_touch := TouchArea {
-                    width: 100%;
-                    height: 100%;
-                    pointer-event(event) => {
-                        if (event.kind == PointerEventKind.down) {
-                            slider_box.update_from_touch(self.mouse-x);
+                        // Active fill bar
+                        Rectangle {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width * root.clamped_ratio;
+                            height: parent.height;
+                            border-radius: self.height / 2;
+                            background: root.is_muted ? MaterialPalette.on_surface_variant : MaterialPalette.primary;
                         }
                     }
-                    moved => {
-                        if (self.pressed) {
-                            slider_box.update_from_touch(self.mouse-x);
+
+                    // Big circular thumb handle
+                    thumb_circle := Rectangle {
+                        width: root.thumb_diameter;
+                        height: root.thumb_diameter;
+                        border-radius: self.height / 2;
+                        x: track_bar.x + (track_bar.width * root.clamped_ratio) - (self.width / 2);
+                        y: (parent.height - self.height) / 2;
+                        background: root.is_muted ? MaterialPalette.surface : MaterialPalette.primary;
+                        border-width: 4px;
+                        border-color: MaterialPalette.on_surface;
+
+                        // High-contrast center dot inside the big circle
+                        Rectangle {
+                            width: 14px;
+                            height: 14px;
+                            border-radius: self.height / 2;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            background: MaterialPalette.on_surface;
+                        }
+                    }
+
+                    slider_touch := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down) {
+                                slider_box.update_from_touch(self.mouse-x);
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                slider_box.update_from_touch(self.mouse-x);
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // 4. Dedicated Mute / Unmute Button Row
-        Rectangle {
-            height: 48px;
-            background: transparent;
-
-            mute_btn := Rectangle {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: 220px;
+            // 4. Dedicated Mute / Unmute Button Row
+            Rectangle {
                 height: 48px;
-                border-radius: self.height / 2;
-                background: root.is_muted ? MaterialPalette.error : MaterialPalette.surface;
-                border-width: 2px;
-                border-color: root.is_muted ? MaterialPalette.error : MaterialPalette.primary;
-                opacity: mute_touch.pressed ? 0.75 : 1.0;
+                background: transparent;
 
-                VerticalLayout {
-                    alignment: center;
+                mute_btn := Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 220px;
+                    height: 48px;
+                    border-radius: self.height / 2;
+                    background: root.is_muted ? MaterialPalette.error : MaterialPalette.surface;
+                    border-width: 2px;
+                    border-color: root.is_muted ? MaterialPalette.error : MaterialPalette.primary;
+                    opacity: mute_touch.pressed ? 0.75 : 1.0;
 
-                    HorizontalLayout {
+                    VerticalLayout {
                         alignment: center;
-                        spacing: 12px;
 
-                        Image {
-                            source: root.is_muted
-                                ? @image-url("../../../assets/icons/volume-mute.svg")
-                                : @image-url("../../../assets/icons/volume-3.svg");
-                            colorize: root.is_muted ? MaterialPalette.on_error : MaterialPalette.primary;
-                            width: 24px;
-                            height: 24px;
-                            image-fit: contain;
-                        }
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 12px;
 
-                        Text {
-                            text: root.is_muted ? "UNMUTE" : "MUTE";
-                            color: root.is_muted ? MaterialPalette.on_error : MaterialPalette.on_surface;
-                            font-size: 16px;
-                            font-weight: 800;
-                            letter-spacing: 1px;
-                            vertical-alignment: center;
+                            Image {
+                                source: root.is_muted
+                                    ? @image-url("../../../assets/icons/volume-mute.svg")
+                                    : @image-url("../../../assets/icons/volume-3.svg");
+                                colorize: root.is_muted ? MaterialPalette.on_error : MaterialPalette.primary;
+                                width: 24px;
+                                height: 24px;
+                                image-fit: contain;
+                            }
+
+                            Text {
+                                text: root.is_muted ? "UNMUTE" : "MUTE";
+                                color: root.is_muted ? MaterialPalette.on_error : MaterialPalette.on_surface;
+                                font-size: 16px;
+                                font-weight: 800;
+                                letter-spacing: 1px;
+                                vertical-alignment: center;
+                            }
                         }
                     }
-                }
 
-                mute_touch := TouchArea {
-                    width: 100%;
-                    height: 100%;
-                    clicked => {
-                        root.interaction_activity();
-                        root.toggle_mute();
+                    mute_touch := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => {
+                            root.interaction_activity();
+                            root.toggle_mute();
+                        }
                     }
                 }
             }

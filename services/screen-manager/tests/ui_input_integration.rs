@@ -885,13 +885,17 @@ fn touch_viewport_settings_button_opens_settings_screen_and_navigates() {
     );
     let _ = fb.render_frame(&window).expect("Render Settings screen");
 
-    // 2. Click "Back" button on Settings screen (top-right header, approx X: 733, Y: 92)
+    // 2. Click "Back" button — the screen app bar puts Back on the trailing
+    // (right-most) edge of the 60px top bar slot: 40px icon at x 744..784 with
+    // a 16px right margin → center ≈ (764, 30). The status bar is not mounted
+    // on the Settings screen.
+    let _ = fb.render_frame(&window).expect("Render before back click");
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(733.0, 92.0),
+        position: LogicalPosition::new(764.0, 30.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(733.0, 92.0),
+        position: LogicalPosition::new(764.0, 30.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);

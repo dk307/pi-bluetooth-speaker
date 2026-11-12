@@ -62,33 +62,44 @@ fn status_bar_logo_and_device_name_open_and_close_details() {
     // Bluetooth logo (left).
     click(&window, 100.0, 30.0);
     assert_eq!(shell.current_tab(), 2, "logo tap opens details");
-    click(&window, 100.0, 30.0);
-    assert_eq!(shell.current_tab(), 0, "second tap returns to player");
 
-    // Device name (center).
+    // On the details screen the status bar is not mounted (the ScreenAppBar
+    // owns the 60px top slot), so closing goes through the app-bar Back button.
+    window.draw_if_needed(|_| {});
+    click(&window, 100.0, 30.0);
+    assert_eq!(
+        shell.current_tab(),
+        2,
+        "status bar is not mounted on details screen"
+    );
+
+    // Device name (center) from the player tab.
+    shell.set_tab(0);
+    window.draw_if_needed(|_| {});
     click(&window, 400.0, 30.0);
     assert_eq!(shell.current_tab(), 2, "device name tap opens details");
 }
 
 #[test]
-fn status_bar_codec_badge_opens_details_from_any_tab() {
+fn status_bar_codec_badge_opens_details_from_player_tab() {
     let (shell, window) = shell_with_window();
-    shell.set_tab(4);
 
-    // Fixed-spec codec ("aptX-HD"): sample-rate and bit-depth pills are hidden.
+    // Fixed-spec codec ("aptX-HD"): sample-rate and bit-depth pills are hidden,
+    // but the codec badge itself still opens the details screen.
     click(&window, 600.0, 30.0);
     assert_eq!(shell.current_tab(), 2, "codec badge tap opens details");
-    assert_eq!(shell.window().get_previous_tab(), 4);
+    assert_eq!(shell.window().get_previous_tab(), 0);
 
     // Variable-spec codec ("AAC"): sample-rate and bit-depth pills are visible
-    // and tapping them also opens/toggles Bluetooth details.
+    // and tapping them also opens the Bluetooth details screen.
     shell.set_stream_codec("AAC");
     shell.set_stream_sample_rate("48 kHz");
     shell.set_stream_bit_depth("24-bit");
-    shell.set_tab(1);
+    shell.set_tab(0);
+    window.draw_if_needed(|_| {});
     click(&window, 590.0, 30.0);
     assert_eq!(shell.current_tab(), 2, "bit-depth badge tap opens details");
-    assert_eq!(shell.window().get_previous_tab(), 1);
+    assert_eq!(shell.window().get_previous_tab(), 0);
 }
 
 #[test]
@@ -152,8 +163,10 @@ fn back_button_returns_to_previous_tab() {
     shell.window().invoke_toggle_bluetooth_details();
     assert_eq!(shell.current_tab(), 2);
 
-    // Header Back button: right edge of the viewport header row.
-    click(&window, 731.0, 94.0);
+    // App-bar Back button (trailing icon, top-right of the 60px top bar slot:
+    // 40px icon at x 744..784 with a 16px right margin → center ≈ (764, 30)).
+    window.draw_if_needed(|_| {});
+    click(&window, 764.0, 30.0);
     assert_eq!(shell.current_tab(), 1);
 }
 

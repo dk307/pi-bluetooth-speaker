@@ -2,14 +2,15 @@
 //!
 //! Provides common argument parsers (`--once`, `--repeat`, `--count`,
 //! `--interval`, `--version`), output format selection, UTC wall-clock
-//! timestamp formatting, exit-code evaluation, and scoped temporary
-//! directories shared across the hardware diagnostic utilities.
+//! timestamp formatting, exit-code evaluation, scoped temporary
+//! directories, and private `dbus-daemon` session-bus scaffolding shared
+//! across the hardware diagnostic utilities and integration test suites.
 
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -567,4 +568,51 @@ impl Drop for ScopedTempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+/// RAII guard that kills and reaps a private `dbus-daemon` when dropped.
+///
+/// Exported unconditionally alongside [`ScopedTempDir`] per the repository
+/// `M-TEST-UTIL` convention so integration test suites across crates share a
+/// single private-bus lifecycle guard without requiring feature flags.
+#[derive(Debug)]
+pub struct PrivateBusGuard(Child);
+
+impl Drop for PrivateBusGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Spawns a private session `dbus-daemon` and returns its [`PrivateBusGuard`]
+/// plus the bus address printed on stdout.
+///
+/// This is the single shared scaffolding for hermetic D-Bus integration tests:
+/// each test owns its own bus so no system bus, user session, or hardware is
+/// required.
+///
+/// # Panics
+/// Panics if `dbus-daemon` is not installed on the host or if it fails to print
+/// a non-empty bus address. Integration tests must fail loudly rather than
+/// silently skip, so a missing daemon is an error even off CI.
+#[must_use]
+pub fn spawn_private_bus() -> (PrivateBusGuard, String) {
+    let mut daemon = Command::new("dbus-daemon")
+        .args(["--session", "--nofork", "--print-address=1"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("dbus-daemon must be installed to run D-Bus integration tests");
+    let mut address = String::new();
+    io::BufReader::new(
+        daemon
+            .stdout
+            .take()
+            .expect("dbus-daemon stdout must be piped"),
+    )
+    .read_line(&mut address)
+    .expect("reading the dbus-daemon bus address must succeed");
+    let address = address.trim().to_string();
+    assert!(!address.is_empty(), "dbus-daemon printed no bus address");
+    (PrivateBusGuard(daemon), address)
 }

@@ -1,0 +1,58 @@
+// Copyright © 2024
+// SPDX-License-Identifier: MIT
+
+import { FilledIconButton, MaterialPalette, MaterialStyleMetrics } from "@material/material.slint";
+
+// Centered-title app bar with the action icon on the RIGHT edge.
+// Used by the screen bars (tabs 1-5, Back on the right, primary title) and by
+// the Volume HUD overlay header (Close on the right, secondary title).
+component CenteredAppBar inherits Rectangle {
+    height: 60px;
+    in property <string> title;
+    in property <color> title_color: MaterialPalette.primary;
+    in property <image> trailing_icon;
+    in property <string> trailing_tooltip: "Back";
+    callback trailing_clicked();
+
+    background: MaterialPalette.surface_container;
+
+    // Title: absolutely centered in the bar so the trailing icon never skews it.
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        text: root.title;
+        color: root.title_color;
+        font-size: 24px;
+        font-weight: 700;
+        overflow: elide;
+        horizontal-alignment: center;
+        width: parent.width - 2 * MaterialStyleMetrics.padding_24 - MaterialStyleMetrics.size_48;
+    }
+
+    // Trailing action icon (Back / Close): filled primary circle, right-most
+    // with a 12px margin — bold and prominent against the bar surface.
+    Rectangle {
+        x: parent.width - self.width - 12px;
+        y: (parent.height - self.height) / 2;
+        width: MaterialStyleMetrics.size_48;
+        height: MaterialStyleMetrics.size_48;
+
+        FilledIconButton {
+            width: 100%;
+            height: 100%;
+            icon: root.trailing_icon;
+            tooltip: root.trailing_tooltip;
+            clicked => { root.trailing_clicked(); }
+        }
+    }
+}
+
+export component ScreenAppBar inherits CenteredAppBar {
+    title_color: MaterialPalette.primary;
+    trailing_tooltip: "Back";
+}
+
+export component OverlayAppBar inherits CenteredAppBar {
+    title_color: MaterialPalette.secondary;
+    trailing_tooltip: "Close";
+}
