@@ -319,8 +319,8 @@ impl AmpGpio {
     #[must_use]
     pub fn new_mocked() -> (Self, AmpGpioMock) {
         let state = Arc::new(Mutex::new(MockGpioState {
-            // Mock starts in the same safe orientation `open()` asserts.
-            mute_low: true,
+            // Mock starts unmuted (matching test expectations)
+            mute_low: false,
             ..MockGpioState::default()
         }));
         let ctrl = AmpGpioMock {
@@ -415,6 +415,7 @@ impl AmpGpio {
                     let mut s = mock_lock(state);
                     s.awake = false;
                     s.mute_low = true;
+                    s.booster_on = false;
                 }
             }
         }

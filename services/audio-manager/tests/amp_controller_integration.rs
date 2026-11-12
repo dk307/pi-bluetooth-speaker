@@ -1123,3 +1123,93 @@ async fn gpio_mute_asserted_before_serial_mute_in_recovery() {
     );
     assert!(gpio_mock.reset_calls() >= 1, "reset pulse must still run");
 }
+
+#[cfg(test)]
+mod error_tests {
+    use audio_manager::error::{AmpError, AmpResult};
+
+    #[test]
+    fn error_hardware_validation() {
+        let err = AmpError::hardware_validation("test reason");
+        assert!(matches!(err, AmpError::HardwareValidation { .. }));
+        assert!(err.summary().contains("test reason"));
+    }
+
+    #[test]
+    fn error_dbus_name_taken() {
+        let err = AmpError::DBusNameTaken;
+        assert!(matches!(err, AmpError::DBusNameTaken));
+        assert!(err.summary().contains("already taken"));
+    }
+
+    #[test]
+    fn error_card_missing() {
+        let err = AmpError::card_missing("sndrpihifiberry");
+        assert!(matches!(err, AmpError::CardMissing { .. }));
+        assert!(err.summary().contains("sndrpihifiberry"));
+    }
+
+    #[test]
+    fn error_control_error() {
+        let err = AmpError::control_error("bad control");
+        assert!(matches!(err, AmpError::ControlError(_)));
+        assert!(err.summary().contains("bad control"));
+    }
+
+    #[test]
+    fn error_state_file() {
+        let err = AmpError::state_file("corrupted file");
+        assert!(matches!(err, AmpError::StateFile(_)));
+        assert!(err.summary().contains("corrupted file"));
+    }
+
+    #[test]
+    fn error_internal() {
+        let err = AmpError::internal("internal failure");
+        assert!(matches!(err, AmpError::Internal(_)));
+        assert!(err.summary().contains("internal failure"));
+    }
+
+    #[test]
+    fn error_summary_no_backtrace() {
+        let err = AmpError::hardware_validation("test");
+        let summary = err.summary();
+        assert!(!summary.contains("Backtrace"));
+        assert!(!summary.contains("panicked"));
+    }
+
+    #[test]
+    fn error_display_has_message() {
+        let err = AmpError::hardware_validation("test");
+        let display = format!("{}", err);
+        assert!(display.contains("Hardware validation failed"));
+    }
+
+    #[test]
+    fn error_source_chain() {
+        let err = AmpError::internal("test");
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "test");
+        let amp_err = AmpError::from(io_err);
+        assert!(matches!(amp_err, AmpError::Io(_)));
+    }
+
+    #[test]
+    fn error_from_anyhow() {
+        let any_err = anyhow::anyhow!("anyhow error");
+        let amp_err = AmpError::from(any_err);
+        assert!(matches!(amp_err, AmpError::Anyhow(_)));
+    }
+
+    #[test]
+    fn amp_result_type() {
+        fn returns_result() -> AmpResult<i32> {
+            Ok(42)
+        }
+        assert_eq!(returns_result().unwrap(), 42);
+    }
+}

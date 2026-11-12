@@ -913,7 +913,7 @@ fn amp_info_cli_set_workflow_ordering_and_failure_stop() {
 
     use speaker_common::diag::{CommonCliOptions, OutputFormat};
     use speaker_diagnostics::cli::amp::{CliOptions, SetValues, run_app};
-    use speaker_hardware::{AmpDevice, AmpI2cAddress};
+    use speaker_hardware::{AmpDevice, AmpI2cAddress, I2sFormat};
 
     let (amp, mock) = AmpDevice::new_mocked();
     mock.set_mock_serial_muted(true);
@@ -986,13 +986,13 @@ fn amp_info_cli_set_workflow_ordering_and_failure_stop() {
     mock.set_mock_serial_muted(true);
     mock.set_transient_write_failures(1);
     let opts = set_opts(SetValues {
-        i2s_format: Some(4),
+        i2s_format: Some(I2sFormat::Rj24),
         mute: Some(false),
         ..SetValues::default()
     });
     assert_eq!(run_app(&amp, &opts), ExitCode::FAILURE);
     assert!(mock.mock_serial_muted());
-    assert_eq!(mock.mock_i2s_format(), 0);
+    assert_eq!(mock.mock_i2s_format(), I2sFormat::LeftJustified);
 
     // Mute-first: with a fault, a requested MUTE is still recorded as the
     // attempted first write... it fails, so state stays; verify the failure

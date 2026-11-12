@@ -15,8 +15,8 @@ use speaker_common::diag::{
     should_print_summary,
 };
 use speaker_hardware::{
-    AmpDevice, AmpError, AmpErrorFlags, AmpI2cAddress, AmpSettings, AmpStatus,
-    MA12070P_DEFAULT_I2C_BUS,
+    AmpDevice, AmpError, AmpErrorFlags, AmpI2cAddress, AmpSettings, AmpStatus, AudioInputMode,
+    I2sFormat, MA12070P_DEFAULT_I2C_BUS, PowerModeCtrl, PowerModeProfile,
 };
 
 /// Default polling interval between amplifier status checks (1.0 second).
@@ -56,14 +56,14 @@ pub struct SetValues {
     pub volume_raw: Option<u16>,
     /// Serial mute state (register 0x36 bit 7).
     pub mute: Option<bool>,
-    /// Manual power mode `PM_man` (0-3).
-    pub pm: Option<u8>,
+    /// Manual power mode `PM_man`.
+    pub pm: Option<PowerModeCtrl>,
     /// Power mode profile (0-5).
-    pub profile: Option<u8>,
-    /// I2S format select (valid 0, 1, 4, 5, 6, 7).
-    pub i2s_format: Option<u8>,
-    /// Audio input mode (0-5).
-    pub audio_mode: Option<u8>,
+    pub profile: Option<PowerModeProfile>,
+    /// I2S format select.
+    pub i2s_format: Option<I2sFormat>,
+    /// Audio input mode.
+    pub audio_mode: Option<AudioInputMode>,
 }
 
 impl SetValues {
@@ -82,15 +82,27 @@ impl SetValues {
 /// Valid I2S format selects (register 0x35 bits 2:0, datasheet Table 8-8).
 const VALID_I2S_FORMATS: [u8; 6] = [0, 1, 4, 5, 6, 7];
 
-/// Parses an I2S format CLI value; rejects the reserved encodings 2 and 3.
-fn parse_i2s_format(value: &str) -> Result<u8, String> {
-    let parsed = parse_u8_in_range(value, "I2S format", 7)?;
+/// Parses an I2S format CLI value; accepts numeric (0,1,4-7) or human-readable names.
+fn parse_i2s_format(value: &str) -> Result<I2sFormat, String> {
+    let trimmed = value.trim().to_ascii_lowercase();
+    // Try human-readable names first
+    match trimmed.as_str() {
+        "standard" | "i2s" | "std" => return Ok(I2sFormat::StandardI2s),
+        "left-justified" | "left" | "lj" => return Ok(I2sFormat::LeftJustified),
+        "rj16" | "right-justified-16" | "rj-16" => return Ok(I2sFormat::Rj16),
+        "rj18" | "right-justified-18" | "rj-18" => return Ok(I2sFormat::Rj18),
+        "rj20" | "right-justified-20" | "rj-20" => return Ok(I2sFormat::Rj20),
+        "rj24" | "right-justified-24" | "rj-24" => return Ok(I2sFormat::Rj24),
+        _ => {}
+    }
+    // Fall back to numeric
+    let parsed = parse_u8_in_range(&trimmed, "I2S format", 7)?;
     if !VALID_I2S_FORMATS.contains(&parsed) {
         return Err(format!(
             "Invalid I2S format value '{value}': 2 and 3 are reserved (valid: 0, 1, 4, 5, 6, 7)"
         ));
     }
-    Ok(parsed)
+    Ok(I2sFormat::from_raw(parsed))
 }
 
 /// Parses an unsigned integer CLI value and enforces an inclusive upper bound.
@@ -110,6 +122,55 @@ fn parse_u8_in_range(value: &str, name: &str, max: u8) -> Result<u8, String> {
         return Err(format!("Invalid {name} value '{value}': expected 0-{max}"));
     }
     Ok(parsed)
+}
+
+/// Parses a manual power mode CLI value; accepts numeric (0-3) or human-readable names.
+fn parse_power_mode_ctrl(value: &str) -> Result<PowerModeCtrl, String> {
+    let trimmed = value.trim().to_ascii_lowercase();
+    match trimmed.as_str() {
+        "pm0" | "p0" | "0" => Ok(PowerModeCtrl::Pm0),
+        "pm1" | "p1" | "1" => Ok(PowerModeCtrl::Pm1),
+        "pm2" | "p2" | "2" => Ok(PowerModeCtrl::Pm2),
+        "pm3" | "p3" | "3" => Ok(PowerModeCtrl::Pm3),
+        _ => {
+            let parsed = parse_u8_in_range(&trimmed, "power mode", 3)?;
+            Ok(PowerModeCtrl::from_raw(parsed))
+        }
+    }
+}
+
+/// Parses a power mode profile CLI value; accepts numeric (0-5) or human-readable names.
+fn parse_power_mode_profile(value: &str) -> Result<PowerModeProfile, String> {
+    let trimmed = value.trim().to_ascii_lowercase();
+    match trimmed.as_str() {
+        "pmp0" | "p0" | "0" => Ok(PowerModeProfile::Pmp0),
+        "pmp1" | "p1" | "1" => Ok(PowerModeProfile::Pmp1),
+        "pmp2" | "p2" | "2" => Ok(PowerModeProfile::Pmp2),
+        "pmp3" | "p3" | "3" => Ok(PowerModeProfile::Pmp3),
+        "pmp4" | "p4" | "4" => Ok(PowerModeProfile::Pmp4),
+        "pmp5" | "p5" | "custom" | "5" => Ok(PowerModeProfile::Pmp5Custom),
+        _ => {
+            let parsed = parse_u8_in_range(&trimmed, "power mode profile", 5)?;
+            Ok(PowerModeProfile::from_raw(parsed))
+        }
+    }
+}
+
+/// Parses an audio input mode CLI value; accepts numeric (0-5) or human-readable names.
+fn parse_audio_input_mode(value: &str) -> Result<AudioInputMode, String> {
+    let trimmed = value.trim().to_ascii_lowercase();
+    match trimmed.as_str() {
+        "digital-20db" | "d20" | "0" => Ok(AudioInputMode::Digital20dB),
+        "digital-26db" | "d26" | "1" => Ok(AudioInputMode::Digital26dB),
+        "digital-32db" | "d32" | "2" => Ok(AudioInputMode::Digital32dB),
+        "digital-0db" | "digital-bypass" | "d0" | "3" => Ok(AudioInputMode::Digital0dB),
+        "analog-20db" | "a20" | "4" => Ok(AudioInputMode::Analog20dB),
+        "analog-26db" | "a26" | "5" => Ok(AudioInputMode::Analog26dB),
+        _ => {
+            let parsed = parse_u8_in_range(&trimmed, "audio input mode", 5)?;
+            Ok(AudioInputMode::from_raw(parsed))
+        }
+    }
 }
 
 /// Parses a master volume raw attenuation value (0-144; dB = raw − 144).
@@ -159,10 +220,14 @@ pub fn print_usage(bin_name: &str) {
         "  --set-volume <RAW>       Master volume attenuation 0-144 (dB = raw - 144; 144 = 0 dB)"
     );
     println!("  --set-mute <on|off>      Serial mute (register 0x36 bit 7)");
-    println!("  --set-pm <0-3>           Manual power mode PM_man (0-3)");
-    println!("  --set-profile <0-5>      Power mode profile preset (0-5; 5 = custom)");
-    println!("  --set-i2s <0|1|4-7>      I2S format select (2 and 3 reserved)");
-    println!("  --set-audio-mode <0-5>   Audio input mode select (0-5)");
+    println!("  --set-pm <NAME|0-3>      Manual power mode (pm0/pm1/pm2/pm3 or 0-3)");
+    println!("  --set-profile <NAME|0-5> Power mode profile (pmp0-pmp5/custom or 0-5)");
+    println!(
+        "  --set-i2s <NAME|0,1,4-7> I2S format (standard/i2s, left-justified/lj, rj16, rj18, rj20, rj24)"
+    );
+    println!(
+        "  --set-audio-mode <NAME|0-5> Audio input mode (digital-20db/digital-26db/digital-32db/digital-0db/analog-20db/analog-26db or 0-5)"
+    );
     println!();
     println!(
         "  -v, --verbose            Display extended hardware diagnostics (human format only)"
@@ -204,19 +269,14 @@ where
                 Ok(true)
             }
             "--set-pm" => {
-                opts.set.pm = Some(parse_u8_in_range(
-                    &next_arg_value(args, "--set-pm")?,
-                    "power mode",
-                    3,
-                )?);
+                opts.set.pm = Some(parse_power_mode_ctrl(&next_arg_value(args, "--set-pm")?)?);
                 Ok(true)
             }
             "--set-profile" => {
-                opts.set.profile = Some(parse_u8_in_range(
-                    &next_arg_value(args, "--set-profile")?,
-                    "power mode profile",
-                    5,
-                )?);
+                opts.set.profile = Some(parse_power_mode_profile(&next_arg_value(
+                    args,
+                    "--set-profile",
+                )?)?);
                 Ok(true)
             }
             "--set-i2s" => {
@@ -224,11 +284,10 @@ where
                 Ok(true)
             }
             "--set-audio-mode" => {
-                opts.set.audio_mode = Some(parse_u8_in_range(
-                    &next_arg_value(args, "--set-audio-mode")?,
-                    "audio input mode",
-                    5,
-                )?);
+                opts.set.audio_mode = Some(parse_audio_input_mode(&next_arg_value(
+                    args,
+                    "--set-audio-mode",
+                )?)?);
                 Ok(true)
             }
             _ => Ok(false),

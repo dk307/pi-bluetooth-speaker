@@ -29,7 +29,7 @@ use anyhow::Context;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use speaker_hardware::{AmpFault, LimiterSlew};
+use speaker_hardware::{AmpFault, I2sFormat, LimiterSlew};
 
 use crate::amp_backend::AmpBackend;
 use crate::amp_gpio::AmpGpio;
@@ -518,7 +518,9 @@ impl AmpController {
     /// # Errors
     /// Returns [`AmpError`] on bus faults.
     async fn reinit_registers(&mut self) -> AmpResult<()> {
-        self.device.write_i2s_format_async(0).await?;
+        self.device
+            .write_i2s_format_async(I2sFormat::StandardI2s)
+            .await?;
         self.device.enable_audio_processor_async().await?;
         self.device.enable_limiter_async().await?;
         // Kernel-parity limiter timing: fast attack, slow release

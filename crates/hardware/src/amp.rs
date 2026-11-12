@@ -84,6 +84,60 @@ pub const REG_ERROR_LIVE: u8 = 0x7C;
 /// Bits 5:4: `PM_man` (0-3 = Power Mode 0-3 selection)
 pub const REG_PM_CTRL: u8 = 0x00;
 
+/// MA12070P manual power mode selection (register 0x00 bits 5:4).
+///
+/// When `manualPM` bit (bit 6) is set, this selects the power mode.
+/// 0 = PM0, 1 = PM1, 2 = PM2, 3 = PM3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum PowerModeCtrl {
+    /// Power Mode 0 (High Audio Performance / Class D).
+    Pm0 = 0,
+    /// Power Mode 1 (Low Idle Power Optimization).
+    Pm1 = 1,
+    /// Power Mode 2 (Default Balanced / Dynamic Power Mode).
+    Pm2 = 2,
+    /// Power Mode 3 (Custom).
+    Pm3 = 3,
+}
+
+impl PowerModeCtrl {
+    /// Decodes the manual power mode from register 0x00 bits `[5:4]`.
+    ///
+    /// The input `raw` is the full register 0x00 value; bits 5:4 are extracted.
+    #[must_use]
+    pub const fn from_raw(raw: u8) -> Self {
+        match (raw >> 4) & 0x03 {
+            0 => Self::Pm0,
+            1 => Self::Pm1,
+            2 => Self::Pm2,
+            _ => Self::Pm3,
+        }
+    }
+
+    /// Returns the raw 2-bit register value (0-3).
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Returns a human-readable description.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Pm0 => "PM0 (High Audio Performance / Class D)",
+            Self::Pm1 => "PM1 (Low Idle Power Optimization)",
+            Self::Pm2 => "PM2 (Default Balanced / Dynamic Power Mode)",
+            Self::Pm3 => "PM3 (Custom)",
+        }
+    }
+}
+
+impl Display for PowerModeCtrl {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.description())
+    }
+}
 /// MA12070P power mode profile register address (0x1D).
 /// Bits 2:0: `PMprofile` (0-4 = PMP0-PMP4 presets, 5 = custom profile).
 pub const REG_PM_PROFILE: u8 = 0x1D;
@@ -96,6 +150,105 @@ pub const REG_PM_PROFILE: u8 = 0x1D;
 /// otherwise the mode comes from the fuse bank setting.
 pub const REG_AUDIO_IN_MODE: u8 = 0x25;
 
+/// MA12070P audio input mode selection (register 0x25 bits 7:5).
+///
+/// Values 0-3 are digital serial modes; 4-5 are analog input modes.
+/// Only takes effect when `audio_in_mode_ext` (register 0x27 bit 5) is set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum AudioInputMode {
+    /// Digital serial mode 0: 20 dB gain.
+    Digital20dB = 0,
+    /// Digital serial mode 1: 26 dB gain.
+    Digital26dB = 1,
+    /// Digital serial mode 2: 32 dB gain.
+    Digital32dB = 2,
+    /// Digital serial mode 3: 0 dB gain (bypass).
+    Digital0dB = 3,
+    /// Analog input mode 0: 20 dB gain.
+    Analog20dB = 4,
+    /// Analog input mode 1: 26 dB gain.
+    Analog26dB = 5,
+}
+
+impl AudioInputMode {
+    /// Decodes the audio input mode from register 0x25 bits `[7:5]`.
+    ///
+    /// The input `raw` is the full register 0x25 value; bits 7:5 are extracted.
+    #[must_use]
+    pub const fn from_raw(raw: u8) -> Self {
+        #[allow(
+            clippy::match_same_arms,
+            reason = "0 and _ both return Digital20dB as safe default"
+        )]
+        match (raw >> 5) & 0x07 {
+            0 => Self::Digital20dB,
+            1 => Self::Digital26dB,
+            2 => Self::Digital32dB,
+            3 => Self::Digital0dB,
+            4 => Self::Analog20dB,
+            5 => Self::Analog26dB,
+            _ => Self::Digital20dB,
+        }
+    }
+
+    /// Returns `true` if this mode was created from a valid register value (0-5).
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.as_u8() <= 5
+    }
+
+    /// Returns the raw 3-bit register value (0-5).
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Validates that a raw register value (0-7) represents a valid audio input mode.
+    ///
+    /// Returns `Ok(())` if valid (bits 7:5 = 0-5), `Err` with the invalid value if invalid (6-7).
+    ///
+    /// # Errors
+    /// Returns the invalid mode value (6 or 7) if bits 7:5 are out of range.
+    pub const fn validate_raw(raw: u8) -> Result<(), u8> {
+        let v = (raw >> 5) & 0x07;
+        if v <= 5 { Ok(()) } else { Err(v) }
+    }
+
+    /// Tries to create an `AudioInputMode` from a raw register value.
+    ///
+    /// Returns `Ok(Self)` if the raw value is valid (bits 7:5 = 0-5), `Err` with the invalid value otherwise.
+    ///
+    /// # Errors
+    /// Returns the invalid mode value (6 or 7) if bits 7:5 are out of range.
+    pub const fn try_from_raw(raw: u8) -> Result<Self, u8> {
+        let v = (raw >> 5) & 0x07;
+        if v <= 5 {
+            Ok(Self::from_raw(v))
+        } else {
+            Err(v)
+        }
+    }
+
+    /// Returns a human-readable description.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Digital20dB => "Digital 20 dB",
+            Self::Digital26dB => "Digital 26 dB",
+            Self::Digital32dB => "Digital 32 dB",
+            Self::Digital0dB => "Digital 0 dB (Bypass)",
+            Self::Analog20dB => "Analog 20 dB",
+            Self::Analog26dB => "Analog 26 dB",
+        }
+    }
+}
+
+impl Display for AudioInputMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.description())
+    }
+}
 /// MA12070P audio input mode extension register address (0x27).
 /// Bit 5 (`audio_in_mode_ext`, mask `0x20`): 1 = `audio_in_mode` (0x25)
 /// controls the input mode; 0 = fuse bank setting (reset default 0).
@@ -111,6 +264,117 @@ pub const AUDIO_IN_MODE_EXT_MASK: u8 = 0x20;
 /// (reserved), 4 = RJ-16, 5 = RJ-18, 6 = RJ-20, 7 = RJ-24.
 pub const REG_I2S_FORMAT: u8 = 0x35;
 
+/// MA12070P I2S format selection (register 0x35 bits 2:0).
+///
+/// Valid values: 0 (Standard I2S), 1 (Left-Justified), 4 (RJ-16),
+/// 5 (RJ-18), 6 (RJ-20), 7 (RJ-24). Values 2 and 3 are reserved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum I2sFormat {
+    /// Standard I2S format.
+    StandardI2s = 0,
+    /// Left-Justified format (reset default).
+    LeftJustified = 1,
+    /// Right-Justified 16-bit format.
+    Rj16 = 4,
+    /// Right-Justified 18-bit format.
+    Rj18 = 5,
+    /// Right-Justified 20-bit format.
+    Rj20 = 6,
+    /// Right-Justified 24-bit format.
+    Rj24 = 7,
+}
+
+impl I2sFormat {
+    /// Decodes the I2S format from register 0x35 bits `[2:0]`.
+    ///
+    /// Valid values: `0`, `1`, `4`, `5`, `6`, `7`. Values `2`, `3` are reserved and map to `LeftJustified`.
+    #[must_use]
+    pub const fn from_raw(raw: u8) -> Self {
+        #[allow(
+            clippy::match_same_arms,
+            reason = "1 and _ both return LeftJustified as reset default"
+        )]
+        match raw & 0x07 {
+            0 => Self::StandardI2s,
+            1 => Self::LeftJustified,
+            4 => Self::Rj16,
+            5 => Self::Rj18,
+            6 => Self::Rj20,
+            7 => Self::Rj24,
+            _ => Self::LeftJustified, // Default to reset default
+        }
+    }
+
+    /// Returns `true` if this format is a valid (non-reserved) I2S format.
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        matches!(
+            self,
+            Self::StandardI2s
+                | Self::LeftJustified
+                | Self::Rj16
+                | Self::Rj18
+                | Self::Rj20
+                | Self::Rj24
+        )
+    }
+
+    /// Returns the raw 3-bit register value.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Validates that a raw register value (0-7) represents a valid I2S format.
+    ///
+    /// Returns `Ok(())` if valid (0, 1, 4, 5, 6, 7), `Err` with the invalid value if reserved (2, 3).
+    ///
+    /// # Errors
+    /// Returns the invalid format value (2 or 3) if the value is reserved.
+    pub const fn validate_raw(raw: u8) -> Result<(), u8> {
+        let v = raw & 0x07;
+        if matches!(v, 0 | 1 | 4 | 5 | 6 | 7) {
+            Ok(())
+        } else {
+            Err(v)
+        }
+    }
+
+    /// Tries to create an `I2sFormat` from a raw register value.
+    ///
+    /// Returns `Ok(Self)` if the raw value is valid (0, 1, 4, 5, 6, 7), `Err` with the invalid value if reserved (2, 3).
+    ///
+    /// # Errors
+    /// Returns the invalid format value (2 or 3) if the value is reserved.
+    pub const fn try_from_raw(raw: u8) -> Result<Self, u8> {
+        let v = raw & 0x07;
+        if matches!(v, 0 | 1 | 4 | 5 | 6 | 7) {
+            Ok(Self::from_raw(v))
+        } else {
+            Err(v)
+        }
+    }
+
+    /// Returns a human-readable description.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::StandardI2s => "Standard I2S",
+            Self::LeftJustified => "Left-Justified",
+            Self::Rj16 => "Right-Justified 16-bit",
+            Self::Rj18 => "Right-Justified 18-bit",
+            Self::Rj20 => "Right-Justified 20-bit",
+            Self::Rj24 => "Right-Justified 24-bit",
+        }
+    }
+}
+
+impl Display for I2sFormat {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.description())
+    }
+}
 /// `0x35` bits 7:6 `audio_proc_attack` mask (00 slow, 01 normal, 10 fast).
 pub const LIMITER_ATTACK_MASK: u8 = 0xC0;
 
@@ -569,6 +833,8 @@ pub enum PowerModeProfile {
 
 impl PowerModeProfile {
     /// Decodes a power mode profile from register 0x1D bits `[2:0]`.
+    ///
+    /// Values 0-4 map to PMP0-PMP4; 5 maps to `PMP5Custom`; values 6-7 also map to `PMP5Custom`.
     #[must_use]
     pub const fn from_raw(raw: u8) -> Self {
         match raw & 0x07 {
@@ -581,6 +847,12 @@ impl PowerModeProfile {
         }
     }
 
+    /// Returns `true` if this profile was created from a valid register value (0-5).
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.as_u8() <= 5
+    }
+
     /// Returns the raw 3-bit register value.
     #[must_use]
     pub const fn as_u8(self) -> u8 {
@@ -591,6 +863,34 @@ impl PowerModeProfile {
             Self::Pmp3 => 3,
             Self::Pmp4 => 4,
             Self::Pmp5Custom => 5,
+        }
+    }
+
+    /// Validates that a raw register value (0-7) represents a valid power mode profile.
+    ///
+    /// Returns `Ok(())` if valid (0-5), `Err` with the invalid value if invalid (6-7).
+    ///
+    /// # Errors
+    /// Returns the invalid profile value (6 or 7) if out of range.
+    pub const fn validate_raw(raw: u8) -> Result<(), u8> {
+        if (raw & 0x07) <= 5 {
+            Ok(())
+        } else {
+            Err(raw & 0x07)
+        }
+    }
+
+    /// Tries to create a `PowerModeProfile` from a raw register value.
+    ///
+    /// Returns `Ok(Self)` if the raw value is valid (0-5), `Err` with the invalid value otherwise.
+    ///
+    /// # Errors
+    /// Returns the invalid profile value (6 or 7) if out of range.
+    pub const fn try_from_raw(raw: u8) -> Result<Self, u8> {
+        if (raw & 0x07) <= 5 {
+            Ok(Self::from_raw(raw))
+        } else {
+            Err(raw & 0x07)
         }
     }
 
@@ -862,14 +1162,14 @@ pub struct AmpSettings {
     pub master_volume_frac: u8,
     /// Serial mute state (register 0x36 bit 7).
     pub serial_muted: bool,
-    /// Decoded manual power mode `PM_man` (bits 5:4 of register 0x00, 0-3).
-    pub pm_ctrl_pm: u8,
+    /// Decoded manual power mode `PM_man` (bits 5:4 of register 0x00).
+    pub pm_ctrl_pm: PowerModeCtrl,
     /// Power mode profile selection (bits 2:0 of register 0x1D, 0-5).
-    pub pm_profile: u8,
-    /// I2S format select (bits 2:0 of register 0x35; valid 0,1,4,5,6,7).
-    pub i2s_format: u8,
+    pub pm_profile: PowerModeProfile,
+    /// I2S format select (bits 2:0 of register 0x35).
+    pub i2s_format: I2sFormat,
     /// Audio input mode (bits 7:5 of register 0x25, 0-5).
-    pub audio_in_mode: u8,
+    pub audio_in_mode: AudioInputMode,
 }
 
 impl AmpSettings {
@@ -893,10 +1193,10 @@ impl AmpSettings {
             master_volume_raw: decode_vlp_raw(vol_int as u16),
             master_volume_frac: vol_frac & 0x03,
             serial_muted: is_muted_bit(audio_proc),
-            pm_ctrl_pm: (pm_ctrl >> 4) & 0x03,
-            pm_profile: pm_profile & 0x07,
-            i2s_format: i2s_format & 0x07,
-            audio_in_mode: (audio_in_mode >> 5) & 0x07,
+            pm_ctrl_pm: PowerModeCtrl::from_raw(pm_ctrl),
+            pm_profile: PowerModeProfile::from_raw(pm_profile),
+            i2s_format: I2sFormat::from_raw(i2s_format),
+            audio_in_mode: AudioInputMode::from_raw(audio_in_mode),
         }
     }
 }
@@ -921,11 +1221,7 @@ impl Display for AmpSettings {
                 "Unmuted"
             }
         )?;
-        writeln!(
-            f,
-            "Manual Power Mode     : PM_man={} (0 = automatic profile follow)",
-            self.pm_ctrl_pm
-        )?;
+        writeln!(f, "Manual Power Mode     : {}", self.pm_ctrl_pm)?;
         writeln!(f, "Power Mode Profile    : {}", self.pm_profile)?;
         writeln!(f, "I2S Format Select     : {}", self.i2s_format)?;
         write!(f, "Audio Input Mode      : {}", self.audio_in_mode)?;
@@ -1267,7 +1563,7 @@ impl AmpDeviceMock {
                 mock_pm_ctrl: 0x30,    // manualPM=0, PM_man=3 (auto PM)
                 mock_pm_profile: 0,    // PMP0 (silicon reset default)
                 mock_audio_in_mode: 0, // 20dB gain
-                mock_reg_0x35: 0x00,   // I2S std, VLP bypassed (reset default)
+                mock_reg_0x35: 0x01,   // Left-Justified (reset default per datasheet)
                 mock_reg_0x36: 0x01,   // bit0 set (live reset default); unmuted
                 mock_limiter_thresholds_dbfs: -15, // driver probe default
             })),
@@ -1392,10 +1688,10 @@ impl AmpDeviceMock {
             master_volume_raw: decode_vlp_raw(state.mock_master_volume_reg),
             master_volume_frac: 0,
             serial_muted: state.mock_reg_0x36 & (1 << 7) != 0,
-            pm_ctrl_pm: (state.mock_pm_ctrl >> 4) & 0x03,
-            pm_profile: state.mock_pm_profile & 0x07,
-            i2s_format: state.mock_reg_0x35 & 0x07,
-            audio_in_mode: (state.mock_audio_in_mode >> 5) & 0x07,
+            pm_ctrl_pm: PowerModeCtrl::from_raw(state.mock_pm_ctrl),
+            pm_profile: PowerModeProfile::from_raw(state.mock_pm_profile & 0x07),
+            i2s_format: I2sFormat::from_raw(state.mock_reg_0x35 & 0x07),
+            audio_in_mode: AudioInputMode::from_raw(state.mock_audio_in_mode),
         })
     }
 
@@ -1439,7 +1735,7 @@ impl AmpDeviceMock {
         Ok(())
     }
 
-    fn write_power_mode_ctrl(&self, pm: u8) -> Result<(), AmpError> {
+    fn write_power_mode_ctrl(&self, pm: PowerModeCtrl) -> Result<(), AmpError> {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
@@ -1449,11 +1745,11 @@ impl AmpDeviceMock {
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         // Store the same encoded register value as hardware: (pm & 0x03) << 4 | 0x40
-        state.mock_pm_ctrl = 0x40 | ((pm & 0x03) << 4);
+        state.mock_pm_ctrl = 0x40 | ((pm.as_u8() & 0x03) << 4);
         Ok(())
     }
 
-    fn write_power_mode_profile(&self, profile: u8) -> Result<(), AmpError> {
+    fn write_power_mode_profile(&self, profile: PowerModeProfile) -> Result<(), AmpError> {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
@@ -1461,17 +1757,13 @@ impl AmpDeviceMock {
         if state.transient_write_failures > 0 {
             state.transient_write_failures -= 1;
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
-        }
-        if profile > 5 {
-            return Err(AmpError::invalid_argument("pm_profile", u16::from(profile)));
         }
         // Store encoded value: profile & 0x07
-        state.mock_pm_profile = profile & 0x07;
+        state.mock_pm_profile = profile.as_u8() & 0x07;
         Ok(())
     }
 
-    fn write_i2s_format(&self, format: u8) -> Result<(), AmpError> {
-        const VALID: [u8; 6] = [0, 1, 4, 5, 6, 7];
+    fn write_i2s_format(&self, format: I2sFormat) -> Result<(), AmpError> {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
@@ -1479,17 +1771,14 @@ impl AmpDeviceMock {
         if state.transient_write_failures > 0 {
             state.transient_write_failures -= 1;
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
-        }
-        if !VALID.contains(&format) {
-            return Err(AmpError::invalid_argument("i2s_format", u16::from(format)));
         }
         // Real read-modify-write on the shared 0x35 byte (format bits 2:0;
         // VLP enable bit 3 and limiter slew bits 7:4 are preserved).
-        state.mock_reg_0x35 = (state.mock_reg_0x35 & 0xF8) | (format & 0x07);
+        state.mock_reg_0x35 = (state.mock_reg_0x35 & 0xF8) | (format.as_u8() & 0x07);
         Ok(())
     }
 
-    fn write_audio_in_mode(&self, mode: u8) -> Result<(), AmpError> {
+    fn write_audio_in_mode(&self, mode: AudioInputMode) -> Result<(), AmpError> {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
@@ -1498,11 +1787,8 @@ impl AmpDeviceMock {
             state.transient_write_failures -= 1;
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
-        if mode > 5 {
-            return Err(AmpError::invalid_argument("audio_in_mode", u16::from(mode)));
-        }
         // Store encoded value: (mode & 0x07) << 5
-        state.mock_audio_in_mode = (mode & 0x07) << 5;
+        state.mock_audio_in_mode = (mode.as_u8() & 0x07) << 5;
         Ok(())
     }
 
@@ -1625,14 +1911,14 @@ impl AmpDeviceMock {
         self.state.read().expect("mock lock poisoned").mock_reg_0x36 & (1 << 7) != 0
     }
 
-    /// Get the mocked `PM_CTRL` decoded `PM_man` value (0-3).
+    /// Get the mocked `PM_CTRL` decoded `PM_man` value.
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
     #[must_use]
-    pub fn mock_pm_ctrl(&self) -> u8 {
+    pub fn mock_pm_ctrl(&self) -> PowerModeCtrl {
         let encoded = self.state.read().expect("mock lock poisoned").mock_pm_ctrl;
-        (encoded >> 4) & 0x03
+        PowerModeCtrl::from_raw(encoded)
     }
 
     /// Get the mocked `PM_PROFILE` value (0-5: 0-4 presets, 5 custom).
@@ -1640,34 +1926,37 @@ impl AmpDeviceMock {
     /// # Panics
     /// Panics if the mock state lock is poisoned.
     #[must_use]
-    pub fn mock_pm_profile(&self) -> u8 {
-        self.state
+    pub fn mock_pm_profile(&self) -> PowerModeProfile {
+        let raw = self
+            .state
             .read()
             .expect("mock lock poisoned")
-            .mock_pm_profile
+            .mock_pm_profile;
+        PowerModeProfile::from_raw(raw & 0x07)
     }
 
-    /// Get the mocked I2S format value (one of 0, 1, 4, 5, 6, 7).
+    /// Get the mocked I2S format value.
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
     #[must_use]
-    pub fn mock_i2s_format(&self) -> u8 {
-        self.state.read().expect("mock lock poisoned").mock_reg_0x35 & 0x07
+    pub fn mock_i2s_format(&self) -> I2sFormat {
+        let raw = self.state.read().expect("mock lock poisoned").mock_reg_0x35 & 0x07;
+        I2sFormat::from_raw(raw)
     }
 
-    /// Get the mocked audio input mode value (0-5).
+    /// Get the mocked audio input mode value.
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
     #[must_use]
-    pub fn mock_audio_in_mode(&self) -> u8 {
+    pub fn mock_audio_in_mode(&self) -> AudioInputMode {
         let encoded = self
             .state
             .read()
             .expect("mock lock poisoned")
             .mock_audio_in_mode;
-        (encoded >> 5) & 0x07
+        AudioInputMode::from_raw(encoded)
     }
 
     /// Set the mocked master volume raw value directly (for test setup).
@@ -1692,50 +1981,51 @@ impl AmpDeviceMock {
 
     /// Set the mocked `PM_CTRL` value directly (for test setup).
     ///
-    /// Takes the decoded manual power mode `PM_man` (0-3) and encodes it
+    /// Takes the decoded manual power mode `PM_man` and encodes it
     /// exactly like [`AmpDeviceMock::write_pm_ctrl`](Self::write_pm_ctrl)
     /// (`0x40 | (pm << 4)`, manualPM=1) so getters and `read_settings()`
     /// decode the same value back.
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
-    pub fn set_mock_pm_ctrl(&self, pm: u8) {
-        self.state.write().expect("mock lock poisoned").mock_pm_ctrl = 0x40 | ((pm & 0x03) << 4);
+    pub fn set_mock_pm_ctrl(&self, pm: PowerModeCtrl) {
+        self.state.write().expect("mock lock poisoned").mock_pm_ctrl =
+            0x40 | ((pm.as_u8() & 0x03) << 4);
     }
 
     /// Set the mocked `PM_PROFILE` value directly (for test setup).
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
-    pub fn set_mock_pm_profile(&self, profile: u8) {
+    pub fn set_mock_pm_profile(&self, profile: PowerModeProfile) {
         self.state
             .write()
             .expect("mock lock poisoned")
-            .mock_pm_profile = profile;
+            .mock_pm_profile = profile.as_u8() & 0x07;
     }
 
     /// Set the mocked I2S format value directly (for test setup).
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
-    pub fn set_mock_i2s_format(&self, format: u8) {
+    pub fn set_mock_i2s_format(&self, format: I2sFormat) {
         let mut state = self.state.write().expect("mock lock poisoned");
-        state.mock_reg_0x35 = (state.mock_reg_0x35 & 0xF8) | (format & 0x07);
+        state.mock_reg_0x35 = (state.mock_reg_0x35 & 0xF8) | (format.as_u8() & 0x07);
     }
 
     /// Set the mocked audio in mode value directly (for test setup).
     ///
-    /// Takes the decoded input mode (0-5) and encodes it exactly like the
+    /// Takes the decoded input mode and encodes it exactly like the
     /// real write path (`(mode & 0x07) << 5` into register 0x25 bits 7:5)
     /// so getters and `read_settings()` decode the same value back.
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
-    pub fn set_mock_audio_in_mode(&self, mode: u8) {
+    pub fn set_mock_audio_in_mode(&self, mode: AudioInputMode) {
         self.state
             .write()
             .expect("mock lock poisoned")
-            .mock_audio_in_mode = (mode & 0x07) << 5;
+            .mock_audio_in_mode = (mode.as_u8() & 0x07) << 5;
     }
 }
 
@@ -1957,26 +2247,29 @@ where
         Ok(())
     }
 
-    /// RMW of `PM_CTRL` (0x00): set manualPM=1, `PM_man` from `PowerMode` (0-3).
+    /// RMW of `PM_CTRL` (0x00): set manualPM=1, `PM_man` from `PowerModeCtrl`.
     ///
     /// # Errors
     /// Returns [`AmpError`] if communication fails.
-    pub fn write_power_mode_ctrl(&mut self, pm: u8) -> Result<(), AmpError> {
+    pub fn write_power_mode_ctrl(&mut self, pm: PowerModeCtrl) -> Result<(), AmpError> {
         let reg = self.read_reg(REG_PM_CTRL)?;
-        let desired = (reg & 0x0F) | 0x40 | ((pm & 0x03) << 4);
+        let desired = (reg & 0x0F) | 0x40 | ((pm.as_u8() & 0x03) << 4);
         self.write_reg(REG_PM_CTRL, desired)
     }
 
     /// Write `PM_PROFILE` (0x1D) bits 2:0 (0-5; 5 = custom profile).
     ///
     /// # Errors
-    /// Returns [`AmpError`] if communication fails or `profile > 5`.
-    pub fn write_power_mode_profile(&mut self, profile: u8) -> Result<(), AmpError> {
-        if profile > 5 {
-            return Err(AmpError::invalid_argument("pm_profile", u16::from(profile)));
+    /// Returns [`AmpError`] if communication fails or `profile` is invalid.
+    pub fn write_power_mode_profile(&mut self, profile: PowerModeProfile) -> Result<(), AmpError> {
+        if !profile.is_valid() {
+            return Err(AmpError::invalid_argument(
+                "pm_profile",
+                u16::from(profile.as_u8()),
+            ));
         }
         let reg = self.read_reg(REG_PM_PROFILE)?;
-        let desired = (reg & 0xF8) | (profile & 0x07);
+        let desired = (reg & 0xF8) | (profile.as_u8() & 0x07);
         self.write_reg(REG_PM_PROFILE, desired)
     }
 
@@ -1992,14 +2285,16 @@ where
     /// 2 and 3 are reserved/invalid.
     ///
     /// # Errors
-    /// Returns [`AmpError`] if communication fails or `format` is invalid.
-    pub fn write_i2s_format(&mut self, format: u8) -> Result<(), AmpError> {
-        const VALID: [u8; 6] = [0, 1, 4, 5, 6, 7];
-        if !VALID.contains(&format) {
-            return Err(AmpError::invalid_argument("i2s_format", u16::from(format)));
+    /// Returns [`AmpError`] if communication fails or `format` is reserved (2 or 3).
+    pub fn write_i2s_format(&mut self, format: I2sFormat) -> Result<(), AmpError> {
+        if !format.is_valid() {
+            return Err(AmpError::invalid_argument(
+                "i2s_format",
+                u16::from(format.as_u8()),
+            ));
         }
         let reg = self.read_reg(REG_I2S_FORMAT)?;
-        let desired = (reg & 0xF8) | (format & 0x07);
+        let desired = (reg & 0xF8) | (format.as_u8() & 0x07);
         self.write_reg(REG_I2S_FORMAT, desired)
     }
 
@@ -2009,13 +2304,16 @@ where
     /// input mode.
     ///
     /// # Errors
-    /// Returns [`AmpError`] if communication fails or `mode > 5`.
-    pub fn write_audio_in_mode(&mut self, mode: u8) -> Result<(), AmpError> {
-        if mode > 5 {
-            return Err(AmpError::invalid_argument("audio_in_mode", u16::from(mode)));
+    /// Returns [`AmpError`] if communication fails or `mode` is invalid.
+    pub fn write_audio_in_mode(&mut self, mode: AudioInputMode) -> Result<(), AmpError> {
+        if !mode.is_valid() {
+            return Err(AmpError::invalid_argument(
+                "audio_in_mode",
+                u16::from(mode.as_u8()),
+            ));
         }
         let reg = self.read_reg(REG_AUDIO_IN_MODE)?;
-        let desired = (reg & 0x1F) | ((mode & 0x07) << 5);
+        let desired = (reg & 0x1F) | ((mode.as_u8() & 0x07) << 5);
         self.write_reg(REG_AUDIO_IN_MODE, desired)?;
         let ext = self.read_reg(REG_AUDIO_IN_MODE_EXT)?;
         self.write_reg(REG_AUDIO_IN_MODE_EXT, ext | AUDIO_IN_MODE_EXT_MASK)
@@ -2353,14 +2651,14 @@ impl AmpDevice {
         }
     }
 
-    /// Write `PM_CTRL` (0x00): set manualPM=1, `PM_man` from `PowerMode` (0-3).
+    /// Write `PM_CTRL` (0x00): set manualPM=1, `PM_man` from `PowerModeCtrl`.
     ///
     /// # Errors
     /// Returns [`AmpError`] if communication fails.
     ///
     /// # Panics
     /// Panics if an internal mutex lock is poisoned.
-    pub fn write_power_mode_ctrl(&self, pm: u8) -> Result<(), AmpError> {
+    pub fn write_power_mode_ctrl(&self, pm: PowerModeCtrl) -> Result<(), AmpError> {
         match self.inner.as_ref() {
             Backend::Hardware { device, .. } => device
                 .lock()
@@ -2377,7 +2675,7 @@ impl AmpDevice {
     ///
     /// # Panics
     /// Panics if an internal mutex lock is poisoned.
-    pub fn write_power_mode_profile(&self, profile: u8) -> Result<(), AmpError> {
+    pub fn write_power_mode_profile(&self, profile: PowerModeProfile) -> Result<(), AmpError> {
         match self.inner.as_ref() {
             Backend::Hardware { device, .. } => device
                 .lock()
@@ -2394,7 +2692,7 @@ impl AmpDevice {
     ///
     /// # Panics
     /// Panics if an internal mutex lock is poisoned.
-    pub fn write_i2s_format(&self, format: u8) -> Result<(), AmpError> {
+    pub fn write_i2s_format(&self, format: I2sFormat) -> Result<(), AmpError> {
         match self.inner.as_ref() {
             Backend::Hardware { device, .. } => device
                 .lock()
@@ -2411,7 +2709,7 @@ impl AmpDevice {
     ///
     /// # Panics
     /// Panics if an internal mutex lock is poisoned.
-    pub fn write_audio_in_mode(&self, mode: u8) -> Result<(), AmpError> {
+    pub fn write_audio_in_mode(&self, mode: AudioInputMode) -> Result<(), AmpError> {
         match self.inner.as_ref() {
             Backend::Hardware { device, .. } => device
                 .lock()
@@ -2482,7 +2780,7 @@ impl AmpDevice {
     ///
     /// # Panics
     /// Panics if the underlying blocking task panics.
-    pub async fn write_power_mode_ctrl_async(&self, pm: u8) -> Result<(), AmpError> {
+    pub async fn write_power_mode_ctrl_async(&self, pm: PowerModeCtrl) -> Result<(), AmpError> {
         let this = self.clone();
         run_blocking("MA12070P write PM_CTRL", move || {
             this.write_power_mode_ctrl(pm)
@@ -2497,7 +2795,10 @@ impl AmpDevice {
     ///
     /// # Panics
     /// Panics if the underlying blocking task panics.
-    pub async fn write_power_mode_profile_async(&self, profile: u8) -> Result<(), AmpError> {
+    pub async fn write_power_mode_profile_async(
+        &self,
+        profile: PowerModeProfile,
+    ) -> Result<(), AmpError> {
         let this = self.clone();
         run_blocking("MA12070P write PM_PROFILE", move || {
             this.write_power_mode_profile(profile)
@@ -2512,7 +2813,7 @@ impl AmpDevice {
     ///
     /// # Panics
     /// Panics if the underlying blocking task panics.
-    pub async fn write_i2s_format_async(&self, format: u8) -> Result<(), AmpError> {
+    pub async fn write_i2s_format_async(&self, format: I2sFormat) -> Result<(), AmpError> {
         let this = self.clone();
         run_blocking("MA12070P write I2S format", move || {
             this.write_i2s_format(format)
@@ -2527,7 +2828,7 @@ impl AmpDevice {
     ///
     /// # Panics
     /// Panics if the underlying blocking task panics.
-    pub async fn write_audio_in_mode_async(&self, mode: u8) -> Result<(), AmpError> {
+    pub async fn write_audio_in_mode_async(&self, mode: AudioInputMode) -> Result<(), AmpError> {
         let this = self.clone();
         run_blocking("MA12070P write audio in mode", move || {
             this.write_audio_in_mode(mode)

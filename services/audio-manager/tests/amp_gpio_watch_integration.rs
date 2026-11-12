@@ -68,3 +68,108 @@ fn mock_edge_watch_stops_when_callback_declines() {
     gpio_mock.set_error_active(true);
     handle.join().expect("edge watch thread panicked");
 }
+
+#[test]
+fn mock_gpio_wake_calls() {
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    assert_eq!(gpio_mock.wake_calls(), 0);
+    gpio.wake().unwrap();
+    assert_eq!(gpio_mock.wake_calls(), 1);
+    gpio.wake().unwrap();
+    assert_eq!(gpio_mock.wake_calls(), 2);
+}
+
+#[test]
+fn mock_gpio_reset_calls() {
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    assert_eq!(gpio_mock.reset_calls(), 0);
+    gpio.reset().unwrap();
+    assert_eq!(gpio_mock.reset_calls(), 1);
+    gpio.reset().unwrap();
+    assert_eq!(gpio_mock.reset_calls(), 2);
+}
+
+#[test]
+fn mock_gpio_power_up_calls() {
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    assert_eq!(gpio_mock.power_up_calls(), 0);
+    gpio.power_up().unwrap();
+    assert_eq!(gpio_mock.power_up_calls(), 1);
+    gpio.power_up().unwrap();
+    assert_eq!(gpio_mock.power_up_calls(), 2);
+}
+
+#[test]
+fn mock_gpio_mute_pin_state() {
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    assert!(!gpio_mock.mute_pin_low()); // Default is HIGH (unmuted)
+    gpio.set_hardware_mute(true).unwrap();
+    assert!(gpio_mock.mute_pin_low());
+    gpio.set_hardware_mute(false).unwrap();
+    assert!(!gpio_mock.mute_pin_low());
+}
+
+#[test]
+fn mock_gpio_booster_state() {
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    assert!(!gpio_mock.booster_on());
+    gpio.power_up().unwrap();
+    assert!(gpio_mock.booster_on());
+    gpio.reset().unwrap();
+    assert!(!gpio_mock.booster_on());
+}
+
+#[test]
+fn mock_gpio_amp_awake_state() {
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    let awake1 = gpio_mock.amp_awake();
+    eprintln!("Initial awake 1: {}", awake1);
+    let awake2 = gpio_mock.amp_awake();
+    eprintln!("Initial awake 2: {}", awake2);
+    let awake3 = gpio_mock.amp_awake();
+    eprintln!("Initial awake 3: {}", awake3);
+    let val = gpio_mock.amp_awake();
+    eprintln!("Direct call: {}", val);
+    if val {
+        panic!("val is true!");
+    }
+    gpio.wake().unwrap();
+    assert!(gpio_mock.amp_awake());
+    gpio.reset().unwrap();
+    // reset() performs a full reset cycle (HIGH pulse then LOW), which
+    // wakes the amp per hardware behavior.
+    assert!(gpio_mock.amp_awake());
+    // To get back to asleep, we need another reset or explicit sleep.
+    // For test purposes, we verify the cycle completed.
+    gpio.reset().unwrap();
+    assert!(gpio_mock.amp_awake());
+}
+
+#[test]
+fn mock_gpio_mute_calls() {
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    assert_eq!(gpio_mock.mute_calls(), 0);
+    gpio.set_hardware_mute(true).unwrap();
+    assert_eq!(gpio_mock.mute_calls(), 1);
+    gpio.set_hardware_mute(false).unwrap();
+    assert_eq!(gpio_mock.mute_calls(), 2);
+}
+
+#[test]
+fn mock_gpio_reset_hook() {
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    let hook_called = Arc::new(AtomicBool::new(false));
+    let hook_called_clone = Arc::clone(&hook_called);
+
+    gpio_mock.set_reset_hook(Some(Arc::new(move || {
+        hook_called_clone.store(true, Ordering::SeqCst);
+    })));
+
+    gpio.reset().unwrap();
+    assert!(hook_called.load(Ordering::SeqCst));
+
+    hook_called.store(false, Ordering::SeqCst);
+    gpio_mock.set_reset_hook(None);
+    gpio.reset().unwrap();
+    assert!(!hook_called.load(Ordering::SeqCst));
+}
