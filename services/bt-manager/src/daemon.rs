@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::agent::AgentCapabilityMode;
 use crate::config::BtManagerConfig;
@@ -490,6 +490,56 @@ pub fn is_audio_manager_amp_signal<'a>(
     interface == "org.speaker.AudioManager1" && changed_keys.any(|k| k == "Level" || k == "Muted")
 }
 
+/// Reverse-direction catch-up: reads audio-manager's current Level/Muted and
+/// pushes them to the `BlueALSA` PCM (propagating to the phone via AVRCP), then
+/// seeds the reverse dedup caches and marks the level as our own write so the
+/// forward arm skips its echo.
+async fn push_amp_level_catchup(
+    conn: &Connection,
+    bt: &BluetoothDevice,
+    last_pushed_level: &mut Option<u8>,
+    last_pushed_muted: &mut Option<bool>,
+    expect_am: &mut Option<u8>,
+) {
+    let proxy = match Proxy::new(
+        conn,
+        "org.speaker.AudioManager",
+        "/org/speaker/amp",
+        "org.speaker.AudioManager1",
+    )
+    .await
+    {
+        Ok(proxy) => proxy,
+        Err(e) => {
+            tracing::debug!(error = %e, "audio-manager not reachable for reverse catch-up");
+            return;
+        }
+    };
+    let level: Option<u8> = proxy.get_property("Level").await.ok();
+    let muted: Option<bool> = proxy.get_property("Muted").await.ok();
+    *last_pushed_level = level;
+    *last_pushed_muted = muted;
+    let Some(level) = level else {
+        tracing::debug!("audio-manager Level unreadable; reverse catch-up skipped");
+        return;
+    };
+    let bt_for_push = bt.clone();
+    match tokio::task::spawn_blocking(move || bt_for_push.set_volume(level)).await {
+        Ok(Ok(())) => {
+            tracing::info!(level, "Volume catch-up: audio-manager -> BlueALSA");
+            // The BlueALSA Volume signal echoing our own push must not be
+            // re-applied to audio-manager as if the phone had spoken.
+            *expect_am = Some(level);
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "Reverse volume catch-up failed");
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "Reverse volume catch-up task panicked");
+        }
+    }
+}
+
 /// Runs one sync attempt, logging failures at debug level (volume sync is
 /// best-effort; the next signal retries).
 async fn sync_volume_logged(
@@ -592,6 +642,11 @@ async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
     // the reverse arm must skip exactly that one signal, otherwise the two
     // sync directions fight each other with stale out-of-order pushes.
     let mut expect_am: Option<u8> = None;
+    // While a fresh PCM settles (BlueALSA initializes the `Volume` property
+    // to max before AVRCP negotiates the phone's real level), forward syncs
+    // from BlueALSA are suppressed; the amp's persisted level is pushed to
+    // the phone instead. `None` = no active suppression.
+    let mut forward_suppress_until: Option<Instant> = None;
 
     let props_rule = match MatchRule::builder()
         .sender("org.bluealsa")
@@ -674,42 +729,15 @@ async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
         sync_volume_logged(&bt, &conn, &mut last_pcm_vol, &mut expect_am).await;
 
         // Reverse-direction catch-up: the amp level may have changed (amp-cli,
-        // thermal offset) while this task was down; seed the dedup cache from
-        // audio-manager's current state and push it to BlueALSA once.
-        match Proxy::new(
+        // thermal offset) while this task was down; push it to BlueALSA once.
+        push_amp_level_catchup(
             &conn,
-            "org.speaker.AudioManager",
-            "/org/speaker/amp",
-            "org.speaker.AudioManager1",
+            &bt,
+            &mut last_pushed_level,
+            &mut last_pushed_muted,
+            &mut expect_am,
         )
-        .await
-        {
-            Ok(proxy) => {
-                let level: Result<u8, _> = proxy.get_property("Level").await;
-                let muted: Result<bool, _> = proxy.get_property("Muted").await;
-                let level = level.ok();
-                let muted = muted.ok();
-                last_pushed_level = level;
-                last_pushed_muted = muted;
-                if let Some(level) = level {
-                    let bt_for_push = bt.clone();
-                    match tokio::task::spawn_blocking(move || bt_for_push.set_volume(level)).await {
-                        Ok(Ok(())) => {
-                            tracing::info!(level, "Volume catch-up: audio-manager -> BlueALSA");
-                        }
-                        Ok(Err(e)) => {
-                            tracing::debug!(error = %e, "Reverse volume catch-up failed");
-                        }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "Reverse volume catch-up task panicked");
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "audio-manager not reachable for reverse catch-up");
-            }
-        }
+        .await;
 
         loop {
             tokio::select! {
@@ -730,6 +758,15 @@ async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
                             &iface,
                             props.keys().map(String::as_str),
                         ) {
+                            continue;
+                        }
+                        // Fresh-connect settle window: BlueALSA initializes a
+                        // new PCM's Volume to max before AVRCP negotiates the
+                        // phone's real level. Trusting it blasts the amp to
+                        // 100%; the reverse catch-up pushed on InterfacesAdded
+                        // owns the initial state instead.
+                        if forward_suppress_until.is_some_and(|until| Instant::now() < until) {
+                            tracing::debug!("Volume sync suppressed during fresh-connect settle");
                             continue;
                         }
                         // Parse the new volume directly from the payload —
@@ -843,11 +880,25 @@ async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
                 },
                 signal = iface_stream.next() => match signal {
                     Some(Ok(signal)) => {
-                        // A new PCM appeared (fresh A2DP connect); do one full
-                        // catch-up read so the amp matches the phone volume.
+                        // A new PCM appeared (fresh A2DP connect). BlueALSA's
+                        // initial PCM Volume is NOT the phone's real level
+                        // (defaults to max until AVRCP negotiates), so the
+                        // amp's persisted level is pushed to the phone and
+                        // forward syncs are suppressed while things settle.
                         let path = signal.header().path().map(std::string::ToString::to_string);
                         if path.as_deref().is_some_and(|p| p.contains("a2dpsnk")) {
-                            sync_volume_logged(&bt, &conn, &mut last_pcm_vol, &mut expect_am).await;
+                            tracing::info!("Fresh A2DP PCM: pushing amp level, settling forward sync");
+                            last_pcm_vol = None;
+                            forward_suppress_until =
+                                Some(Instant::now() + Duration::from_secs(2));
+                            push_amp_level_catchup(
+                                &conn,
+                                &bt,
+                                &mut last_pushed_level,
+                                &mut last_pushed_muted,
+                                &mut expect_am,
+                            )
+                            .await;
                         }
                     }
                     Some(Err(e)) => {
