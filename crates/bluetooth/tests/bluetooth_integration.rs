@@ -1222,6 +1222,60 @@ fn playback_state_and_duration_formatting() {
 }
 
 #[test]
+fn avrcp_volume_construction_and_serde_roundtrip() {
+    use speaker_bluetooth::{AVRCP_MAX_VOLUME, AvrcpVolume};
+
+    // Boundary construction: 0 and the maximum are valid, one above is rejected.
+    assert_eq!(AvrcpVolume::new(0).map(AvrcpVolume::get), Some(0));
+    assert_eq!(
+        AvrcpVolume::new(AVRCP_MAX_VOLUME).map(AvrcpVolume::get),
+        Some(AVRCP_MAX_VOLUME)
+    );
+    assert!(AvrcpVolume::new(AVRCP_MAX_VOLUME + 1).is_none());
+    assert!(AvrcpVolume::new(u16::MAX).is_none());
+
+    // Percentage conversion boundaries (0-127 -> 0-100, rounded).
+    assert_eq!(AvrcpVolume::new(0).map(AvrcpVolume::to_percent), Some(0));
+    assert_eq!(AvrcpVolume::new(64).map(AvrcpVolume::to_percent), Some(50));
+    assert_eq!(AvrcpVolume::new(80).map(AvrcpVolume::to_percent), Some(63));
+    assert_eq!(
+        AvrcpVolume::new(AVRCP_MAX_VOLUME).map(AvrcpVolume::to_percent),
+        Some(100)
+    );
+
+    // Serialization emits the raw 0-127 level.
+    let vol = AvrcpVolume::new(96).expect("96 is within range");
+    assert_eq!(serde_json::to_string(&vol).expect("serialize"), "96");
+
+    // Deserialization validates the invariant: in-range values round-trip,
+    // out-of-range values are rejected with a canonical error.
+    let de: AvrcpVolume = serde_json::from_str("96").expect("96 deserializes");
+    assert_eq!(de, vol);
+    let err = serde_json::from_str::<AvrcpVolume>("200")
+        .expect_err("200 exceeds the AVRCP maximum and must be rejected");
+    assert!(
+        err.to_string().contains("exceeds maximum"),
+        "unexpected error: {err}"
+    );
+    let err = serde_json::from_str::<AvrcpVolume>("70000")
+        .expect_err("values beyond u16 must be rejected");
+    assert!(
+        err.to_string().contains("invalid value"),
+        "unexpected: {err}"
+    );
+
+    // A full BtPlaybackState round-trips through serde with the validated volume.
+    let state = BtPlaybackState {
+        phone_volume: Some(vol),
+        ..BtPlaybackState::default()
+    };
+    let json = serde_json::to_string(&state).expect("state serializes");
+    let back: BtPlaybackState = serde_json::from_str(&json).expect("state deserializes");
+    assert_eq!(back.phone_volume, Some(vol));
+    assert_eq!(back.phone_volume_percent(), Some(76));
+}
+
+#[test]
 fn bluetooth_mock_playback_controls() {
     let (device, _) = BluetoothDevice::new_mocked();
 
