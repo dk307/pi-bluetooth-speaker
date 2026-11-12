@@ -1258,11 +1258,15 @@ impl AmpDeviceMock {
                 fault: None,
                 // Write-path defaults
                 mock_master_volume_reg: 168 - 116, // ≈ -28 dB (raw 116 ⇒ reg 52)
-                mock_pm_ctrl: 0x60,                // manualPM=1 (bit6), PM_man=2 (bits5:4) -> PMP2
-                mock_pm_profile: 2,                // PMP2
-                mock_audio_in_mode: 0,             // 20dB gain
-                mock_reg_0x35: 0x00,               // I2S std, VLP bypassed (reset default)
-                mock_reg_0x36: 0x01,               // bit0 set (live reset default); unmuted
+                // Silicon reset defaults per `ma120x0p.h`: manualPM=0
+                // (auto power-mode), pm_man=3 (0x30), pmprofile=0 (0x1D).
+                // After an `/ENABLE` reset pulse the chip returns to these
+                // values — the mock must match (audit Violation 3 triage).
+                mock_pm_ctrl: 0x30,    // manualPM=0, PM_man=3 (auto PM)
+                mock_pm_profile: 0,    // PMP0 (silicon reset default)
+                mock_audio_in_mode: 0, // 20dB gain
+                mock_reg_0x35: 0x00,   // I2S std, VLP bypassed (reset default)
+                mock_reg_0x36: 0x01,   // bit0 set (live reset default); unmuted
                 mock_limiter_thresholds_dbfs: -15, // driver probe default
             })),
         }
@@ -1844,11 +1848,17 @@ where
             reason = "range-checked above: 24 - dbfs is 24..=168, fits u8"
         )]
         let reg = (24 - dbfs) as u8;
+        // 0x4B holds the 0.25 dB fractional threshold bits (2 per channel,
+        // reset 0x00 per `ma120x0p.h` `ma_thr_lsb_chX`). Zeroed alongside
+        // the integer bytes — same pattern as `write_master_volume`
+        // writing `(REG_VOL_LSB_MASTER, 0)` — so a stale fractional value
+        // can never offset the programmed threshold (audit Violation 2).
         self.write_regs(&[
             (REG_THR_DB_CH0, reg),
             (REG_THR_DB_CH0 + 1, reg),
             (REG_THR_DB_CH0 + 2, reg),
             (REG_THR_DB_CH0 + 3, reg),
+            (REG_THR_LSB_CH, 0),
         ])
     }
 

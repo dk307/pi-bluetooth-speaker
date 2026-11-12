@@ -62,8 +62,13 @@ const ENABLE_SETTLE: Duration = Duration::from_millis(50);
 /// `/ENABLE` HIGH pulse width for a reset cycle.
 const RESET_PULSE: Duration = Duration::from_millis(1);
 
-/// Post-reset settle time before register re-init.
-const RESET_SETTLE: Duration = Duration::from_millis(10);
+/// Post-reset settle time before register re-init. The `/ENABLE` LOW
+/// edge starts the same internal power-up state machine as a cold boot
+/// (flying-cap soft-charge, gate-drive charge pumps, OTP fuse load);
+/// kernel parity (`ma120x0p.c` probe) waits `msleep(50)` after `/ENABLE`
+/// goes LOW, and so do we — 10 ms left the first post-reset I2C write
+/// (serial mute re-assert) racing the fuse load (audit Violation 1).
+const RESET_SETTLE: Duration = Duration::from_millis(50);
 
 /// How long a single edge-watch poll blocks before re-checking shutdown.
 const EDGE_POLL_INTERVAL: Duration = Duration::from_millis(500);

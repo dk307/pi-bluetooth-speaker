@@ -567,8 +567,8 @@ fn mock_write_serial_mute_and_read() {
 #[test]
 fn mock_write_power_mode_ctrl_and_read() {
     let (amp, mock) = AmpDevice::new_mocked();
-    // Default: manualPM=1 (bit6), PM_man=2 (bits5:4) -> decoded PM_man = 2
-    assert_eq!(mock.mock_pm_ctrl(), 2);
+    // Silicon reset default: manualPM=0, PM_man=3 (auto PM)
+    assert_eq!(mock.mock_pm_ctrl(), 3);
 
     amp.write_power_mode_ctrl(0).unwrap(); // PMP0
     assert_eq!(mock.mock_pm_ctrl(), 0);
@@ -580,8 +580,8 @@ fn mock_write_power_mode_ctrl_and_read() {
 #[test]
 fn mock_write_power_mode_profile_and_read() {
     let (amp, mock) = AmpDevice::new_mocked();
-    // Default PMP2
-    assert_eq!(mock.mock_pm_profile(), 2);
+    // Silicon reset default: pmprofile = 0 (PMP0)
+    assert_eq!(mock.mock_pm_profile(), 0);
 
     amp.write_power_mode_profile(0).unwrap(); // PMP0
     assert_eq!(mock.mock_pm_profile(), 0);
@@ -765,7 +765,7 @@ mod hardware_device_tests {
     use super::eh_mock_bus::MockBus;
     use speaker_hardware::amp::{
         AmpI2cAddress, LimiterSlew, REG_AUDIO_IN_MODE, REG_AUDIO_PROC, REG_I2S_FORMAT, REG_PM_CTRL,
-        REG_PM_PROFILE, REG_THR_DB_CH0, REG_VOL_DB_MASTER, REG_VOL_LSB_MASTER,
+        REG_PM_PROFILE, REG_THR_DB_CH0, REG_THR_LSB_CH, REG_VOL_DB_MASTER, REG_VOL_LSB_MASTER,
     };
     use speaker_hardware::amp_test_helpers::HardwareDevice;
 
@@ -888,6 +888,10 @@ mod hardware_device_tests {
         for ch in 0..4u8 {
             assert_eq!(bus.get_register(REG_THR_DB_CH0 + ch), Some(0x27), "ch{ch}");
         }
+        // Fractional 0.25 dB bits (0x4B, 2 per channel) zeroed with the
+        // integer bytes so a stale value can never offset the threshold
+        // (audit Violation 2).
+        assert_eq!(bus.get_register(REG_THR_LSB_CH), Some(0x00));
 
         let err = dev.write_limiter_thresholds(1).unwrap_err();
         assert!(err.is_invalid_argument());
@@ -1062,8 +1066,9 @@ fn mock_read_settings_defaults() {
     assert_eq!(s.master_volume_raw, 116);
     assert_eq!(s.master_volume_frac, 0);
     assert!(!s.serial_muted);
-    assert_eq!(s.pm_ctrl_pm, 2);
-    assert_eq!(s.pm_profile, 2);
+    // Silicon reset defaults (ma120x0p.h): manualPM=0, pm_man=3, profile 0.
+    assert_eq!(s.pm_ctrl_pm, 3);
+    assert_eq!(s.pm_profile, 0);
     assert_eq!(s.i2s_format, 0);
     assert_eq!(s.audio_in_mode, 0);
 }
@@ -1139,7 +1144,7 @@ async fn async_settings_read_and_audio_in_mode_write() {
     let (amp, mock) = AmpDevice::new_mocked();
 
     let s = amp.read_settings_async().await.unwrap();
-    assert_eq!(s.pm_ctrl_pm, 2);
+    assert_eq!(s.pm_ctrl_pm, 3); // silicon reset default (auto PM)
 
     amp.write_audio_in_mode_async(1).await.unwrap();
     assert_eq!(mock.mock_audio_in_mode(), 1);
