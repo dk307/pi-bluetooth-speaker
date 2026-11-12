@@ -1059,11 +1059,11 @@ pub fn select_best_format(properties: &BipImageProperties, target_min_dim: u32) 
                 }
             };
 
-            if target_w > native_dim.0 {
+            let target_area = u64::from(target_w) * u64::from(target_h);
+            let native_area = u64::from(native_dim.0) * u64::from(native_dim.1);
+            if target_area > native_area && (target_w > native_dim.0 || target_h > native_dim.1) {
                 if let Some((curr_w, curr_h)) = best_variant {
-                    if (u64::from(target_w) * u64::from(target_h))
-                        > (u64::from(curr_w) * u64::from(curr_h))
-                    {
+                    if target_area > (u64::from(curr_w) * u64::from(curr_h)) {
                         best_variant = Some((target_w, target_h));
                     }
                 } else {
