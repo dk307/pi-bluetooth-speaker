@@ -2,8 +2,8 @@
 
 use bt_manager::agent::AgentCapabilityMode;
 use bt_manager::daemon::{
-    BtManagerOptions, is_bluealsa_volume_signal, parse_cli_args_from, parse_interval_secs,
-    parse_ticks, run_app, run_tick,
+    BtManagerOptions, is_audio_manager_amp_signal, is_bluealsa_volume_signal, parse_cli_args_from,
+    parse_interval_secs, parse_ticks, run_app, run_tick,
 };
 use speaker_bluetooth::BluetoothDevice;
 use speaker_common::diag::CliParse;
@@ -282,6 +282,30 @@ fn run_app_fails_on_malformed_config() {
         .build()
         .expect("runtime");
     assert_eq!(rt.block_on(run_app(bt, opts)), ExitCode::FAILURE);
+}
+
+#[test]
+fn audio_manager_amp_signal_predicate() {
+    // Level change on the amp interface -> must react
+    assert!(is_audio_manager_amp_signal(
+        "org.speaker.AudioManager1",
+        ["Level"].into_iter(),
+    ));
+    // Mute change -> must react
+    assert!(is_audio_manager_amp_signal(
+        "org.speaker.AudioManager1",
+        ["Muted"].into_iter(),
+    ));
+    // Other interface -> ignore
+    assert!(!is_audio_manager_amp_signal(
+        "org.bluealsa.PCM1",
+        ["Level"].into_iter(),
+    ));
+    // Unrelated property -> ignore
+    assert!(!is_audio_manager_amp_signal(
+        "org.speaker.AudioManager1",
+        ["Codec"].into_iter(),
+    ));
 }
 
 #[test]

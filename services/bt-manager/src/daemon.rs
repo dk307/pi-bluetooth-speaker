@@ -472,6 +472,20 @@ pub fn is_bluealsa_volume_signal<'a>(
         && changed_keys.any(|k| k == "Volume")
 }
 
+/// Predicate: does this D-Bus `PropertiesChanged` signal announce an
+/// audio-manager amp level/mute change?
+///
+/// Pure and host-testable; path/interface/key parsing never touches D-Bus.
+/// `pub` under `test-util` so the integration suite can exercise it; the bin
+/// target never calls it, hence the scoped `dead_code` allowance.
+#[cfg_attr(not(feature = "test-util"), allow(dead_code))]
+pub fn is_audio_manager_amp_signal<'a>(
+    interface: &str,
+    mut changed_keys: impl Iterator<Item = &'a str>,
+) -> bool {
+    interface == "org.speaker.AudioManager1" && changed_keys.any(|k| k == "Level" || k == "Muted")
+}
+
 /// Runs one sync attempt, logging failures at debug level (volume sync is
 /// best-effort; the next signal retries).
 async fn sync_volume_logged(
@@ -557,6 +571,12 @@ async fn apply_pcm_volume(
 )]
 async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
     let mut last_pcm_vol: Option<u8> = None;
+    // Reverse direction dedup (audio-manager -> BlueALSA): the last level /
+    // mute state this task pushed to BlueALSA itself. Dampens the echo loop
+    // (our own push round-trips back through BlueALSA's Volume signal and the
+    // forward arm's SetLevel, both of which converge without a third write).
+    let mut last_pushed_level: Option<u8> = None;
+    let mut last_pushed_muted: Option<bool> = None;
 
     let props_rule = match MatchRule::builder()
         .sender("org.bluealsa")
@@ -583,35 +603,98 @@ async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
         }
     };
 
+    let amp_rule = match MatchRule::builder()
+        .sender("org.speaker.AudioManager")
+        .and_then(|b| b.path("/org/speaker/amp"))
+        .and_then(|b| b.interface("org.freedesktop.DBus.Properties"))
+        .and_then(|b| b.member("PropertiesChanged"))
+        .map(zbus::match_rule::Builder::build)
+    {
+        Ok(rule) => rule,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to build audio-manager signal match rule");
+            return;
+        }
+    };
+
     // Signal-Listener Reconnect Loop: if a stream dies or setup fails,
     // rebuild it from scratch after a backoff instead of hot-spinning.
     loop {
-        let (mut props_stream, mut iface_stream) = match MessageStream::for_match_rule(
-            props_rule.clone(),
+        let (mut props_stream, mut iface_stream, mut amp_stream) =
+            match MessageStream::for_match_rule(props_rule.clone(), &conn, Some(64)).await {
+                Ok(props) => {
+                    match MessageStream::for_match_rule(interfaces_rule.clone(), &conn, Some(8))
+                        .await
+                    {
+                        Ok(interfaces) => {
+                            match MessageStream::for_match_rule(amp_rule.clone(), &conn, Some(8))
+                                .await
+                            {
+                                Ok(amp) => (props, interfaces, amp),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to subscribe to audio-manager PropertiesChanged"
+                                    );
+                                    tokio::time::sleep(TokioDuration::from_millis(500)).await;
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to subscribe to BlueALSA InterfacesAdded");
+                            tokio::time::sleep(TokioDuration::from_millis(500)).await;
+                            continue;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to subscribe to BlueALSA PropertiesChanged");
+                    tokio::time::sleep(TokioDuration::from_millis(500)).await;
+                    continue;
+                }
+            };
+
+        // One-shot catch-up: apply the current volume on startup/reconnect.
+        sync_volume_logged(&bt, &conn, &mut last_pcm_vol).await;
+
+        // Reverse-direction catch-up: the amp level may have changed (amp-cli,
+        // thermal offset) while this task was down; seed the dedup cache from
+        // audio-manager's current state and push it to BlueALSA once.
+        match Proxy::new(
             &conn,
-            Some(64),
+            "org.speaker.AudioManager",
+            "/org/speaker/amp",
+            "org.speaker.AudioManager1",
         )
         .await
         {
-            Ok(props) => {
-                match MessageStream::for_match_rule(interfaces_rule.clone(), &conn, Some(8)).await {
-                    Ok(interfaces) => (props, interfaces),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to subscribe to BlueALSA InterfacesAdded");
-                        tokio::time::sleep(TokioDuration::from_millis(500)).await;
-                        continue;
+            Ok(proxy) => {
+                let level: Result<u8, _> = proxy.get_property("Level").await;
+                let muted: Result<bool, _> = proxy.get_property("Muted").await;
+                let level = level.ok();
+                let muted = muted.ok();
+                last_pushed_level = level;
+                last_pushed_muted = muted;
+                if let Some(level) = level {
+                    let bt_for_push = bt.clone();
+                    match tokio::task::spawn_blocking(move || bt_for_push.set_volume(level)).await {
+                        Ok(Ok(())) => {
+                            tracing::info!(level, "Volume catch-up: audio-manager -> BlueALSA");
+                        }
+                        Ok(Err(e)) => {
+                            tracing::debug!(error = %e, "Reverse volume catch-up failed");
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, "Reverse volume catch-up task panicked");
+                        }
                     }
                 }
             }
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to subscribe to BlueALSA PropertiesChanged");
-                tokio::time::sleep(TokioDuration::from_millis(500)).await;
-                continue;
+                tracing::debug!(error = %e, "audio-manager not reachable for reverse catch-up");
             }
-        };
-
-        // One-shot catch-up: apply the current volume on startup/reconnect.
-        sync_volume_logged(&bt, &conn, &mut last_pcm_vol).await;
+        }
 
         loop {
             tokio::select! {
@@ -657,6 +740,76 @@ async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
                     }
                     None => {
                         tracing::warn!("BlueALSA volume signal stream closed; reconnecting");
+                        break;
+                    }
+                },
+                signal = amp_stream.next() => match signal {
+                    Some(Ok(signal)) => {
+                        // audio-manager published a new Level/Muted (speaker-side
+                        // volume change, e.g. amp-cli or the controller's thermal
+                        // offset): push it back to BlueALSA so the phone's AVRCP
+                        // absolute volume follows the speaker.
+                        let body = signal.body();
+                        let parsed = body.deserialize::<(
+                            Box<str>,
+                            HashMap<String, zbus::zvariant::Value<'_>>,
+                            Vec<String>,
+                        )>();
+                        let Ok((iface, props, _invalidated)) = parsed else {
+                            continue;
+                        };
+                        if !is_audio_manager_amp_signal(
+                            &iface,
+                            props.keys().map(String::as_str),
+                        ) {
+                            continue;
+                        }
+                        if let Some(level) = props.get("Level").and_then(|v| v.try_into().ok())
+                            && last_pushed_level != Some(level) {
+                            last_pushed_level = Some(level);
+                            let bt_for_push = bt.clone();
+                            match tokio::task::spawn_blocking(move || bt_for_push.set_volume(level))
+                                .await
+                            {
+                                Ok(Ok(())) => {
+                                    tracing::info!(
+                                        level,
+                                        "Volume sync: audio-manager -> BlueALSA"
+                                    );
+                                }
+                                Ok(Err(e)) => {
+                                    tracing::debug!(error = %e, "Reverse volume sync failed");
+                                }
+                                Err(e) => {
+                                    tracing::debug!(error = %e, "Reverse volume sync task panicked");
+                                }
+                            }
+                        }
+                        if let Some(muted) = props.get("Muted").and_then(|v| v.try_into().ok())
+                            && last_pushed_muted != Some(muted) {
+                            last_pushed_muted = Some(muted);
+                            let bt_for_push = bt.clone();
+                            match tokio::task::spawn_blocking(move || bt_for_push.set_mute(muted))
+                                .await
+                            {
+                                Ok(Ok(())) => {
+                                    tracing::info!(muted, "Mute sync: audio-manager -> BlueALSA");
+                                }
+                                Ok(Err(e)) => {
+                                    tracing::debug!(error = %e, "Reverse mute sync failed");
+                                }
+                                Err(e) => {
+                                    tracing::debug!(error = %e, "Reverse mute sync task panicked");
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!(error = %e, "audio-manager signal stream error; reconnecting");
+                        break;
+                    }
+                    None => {
+                        tracing::warn!("audio-manager signal stream closed; reconnecting");
                         break;
                     }
                 },

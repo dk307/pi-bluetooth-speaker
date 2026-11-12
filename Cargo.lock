@@ -392,6 +392,7 @@ dependencies = [
  "async-trait",
  "config",
  "ctrlc",
+ "futures-util",
  "libc",
  "nix 0.28.0",
  "rppal",

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tracing::{debug, info, warn};
 use zbus::fdo::Error as ZBusError;
+use zbus::object_server::SignalEmitter;
 use zbus::{Connection, interface};
 
 use crate::amp_backend::AmpBackend;
@@ -14,7 +15,7 @@ use amp_curve::PERCENT_TO_RAW;
 
 /// The D-Bus interface implementation.
 pub struct AudioManagerInterface {
-    state: Arc<tokio::sync::Mutex<AmpState>>,
+    pub state: Arc<tokio::sync::Mutex<AmpState>>,
     backend: Option<Arc<dyn AmpBackend>>,
     state_file: StateFile,
     /// Phase 2 i2c mode: commands flow through the [`AmpController`] loop.
@@ -66,19 +67,14 @@ impl AudioManagerInterface {
         .map_err(|e| ZBusError::Failed(format!("controller command channel closed: {e}")))?;
         reply_rx
             .await
-            .map_err(|e| ZBusError::Failed(format!("controller dropped the reply: {e}")))?
-            .map_err(ZBusError::Failed)
+            .map_err(|e| ZBusError::Failed(e.to_string()))?
+            .map_err(ZBusError::Failed)?;
+        Ok(())
     }
-}
 
-/// The zbus interface definition for org.speaker.AudioManager1.
-#[interface(name = "org.speaker.AudioManager1")]
-impl AudioManagerInterface {
-    /// Set the volume level as a percentage (0..100).
-    /// Maps to the Merus A.Mstr Vol register via the perceptual curve.
-    /// If muted, the level is still applied to the mixer (silence is
-    /// guaranteed by the serial mute bit), so unmute is instant.
-    pub async fn set_level(&self, percent: u8) -> Result<(), ZBusError> {
+    /// Core level write (D-Bus-free; tests call this directly). The zbus
+    /// wrapper emits `PropertiesChanged` after this succeeds.
+    pub async fn set_level_inner(&self, percent: u8) -> Result<(), ZBusError> {
         if percent > 100 {
             return Err(ZBusError::Failed(format!(
                 "percent {} out of range 0..100",
@@ -120,8 +116,9 @@ impl AudioManagerInterface {
         Ok(())
     }
 
-    /// Set mute state (serial mute register; the mixer level is untouched).
-    pub async fn set_mute(&self, muted: bool) -> Result<(), ZBusError> {
+    /// Core mute write (D-Bus-free; tests call this directly). The zbus
+    /// wrapper emits `PropertiesChanged` after this succeeds.
+    pub async fn set_mute_inner(&self, muted: bool) -> Result<(), ZBusError> {
         // Phase 2 i2c mode: the controller owns the mute state machine.
         if self.commands.is_some() {
             return self.dispatch(AmpCommandKind::SetMute(muted)).await;
@@ -150,6 +147,39 @@ impl AudioManagerInterface {
         }
 
         info!(muted = applied.muted, level = applied.level_raw, "SetMute");
+        Ok(())
+    }
+}
+
+/// The zbus interface definition for org.speaker.AudioManager1.
+#[interface(name = "org.speaker.AudioManager1")]
+impl AudioManagerInterface {
+    /// Set the volume level as a percentage (0..100).
+    /// Maps to the Merus A.Mstr Vol register via the perceptual curve.
+    /// If muted, the level is still applied to the mixer (silence is
+    /// guaranteed by the serial mute bit), so unmute is instant.
+    pub async fn set_level(
+        &self,
+        percent: u8,
+        #[zbus(signal_emitter)] signal_emitter: SignalEmitter<'_>,
+    ) -> Result<(), ZBusError> {
+        // Signals are emitted only after the hardware transaction succeeded,
+        // so a failed command never announces state it did not apply.
+        self.set_level_inner(percent).await?;
+        self.level_changed(&signal_emitter).await?;
+        self.muted_changed(&signal_emitter).await?;
+        Ok(())
+    }
+
+    /// Set mute state (serial mute register; the mixer level is untouched).
+    pub async fn set_mute(
+        &self,
+        muted: bool,
+        #[zbus(signal_emitter)] signal_emitter: SignalEmitter<'_>,
+    ) -> Result<(), ZBusError> {
+        self.set_mute_inner(muted).await?;
+        self.muted_changed(&signal_emitter).await?;
+        self.level_changed(&signal_emitter).await?;
         Ok(())
     }
 
