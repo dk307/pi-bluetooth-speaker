@@ -414,8 +414,13 @@ pub fn print_human_single_status(status: &BluetoothStatus, opts: &CliOptions) {
     println!("=========================================================");
 }
 
-/// Formats and outputs Bluetooth status as JSON.
-pub fn output_json_status(timestamp: &str, status: &BluetoothStatus, opts: &CliOptions) {
+/// Builds the Bluetooth status JSON document.
+#[must_use]
+pub fn build_json_status(
+    timestamp: &str,
+    status: &BluetoothStatus,
+    opts: &CliOptions,
+) -> serde_json::Value {
     let mut devices: Vec<&BtDevice> = status.devices.iter().collect();
     let mut pcms: Vec<&BlueAlsaPcm> = status.pcms.iter().collect();
 
@@ -424,7 +429,7 @@ pub fn output_json_status(timestamp: &str, status: &BluetoothStatus, opts: &CliO
         pcms.retain(|p| p.device_address == target);
     }
 
-    let obj = serde_json::json!({
+    serde_json::json!({
         "timestamp": timestamp,
         "is_operational": status.is_operational(),
         "services": {
@@ -509,8 +514,12 @@ pub fn output_json_status(timestamp: &str, status: &BluetoothStatus, opts: &CliO
                 "firmware_version": status.hardware.controller.firmware_version,
             }
         }
-    });
-    println!("{obj}");
+    })
+}
+
+/// Formats and outputs Bluetooth status as JSON.
+pub fn output_json_status(timestamp: &str, status: &BluetoothStatus, opts: &CliOptions) {
+    println!("{}", build_json_status(timestamp, status, opts));
 }
 
 /// Formats and outputs an error as JSON.

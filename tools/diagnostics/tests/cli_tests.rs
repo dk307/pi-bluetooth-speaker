@@ -1813,7 +1813,7 @@ fn bt_info_phone_volume_output_and_json() {
     };
     use speaker_common::diag::{OutputFormat, format_timestamp};
     use speaker_common::systemd::ServiceState;
-    use speaker_diagnostics::cli::bt::{CliOptions, run_app};
+    use speaker_diagnostics::cli::bt::{CliOptions, build_json_status, run_app};
 
     // Test human output with phone volume
     let (device, mock) = BluetoothDevice::new_mocked();
@@ -1831,12 +1831,17 @@ fn bt_info_phone_volume_output_and_json() {
     let code = run_app(&device, &opts);
     assert_eq!(code, ExitCode::SUCCESS);
 
-    // Test JSON output includes phone_volume and phone_volume_percent
+    // JSON payload carries the raw AVRCP level and its percentage
+    let json = build_json_status("12:00:00", &status, &opts);
+    let json_playback = &json["playback"];
+    assert_eq!(json_playback["phone_volume"], serde_json::json!(80));
+    assert_eq!(json_playback["phone_volume_percent"], serde_json::json!(63));
+
     opts.common.format = OutputFormat::Json;
     let code_json = run_app(&device, &opts);
     assert_eq!(code_json, ExitCode::SUCCESS);
 
-    // Test with no phone volume
+    // Test with no phone volume: the keys are present but null
     if let Ok(Some(mut pb)) = device.playback_state() {
         pb.phone_volume = None;
         mock.set_playback(Some(pb));
@@ -1844,6 +1849,11 @@ fn bt_info_phone_volume_output_and_json() {
     opts.common.format = OutputFormat::Human;
     let code_none = run_app(&device, &opts);
     assert_eq!(code_none, ExitCode::SUCCESS);
+
+    let status_none = device.status().unwrap();
+    let json_none = build_json_status("12:00:01", &status_none, &opts);
+    assert!(json_none["playback"]["phone_volume"].is_null());
+    assert!(json_none["playback"]["phone_volume_percent"].is_null());
 
     opts.common.format = OutputFormat::Json;
     let code_none_json = run_app(&device, &opts);
@@ -1854,7 +1864,8 @@ fn bt_info_phone_volume_output_and_json() {
         pb.phone_volume = Some(AvrcpVolume::new(80).unwrap());
         mock.set_playback(Some(pb));
     }
-    let _ = run_app(&device, &opts);
+    let code_restored = run_app(&device, &opts);
+    assert_eq!(code_restored, ExitCode::SUCCESS);
 
     // Test direct output_json_status with phone volume
     let pcm_status = BluetoothStatus {
@@ -1885,9 +1896,14 @@ fn bt_info_phone_volume_output_and_json() {
         }),
     };
     let timestamp = format_timestamp();
-    speaker_diagnostics::cli::bt::output_json_status(
-        &timestamp,
-        &pcm_status,
-        &CliOptions::default(),
+    let json_direct = build_json_status(&timestamp, &pcm_status, &CliOptions::default());
+    assert_eq!(
+        json_direct["playback"]["phone_volume"],
+        serde_json::json!(100)
     );
+    assert_eq!(
+        json_direct["playback"]["phone_volume_percent"],
+        serde_json::json!(79)
+    );
+    assert_eq!(json_direct["timestamp"], serde_json::json!(timestamp));
 }
