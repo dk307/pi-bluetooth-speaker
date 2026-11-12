@@ -413,8 +413,11 @@ impl AmpGpio {
 
     /// Blocking error-line edge watch: invokes `on_edge` on every falling
     /// edge (fault asserted). The callback returns `false` to stop the
-    /// watch (shutdown). Designed to be spawned inside a `spawn_blocking`
-    /// task per plan §5.3.
+    /// watch (shutdown). Between edges the watch consults `keep_going`
+    /// (poll timeout / mock tick / error backoff) so the thread exits
+    /// promptly when the edge channel closes, instead of polling forever
+    /// after a graceful shutdown. Designed to be spawned inside a
+    /// `spawn_blocking` task per plan §5.3.
     ///
     /// On hardware, the synchronous interrupt is armed once
     /// (`set_interrupt(Trigger::FallingEdge, None)` — `poll_interrupt` is a
@@ -425,7 +428,11 @@ impl AmpGpio {
     /// # Panics
     /// Panics if the mock state lock is poisoned beyond recovery (a
     /// panicked holder is a bug; the safety tick covers fault detection).
-    pub fn watch_error_edges<F: FnMut() -> bool + Send>(&self, mut on_edge: F) {
+    pub fn watch_error_edges<F, K>(&self, mut on_edge: F, keep_going: K)
+    where
+        F: FnMut() -> bool + Send,
+        K: Fn() -> bool + Send,
+    {
         let (mock_state, hardware_pin) = {
             let mut seam = match self.seam.lock() {
                 Ok(s) => s,
@@ -450,6 +457,9 @@ impl AmpGpio {
         };
         if let Some(state) = mock_state {
             loop {
+                if !keep_going() {
+                    return;
+                }
                 let fire = mock_lock(&state).error_active;
                 if fire && !on_edge() {
                     return;
@@ -469,12 +479,19 @@ impl AmpGpio {
                     }
                 }
                 Ok(None) => {
-                    // Poll timeout: cycle again; the next poll re-arms.
+                    // Poll timeout: cycle again (the next poll re-arms),
+                    // unless the shutdown signal says to stop.
+                    if !keep_going() {
+                        return;
+                    }
                 }
                 Err(e) => {
                     // Transient OS-level watch faults: back off rather than
                     // hot-spinning; the safety tick covers detection.
                     warn!(error = %e, "GPIO error-line poll failed; backing off");
+                    if !keep_going() {
+                        return;
+                    }
                     std::thread::sleep(EDGE_POLL_INTERVAL);
                 }
             }

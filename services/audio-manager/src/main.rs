@@ -137,8 +137,14 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
     //    `false` (channel closed) to stop the watch; the task runs for the
     //    daemon lifetime otherwise.
     let (edge_tx, edge_rx) = mpsc::channel::<()>(16);
+    let edge_tx_close = edge_tx.clone();
     tokio::task::spawn_blocking(move || {
-        gpio_for_watch.watch_error_edges(move || edge_tx.blocking_send(()).is_ok())
+        gpio_for_watch.watch_error_edges(
+            move || edge_tx.blocking_send(()).is_ok(),
+            // Exit promptly once the receiver is gone (controller loop
+            // ended): no edge is required to notice the shutdown.
+            move || !edge_tx_close.is_closed(),
+        )
     });
 
     // 6. Connect to system D-Bus, claim the name, export the interface.

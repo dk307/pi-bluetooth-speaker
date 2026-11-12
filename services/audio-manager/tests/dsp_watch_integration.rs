@@ -320,3 +320,23 @@ async fn loop_exits_when_command_channel_closes() {
         .expect("watcher must exit when the command channel closes")
         .unwrap();
 }
+
+#[test]
+fn stalled_unknown_stalled_counts_as_consecutive() {
+    // Documented behavior: `Hold` (Unknown/Starting) does NOT reset the
+    // Stalled debounce counter — Stalled → Unknown → Stalled emits the
+    // stop. Conservative and safe (mutes on a possibly-dead stream); the
+    // engine reported capture starvation twice within the hold window.
+    let mut t = LifecycleTracker::new();
+    assert_eq!(
+        t.step(&ProcessingState::Running),
+        Some(AmpCommandKind::StreamStarting)
+    );
+    assert_eq!(t.step(&ProcessingState::Stalled), None);
+    assert_eq!(t.step(&ProcessingState::Unknown("blip".into())), None);
+    assert_eq!(
+        t.step(&ProcessingState::Stalled),
+        Some(AmpCommandKind::StreamStopping),
+        "Unknown between two Stalled polls does not reset the debounce"
+    );
+}
