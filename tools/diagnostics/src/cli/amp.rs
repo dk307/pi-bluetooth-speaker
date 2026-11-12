@@ -570,37 +570,57 @@ fn report_write(
 /// Applies requested Phase 1.5 setting changes, then reads back and reports the settings.
 ///
 /// Stops at the first failed write to avoid cascading transactions on a misbehaving bus.
+/// A deferred write operation: its report label and the write itself. The
+/// closure form keeps the write unexecuted until `handle_set` reaches it in
+/// the safety-ordered sequence (no eager bus transactions).
+type PendingWrite<'a> = (&'static str, Box<dyn FnOnce() -> Result<(), AmpError> + 'a>);
+
 fn handle_set(amp: &AmpDevice, opts: &CliOptions) -> ExitCode {
     let set = opts.set;
 
     // Safety ordering: a requested MUTE is applied FIRST (the amp must
     // never sit loud while later writes run); a requested UNMUTE is
     // applied LAST, only after every other write succeeded — a failed
-    // volume write must never unmask the output. The vec encodes this
-    // order; `filter_map` drops unrequested writes.
-    let writes = [
-        set.mute
-            .filter(|&m| m)
-            .map(|_| ("serial mute", amp.write_serial_mute(true))),
-        set.volume_raw
-            .map(|raw| ("master volume", amp.write_master_volume(raw))),
-        set.mute
-            .filter(|&m| !m)
-            .map(|_| ("serial mute", amp.write_serial_mute(false))),
-        set.pm
-            .map(|pm| ("power mode", amp.write_power_mode_ctrl(pm))),
-        set.profile
-            .map(|profile| ("power mode profile", amp.write_power_mode_profile(profile))),
-        set.i2s_format
-            .map(|format| ("I2S format", amp.write_i2s_format(format))),
-        set.audio_mode
-            .map(|mode| ("audio input mode", amp.write_audio_in_mode(mode))),
-    ]
-    .into_iter()
-    .flatten();
+    // volume write must never unmask the output. Ops are collected as
+    // DEFERRED closures in that order and executed one at a time, so a
+    // failure stops before any later transaction touches the bus.
+    let mut writes: Vec<PendingWrite<'_>> = Vec::new();
+    if set.mute == Some(true) {
+        writes.push(("serial mute", Box::new(|| amp.write_serial_mute(true))));
+    }
+    if let Some(raw) = set.volume_raw {
+        writes.push((
+            "master volume",
+            Box::new(move || amp.write_master_volume(raw)),
+        ));
+    }
+    if set.mute == Some(false) {
+        writes.push(("serial mute", Box::new(|| amp.write_serial_mute(false))));
+    }
+    if let Some(pm) = set.pm {
+        writes.push((
+            "power mode",
+            Box::new(move || amp.write_power_mode_ctrl(pm)),
+        ));
+    }
+    if let Some(profile) = set.profile {
+        writes.push((
+            "power mode profile",
+            Box::new(move || amp.write_power_mode_profile(profile)),
+        ));
+    }
+    if let Some(format) = set.i2s_format {
+        writes.push(("I2S format", Box::new(move || amp.write_i2s_format(format))));
+    }
+    if let Some(mode) = set.audio_mode {
+        writes.push((
+            "audio input mode",
+            Box::new(move || amp.write_audio_in_mode(mode)),
+        ));
+    }
 
-    for (name, result) in writes {
-        if !report_write(amp, opts, name, result) {
+    for (name, op) in writes {
+        if !report_write(amp, opts, name, op()) {
             return ExitCode::FAILURE;
         }
     }

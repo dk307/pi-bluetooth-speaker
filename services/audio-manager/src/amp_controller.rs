@@ -342,8 +342,6 @@ impl AmpController {
                 self.mute_hardware().await?;
                 self.ctrl = CtrlState::Muted;
                 self.stream_live = false;
-                // Re-assert GPIO /MUTE for a pop-free standby.
-                self.gpio.set_hardware_mute(true)?;
                 debug!("StreamStopping applied (hardware muted, user intent preserved)");
             }
             AmpCommandKind::StreamStarting => {

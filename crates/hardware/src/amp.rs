@@ -890,12 +890,7 @@ impl AmpSettings {
             // `as` casts required inside const blocks (From is not const fn);
             // u8 -> u16 is lossless. VLP register decode: raw = 168 − reg,
             // clamped to the user scale 0..=144 (reg < 24 = boost).
-            master_volume_raw: if vol_int >= VLP_NEG144_DB_REG as u8 {
-                0
-            } else {
-                let diff = VLP_NEG144_DB_REG - vol_int as u16;
-                if diff > 144 { 144 } else { diff }
-            },
+            master_volume_raw: decode_vlp_raw(vol_int as u16),
             master_volume_frac: vol_frac & 0x03,
             serial_muted: is_muted_bit(audio_proc),
             pm_ctrl_pm: (pm_ctrl >> 4) & 0x03,
@@ -1224,6 +1219,11 @@ struct MockState {
     live_errors: AmpErrorFlags,
     latched_errors: AmpErrorFlags,
     fault: Option<Box<str>>,
+    // Transient single-shot write failures (test seam): the next N write
+    // calls on the ordering-critical writes (master volume, serial mute)
+    // fail once and then recover, modeling a single NACK on a misbehaving
+    // bus (unlike `fault`, which fails every operation uniformly).
+    transient_write_failures: u32,
     // Write-path mock state (Phase 1.5). Stores the hardware `0x40` VLP
     // register encoding (24 − dB) to mirror `HardwareDevice` fidelity.
     mock_master_volume_reg: u16,
@@ -1257,6 +1257,7 @@ impl AmpDeviceMock {
                 live_errors: AmpErrorFlags::NONE,
                 latched_errors: AmpErrorFlags::NONE,
                 fault: None,
+                transient_write_failures: 0,
                 // Write-path defaults
                 mock_master_volume_reg: 168 - 116, // ≈ -28 dB (raw 116 ⇒ reg 52)
                 // Silicon reset defaults per `ma120x0p.h`: manualPM=0
@@ -1327,6 +1328,21 @@ impl AmpDeviceMock {
         state.fault = fault;
     }
 
+    /// Arms N one-shot transient failures on the ordering-critical writes
+    /// (master volume, serial mute): the next N of those write calls fail
+    /// with a mock fault and subsequent calls recover. Models a single
+    /// transient NACK on a misbehaving bus, unlike [`Self::set_fault`],
+    /// which fails every operation uniformly.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_transient_write_failures(&self, count: u32) {
+        self.state
+            .write()
+            .expect("mock lock poisoned")
+            .transient_write_failures = count;
+    }
+
     fn read_status(&self) -> Result<AmpStatus, AmpError> {
         let state = self.state.read().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
@@ -1389,6 +1405,10 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
+        if state.transient_write_failures > 0 {
+            state.transient_write_failures -= 1;
+            return Err(AmpError::mock_fault(Box::from("transient write failure")));
+        }
         if raw > 144 {
             return Err(AmpError::invalid_argument("master_volume_raw", raw));
         }
@@ -1401,6 +1421,10 @@ impl AmpDeviceMock {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
+        }
+        if state.transient_write_failures > 0 {
+            state.transient_write_failures -= 1;
+            return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         // Real read-modify-write on the shared 0x36 byte (serial mute is
         // bit 7; the limiter enable bit 6 and other bits are preserved).
@@ -1680,7 +1704,7 @@ impl AmpDeviceMock {
 ///
 /// Generic over `embedded_hal::blocking::i2c` traits to enable testing with embedded-hal mocks.
 /// Production code instantiates with `rppal::hal::I2c` (enabled by `rppal` `hal` feature).
-#[allow(
+#[expect(
     missing_debug_implementations,
     reason = "Generic over I2C which may not implement Debug"
 )]

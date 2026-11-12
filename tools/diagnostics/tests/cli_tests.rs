@@ -958,9 +958,32 @@ fn amp_info_cli_set_workflow_ordering_and_failure_stop() {
     assert!(mock.mock_serial_muted());
     mock.set_fault(None);
 
+    // Partial-failure path (the hazardous one): a TRANSIENT volume-write
+    // failure (single NACK) must stop the workflow BEFORE the requested
+    // unmute runs — the amp must never end up unmuted by a failed set.
+    // With eager write evaluation the unmute would execute despite the
+    // volume failure.
+    mock.set_mock_serial_muted(true);
+    mock.set_mock_master_volume_raw(144);
+    mock.set_transient_write_failures(1);
+    let opts = set_opts(SetValues {
+        volume_raw: Some(80),
+        mute: Some(false),
+        ..SetValues::default()
+    });
+    assert_eq!(run_app(&amp, &opts), ExitCode::FAILURE);
+    assert_eq!(mock.mock_master_volume_raw(), 144);
+    assert!(mock.mock_serial_muted());
+
+    // Recovery: the transient failure was consumed; a retry succeeds.
+    assert_eq!(run_app(&amp, &opts), ExitCode::SUCCESS);
+    assert_eq!(mock.mock_master_volume_raw(), 80);
+    assert!(!mock.mock_serial_muted());
+
     // Mute-first: with a fault, a requested MUTE is still recorded as the
     // attempted first write... it fails, so state stays; verify the failure
     // surfaces instead of a silent partial set.
+    mock.set_mock_serial_muted(true);
     let opts = set_opts(SetValues {
         mute: Some(true),
         ..SetValues::default()
