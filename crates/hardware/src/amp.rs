@@ -1629,10 +1629,15 @@ impl AmpDeviceMock {
 
     /// Set the mocked `PM_CTRL` value directly (for test setup).
     ///
+    /// Takes the decoded manual power mode `PM_man` (0-3) and encodes it
+    /// exactly like [`AmpDeviceMock::write_pm_ctrl`](Self::write_pm_ctrl)
+    /// (`0x40 | (pm << 4)`, manualPM=1) so getters and `read_settings()`
+    /// decode the same value back.
+    ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
     pub fn set_mock_pm_ctrl(&self, pm: u8) {
-        self.state.write().expect("mock lock poisoned").mock_pm_ctrl = pm;
+        self.state.write().expect("mock lock poisoned").mock_pm_ctrl = 0x40 | ((pm & 0x03) << 4);
     }
 
     /// Set the mocked `PM_PROFILE` value directly (for test setup).
@@ -1657,13 +1662,17 @@ impl AmpDeviceMock {
 
     /// Set the mocked audio in mode value directly (for test setup).
     ///
+    /// Takes the decoded input mode (0-5) and encodes it exactly like the
+    /// real write path (`(mode & 0x07) << 5` into register 0x25 bits 7:5)
+    /// so getters and `read_settings()` decode the same value back.
+    ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
     pub fn set_mock_audio_in_mode(&self, mode: u8) {
         self.state
             .write()
             .expect("mock lock poisoned")
-            .mock_audio_in_mode = mode;
+            .mock_audio_in_mode = (mode & 0x07) << 5;
     }
 }
 

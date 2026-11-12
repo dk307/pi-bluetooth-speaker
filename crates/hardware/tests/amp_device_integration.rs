@@ -1096,6 +1096,30 @@ fn mock_read_settings_reflects_writes() {
 }
 
 #[test]
+fn mock_setter_helpers_roundtrip_through_read_settings() {
+    // The `set_mock_*` helpers must encode exactly like the real write
+    // path: `read_settings()` and the getters must return the same decoded
+    // values that were set (PR-Agent mock-encoding-mismatch regression).
+    let (amp, mock) = AmpDevice::new_mocked();
+    mock.set_mock_pm_ctrl(2);
+    mock.set_mock_pm_profile(5);
+    mock.set_mock_i2s_format(4);
+    mock.set_mock_audio_in_mode(5);
+    mock.set_mock_master_volume_raw(80);
+
+    let s = amp.read_settings().unwrap();
+    assert_eq!(s.pm_ctrl_pm, 2);
+    assert_eq!(s.pm_profile, 5);
+    assert_eq!(s.i2s_format, 4);
+    assert_eq!(s.audio_in_mode, 5);
+    assert_eq!(s.master_volume_raw, 80);
+    assert_eq!(mock.mock_pm_ctrl(), 2);
+    assert_eq!(mock.mock_pm_profile(), 5);
+    assert_eq!(mock.mock_i2s_format(), 4);
+    assert_eq!(mock.mock_audio_in_mode(), 5);
+}
+
+#[test]
 fn mock_read_settings_fault_injection() {
     let (amp, mock) = AmpDevice::new_mocked();
     mock.set_fault(Some("simulated bus failure".into()));
