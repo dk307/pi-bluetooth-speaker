@@ -257,6 +257,9 @@ struct MockState {
     should_fail_read: bool,
     should_fail_validate: bool,
     should_fail_serial_mute: bool,
+    /// Sticky variant: every serial-mute write fails until cleared
+    /// (models a persistently broken bus segment during fault recovery).
+    should_fail_serial_mute_sticky: bool,
     serial_muted: bool,
     serial_mute_calls: u32,
     validate_called: u32,
@@ -289,6 +292,11 @@ impl MockAmpCtrl {
     /// Set whether the next serial mute write should fail.
     pub fn set_serial_mute_fail(&self, fail: bool) {
         self.inner.lock().unwrap().should_fail_serial_mute = fail;
+    }
+
+    /// Fail EVERY serial-mute write until cleared with `false`.
+    pub fn set_serial_mute_fail_sticky(&self, fail: bool) {
+        self.inner.lock().unwrap().should_fail_serial_mute_sticky = fail;
     }
 
     /// Set the mocked serial mute register state (for read_serial_mute).
@@ -409,7 +417,7 @@ impl AmpBackend for MockAmpBackend {
             .map_err(|e| AmpError::internal(e.to_string()))?;
         guard.serial_mute_calls += 1;
 
-        if guard.should_fail_serial_mute {
+        if guard.should_fail_serial_mute_sticky || guard.should_fail_serial_mute {
             guard.should_fail_serial_mute = false;
             return Err(AmpError::internal("mock serial mute failure"));
         }

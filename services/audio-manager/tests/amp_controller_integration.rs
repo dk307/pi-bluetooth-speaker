@@ -236,7 +236,7 @@ async fn start_stream_write_error_fails_safe_to_muted_not_awaiting_clock() {
 
     // The controller is fully functional afterwards: clearing the fault
     // and retrying the stream start succeeds normally.
-    backend_ctrl.set_serial_mute_fail(false);
+    backend_ctrl.set_serial_mute_fail_sticky(false);
     amp_mock.set_live_errors(AmpErrorFlags::NONE);
     controller
         .handle_command(AmpCommandKind::StreamStarting)
@@ -993,4 +993,133 @@ async fn run_loop_replies_edge_close_errors_and_shutdown() {
         .await
         .expect("run loop must exit on shutdown")
         .unwrap();
+}
+
+#[tokio::test]
+async fn failed_fault_recovery_blocks_unmute_until_reinit_succeeds() {
+    // This scenario needs a backend whose serial-mute WRITE fails while the
+    // device reads stay healthy: fault recovery fails mid-way (after the
+    // /ENABLE wipe), the registers stay UNINITIALIZED, and a later
+    // StreamStarting must re-run recovery instead of unmuting into
+    // reset defaults (VLP bypassed = full-scale output).
+    let dir = tempdir().unwrap();
+    let (backend, backend_ctrl) = MockAmpBackend::new_mocked();
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    let state_file = StateFile::new(dir.path().join("amp-state.json"));
+    let (device, amp_mock) = AmpDevice::new_mocked();
+    let mut controller = AmpController::new(
+        Arc::new(backend),
+        Arc::new(device),
+        gpio,
+        state_file.clone(),
+        AmpState::default(),
+    );
+    controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    // Critical fault triggers recovery; the post-reset serial-mute
+    // re-assert fails, leaving recovery incomplete.
+    amp_mock.set_live_errors(fault_flags(AmpFault::OvercurrentProtect));
+    backend_ctrl.set_serial_mute_fail_sticky(true);
+    controller.handle_error_edge().await.unwrap_err();
+    assert_eq!(controller.ctrl_state(), CtrlState::Faulted);
+    let resets_after_first_recovery = gpio_mock.reset_calls();
+    assert!(resets_after_first_recovery >= 1);
+
+    // Bus healthy again: the next StreamStarting must FIRST complete the
+    // interrupted recovery (a second /ENABLE pulse + re-init) and only
+    // then run the handshake — never unmute into reset defaults.
+    backend_ctrl.set_serial_mute_fail_sticky(false);
+    amp_mock.set_live_errors(AmpErrorFlags::NONE);
+    controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(controller.ctrl_state(), CtrlState::Playing);
+    assert!(
+        gpio_mock.reset_calls() > resets_after_first_recovery,
+        "StreamStarting must re-run the interrupted recovery before unmuting"
+    );
+    assert!(
+        amp_mock.mock_vlp_enabled() && amp_mock.mock_limiter_enabled(),
+        "register model must be re-initialized before the audio path opens"
+    );
+}
+
+#[tokio::test]
+async fn safety_tick_retries_recovery_while_faulted() {
+    // Needs the sticky serial-mute-write failure to break recovery
+    // mid-way while device reads stay healthy.
+    let dir = tempdir().unwrap();
+    let (backend, backend_ctrl) = MockAmpBackend::new_mocked();
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    let state_file = StateFile::new(dir.path().join("amp-state.json"));
+    let (device, amp_mock) = AmpDevice::new_mocked();
+    let mut controller = AmpController::new(
+        Arc::new(backend),
+        Arc::new(device),
+        gpio,
+        state_file.clone(),
+        AmpState::default(),
+    );
+    controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    // Recovery attempt one fails mid-way (post-reset serial-mute
+    // re-assert fails while device reads stay healthy): the controller
+    // stays Faulted.
+    amp_mock.set_live_errors(fault_flags(AmpFault::OvercurrentProtect));
+    backend_ctrl.set_serial_mute_fail_sticky(true);
+    controller.handle_error_edge().await.unwrap_err();
+    assert_eq!(controller.ctrl_state(), CtrlState::Faulted);
+
+    // Bus recovers: the safety tick must retry recovery and land in
+    // Muted (never stay Faulted forever).
+    backend_ctrl.set_serial_mute_fail_sticky(false);
+    amp_mock.set_live_errors(AmpErrorFlags::NONE);
+    controller.handle_safety_tick().await.unwrap();
+    assert_eq!(controller.ctrl_state(), CtrlState::Muted);
+    assert_eq!(
+        backend_ctrl.last_serial_mute(),
+        Some(true),
+        "recovery re-asserts the serial mute"
+    );
+    assert!(gpio_mock.mute_pin_low());
+}
+
+#[tokio::test]
+async fn gpio_mute_asserted_before_serial_mute_in_recovery() {
+    // The electrical mute must go LOW even when the serial-mute write
+    // fails during fault recovery (bus faults are the likely recovery
+    // trigger — the I2C-dependent path may be broken).
+    let dir = tempdir().unwrap();
+    let (backend, backend_ctrl) = MockAmpBackend::new_mocked();
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    let state_file = StateFile::new(dir.path().join("amp-state.json"));
+    let (device, amp_mock) = AmpDevice::new_mocked();
+    let mut controller = AmpController::new(
+        Arc::new(backend),
+        Arc::new(device),
+        gpio,
+        state_file.clone(),
+        AmpState::default(),
+    );
+    controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    backend_ctrl.set_serial_mute_fail_sticky(true);
+    amp_mock.set_live_errors(fault_flags(AmpFault::OvercurrentProtect));
+    controller.handle_error_edge().await.unwrap_err();
+
+    assert!(
+        gpio_mock.mute_pin_low(),
+        "GPIO /MUTE must assert before the serial mute write attempt"
+    );
+    assert!(gpio_mock.reset_calls() >= 1, "reset pulse must still run");
 }

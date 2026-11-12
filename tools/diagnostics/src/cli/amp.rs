@@ -52,7 +52,7 @@ impl Default for CliOptions {
 /// the diagnostic read loop begins.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SetValues {
-    /// Master volume raw attenuation (0..=144, raw = -dB).
+    /// Master volume raw attenuation (0..=144; dB = raw − 144).
     pub volume_raw: Option<u16>,
     /// Serial mute state (register 0x36 bit 7).
     pub mute: Option<bool>,
@@ -112,7 +112,7 @@ fn parse_u8_in_range(value: &str, name: &str, max: u8) -> Result<u8, String> {
     Ok(parsed)
 }
 
-/// Parses a master volume raw attenuation value (0-144, raw = -dB).
+/// Parses a master volume raw attenuation value (0-144; dB = raw − 144).
 fn parse_volume_raw(value: &str) -> Result<u16, String> {
     let trimmed = value.trim();
     let parsed: u16 = match trimmed.parse() {
@@ -155,7 +155,9 @@ pub fn print_usage(bin_name: &str) {
     println!("  -c, --clear              Clear historical latched error logs");
     println!();
     println!("Setting changes (applied once before reading, then exit):");
-    println!("  --set-volume <RAW>       Master volume attenuation 0-144 (raw = -dB; 144 = 0 dB)");
+    println!(
+        "  --set-volume <RAW>       Master volume attenuation 0-144 (dB = raw - 144; 144 = 0 dB)"
+    );
     println!("  --set-mute <on|off>      Serial mute (register 0x36 bit 7)");
     println!("  --set-pm <0-3>           Manual power mode PM_man (0-3)");
     println!("  --set-profile <0-5>      Power mode profile preset (0-5; 5 = custom)");
@@ -367,7 +369,7 @@ pub fn output_json_settings(timestamp: &str, amp: &AmpDevice, settings: &AmpSett
         "i2c_address": amp.i2c_address().to_string(),
         "settings": {
             "master_volume_raw": settings.master_volume_raw,
-            // dB = raw − 144 (raw = −dB user scale; raw 144 = 0 dB).
+            // dB = raw − 144 (user attenuation scale; raw 144 = 0 dB).
             "master_volume_db": i64::from(settings.master_volume_raw) - 144,
             "master_volume_frac": settings.master_volume_frac,
             "serial_muted": settings.serial_muted,
@@ -494,7 +496,10 @@ pub fn handle_amp_iteration(
 }
 
 /// Reads the Phase 1.5 configuration settings and prints them in the active output format.
-fn show_settings(amp: &AmpDevice, format: OutputFormat) {
+/// Reads back and reports the current settings.
+/// Returns `Err` when the settings readback fails (already reported), so
+/// automation can distinguish a completed readback from a failed one.
+fn show_settings(amp: &AmpDevice, format: OutputFormat) -> Result<(), AmpError> {
     match amp.read_settings() {
         Ok(settings) => match format {
             OutputFormat::Json => output_json_settings(&format_timestamp(), amp, &settings),
@@ -504,15 +509,19 @@ fn show_settings(amp: &AmpDevice, format: OutputFormat) {
                 println!("---------------------------------------------------------");
             }
         },
-        Err(err) => match format {
-            OutputFormat::Json => {
-                output_json_error(&format_timestamp(), amp.i2c_bus(), amp.i2c_address(), &err);
+        Err(err) => {
+            match format {
+                OutputFormat::Json => {
+                    output_json_error(&format_timestamp(), amp.i2c_bus(), amp.i2c_address(), &err);
+                }
+                OutputFormat::Human => {
+                    eprintln!("Failed to read configuration settings: {err}");
+                }
             }
-            OutputFormat::Human => {
-                eprintln!("Failed to read configuration settings: {err}");
-            }
-        },
+            return Err(err);
+        }
     }
+    Ok(())
 }
 
 /// Reports a single setting write in the active output format.
@@ -564,13 +573,22 @@ fn report_write(
 fn handle_set(amp: &AmpDevice, opts: &CliOptions) -> ExitCode {
     let set = opts.set;
 
+    // Safety ordering: a requested MUTE is applied FIRST (the amp must
+    // never sit loud while later writes run); a requested UNMUTE is
+    // applied LAST, only after every other write succeeded — a failed
+    // volume write must never unmask the output.
+    if set.mute == Some(true)
+        && !report_write(amp, opts, "serial mute", amp.write_serial_mute(true))
+    {
+        return ExitCode::FAILURE;
+    }
     if let Some(raw) = set.volume_raw
         && !report_write(amp, opts, "master volume", amp.write_master_volume(raw))
     {
         return ExitCode::FAILURE;
     }
-    if let Some(muted) = set.mute
-        && !report_write(amp, opts, "serial mute", amp.write_serial_mute(muted))
+    if set.mute == Some(false)
+        && !report_write(amp, opts, "serial mute", amp.write_serial_mute(false))
     {
         return ExitCode::FAILURE;
     }
@@ -600,7 +618,9 @@ fn handle_set(amp: &AmpDevice, opts: &CliOptions) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    show_settings(amp, opts.common.format);
+    if show_settings(amp, opts.common.format).is_err() {
+        return ExitCode::FAILURE;
+    }
     ExitCode::SUCCESS
 }
 
@@ -621,7 +641,10 @@ pub fn run_app(amp: &AmpDevice, opts: &CliOptions) -> ExitCode {
             println!("Press Ctrl+C to stop monitoring.\n");
         }
     }
-    show_settings(amp, opts.common.format);
+    // A failed readback here cannot abort the monitoring session (reads
+    // follow their own error-rate accounting); keep the previous
+    // behavior for the poll path.
+    let _ = show_settings(amp, opts.common.format);
 
     let mut stats = AmpStats::default();
 

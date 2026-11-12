@@ -510,3 +510,11 @@ impl AmpGpio {
         })
     }
 }
+
+impl std::fmt::Debug for AmpGpio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Manual impl: `GpioSeam` holds hardware handles and trait objects
+        // that intentionally do not implement `Debug` (M-DEBUG-PUBLIC).
+        f.debug_struct("AmpGpio").finish_non_exhaustive()
+    }
+}

@@ -127,6 +127,14 @@ pub struct AmpController {
     /// at hardware-write time so the user level survives in state + state
     /// file and is restored when the warning clears.
     thermal_offset_raw: u16,
+    /// `true` once the register model (VLP, limiter, I2S, audio-in) is
+    /// confirmed written. An `/ENABLE` reset wipes every register to
+    /// defaults — VLP bypassed and limiter off, i.e. full-scale output — so
+    /// the audio path must stay muted until [`Self::reinit_registers`]
+    /// succeeds again. Unmuting with reset defaults would run 0 dB through
+    /// the speakers (the failure mode boot's mute-first sequencing exists
+    /// to prevent).
+    regs_initialized: bool,
     /// Read-only mirror of [`Self::state`] for D-Bus property reads.
     mirror: Arc<tokio::sync::Mutex<AmpState>>,
 }
@@ -170,6 +178,9 @@ impl AmpController {
             hardware_muted: true,
             stream_live: false,
             thermal_offset_raw: 0,
+            // Registers are unproven until boot_init's init sequence
+            // completes; the audio path stays muted until then.
+            regs_initialized: false,
             mirror: Arc::new(tokio::sync::Mutex::new(initial)),
         }
     }
@@ -252,6 +263,9 @@ impl AmpController {
         self.hardware_muted = true;
         self.state = persisted;
         self.ctrl = CtrlState::Muted;
+        // The register model is now proven written; only an `/ENABLE`
+        // reset (fault recovery) invalidates it again.
+        self.regs_initialized = true;
         *self.mirror.lock().await = persisted;
         info!("Boot reconcile complete; amp awake, muted awaiting first stream");
         Ok(())
@@ -322,6 +336,9 @@ impl AmpController {
             AmpCommandKind::StreamStopping => {
                 // Transient mute: hardware only — the user's mute intent is
                 // untouched so the next stream auto-resumes at full level.
+                // Electrical mute first (cannot fail on the bus); the
+                // serial write follows.
+                self.gpio.set_hardware_mute(true)?;
                 self.mute_hardware().await?;
                 self.ctrl = CtrlState::Muted;
                 self.stream_live = false;
@@ -344,10 +361,15 @@ impl AmpController {
         info!("GPIO error line asserted; reading live error register");
         let flags = self.device.read_live_errors_async().await?;
         // Historical fault accumulation (0x6D) rides along for diagnostics:
-        // it shows whether the live fault is a repeat event since boot.
-        let latched = self.device.read_latched_errors_async().await?;
-        if latched != speaker_hardware::AmpErrorFlags::NONE {
-            debug!(?latched, "Latched error accumulation at edge");
+        // it shows whether the live fault is a repeat event since boot. The
+        // read is best-effort — a diagnostic must never delay or drop the
+        // live-fault handling below.
+        match self.device.read_latched_errors_async().await {
+            Ok(latched) if latched != speaker_hardware::AmpErrorFlags::NONE => {
+                debug!(?latched, "Latched error accumulation at edge");
+            }
+            Ok(_) => {}
+            Err(e) => debug!(error = %e, "Latched error read failed at edge"),
         }
         self.handle_faults(flags).await
     }
@@ -360,6 +382,15 @@ impl AmpController {
     /// Propagated hardware faults; callers log and keep running.
     pub async fn handle_safety_tick(&mut self) -> AmpResult<()> {
         debug!("Safety tick");
+        // A `Faulted` controller must keep retrying recovery every tick:
+        // staying faulted forever (because the recovery's first attempt
+        // failed mid-way) is worse than repeated retry attempts, and the
+        // retry path itself re-mutes before anything else.
+        if self.ctrl == CtrlState::Faulted {
+            self.fault_recovery().await?;
+            self.ctrl = CtrlState::Muted;
+            return Ok(());
+        }
         let flags = self.device.read_live_errors_async().await?;
         if flags == speaker_hardware::AmpErrorFlags::NONE {
             if self.thermal_offset_raw != 0 {
@@ -412,8 +443,10 @@ impl AmpController {
                 || (self.ctrl == CtrlState::Muted && self.stream_live))
         {
             warn!("PLL clock lost during playback; muting until the stream restarts");
-            self.mute_hardware().await?;
+            // Electrical mute first: the only path that cannot fail, and
+            // the digital domain cannot be trusted while the PLL is open.
             self.gpio.set_hardware_mute(true)?;
+            self.mute_hardware().await?;
             self.ctrl = CtrlState::Muted;
             self.stream_live = false;
             return Ok(());
@@ -447,9 +480,19 @@ impl AmpController {
     /// # Errors
     /// Returns [`AmpError`] if any recovery step fails.
     pub async fn fault_recovery(&mut self) -> AmpResult<()> {
-        // Serial mute first (audio path off even if recovery fails).
-        self.mute_hardware().await?;
+        // From here until re-init completes the registers are UNPROVEN: the
+        // upcoming /ENABLE pulse wipes them to defaults (VLP bypassed,
+        // limiter off = full-scale output).
+        self.regs_initialized = false;
+        // ELECTRICAL mute FIRST: it does not depend on the I2C bus, and bus
+        // faults are exactly the condition that triggered recovery. Only
+        // then attempt the serial mute (best-effort before a reset — the
+        // wipe clears the bit anyway; a failure must not skip the reset).
         self.gpio.set_hardware_mute(true)?;
+        self.hardware_muted = true;
+        if let Err(e) = self.mute_hardware().await {
+            warn!(error = %e, "Serial mute failed before reset; GPIO /MUTE asserted; continuing with reset");
+        }
         // /ENABLE reset cycle: registers return to true reset defaults.
         // The reset itself drives /MUTE LOW (pop-safe during the pulse).
         let gpio = self.gpio.clone();
@@ -460,8 +503,9 @@ impl AmpController {
         // re-init so the audio path never comes back unmuted at 0 dB.
         self.mute_hardware().await?;
         self.reinit_registers().await?;
-        // Restore the user's (thermally effective) volume; keep muted until
-        // the next StreamStarting.
+        // Registers proven again; restore the user's (thermally effective)
+        // volume; keep muted until the next StreamStarting.
+        self.regs_initialized = true;
         self.device
             .write_master_volume_async(self.effective_raw())
             .await?;
@@ -518,6 +562,15 @@ impl AmpController {
     /// # Errors
     /// Returns [`AmpError`] on bus faults.
     async fn start_stream_locked(&mut self) -> AmpResult<()> {
+        // Registers wiped by a prior failed fault recovery are unproven:
+        // re-run recovery BEFORE any handshake/unmute decision so the audio
+        // path can never be released while VLP is bypassed (reset defaults
+        // would put full-scale output through the speakers).
+        if !self.regs_initialized {
+            self.ctrl = CtrlState::Faulted;
+            self.fault_recovery().await?;
+            self.ctrl = CtrlState::Muted;
+        }
         let locked = self
             .pll_lock_handshake(PLL_LOCK_TIMEOUT)
             .await
@@ -730,5 +783,20 @@ impl AmpController {
                 }
             }
         }
+    }
+}
+
+impl std::fmt::Debug for AmpController {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Manual impl: the backend is a `dyn` trait object and the device
+        // handle is hardware — neither implements `Debug` (M-DEBUG-PUBLIC).
+        f.debug_struct("AmpController")
+            .field("state", &self.state)
+            .field("ctrl", &self.ctrl)
+            .field("hardware_muted", &self.hardware_muted)
+            .field("stream_live", &self.stream_live)
+            .field("thermal_offset_raw", &self.thermal_offset_raw)
+            .field("regs_initialized", &self.regs_initialized)
+            .finish_non_exhaustive()
     }
 }

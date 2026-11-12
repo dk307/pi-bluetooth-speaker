@@ -163,9 +163,26 @@ pub fn poll_interval(idle: Duration, current: EmittedLifecycle) -> Duration {
     }
 }
 
+/// Re-issue `StreamStarting` roughly every [`START_RETRY_POLLS`] Running
+/// polls (~2 s at the 250 ms adaptive running poll) until
+/// [`MAX_START_RETRIES`] attempts, then give up (warn once) until the
+/// lifecycle leaves `Running`.
+const START_RETRY_POLLS: u32 = 8;
+const MAX_START_RETRIES: u32 = 15;
+
 /// Run the watcher until the command channel closes (the receiver is owned
 /// by [`crate::amp_controller::AmpController::run`], so dropping the
 /// controller ends the watcher — no separate shutdown plumbing).
+///
+/// Only the engine STATE is read each poll (single `GetState` query): a
+/// failure in ancillary telemetry (rate adjust, buffer level, …) can
+/// never block a start/stop edge.
+///
+/// Failed starts are retried (bounded): the watcher sends `StreamStarting`
+/// fire-and-forget and cannot observe the controller's handshake outcome,
+/// so while the DSP stays `Running` the edge is re-issued every
+/// [`START_RETRY_POLLS`] polls up to [`MAX_START_RETRIES`] times. A resend
+/// on an already-playing controller is a cheap no-op.
 ///
 /// # Errors/Naming
 /// Hardware/WS faults are logged (state held, §4.5) and never close the
@@ -177,6 +194,8 @@ pub async fn run(device: DspDevice, commands: mpsc::Sender<AmpCommand>, idle_int
         "DSP stream-lifecycle watcher started (emits StreamStarting/Stopping edges)"
     );
     let mut telemetry_failed = false;
+    let mut polls_since_start: u32 = 0;
+    let mut start_retries: u32 = 0;
     loop {
         // The receiver lives in the controller loop; when it is dropped
         // (daemon shutdown), exit promptly even without a pending edge.
@@ -185,13 +204,44 @@ pub async fn run(device: DspDevice, commands: mpsc::Sender<AmpCommand>, idle_int
             return;
         }
         tokio::time::sleep(poll_interval(idle_interval, tracker.lifecycle())).await;
-        match device.read_status_async().await {
-            Ok(status) => {
+        match device.read_state_async().await {
+            Ok(state) => {
                 if telemetry_failed {
                     telemetry_failed = false;
                     info!("DSP telemetry recovered");
                 }
-                if let Some(kind) = tracker.step(&status.state) {
+                let edge = tracker.step(&state);
+                if tracker.lifecycle() == EmittedLifecycle::Running {
+                    if edge.is_some() {
+                        polls_since_start = 0;
+                    } else {
+                        polls_since_start += 1;
+                        if polls_since_start >= START_RETRY_POLLS
+                            && start_retries < MAX_START_RETRIES
+                        {
+                            polls_since_start = 0;
+                            start_retries += 1;
+                            debug!(
+                                retry = start_retries,
+                                "Re-issuing StreamStarting (start not yet confirmed)"
+                            );
+                            if commands
+                                .send(AmpCommand::fire_and_forget(AmpCommandKind::StreamStarting))
+                                .await
+                                .is_err()
+                            {
+                                info!("Command channel closed; DSP watcher exiting");
+                                return;
+                            }
+                        }
+                    }
+                } else {
+                    // Stopped lifecycle: the retry budget resets for the
+                    // next start episode.
+                    start_retries = 0;
+                    polls_since_start = 0;
+                }
+                if let Some(kind) = edge {
                     info!(?kind, "DSP lifecycle edge");
                     if commands
                         .send(AmpCommand::fire_and_forget(kind))

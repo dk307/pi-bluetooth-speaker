@@ -122,7 +122,8 @@ pub const LIMITER_RELEASE_MASK: u8 = 0x30;
 pub const REG_AUDIO_PROC: u8 = 0x36;
 
 /// MA12070P master volume integer dB register address (0x40).
-/// Raw value 0..144 maps to -144..0 dB (raw = -dB).
+/// Register value = `24 − dB` (0x18 = 0 dB, 0xA8 = −144 dB); the appliance
+/// user-scale attenuation raw maps as `reg = 168 − raw` (`dB = raw − 144`).
 pub const REG_VOL_DB_MASTER: u8 = 0x40;
 
 /// MA12070P master volume fractional 0.25 dB register address (0x41).
@@ -149,9 +150,9 @@ pub const REG_THR_LSB_CH: u8 = 0x4B;
 /// master volume range. Datasheet Table 8-9: `reg = 24 − dB`, so 0 dB is
 /// register `0x18` = 24 and −144 dB is `0xA8` = 168.
 ///
-/// The appliance user-scale raw = −dB maps `0x40` to `168 − raw`
-/// (raw 0 = −144 dB, raw 144 = 0 dB); this constant is that transform's
-/// anchor.
+/// The appliance user-scale attenuation (`dB = raw − 144`) maps `0x40`
+/// to `168 − raw` (raw 0 = −144 dB, raw 144 = 0 dB); this constant is
+/// that transform's anchor.
 pub const VLP_NEG144_DB_REG: u16 = 168;
 
 /// `0x35` bit 3 `audio_proc_enable` (VLP bypass mux; 1 = VLP active).
@@ -177,7 +178,7 @@ pub const fn is_muted_bit(reg: u8) -> bool {
 }
 
 /// Decodes a VLP `0x40` register value (`24 − dB` encoding) to the appliance
-/// user-scale raw (raw = −dB, 0..=144).
+/// user-scale attenuation raw (`dB = raw − 144`, 0..=144).
 ///
 /// Values below the 0 dB register (boost) clamp to 144; values above the
 /// −144 dB register clamp to 0.
@@ -855,7 +856,7 @@ impl Display for AmpStatus {
 /// manual power mode, power mode profile, I2S format, and audio input gain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AmpSettings {
-    /// Master volume raw attenuation (raw = -dB, 0..=144; 0 is full mute, 144 is 0 dB).
+    /// Master volume attenuation (`dB = raw − 144`, 0..=144; 0 is full mute, 144 is 0 dB).
     pub master_volume_raw: u16,
     /// Master volume fractional register value (0.25 dB steps, bits 1:0 of 0x41).
     pub master_volume_frac: u8,
@@ -907,7 +908,7 @@ impl AmpSettings {
 
 impl Display for AmpSettings {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // dB = raw − 144 (§10: raw = −dB user scale; raw 144 = 0 dB,
+        // dB = raw − 144 (user attenuation scale; raw 144 = 0 dB,
         // raw 0 = −144 dB).
         writeln!(
             f,
@@ -1233,7 +1234,7 @@ struct MockState {
     // enable bit 3, limiter slew bits 7:4) and `0x36` (serial mute bit 7,
     // limiter enable bit 6): every writer performs a real read-modify-write
     // on the shared byte, exactly like `HardwareDevice`, so mask-preservation
-    // interactions between writers are exercised (audit Bug D).
+    // interactions between writers are exercised.
     mock_reg_0x35: u8,
     mock_reg_0x36: u8,
     mock_limiter_thresholds_dbfs: i16,
@@ -1261,7 +1262,7 @@ impl AmpDeviceMock {
                 // Silicon reset defaults per `ma120x0p.h`: manualPM=0
                 // (auto power-mode), pm_man=3 (0x30), pmprofile=0 (0x1D).
                 // After an `/ENABLE` reset pulse the chip returns to these
-                // values — the mock must match (audit Violation 3 triage).
+                // values — the mock must match.
                 mock_pm_ctrl: 0x30,    // manualPM=0, PM_man=3 (auto PM)
                 mock_pm_profile: 0,    // PMP0 (silicon reset default)
                 mock_audio_in_mode: 0, // 20dB gain
@@ -1571,7 +1572,7 @@ impl AmpDeviceMock {
         (encoded >> 4) & 0x03
     }
 
-    /// Get the mocked `PM_PROFILE` value (0-4).
+    /// Get the mocked `PM_PROFILE` value (0-5: 0-4 presets, 5 custom).
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
@@ -1583,7 +1584,7 @@ impl AmpDeviceMock {
             .mock_pm_profile
     }
 
-    /// Get the mocked I2S format value (0-4).
+    /// Get the mocked I2S format value (one of 0, 1, 4, 5, 6, 7).
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
@@ -1592,7 +1593,7 @@ impl AmpDeviceMock {
         self.state.read().expect("mock lock poisoned").mock_reg_0x35 & 0x07
     }
 
-    /// Get the mocked audio in mode gain value (0-3).
+    /// Get the mocked audio input mode value (0-5).
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
@@ -1783,9 +1784,8 @@ where
     ///
     /// The MA12070P VLP encodes gain as `register = 24 − dB` (datasheet
     /// Table 8-9: 0x18 = 0.00 dB, 0xA8 = −144.00 dB, boost below 0x18), so
-    /// the user-scale attenuation raw maps to **`reg = 168 − raw`**.
-    /// Live-verified on the Pi (2026-11-11): `0xA8` cuts playback, `0x30`
-    /// (−24 dB) audibly attenuates. The fractional register 0x41 stays 0
+    /// the user-scale attenuation raw maps to **`reg = 168 − raw`**
+    /// (`0xA8` mutes, `0x30` = −24 dB). The fractional register 0x41 stays 0
     /// (`amp_curve` produces integer dB).
     ///
     /// Requires the VLP to be enabled (`0x35` bit 3 `audio_proc_enable`,
@@ -1852,7 +1852,7 @@ where
         // reset 0x00 per `ma120x0p.h` `ma_thr_lsb_chX`). Zeroed alongside
         // the integer bytes — same pattern as `write_master_volume`
         // writing `(REG_VOL_LSB_MASTER, 0)` — so a stale fractional value
-        // can never offset the programmed threshold (audit Violation 2).
+        // can never offset the programmed threshold.
         self.write_regs(&[
             (REG_THR_DB_CH0, reg),
             (REG_THR_DB_CH0 + 1, reg),
@@ -2246,7 +2246,8 @@ impl AmpDevice {
     // === Write operations (Phase 1.5) ===
 
     /// Write master volume (0x40 integer dB, 0x41 fractional 0.25 dB).
-    /// Raw = -dB (0 = -144 dB mute, 144 = 0 dB). Caller maps percent→raw via `amp_curve::PERCENT_TO_RAW`.
+    /// Raw attenuation: `dB = raw − 144` (0 = −144 dB mute, 144 = 0 dB).
+    /// Caller maps percent→raw via `amp_curve::PERCENT_TO_RAW`.
     ///
     /// # Errors
     /// Returns [`AmpError`] if communication fails or `raw > 144`.
@@ -2264,7 +2265,6 @@ impl AmpDevice {
     }
 
     /// Write serial mute (0x36 bit 7) with verify-by-re-read.
-    /// Live-verified implementation.
     ///
     /// # Errors
     /// Returns [`AmpError`] if communication fails or verification mismatches.
@@ -2298,7 +2298,7 @@ impl AmpDevice {
         }
     }
 
-    /// Write `PM_PROFILE` (0x1D) bits 2:0 (0-4).
+    /// Write `PM_PROFILE` (0x1D) bits 2:0 (0-4 = PMP0-PMP4 presets, 5 = custom).
     ///
     /// # Errors
     /// Returns [`AmpError`] if communication fails.
@@ -2332,7 +2332,7 @@ impl AmpDevice {
         }
     }
 
-    /// Write audio in mode (0x25) bits 6:5 gain select.
+    /// Write audio input mode (0x25) bits 7:5 (0..=5; 0 = 20 dB input gain).
     ///
     /// # Errors
     /// Returns [`AmpError`] if communication fails.

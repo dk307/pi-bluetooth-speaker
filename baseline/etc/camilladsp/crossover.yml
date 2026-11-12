@@ -4,9 +4,9 @@ devices:
   queuelimit: 4
   enable_rate_adjust: true
   # Pop-prevention lever (plan §11.3): when the capture signal stays below
-  # -60 dB for this long, the engine reports Paused. Until Paused, the
-  # playback device stays OPEN and streams digital zeros, giving the
-  # audio-manager dsp_watch pre-mute a guaranteed window before BCLK dies.
+  # -60 dB for this long, the engine reports Paused. dsp_watch mutes only
+  # after it observes a stopped state, so this setting does not by itself
+  # guarantee a mute before BCLK stops.
   silence_threshold: -60
   silence_timeout: 3.0
   capture:

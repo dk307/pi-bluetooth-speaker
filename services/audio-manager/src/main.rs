@@ -26,20 +26,37 @@
 
 // The bin target compiles these modules privately; test-only helpers (mocks,
 // unused error variants) trip dead_code. Scope the allow to the bin only.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "bin-only compilation leaves mock/test helpers unused"
+)]
 mod amp_backend;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "bin-only compilation leaves mock/test helpers unused"
+)]
 mod amp_controller;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "bin-only compilation leaves mock/test helpers unused"
+)]
 mod amp_gpio;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "bin-only compilation leaves mock/test helpers unused"
+)]
 mod amp_state;
 mod config;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "bin-only compilation leaves mock/test helpers unused"
+)]
 mod dbus_api;
-#[allow(dead_code)]
 mod dsp_watch;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "bin-only compilation leaves mock/test helpers unused"
+)]
 mod error;
 mod state_file;
 

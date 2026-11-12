@@ -110,7 +110,7 @@ fn stalled_to_paused_collapse_emits_one_stop() {
 
 /// Small test poll interval (production intervals are config-driven, never
 /// `cfg(test)`-shrunk; tests inject their own).
-const TEST_INTERVAL: Duration = Duration::from_millis(20);
+const TEST_INTERVAL: Duration = Duration::from_millis(60);
 
 struct LoopFixture {
     device: DspDevice,
@@ -233,13 +233,20 @@ async fn loop_stalled_stops_only_after_two_consecutive_polls() {
         .unwrap();
     assert!(matches!(cmd.kind, AmpCommandKind::StreamStarting));
 
-    // One Stalled poll: debounce holds, no edge.
+    // One Stalled poll: debounce holds, no edge. Synchronize with the
+    // poll cadence instead of a fixed sleep: the assertion window ends
+    // BEFORE the next poll can fire (the watcher polls every
+    // TEST_INTERVAL; run() floors the effective interval at 50 ms and
+    // TEST_INTERVAL sits above that floor).
     mock.set_state(ProcessingState::Stalled);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
+    let within_one_poll = tokio::time::timeout(
+        TEST_INTERVAL.saturating_sub(Duration::from_millis(15)),
+        cmd_rx.recv(),
+    )
+    .await;
     assert!(
-        received(&mut cmd_rx).await.is_empty(),
-        "single Stalled must not stop"
+        within_one_poll.is_err(),
+        "single Stalled must not stop (got an edge within one poll window)"
     );
 
     // Second consecutive Stalled: stop edge fires.
@@ -419,5 +426,50 @@ async fn loop_telemetry_failure_holds_lifecycle_and_recovers() {
     tokio::time::timeout(Duration::from_secs(2), task)
         .await
         .expect("watcher exits when the channel closes")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn loop_reissues_starting_while_running_until_confirmed() {
+    use std::time::Duration;
+
+    let LoopFixture {
+        device,
+        mock,
+        cmd_tx,
+        mut cmd_rx,
+    } = loop_fixture();
+    mock.set_state(ProcessingState::Running);
+    let task = tokio::spawn(run(device, cmd_tx.clone(), TEST_INTERVAL));
+
+    // First poll: StreamStarting.
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("StreamStarting")
+        .unwrap();
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStarting));
+
+    // The DSP stays Running; the watcher re-issues StreamStarting on a
+    // bounded cadence so a failed controller handshake is retried (a
+    // resend on an already-playing controller is a no-op).
+    let cmd = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+        .await
+        .expect("retry StreamStarting must arrive while DSP stays Running")
+        .unwrap();
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStarting));
+
+    // Leaving Running resets the retry budget: exactly one StreamStopping.
+    mock.set_state(ProcessingState::Inactive);
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("StreamStopping")
+        .unwrap();
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStopping));
+
+    drop(cmd_tx);
+    drop(cmd_rx);
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("watcher exits on channel close")
         .unwrap();
 }
