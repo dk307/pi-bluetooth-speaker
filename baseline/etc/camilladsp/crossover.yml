@@ -3,6 +3,12 @@ devices:
   chunksize: 1024
   queuelimit: 4
   enable_rate_adjust: true
+  # Pop-prevention lever (plan §11.3): when the capture signal stays below
+  # -60 dB for this long, the engine reports Paused. Until Paused, the
+  # playback device stays OPEN and streams digital zeros, giving the
+  # audio-manager dsp_watch pre-mute a guaranteed window before BCLK dies.
+  silence_threshold: -60
+  silence_timeout: 3.0
   capture:
     type: Alsa
     channels: 2
@@ -11,7 +17,9 @@ devices:
   playback:
     type: Alsa
     channels: 2
-    device: "hw:sndrpimerusamp,0"
+    # hifiberry-dac (PCM5102A) card — the merus overlay card is removed
+    # (verified live: /proc/asound/cards "sndrpihifiberry", card 1).
+    device: "hw:sndrpihifiberry,0"
     format: S32_LE
 
 mixers:
