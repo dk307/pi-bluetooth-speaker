@@ -1226,15 +1226,16 @@ struct MockState {
     // Write-path mock state (Phase 1.5). Stores the hardware `0x40` VLP
     // register encoding (24 − dB) to mirror `HardwareDevice` fidelity.
     mock_master_volume_reg: u16,
-    mock_serial_muted: bool,
     mock_pm_ctrl: u8,
     mock_pm_profile: u8,
-    mock_i2s_format: u8,
     mock_audio_in_mode: u8,
-    // Phase 2 (Stage A): full-register mock fidelity for the VLP/limiter
-    // enable bits — stores the complete `0x35` / `0x36` register values.
-    mock_i2s_format_reg: u8,
-    mock_audio_proc_reg: u8,
+    // Full-register mock fidelity for `0x35` (I2S format bits 2:0, VLP
+    // enable bit 3, limiter slew bits 7:4) and `0x36` (serial mute bit 7,
+    // limiter enable bit 6): every writer performs a real read-modify-write
+    // on the shared byte, exactly like `HardwareDevice`, so mask-preservation
+    // interactions between writers are exercised (audit Bug D).
+    mock_reg_0x35: u8,
+    mock_reg_0x36: u8,
     mock_limiter_thresholds_dbfs: i16,
 }
 
@@ -1257,13 +1258,11 @@ impl AmpDeviceMock {
                 fault: None,
                 // Write-path defaults
                 mock_master_volume_reg: 168 - 116, // ≈ -28 dB (raw 116 ⇒ reg 52)
-                mock_serial_muted: false,
-                mock_pm_ctrl: 0x60, // manualPM=1 (bit6), PM_man=2 (bits5:4) -> PMP2
-                mock_pm_profile: 2, // PMP2
-                mock_i2s_format: 0, // Standard I2S
-                mock_audio_in_mode: 0, // 20dB gain
-                mock_i2s_format_reg: 0x00, // VLP bypassed (reset default)
-                mock_audio_proc_reg: 0x01, // bit0 set (live reset default)
+                mock_pm_ctrl: 0x60,                // manualPM=1 (bit6), PM_man=2 (bits5:4) -> PMP2
+                mock_pm_profile: 2,                // PMP2
+                mock_audio_in_mode: 0,             // 20dB gain
+                mock_reg_0x35: 0x00,               // I2S std, VLP bypassed (reset default)
+                mock_reg_0x36: 0x01,               // bit0 set (live reset default); unmuted
                 mock_limiter_thresholds_dbfs: -15, // driver probe default
             })),
         }
@@ -1372,10 +1371,10 @@ impl AmpDeviceMock {
         Ok(AmpSettings {
             master_volume_raw: decode_vlp_raw(state.mock_master_volume_reg),
             master_volume_frac: 0,
-            serial_muted: state.mock_serial_muted,
+            serial_muted: state.mock_reg_0x36 & (1 << 7) != 0,
             pm_ctrl_pm: (state.mock_pm_ctrl >> 4) & 0x03,
             pm_profile: state.mock_pm_profile & 0x07,
-            i2s_format: state.mock_i2s_format & 0x07,
+            i2s_format: state.mock_reg_0x35 & 0x07,
             audio_in_mode: (state.mock_audio_in_mode >> 5) & 0x07,
         })
     }
@@ -1398,9 +1397,9 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        // Models the hardware RMW outcome on register 0x36 bit 7 (audio_proc_mute);
-        // verify-by-re-read always succeeds in the mock unless a fault is injected.
-        state.mock_serial_muted = muted;
+        // Real read-modify-write on the shared 0x36 byte (serial mute is
+        // bit 7; the limiter enable bit 6 and other bits are preserved).
+        state.mock_reg_0x36 = apply_mute_bit(state.mock_reg_0x36, muted);
         Ok(())
     }
 
@@ -1436,8 +1435,9 @@ impl AmpDeviceMock {
         if !VALID.contains(&format) {
             return Err(AmpError::invalid_argument("i2s_format", u16::from(format)));
         }
-        // Store encoded value: format & 0x07
-        state.mock_i2s_format = format & 0x07;
+        // Real read-modify-write on the shared 0x35 byte (format bits 2:0;
+        // VLP enable bit 3 and limiter slew bits 7:4 are preserved).
+        state.mock_reg_0x35 = (state.mock_reg_0x35 & 0xF8) | (format & 0x07);
         Ok(())
     }
 
@@ -1463,8 +1463,7 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        state.mock_i2s_format_reg = (state.mock_i2s_format_reg
-            & !(LIMITER_ATTACK_MASK | LIMITER_RELEASE_MASK))
+        state.mock_reg_0x35 = (state.mock_reg_0x35 & !(LIMITER_ATTACK_MASK | LIMITER_RELEASE_MASK))
             | (attack.encode() << 6)
             | (release.encode() << 4);
         Ok(())
@@ -1475,7 +1474,7 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        state.mock_i2s_format_reg |= AUDIO_PROC_ENABLE_MASK;
+        state.mock_reg_0x35 |= AUDIO_PROC_ENABLE_MASK;
         Ok(())
     }
 
@@ -1484,7 +1483,7 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        state.mock_audio_proc_reg |= LIMITER_ENABLE_MASK;
+        state.mock_reg_0x36 |= LIMITER_ENABLE_MASK;
         Ok(())
     }
 
@@ -1511,12 +1510,7 @@ impl AmpDeviceMock {
     /// Panics if the mock state lock is poisoned.
     #[must_use]
     pub fn mock_vlp_enabled(&self) -> bool {
-        self.state
-            .read()
-            .expect("mock lock poisoned")
-            .mock_i2s_format_reg
-            & AUDIO_PROC_ENABLE_MASK
-            != 0
+        self.state.read().expect("mock lock poisoned").mock_reg_0x35 & AUDIO_PROC_ENABLE_MASK != 0
     }
 
     /// Returns `true` when the mocked limiter is enabled (`0x36` bit 6).
@@ -1525,12 +1519,7 @@ impl AmpDeviceMock {
     /// Panics if the mock state lock is poisoned.
     #[must_use]
     pub fn mock_limiter_enabled(&self) -> bool {
-        self.state
-            .read()
-            .expect("mock lock poisoned")
-            .mock_audio_proc_reg
-            & LIMITER_ENABLE_MASK
-            != 0
+        self.state.read().expect("mock lock poisoned").mock_reg_0x36 & LIMITER_ENABLE_MASK != 0
     }
 
     /// Gets the mocked limiter threshold (dBFS).
@@ -1565,10 +1554,7 @@ impl AmpDeviceMock {
     /// Panics if the mock state lock is poisoned.
     #[must_use]
     pub fn mock_serial_muted(&self) -> bool {
-        self.state
-            .read()
-            .expect("mock lock poisoned")
-            .mock_serial_muted
+        self.state.read().expect("mock lock poisoned").mock_reg_0x36 & (1 << 7) != 0
     }
 
     /// Get the mocked `PM_CTRL` decoded `PM_man` value (0-3).
@@ -1599,10 +1585,7 @@ impl AmpDeviceMock {
     /// Panics if the mock state lock is poisoned.
     #[must_use]
     pub fn mock_i2s_format(&self) -> u8 {
-        self.state
-            .read()
-            .expect("mock lock poisoned")
-            .mock_i2s_format
+        self.state.read().expect("mock lock poisoned").mock_reg_0x35 & 0x07
     }
 
     /// Get the mocked audio in mode gain value (0-3).
@@ -1635,10 +1618,8 @@ impl AmpDeviceMock {
     /// # Panics
     /// Panics if the mock state lock is poisoned.
     pub fn set_mock_serial_muted(&self, muted: bool) {
-        self.state
-            .write()
-            .expect("mock lock poisoned")
-            .mock_serial_muted = muted;
+        let mut state = self.state.write().expect("mock lock poisoned");
+        state.mock_reg_0x36 = apply_mute_bit(state.mock_reg_0x36, muted);
     }
 
     /// Set the mocked `PM_CTRL` value directly (for test setup).
@@ -1665,10 +1646,8 @@ impl AmpDeviceMock {
     /// # Panics
     /// Panics if the mock state lock is poisoned.
     pub fn set_mock_i2s_format(&self, format: u8) {
-        self.state
-            .write()
-            .expect("mock lock poisoned")
-            .mock_i2s_format = format;
+        let mut state = self.state.write().expect("mock lock poisoned");
+        state.mock_reg_0x35 = (state.mock_reg_0x35 & 0xF8) | (format & 0x07);
     }
 
     /// Set the mocked audio in mode value directly (for test setup).
@@ -1974,8 +1953,8 @@ where
     ) -> Result<(), AmpError> {
         let reg = self.read_reg(REG_I2S_FORMAT)?;
         let desired = (reg & !(LIMITER_ATTACK_MASK | LIMITER_RELEASE_MASK))
-            | attack.encode() << 6
-            | release.encode() << 4;
+            | (attack.encode() << 6)
+            | (release.encode() << 4);
         self.write_reg(REG_I2S_FORMAT, desired)
     }
 }

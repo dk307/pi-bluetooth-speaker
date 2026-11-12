@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use speaker_hardware::{
     AmpDevice, AmpError, AmpErrorFlags, AmpFault, AmpHardwareInfo, AmpI2cAddress, AmpSettings,
-    AmpStatus, DcuChannelStatus, DcuMonitor, Pm2Config, PowerModeMon, PowerModeProfile,
-    amp_test_helpers,
+    AmpStatus, DcuChannelStatus, DcuMonitor, LimiterSlew, Pm2Config, PowerModeMon,
+    PowerModeProfile, amp_test_helpers,
 };
 
 #[test]
@@ -1144,4 +1144,44 @@ async fn async_settings_read_and_audio_in_mode_write() {
     amp.write_audio_in_mode_async(1).await.unwrap();
     assert_eq!(mock.mock_audio_in_mode(), 1);
     assert_eq!(amp.read_settings_async().await.unwrap().audio_in_mode, 1);
+}
+
+#[test]
+fn shared_register_0x35_writers_preserve_each_others_bits() {
+    // Audit Bug D: `0x35` is ONE physical byte shared by the I2S format
+    // (bits 2:0), VLP enable (bit 3), and limiter slew (bits 7:4) writers.
+    // The mock must model the same read-modify-write semantics as
+    // `HardwareDevice` so mask-preservation interactions are exercised.
+    let (amp, mock) = AmpDevice::new_mocked();
+
+    amp.write_i2s_format(4).unwrap();
+    amp.enable_audio_processor().unwrap();
+    amp.configure_limiter_slew(LimiterSlew::Fast, LimiterSlew::Normal)
+        .unwrap();
+
+    // Each later writer preserved the earlier writers' bits.
+    assert_eq!(mock.mock_i2s_format(), 4, "format preserved across RMWs");
+    assert!(mock.mock_vlp_enabled(), "VLP bit preserved");
+    let s = amp.read_settings().unwrap();
+    assert_eq!(s.i2s_format, 4, "read-back decodes the shared register");
+}
+
+#[test]
+fn shared_register_0x36_writers_preserve_each_others_bits() {
+    // `0x36` is ONE physical byte: serial mute (bit 7) and limiter enable
+    // (bit 6) must not clobber each other.
+    let (amp, mock) = AmpDevice::new_mocked();
+
+    amp.enable_limiter().unwrap();
+    amp.write_serial_mute(true).unwrap();
+    assert!(mock.mock_serial_muted());
+    assert!(mock.mock_limiter_enabled(), "limiter bit preserved by mute");
+
+    amp.write_serial_mute(false).unwrap();
+    assert!(!mock.mock_serial_muted());
+    assert!(
+        mock.mock_limiter_enabled(),
+        "limiter bit survives the unmute"
+    );
+    assert!(!amp.read_settings().unwrap().serial_muted);
 }
