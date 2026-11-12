@@ -1328,11 +1328,10 @@ impl AmpDeviceMock {
         state.fault = fault;
     }
 
-    /// Arms N one-shot transient failures on the ordering-critical writes
-    /// (master volume, serial mute): the next N of those write calls fail
-    /// with a mock fault and subsequent calls recover. Models a single
+    /// Arms N one-shot transient write failures: the next N **write** calls
+    /// fail with a mock fault and subsequent calls recover. Models a single
     /// transient NACK on a misbehaving bus, unlike [`Self::set_fault`],
-    /// which fails every operation uniformly.
+    /// which fails every operation (reads and writes) uniformly.
     ///
     /// # Panics
     /// Panics if the mock state lock is poisoned.
@@ -1409,6 +1408,10 @@ impl AmpDeviceMock {
             state.transient_write_failures -= 1;
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
+        if state.transient_write_failures > 0 {
+            state.transient_write_failures -= 1;
+            return Err(AmpError::mock_fault(Box::from("transient write failure")));
+        }
         if raw > 144 {
             return Err(AmpError::invalid_argument("master_volume_raw", raw));
         }
@@ -1426,6 +1429,10 @@ impl AmpDeviceMock {
             state.transient_write_failures -= 1;
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
+        if state.transient_write_failures > 0 {
+            state.transient_write_failures -= 1;
+            return Err(AmpError::mock_fault(Box::from("transient write failure")));
+        }
         // Real read-modify-write on the shared 0x36 byte (serial mute is
         // bit 7; the limiter enable bit 6 and other bits are preserved).
         state.mock_reg_0x36 = apply_mute_bit(state.mock_reg_0x36, muted);
@@ -1437,6 +1444,10 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
+        if state.transient_write_failures > 0 {
+            state.transient_write_failures -= 1;
+            return Err(AmpError::mock_fault(Box::from("transient write failure")));
+        }
         // Store the same encoded register value as hardware: (pm & 0x03) << 4 | 0x40
         state.mock_pm_ctrl = 0x40 | ((pm & 0x03) << 4);
         Ok(())
@@ -1446,6 +1457,10 @@ impl AmpDeviceMock {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
+        }
+        if state.transient_write_failures > 0 {
+            state.transient_write_failures -= 1;
+            return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         if profile > 5 {
             return Err(AmpError::invalid_argument("pm_profile", u16::from(profile)));
@@ -1461,6 +1476,10 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
+        if state.transient_write_failures > 0 {
+            state.transient_write_failures -= 1;
+            return Err(AmpError::mock_fault(Box::from("transient write failure")));
+        }
         if !VALID.contains(&format) {
             return Err(AmpError::invalid_argument("i2s_format", u16::from(format)));
         }
@@ -1474,6 +1493,10 @@ impl AmpDeviceMock {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
+        }
+        if state.transient_write_failures > 0 {
+            state.transient_write_failures -= 1;
+            return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         if mode > 5 {
             return Err(AmpError::invalid_argument("audio_in_mode", u16::from(mode)));
@@ -1492,6 +1515,10 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
+        if state.transient_write_failures > 0 {
+            state.transient_write_failures -= 1;
+            return Err(AmpError::mock_fault(Box::from("transient write failure")));
+        }
         state.mock_reg_0x35 = (state.mock_reg_0x35 & !(LIMITER_ATTACK_MASK | LIMITER_RELEASE_MASK))
             | (attack.encode() << 6)
             | (release.encode() << 4);
@@ -1503,6 +1530,10 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
+        if state.transient_write_failures > 0 {
+            state.transient_write_failures -= 1;
+            return Err(AmpError::mock_fault(Box::from("transient write failure")));
+        }
         state.mock_reg_0x35 |= AUDIO_PROC_ENABLE_MASK;
         Ok(())
     }
@@ -1512,6 +1543,10 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
+        if state.transient_write_failures > 0 {
+            state.transient_write_failures -= 1;
+            return Err(AmpError::mock_fault(Box::from("transient write failure")));
+        }
         state.mock_reg_0x36 |= LIMITER_ENABLE_MASK;
         Ok(())
     }
@@ -1520,6 +1555,10 @@ impl AmpDeviceMock {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
+        }
+        if state.transient_write_failures > 0 {
+            state.transient_write_failures -= 1;
+            return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         if !(-144..=0).contains(&dbfs) {
             return Err(AmpError::invalid_argument(

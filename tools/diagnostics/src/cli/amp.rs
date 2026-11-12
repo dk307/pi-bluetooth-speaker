@@ -594,9 +594,6 @@ fn handle_set(amp: &AmpDevice, opts: &CliOptions) -> ExitCode {
             Box::new(move || amp.write_master_volume(raw)),
         ));
     }
-    if set.mute == Some(false) {
-        writes.push(("serial mute", Box::new(|| amp.write_serial_mute(false))));
-    }
     if let Some(pm) = set.pm {
         writes.push((
             "power mode",
@@ -617,6 +614,11 @@ fn handle_set(amp: &AmpDevice, opts: &CliOptions) -> ExitCode {
             "audio input mode",
             Box::new(move || amp.write_audio_in_mode(mode)),
         ));
+    }
+    // Unmute is pushed AFTER every other requested write: a failure in any
+    // of them must leave the amp muted (a failed set never unmasks output).
+    if set.mute == Some(false) {
+        writes.push(("serial mute", Box::new(|| amp.write_serial_mute(false))));
     }
 
     for (name, op) in writes {

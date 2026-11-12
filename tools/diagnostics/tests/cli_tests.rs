@@ -980,6 +980,20 @@ fn amp_info_cli_set_workflow_ordering_and_failure_stop() {
     assert_eq!(mock.mock_master_volume_raw(), 80);
     assert!(!mock.mock_serial_muted());
 
+    // Unmute-last across ALL other writes: a failed I2S-format write must
+    // stop before the requested unmute executes, even though the unmute is
+    // unrelated to the failing write.
+    mock.set_mock_serial_muted(true);
+    mock.set_transient_write_failures(1);
+    let opts = set_opts(SetValues {
+        i2s_format: Some(4),
+        mute: Some(false),
+        ..SetValues::default()
+    });
+    assert_eq!(run_app(&amp, &opts), ExitCode::FAILURE);
+    assert!(mock.mock_serial_muted());
+    assert_eq!(mock.mock_i2s_format(), 0);
+
     // Mute-first: with a fault, a requested MUTE is still recorded as the
     // attempted first write... it fails, so state stays; verify the failure
     // surfaces instead of a silent partial set.
