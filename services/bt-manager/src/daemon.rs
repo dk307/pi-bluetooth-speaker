@@ -26,64 +26,6 @@ use zbus::{Connection, MatchRule, MessageStream, Proxy};
 /// Default status poll interval (5 seconds).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Syncs volume between `BlueALSA` PCM (mirrors transport) and audio-manager D-Bus service.
-async fn sync_volume(
-    bt: &BluetoothDevice,
-    conn: &Connection,
-    last_pcm_vol: &mut Option<u8>,
-    expect_am: &mut Option<u8>,
-) -> Result<(), BtError> {
-    // Read BlueALSA PCM volume (mirrors BlueZ transport volume)
-    let pcm_vol = match bt.audio_pcms_async().await {
-        Ok(pcms) => pcms
-            .iter()
-            .find(|p| p.pcm_path.contains("a2dpsnk"))
-            .and_then(|p| p.volume_percent),
-        Err(e) => {
-            tracing::debug!(error = %e, "Failed to read BlueALSA PCMs for sync");
-            None
-        }
-    };
-
-    if let Some(pcm_vol) = pcm_vol {
-        // Only sync if PCM volume changed
-        if *last_pcm_vol == Some(pcm_vol) {
-            tracing::debug!(pcm_volume = pcm_vol, "Volume sync skipped: no change");
-            return Ok(());
-        }
-
-        // `volume_percent` is already 0..=100 (avg of per-channel levels);
-        // forward it directly — do NOT re-map through the AVRCP 0..127 table.
-        let percent = pcm_vol;
-
-        // Call audio-manager SetLevel via D-Bus
-        let proxy = Proxy::new(
-            conn,
-            "org.speaker.AudioManager",
-            "/org/speaker/amp",
-            "org.speaker.AudioManager1",
-        )
-        .await?;
-
-        proxy.call_method("SetLevel", &percent).await?;
-
-        tracing::info!(
-            pcm_volume = pcm_vol,
-            percent,
-            "Volume sync: BlueALSA PCM -> audio-manager"
-        );
-        *last_pcm_vol = Some(pcm_vol);
-        // The resulting audio-manager `PropertiesChanged(Level)` is our own
-        // echo; the reverse arm must skip exactly this one signal.
-        *expect_am = Some(pcm_vol);
-    } else {
-        // No active PCM
-        tracing::debug!("No active PCM for volume sync");
-    }
-
-    Ok(())
-}
-
 /// Bluetooth manager service command-line options..
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtManagerOptions {
@@ -540,19 +482,6 @@ async fn push_amp_level_catchup(
     }
 }
 
-/// Runs one sync attempt, logging failures at debug level (volume sync is
-/// best-effort; the next signal retries).
-async fn sync_volume_logged(
-    bt: &BluetoothDevice,
-    conn: &Connection,
-    last_pcm_vol: &mut Option<u8>,
-    expect_am: &mut Option<u8>,
-) {
-    if let Err(e) = sync_volume(bt, conn, last_pcm_vol, expect_am).await {
-        tracing::debug!(error = %e, "Volume sync failed");
-    }
-}
-
 /// Extracts the per-channel volume byte array from a D-Bus property value.
 ///
 /// Pure and host-testable; no D-Bus round-trips.
@@ -725,8 +654,12 @@ async fn spawn_volume_sync_task(bt: BluetoothDevice, conn: Connection) {
                 }
             };
 
-        // One-shot catch-up: apply the current volume on startup/reconnect.
-        sync_volume_logged(&bt, &conn, &mut last_pcm_vol, &mut expect_am).await;
+        // No forward catch-up here: BlueALSA's PCM `Volume` is stale or
+        // default-max/zero whenever no negotiated AVRCP stream is live, and
+        // applying it clobbered the amp (observed: 100% at stream start, 0%
+        // at task restart). The fresh-PCM arm owns initial state with a
+        // reverse push; after that, only genuine phone Volume *changes*
+        // (signals) flow forward.
 
         // Reverse-direction catch-up: the amp level may have changed (amp-cli,
         // thermal offset) while this task was down; push it to BlueALSA once.
