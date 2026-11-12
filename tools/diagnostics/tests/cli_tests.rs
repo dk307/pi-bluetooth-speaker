@@ -1802,3 +1802,88 @@ fn bt_info_cli_mock_execution_and_controls() {
     pcm_opts.target_device = Some(target_addr);
     speaker_diagnostics::cli::bt::print_human_audio_pipeline(&pcm_status, &pcm_opts);
 }
+
+#[test]
+fn bt_info_phone_volume_output_and_json() {
+    use std::process::ExitCode;
+
+    use speaker_bluetooth::{
+        AvrcpVolume, BluetoothDevice, BluetoothHardwareInfo, BluetoothServices,
+        BluetoothStatus, BtAddress, BtPlaybackState,
+    };
+    use speaker_common::systemd::ServiceState;
+    use speaker_common::diag::{format_timestamp, OutputFormat};
+    use speaker_diagnostics::cli::bt::{run_app, CliOptions};
+
+    // Test human output with phone volume
+    let (device, mock) = BluetoothDevice::new_mocked();
+    let mut opts = CliOptions::default();
+    opts.common.max_count = Some(1);
+    opts.common.verbose = true;
+    opts.common.format = OutputFormat::Human;
+
+    // Verify phone volume is present in mock (80/127 ≈ 63%)
+    let status = device.status().unwrap();
+    let playback = status.playback.as_ref().unwrap();
+    assert_eq!(playback.phone_volume, Some(AvrcpVolume::new(80).unwrap()));
+    assert_eq!(playback.phone_volume_percent(), Some(63));
+
+    let code = run_app(&device, &opts);
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    // Test JSON output includes phone_volume and phone_volume_percent
+    opts.common.format = OutputFormat::Json;
+    let code_json = run_app(&device, &opts);
+    assert_eq!(code_json, ExitCode::SUCCESS);
+
+    // Test with no phone volume
+    if let Ok(Some(mut pb)) = device.playback_state() {
+        pb.phone_volume = None;
+        mock.set_playback(Some(pb));
+    }
+    opts.common.format = OutputFormat::Human;
+    let code_none = run_app(&device, &opts);
+    assert_eq!(code_none, ExitCode::SUCCESS);
+
+    opts.common.format = OutputFormat::Json;
+    let code_none_json = run_app(&device, &opts);
+    assert_eq!(code_none_json, ExitCode::SUCCESS);
+
+    // Test with valid phone volume restored
+    if let Ok(Some(mut pb)) = device.playback_state() {
+        pb.phone_volume = Some(AvrcpVolume::new(80).unwrap());
+        mock.set_playback(Some(pb));
+    }
+    let _ = run_app(&device, &opts);
+
+    // Test direct output_json_status with phone volume
+    let pcm_status = BluetoothStatus {
+        services: BluetoothServices {
+            bluetoothd: ServiceState::Active,
+            bluealsa: ServiceState::Active,
+            bluealsa_aplay: ServiceState::Active,
+            bt_agent: ServiceState::Active,
+        },
+        adapter: None,
+        devices: Box::default(),
+        pcms: Box::default(),
+        hardware: BluetoothHardwareInfo::rpi3(),
+        playback: Some(BtPlaybackState {
+            device_address: Some(BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])),
+            device_name: "Test Phone".into(),
+            status: "playing".into(),
+            title: "Test Track".into(),
+            artist: "Test Artist".into(),
+            album: "Test Album".into(),
+            position_ms: 0,
+            duration_ms: 0,
+            player_path: None,
+            obex_port: None,
+            image_handle: None,
+            cover_art_path: None,
+            phone_volume: Some(AvrcpVolume::new(100).unwrap()), // 100/127 ≈ 79%
+        }),
+    };
+    let timestamp = format_timestamp();
+    speaker_diagnostics::cli::bt::output_json_status(&timestamp, &pcm_status, &CliOptions::default());
+}

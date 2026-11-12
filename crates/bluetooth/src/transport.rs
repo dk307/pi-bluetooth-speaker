@@ -136,8 +136,22 @@ pub const AVRCP_MAX_VOLUME: u16 = 127;
 /// the remote device's volume level. This newtype enforces the invariant at
 /// construction time, preventing invalid values from propagating through the
 /// system (M-STRONG-TYPES-GUARD).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct AvrcpVolume(u16);
+
+impl<'de> serde::Deserialize<'de> for AvrcpVolume {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let v = u16::deserialize(deserializer)?;
+        Self::new(v).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "AVRCP absolute volume {v} exceeds maximum {AVRCP_MAX_VOLUME}"
+            ))
+        })
+    }
+}
 
 impl AvrcpVolume {
     /// Creates a new `AvrcpVolume` from a raw value, returning `None` if out of range.

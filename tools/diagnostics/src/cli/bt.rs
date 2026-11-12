@@ -13,9 +13,9 @@ use speaker_bluetooth::{
     BtError,
 };
 use speaker_common::diag::{
-    CliParse, CommonCliOptions, NumericStats, OutputFormat, env_args, exit_code_for_reads,
-    format_timestamp, next_arg_value, parse_args_with_common, resolve_cli_opts, run_poll_loop,
-    should_print_summary,
+    env_args, exit_code_for_reads, format_timestamp, next_arg_value, parse_args_with_common,
+    resolve_cli_opts, run_poll_loop, should_print_summary, CliParse, CommonCliOptions,
+    NumericStats, OutputFormat,
 };
 
 /// Default polling interval between status checks (1.0 second).
@@ -352,7 +352,8 @@ pub fn print_human_audio_pipeline(status: &BluetoothStatus, opts: &CliOptions) {
             p.status,
             p.format_position()
         );
-        if let (Some(vol), Some(pct)) = (p.phone_volume, p.phone_volume_percent()) {
+        if let Some(vol) = p.phone_volume {
+            let pct = vol.to_percent();
             println!(
                 "  ↳ Phone Volume    : {pct}% (AVRCP absolute: {})",
                 vol.get()
