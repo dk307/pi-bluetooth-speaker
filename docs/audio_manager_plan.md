@@ -1,9 +1,12 @@
 # Audio Manager Plan — Hardware Volume & Mute Owner
 
-> Status: **planned** (not yet implemented). Written 2026-11-09 after live
-> verification that the current mute path is an audible no-op on this hardware.
-> Follows `docs/volume_sync_plan.md` (native BT volume sync, resolved) and
-> `docs/rpi_audio_bluetooth_report.md` §7.6.
+> Status: **implemented & deployed 2026-11-10** (`services/audio-manager` +
+> `crates/amp_curve`). D-Bus API verified live on the Pi: `SetLevel 50` →
+> Merus raw 125, mute → raw 0, unmute → level restored. bt-manager's
+> `sync_volume` task routes phone volume into it (see
+> `docs/volume_sync_plan.md`, "Final Architecture"). Written 2026-11-09 after
+> live verification that the current mute path is an audible no-op on this
+> hardware. Follows `docs/rpi_audio_bluetooth_report.md` §7.6.
 
 ## 1. Problem Statement
 

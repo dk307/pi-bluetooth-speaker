@@ -9,5 +9,11 @@ use std::process::ExitCode;
 speaker_common::glibc_compat!();
 
 fn main() -> ExitCode {
-    bt_manager::daemon::main()
+    // Use current thread runtime to avoid "Cannot start a runtime from within a runtime"
+    // when subsystems like cover-art and auto-trust have already started their own runtimes.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create tokio runtime")
+        .block_on(bt_manager::daemon::main())
 }

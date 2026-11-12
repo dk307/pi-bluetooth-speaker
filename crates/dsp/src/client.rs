@@ -492,7 +492,7 @@ impl DspHardwareInfo {
             config_path: "/etc/camilladsp/crossover.yml",
             log_path: "/var/log/camilladsp/camilladsp.log",
             capture_device: "hw:Loopback,1,0",
-            playback_device: "hw:sndrpimerusamp,0",
+            playback_device: "hw:sndrpihifiberry,0",
             infrasonic_hpf_hz: 45,
             crossover_freq_hz: 180,
             tweeter_shelf_hz: 3000,
@@ -850,6 +850,15 @@ impl DspDeviceMock {
         }
     }
 
+    /// Mock state-only read (sibling of [`Self::read_status`]).
+    fn read_state(&self, _host: &DspHost, _port: DspPort) -> Result<ProcessingState, DspError> {
+        let g = self.inner.lock().expect("dsp mock mutex poisoned");
+        if let Some(ref fault) = g.injected_fault {
+            return Err(DspError::protocol_error(fault.clone()));
+        }
+        Ok(g.state.clone())
+    }
+
     fn read_status(&self, host: &DspHost, port: DspPort) -> Result<DspStatus, DspError> {
         let g = self.inner.lock().expect("dsp mock mutex poisoned");
         if let Some(ref fault) = g.injected_fault {
@@ -1009,6 +1018,61 @@ impl DspDevice {
                     .unwrap_or_else(|e| std::panic::resume_unwind(e))
             }
         }
+    }
+
+    /// Reads only the `CamillaDSP` engine state (`GetState`).
+    ///
+    /// Lightweight sibling of [`Self::read_status`]: a single WS connection
+    /// and a single command, so ancillary-telemetry failures (rate adjust,
+    /// buffer level, …) can never block the DSP stream-lifecycle watcher's
+    /// start/stop edges.
+    ///
+    /// # Errors
+    /// Returns [`DspError`] if communication fails or the server returns an error.
+    pub fn read_state(&self) -> Result<ProcessingState, DspError> {
+        match &*self.backend {
+            Backend::Mock { host, port, mock } => mock.read_state(host, *port),
+            Backend::Hardware { host, port } => {
+                let host_clone = host.clone();
+                let port_val = *port;
+                let handle = std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| DspError::invalid_state(e.to_string()))?;
+                    rt.block_on(Self::query_state(host_clone, port_val))
+                });
+                handle
+                    .join()
+                    .unwrap_or_else(|e| std::panic::resume_unwind(e))
+            }
+        }
+    }
+
+    /// Reads only the engine state asynchronously.
+    ///
+    /// # Errors
+    /// Returns [`DspError`] if communication fails or the server returns an error.
+    pub async fn read_state_async(&self) -> Result<ProcessingState, DspError> {
+        let dev = self.clone();
+        speaker_common::runtime::run_blocking("dsp state", move || dev.read_state()).await
+    }
+
+    async fn query_state(host: DspHost, port: DspPort) -> Result<ProcessingState, DspError> {
+        let mut ws = Self::connect_ws(&host, port).await?;
+        let val = Self::send_command(&mut ws, "GetState").await?;
+        // Close with a proper WebSocket closing handshake: this poll runs at
+        // 2-4 Hz for the lifecycle watcher, and dropping the stream without a
+        // close frame makes the CamillaDSP socket server log a
+        // "Lost connection: Connection reset without closing handshake"
+        // warning per poll, flooding `/var/log/camilladsp/camilladsp.log`.
+        // Bound the handshake wait so an unresponsive server can never hang
+        // the lifecycle watcher's poll loop.
+        let _ = tokio::time::timeout(Duration::from_millis(500), ws.close(None)).await;
+        let s = val
+            .as_str()
+            .ok_or_else(|| DspError::protocol_error("invalid GetState string response"))?;
+        Ok(ProcessingState::parse_state(s))
     }
 
     /// Reads `CamillaDSP` pipeline telemetry asynchronously.

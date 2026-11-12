@@ -14,7 +14,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use zbus::blocking::Connection;
+use zbus::Connection;
+use zbus::blocking::Connection as BlockingConnection;
 use zbus::names::OwnedInterfaceName;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
@@ -1095,7 +1096,7 @@ const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
 /// If the system bus cannot be reached, the thread retries with backoff and
 /// callers fall back to the keep-alive timeout polling path meanwhile.
 fn spawn_properties_changed_listener(
-    conn_slot: Arc<Mutex<Option<Connection>>>,
+    conn_slot: Arc<Mutex<Option<BlockingConnection>>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) -> Arc<ChangeFlag> {
     let flag = Arc::new(ChangeFlag::default());
@@ -1173,7 +1174,7 @@ fn spawn_properties_changed_listener(
 /// thread to stop, which must only happen when the last owner is dropped.
 #[derive(Debug)]
 pub struct DbusClient {
-    conn_slot: Arc<Mutex<Option<Connection>>>,
+    conn_slot: Arc<Mutex<Option<BlockingConnection>>>,
     device_caps_dir: std::path::PathBuf,
     cache_dir: std::path::PathBuf,
     change_flag: Arc<ChangeFlag>,
@@ -1197,7 +1198,7 @@ impl Drop for DbusClient {
 
 impl DbusClient {
     #[must_use]
-    pub fn new(conn: Connection) -> Self {
+    pub fn new(conn: BlockingConnection) -> Self {
         let conn_slot = Arc::new(Mutex::new(Some(conn)));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         Self {
@@ -1214,7 +1215,7 @@ impl DbusClient {
     /// The `Drop` impl drains the slot and closes the connection to release
     /// the parked listener thread; reaching this method afterwards is a
     /// use-after-drop bug, so panicking is the correct behavior.
-    fn conn(&self) -> Connection {
+    fn conn(&self) -> BlockingConnection {
         self.conn_slot
             .lock()
             .unwrap()
@@ -1769,7 +1770,10 @@ impl DbusClient {
     /// (older `BlueALSA` versions), mirroring `bluealsactl` which prints
     /// `[ Unknown ]` when the list is empty. Transport-level faults (connection
     /// loss, permission errors, malformed replies) propagate as [`BtError`].
-    fn query_pcm_codecs(conn: &Connection, pcm_path: &str) -> Result<Box<[Box<str>]>, BtError> {
+    fn query_pcm_codecs(
+        conn: &BlockingConnection,
+        pcm_path: &str,
+    ) -> Result<Box<[Box<str>]>, BtError> {
         let proxy = zbus::blocking::Proxy::new(conn, "org.bluealsa", pcm_path, "org.bluealsa.PCM1")
             .map_err(|e| BtError::dbus_with_source(format!("codec proxy for {pcm_path}"), e))?;
         match proxy.call_method("GetCodecs", &()) {
@@ -2524,10 +2528,46 @@ impl BluetoothDevice {
     ///
     /// # Errors
     /// Returns [`BtError`] if connecting to the system D-Bus fails.
-    pub fn new() -> Result<Self, BtError> {
-        let conn = Connection::system()?;
+    pub async fn new() -> Result<Self, BtError> {
+        // Create async connection for any async operations
+        let _async_conn = Connection::system().await?;
+
+        // Create blocking connection for DbusClient (must be done on a blocking thread
+        // to avoid "Cannot start a runtime from within a runtime" error)
+        let blocking_conn = tokio::task::spawn_blocking(BlockingConnection::system)
+            .await
+            .map_err(|e| {
+                BtError::new(BtErrorKind::Dbus {
+                    details: format!("spawn_blocking failed: {e}").into(),
+                })
+            })?
+            .map_err(|e| {
+                BtError::new(BtErrorKind::Dbus {
+                    details: format!("blocking connection failed: {e}").into(),
+                })
+            })?;
+
         Ok(Self {
-            backend: Arc::new(Backend::Dbus(DbusClient::new(conn))),
+            backend: Arc::new(Backend::Dbus(DbusClient::new(blocking_conn))),
+        })
+    }
+
+    /// Connects to the Linux system D-Bus using the blocking API.
+    ///
+    /// This is intended for synchronous CLI tools that don't use an async runtime.
+    /// It uses `zbus::blocking::Connection::system()` directly.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if connecting to the system D-Bus fails.
+    pub fn new_blocking() -> Result<Self, BtError> {
+        let blocking_conn = BlockingConnection::system().map_err(|e| {
+            BtError::new(BtErrorKind::Dbus {
+                details: format!("blocking connection failed: {e}").into(),
+            })
+        })?;
+
+        Ok(Self {
+            backend: Arc::new(Backend::Dbus(DbusClient::new(blocking_conn))),
         })
     }
 
@@ -2541,9 +2581,11 @@ impl BluetoothDevice {
         (device, mock)
     }
 
-    /// Creates a device instance backed by an established D-Bus connection.
+    /// Creates a device instance backed by an established blocking D-Bus connection.
+    ///
+    /// Primarily used for testing with a private system bus.
     #[must_use]
-    pub fn with_connection(conn: Connection) -> Self {
+    pub fn with_connection(conn: BlockingConnection) -> Self {
         Self {
             backend: Arc::new(Backend::Dbus(DbusClient::new(conn))),
         }
@@ -2698,6 +2740,16 @@ impl BluetoothDevice {
         Ok(self.link_snapshot()?.pcms)
     }
 
+    /// Returns active `BlueALSA` audio PCM transport streams asynchronously.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if querying fails or the task is cancelled.
+    pub async fn audio_pcms_async(&self) -> Result<Box<[BlueAlsaPcm]>, BtError> {
+        let dev = self.clone();
+        speaker_common::runtime::run_blocking("bluetooth audio_pcms read", move || dev.audio_pcms())
+            .await
+    }
+
     /// Returns the adapter, remote devices, and audio streams without service or hardware probes.
     ///
     /// # Errors
@@ -2715,6 +2767,18 @@ impl BluetoothDevice {
                 })
             }
         }
+    }
+
+    /// Returns the adapter, remote devices, and audio streams asynchronously.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails, a mock fault is injected, or the task is cancelled.
+    pub async fn link_snapshot_async(&self) -> Result<LinkSnapshot, BtError> {
+        let dev = self.clone();
+        speaker_common::runtime::run_blocking("bluetooth link_snapshot read", move || {
+            dev.link_snapshot()
+        })
+        .await
     }
 
     /// Returns the active media player playback state, if available.

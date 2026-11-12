@@ -1,0 +1,236 @@
+//! Integration tests for amp_backend module.
+
+use audio_manager::{AmpBackend, AmpState, MockAmpBackend};
+
+#[tokio::test]
+async fn mock_backend_write_state() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_state(AmpState {
+        level_raw: 50,
+        muted: false,
+    });
+
+    let result = backend
+        .write_state(&AmpState {
+            level_raw: 80,
+            muted: false,
+        })
+        .await
+        .unwrap();
+    assert!(!result.muted);
+    assert_eq!(result.level_raw, 80);
+
+    let write = ctrl.last_write().unwrap();
+    assert!(!write.muted);
+    assert_eq!(write.level_raw, 80);
+}
+
+#[tokio::test]
+async fn mock_backend_write_state_muted() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_state(AmpState {
+        level_raw: 50,
+        muted: true,
+    });
+
+    let result = backend
+        .write_state(&AmpState {
+            level_raw: 80,
+            muted: true,
+        })
+        .await
+        .unwrap();
+    assert!(result.muted);
+    // `write_state` returns the logical requested state; the level stays
+    // live on the mixer even while muted (serial mute silences output).
+    assert_eq!(result.level_raw, 80);
+    assert_eq!(result.hardware_level(), 80);
+
+    let write = ctrl.last_write().unwrap();
+    assert!(write.muted);
+    assert_eq!(write.level_raw, 80);
+}
+
+#[tokio::test]
+async fn mock_backend_read_state() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_state(AmpState {
+        level_raw: 100,
+        muted: false,
+    });
+
+    let state = backend.read_state().await.unwrap();
+    assert_eq!(state.level_raw, 100);
+    assert!(!state.muted);
+}
+
+#[tokio::test]
+async fn mock_backend_validate() {
+    let (backend, _ctrl) = MockAmpBackend::new_mocked();
+
+    let result = backend.validate().await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn mock_backend_validate_fail() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_validate_fail(true);
+
+    let result = backend.validate().await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn mock_backend_write_fail() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_write_fail(true);
+
+    let result = backend
+        .write_state(&AmpState {
+            level_raw: 50,
+            muted: false,
+        })
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn mock_backend_read_fail() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_read_fail(true);
+
+    let result = backend.read_state().await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn mock_ctrl_call_counts() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_state(AmpState {
+        level_raw: 50,
+        muted: false,
+    });
+
+    let _ = backend.validate().await;
+    let _ = backend
+        .write_state(&AmpState {
+            level_raw: 80,
+            muted: false,
+        })
+        .await;
+    let _ = backend.read_state().await;
+
+    let (v, w, r) = ctrl.call_counts();
+    assert_eq!(v, 1);
+    assert_eq!(w, 1);
+    assert_eq!(r, 1);
+}
+
+#[tokio::test]
+async fn mock_serial_mute_write_and_read() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+
+    backend.set_serial_mute(true).await.unwrap();
+    assert!(ctrl.serial_mute_calls() >= 1);
+    assert_eq!(ctrl.last_serial_mute(), Some(true));
+    assert!(backend.read_serial_mute().await.unwrap());
+
+    backend.set_serial_mute(false).await.unwrap();
+    assert_eq!(ctrl.serial_mute_calls(), 2);
+    assert!(!backend.read_serial_mute().await.unwrap());
+}
+
+#[tokio::test]
+async fn mock_serial_mute_fault_injection() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_serial_mute_fail(true);
+    let err = backend.set_serial_mute(true).await.unwrap_err();
+    assert!(err.to_string().contains("mock serial mute failure"));
+    // One-shot failure: next call succeeds.
+    backend.set_serial_mute(false).await.unwrap();
+}
+
+#[tokio::test]
+async fn mock_write_state_applies_serial_mute() {
+    // Mock fidelity: the real backend's write_state applies the serial mute
+    // bit after the mixer write; the mock mirrors that coupling.
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    backend
+        .write_state(&AmpState {
+            level_raw: 80,
+            muted: true,
+        })
+        .await
+        .unwrap();
+    assert!(ctrl.last_write().unwrap().muted);
+    assert_eq!(ctrl.last_serial_mute(), Some(true));
+    assert!(backend.read_serial_mute().await.unwrap());
+
+    backend
+        .write_state(&AmpState {
+            level_raw: 80,
+            muted: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(ctrl.last_serial_mute(), Some(false));
+    assert!(!backend.read_serial_mute().await.unwrap());
+}
+
+#[test]
+fn amp_error_summary_is_single_line_without_backtraces() {
+    // A hardware error carries a captured backtrace in its Display when
+    // RUST_BACKTRACE=1; the summary used for D-Bus error strings must be a
+    // single line without one.
+    let (amp, _mock) = speaker_hardware::AmpDevice::new_mocked();
+    let inner = amp.write_master_volume(999).unwrap_err();
+    let wrapped = audio_manager::AmpError::from(inner);
+
+    let summary = wrapped.summary();
+    assert!(
+        !summary.contains('\n'),
+        "summary must be single-line: {summary}"
+    );
+    assert!(!summary.contains("Backtrace"));
+    assert!(summary.contains("master_volume_raw"));
+
+    // Non-hardware variants pass through single-line thiserror formatting.
+    let io = audio_manager::AmpError::internal("boom");
+    assert_eq!(io.summary(), "Internal error: boom");
+}
+
+#[tokio::test]
+async fn mock_backend_tracks_full_call_history_and_state() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+
+    // Identity + initial state.
+    assert_eq!(backend.backend_id(), "mock");
+    let initial = backend.read_state().await.unwrap();
+    assert_eq!(initial.level_raw, ctrl.current_state().level_raw);
+
+    // write_state: last_write mirrors the write, read_state reflects it.
+    let written = backend
+        .write_state(&AmpState::new(120, false).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(written.level_raw, 120);
+    assert_eq!(ctrl.last_write().map(|s| s.level_raw), Some(120));
+    assert_eq!(backend.read_state().await.unwrap().level_raw, 120);
+
+    // set_serial_mute: call counted, both directions observable.
+    backend.set_serial_mute(true).await.unwrap();
+    assert!(ctrl.serial_mute_calls() >= 1);
+    assert_eq!(ctrl.last_serial_mute(), Some(true));
+    assert!(backend.read_serial_mute().await.unwrap());
+    ctrl.set_serial_muted(false);
+    assert!(!backend.read_serial_mute().await.unwrap());
+
+    // Direct state injection and cumulative call counts.
+    ctrl.set_state(AmpState::new(30, true).unwrap());
+    assert_eq!(backend.read_state().await.unwrap().level_raw, 30);
+    assert!(backend.read_state().await.unwrap().muted);
+    let (_validate, writes, reads) = ctrl.call_counts();
+    assert!(writes >= 1, "write_state calls must be counted");
+    assert!(reads >= 3, "read_state calls must be counted");
+}

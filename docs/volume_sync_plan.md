@@ -1,26 +1,61 @@
 # Volume Sync Plan - Raspberry Pi Bluetooth Speaker
 
-> **RESOLVED (2026-11-09):** Phone → hardware volume sync is fully working via the
-> native BlueZ → bluez-alsa → `bluealsa-aplay` → Merus chain. The root cause was
-> **BlueZ 5.88's new `[AVRCP] VolumeCategory = true` default** (commit `8baabd2f5`),
-> which rejects phones whose AVRCP Target SDP record lacks the category-2 feature
-> bit (Pixel = TG 1.4, no category-2). BlueZ then never registered
-> `EVENT_VOLUME_CHANGED`, so the phone never sent `SetAbsoluteVolume` and
-> `MediaTransport1.Volume` stayed frozen. Fix: `[AVRCP] VolumeCategory = false` in
-> `/etc/bluetooth/main.conf` + `systemctl restart bluetooth` (no re-pair needed);
-> committed as `baseline/etc/bluetooth/main.conf`. Full diagnosis and live
-> verification: `docs/rpi_audio_bluetooth_report.md` § 7.6.1 (Rank 0 gate).
->
-> Correction to the analysis below: "bluealsa v5.0.0 has no AVRCP target profile"
-> was **not** the blocker — bluez-alsa never implements AVRCP in any version; BlueZ
-> owns the AVRCP TG role and forwards volume into `MediaTransport1.Volume`, which
-> bluealsad / `bluealsa-aplay` pick up natively. Options 1–4 are therefore moot and
-> kept only as history. Do **not** implement Option 3/4 or a polled `sync_volume`
-> fallback in bt-manager: native sync works, and a second writer with a different
-> volume curve (0–100 percent fed into a 0–127 AVRCP mapper) would fight
-> `bluealsa-aplay` and cause audible volume oscillation.
+## Final Architecture (IMPLEMENTED Nov 2026)
 
-## Current State (as of Nov 2026)
+The options below were evaluated; the shipped solution combines a BlueZ
+configuration fix with `audio-manager` as the sole amp owner and a small
+bt-manager sync task:
+
+```
+Phone volume buttons (AVRCP absolute volume, 0-127)
+    → bluealsad reads AVRCP volume itself (bluez-alsa v5.0, native)
+    → org.bluealsa.PCM1 Volume (ay, per-channel bytes)
+    → bt-manager `sync_volume` task (5 s dedup poll)
+    → audio-manager D-Bus SetLevel(percent)
+    → amp_curve PERCENT_TO_RAW → ALSA A.Mstr Vol (Merus raw 0-144)
+    → Speaker
+```
+
+### Ownership map (single-writer rule)
+
+| Component | Writes | Reads |
+|-----------|--------|-------|
+| `audio-manager` | **Only writer** of `A.Mstr Vol`; persists/restores state | ALSA mixer |
+| bt-manager `sync_volume` | audio-manager `SetLevel` (deduped on change) | `org.bluealsa.PCM1 Volume` |
+| screen-manager UI knob | → `bt.set_volume` → BlueALSA PCM → phone (AVRCP absolute) | BlueALSA volume (readout) |
+| bt-manager pairing agent | BlueZ info file `Volume=` seed (one-shot at trust) | amixer `A.Mstr Vol` (one-shot) |
+| reconciler | connection healing only — never volume | BlueZ/BlueALSA topology |
+
+### Root causes that were fixed
+
+1. **BlueZ 5.88 `[AVRCP] VolumeCategory = true`** rejects the Pixel's AVRCP TG
+   (it advertises no category-2 bit) → fixed with `VolumeCategory = false` in
+   `/etc/bluetooth/main.conf` (committed to `baseline/etc/bluetooth/main.conf`).
+   With this fix bluez-alsa receives AVRCP absolute volume natively; the BlueZ
+   `MediaTransport1.Volume` path is NOT used and stays 0.
+2. **Double conversion bug**: bt-manager took `volume_percent` (already 0-100)
+   from `format_volume_bytes` and re-mapped it through the AVRCP 0-127 table,
+   squashing the scale (100 % → 79 %). The percent is now forwarded directly.
+3. **Blocking zbus inside tokio**: bt-manager used
+   `zbus::blocking::Connection::system()` from async context (nested runtime
+   panic); the daemon now runs on a `current_thread` async runtime with
+   blocking calls isolated via `speaker_common::runtime::run_blocking`.
+4. **Mute restores 0**: `write_state` returned the hardware-clamped state
+   (level 0 when muted), losing the logical level; it now returns the logical
+   requested state and `AmpState::hardware_level()` clamps for hardware.
+
+### What was NOT needed
+
+- No AVRCP target implementation in bt-manager (Option 3 unnecessary).
+- `MediaTransport1.Volume` is not consulted (stays 0 under
+  `VolumeCategory = false`; bluez-alsa bypasses BlueZ for volume).
+- bluealsa-aplay still owns raw PCM routing; the amp mixer control is not
+  bound to it as a sync channel (`--mixer-control` is only used for the
+  softvol path; `audio-manager` drives the mixer directly).
+
+---
+
+## Historical Analysis (pre-audio-manager)
 
 ### Hardware
 - **DAC/Amp**: Merus MA12070P (Mono, 0-144 raw, fake dB scale 0-70=mute)
@@ -61,18 +96,12 @@ Phone AVRCP (0-127)
 3. **bluealsa-aplay --volume=auto** (native): Subscribes to `MediaTransport1.Volume` signals → writes ALSA mixer
 
 ### What's Broken
-**~~bluealsa v5.0.0 has no AVRCP target profile~~ → superseded:** the actual blocker was
-BlueZ 5.88's `[AVRCP] VolumeCategory = true` gate (see resolution banner above).
-Original (incorrect) evidence notes kept for history:
+**bluealsa v5.0.0 has no AVRCP target profile** - cannot receive phone volume commands.
+
+Evidence:
 - `busctl tree org.bluez` shows only phone's AVRCP controller (`/dev_.../avrcp/player0`)
 - No `/org/bluealsa/avrcp` target registered
 - Phone volume changes → nowhere to go
-
-**Actual root cause (fixed 2026-11-09):** BlueZ 5.88 `[AVRCP] VolumeCategory = true`
-default rejects the Pixel's TG record (1.4, no category-2) in `avrcp_volume_supported()`,
-so `target_init()` skips registering `EVENT_VOLUME_CHANGED` and the phone never sends
-`SetAbsoluteVolume` (PDU 0x50). Verified via `bluetoothd -d`: after the fix the PDU 0x50
-is accepted and the transport volume tracks every key press.
 
 **Underrun bug**: bluealsa-aplay loses BlueZ subscription after "Draining ALSA playback PCM to avoid underrun" restart.
 
@@ -137,25 +166,9 @@ struct VolumeState {
 
 ## Recommended Path
 
-> **Superseded 2026-11-09:** resolved by the `[AVRCP] VolumeCategory = false` fix
-> (see banner). No bt-manager code changes are needed or desired for volume sync.
->
-> **Follow-up design (2026-11-09):** the remaining mute/volume gaps — mute is an
-> audible no-op (the Merus mixer has no ALSA mute switch for the BlueALSA mute
-> bit to drive) and the amp is owned by `bluealsa-aplay` — are addressed by the
-> new **audio-manager** service plan: a single event-driven hardware owner of
-> `A.Mstr Vol` (mute = raw 0 / -144 dB, level restore on unmute) with bt-manager
-> and the UI as clients. Do **not** implement Options 3/4 below or the obsolete
-> polled `sync_volume` code in bt-manager (0–100% vs 0..127 scale bug; dual-writer
-> oscillation with `bluealsa-aplay`). See **`docs/audio_manager_plan.md`** —
-> Options 3/4 are replaced by its phase 2.
-
 1. **Test Option 1** (current buffer-tuned config) under real usage for 24-48h
-   *(note: the buffer flags were never actually deployed to the live unit —
-   `bluealsa-aplay.service` still runs without `--pcm-buffer-time/--pcm-period-time`)*
 2. If underruns persist → **Option 2** (upgrade bluealsa)
-3. ~~If upgrade not feasible → **Option 3** (AVRCP target in bt-manager)~~
-   → replaced by `docs/audio_manager_plan.md` phase 2
+3. If upgrade not feasible → **Option 3** (AVRCP target in bt-manager)
 4. **Avoid Option 4** unless absolutely necessary
 
 ---

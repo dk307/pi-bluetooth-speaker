@@ -27,6 +27,7 @@ RELEASE_DIR="target/${TARGET_TRIPLE}/release"
 KNOWN_BINARIES=(
   screen-manager
   bt-manager
+  audio-manager
   amp-info
   bt-info
   dsp-info
