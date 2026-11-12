@@ -182,11 +182,22 @@ impl BtPlaybackState {
 
     /// Converts the AVRCP absolute volume (0-127) to a percentage (0-100),
     /// rounded. `None` when no phone volume is reported.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `phone_volume` is `Some` but `phone_volume_percent()` returns `None`
+    /// (logic invariant violation — should be impossible since the conversion always
+    /// returns `Some` when input is `Some`).
     #[must_use]
     pub fn phone_volume_percent(&self) -> Option<u8> {
         self.phone_volume.map(|v| {
-            ((u32::from(v) * 100 + u32::from(AVRCP_MAX_VOLUME) / 2) / u32::from(AVRCP_MAX_VOLUME))
-                as u8
+            debug_assert!(
+                v <= AVRCP_MAX_VOLUME,
+                "AVRCP absolute volume {v} exceeds max {AVRCP_MAX_VOLUME}"
+            );
+            let pct = (u32::from(v) * 100 + u32::from(AVRCP_MAX_VOLUME) / 2)
+                / u32::from(AVRCP_MAX_VOLUME);
+            pct.min(100) as u8
         })
     }
 }
