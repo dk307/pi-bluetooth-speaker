@@ -9,7 +9,7 @@ use tracing::info;
 /// Configuration loaded from `/etc/audio-manager/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// ALSA card name for the Merus amplifier (e.g., "sndrpimerusamp").
+    /// ALSA card name for the amplifier (e.g., "sndrpihifiberry").
     #[serde(default = "default_alsa_card")]
     pub alsa_card: String,
 
@@ -63,7 +63,9 @@ pub struct Config {
 }
 
 fn default_alsa_card() -> String {
-    "sndrpimerusamp".to_string()
+    // hifiberry-dac (PCM5102A) card — the merus overlay card was removed
+    // in the dtoverlay migration (verified live: card 1 sndrpihifiberry).
+    "sndrpihifiberry".to_string()
 }
 
 fn default_control_mode() -> String {

@@ -492,7 +492,7 @@ impl DspHardwareInfo {
             config_path: "/etc/camilladsp/crossover.yml",
             log_path: "/var/log/camilladsp/camilladsp.log",
             capture_device: "hw:Loopback,1,0",
-            playback_device: "hw:sndrpimerusamp,0",
+            playback_device: "hw:sndrpihifiberry,0",
             infrasonic_hpf_hz: 45,
             crossover_freq_hz: 180,
             tweeter_shelf_hz: 3000,
