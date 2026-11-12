@@ -232,7 +232,11 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
             "DSP stream-lifecycle watcher enabled"
         );
     } else {
-        info!("DSP stream-lifecycle watcher disabled by configuration");
+        warn!(
+            "DSP stream-lifecycle watcher disabled by configuration: no lifecycle \
+             source can emit StreamStarting, so the amp stays hardware-muted while \
+             no stream runs (idle SetMute(false) records intent only)"
+        );
     }
 
     let mirror = controller.mirror();

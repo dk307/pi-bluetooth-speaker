@@ -42,8 +42,15 @@ pub struct Config {
 
     /// Enable the DSP stream-lifecycle watcher (plan §11.3): polls the
     /// CamillaDSP engine state and emits `StreamStarting`/`StreamStopping`
-    /// edges to the controller. Disabled = the amp is driven only by D-Bus
-    /// commands (logged at boot).
+    /// edges to the controller.
+    ///
+    /// The watcher is the ONLY source that can open the audio path while
+    /// the amp is idle: an idle unmute intentionally stays hardware-muted
+    /// until the next `StreamStarting` runs the pop-free PLL handshake.
+    /// Disabling it therefore keeps the amp muted while no stream runs
+    /// (D-Bus `SetMute(false)` records the intent only); use it only when
+    /// an external lifecycle source is provided. Logged with its
+    /// consequence at boot.
     #[serde(default = "default_dsp_watch")]
     pub dsp_watch_enabled: bool,
 
