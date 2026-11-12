@@ -970,17 +970,11 @@ fn find_attr<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
 }
 
 impl BipImageProperties {
+    // Note on parser design (crates.io search): lightweight crates (quick-xml, xml-rs)
+    // were evaluated, but BIP properties documents have a flat schema with only top-level
+    // <image-properties> and leaf <native>/<variant> elements. The zero-alloc token scanner
+    // `find_attr` suffices without introducing extra parser dependencies.
     /// Parses a BIP `<image-properties ...>` XML string.
-    ///
-    /// # Parser Implementation Rationale (crates.io search)
-    /// Lightweight XML parser crates (`quick-xml`, `xml-rs`, `minidom`) were evaluated
-    /// for parsing BIP properties documents. However, Bluetooth BIP v1.2.1 §5.2.2 defines
-    /// a flat, non-nested XML schema containing solely top-level `<image-properties>` and
-    /// leaf `<native>` / `<variant>` elements with a fixed set of attributes (`encoding`,
-    /// `pixel`, `size`). Adopting an external XML crate introduces extra transitive
-    /// dependencies and binary bloat for a task requiring only 3 attribute extractions.
-    /// The zero-alloc attribute scanner (`find_attr`) below is strictly bounded and immune
-    /// to non-conforming XML extensions while avoiding heavy dependencies.
     #[must_use]
     pub fn parse(xml: &str) -> Option<Self> {
         let mut handle = None;
@@ -1369,10 +1363,16 @@ pub struct PersistentBipSession {
     transport: Option<BipTransport>,
     /// Whether the connected peer supports BIP `image-properties` queries.
     ///
-    /// If an `x-bt/img-properties` query fails with an application-level rejection
-    /// (e.g. 404 Not Found, 501 Not Implemented) or timeout, this flag is set to `false`
+    /// If an `x-bt/img-properties` query returns an application-level rejection
+    /// (e.g. 404 Not Found, 501 Not Implemented), this flag is set to `false`
     /// for the remaining lifetime of the active session to avoid repeating query delays.
     properties_supported: bool,
+    /// Whether the connected peer accepts higher-resolution variant `Img-Descriptor` GETs.
+    ///
+    /// If an `Img-Descriptor` GET is rejected by the peer with an application rejection
+    /// (e.g. 406 Not Acceptable on AOSP), this flag is set to `false` so subsequent
+    /// tracks on this session fetch native artwork directly without repeated round-trips.
+    variants_supported: bool,
     /// Session generation, bumped on every release/re-establish; see
     /// [`BipSessionKeeper::epoch`].
     epoch: u64,
@@ -1393,6 +1393,7 @@ impl fmt::Debug for PersistentBipSession {
             .field("transport", &self.transport)
             .field("session_held", &self.session.is_some())
             .field("properties_supported", &self.properties_supported)
+            .field("variants_supported", &self.variants_supported)
             .field("epoch", &self.epoch)
             .finish_non_exhaustive()
     }
@@ -1405,6 +1406,7 @@ impl Default for PersistentBipSession {
             address: None,
             transport: None,
             properties_supported: true,
+            variants_supported: true,
             epoch: 0,
             channel_factory: Box::new(|transport| bip_channel_for(*transport)),
         }
@@ -1419,12 +1421,8 @@ impl PersistentBipSession {
         factory: impl Fn(&BipTransport) -> Box<dyn BipChannel> + Send + 'static,
     ) -> Self {
         Self {
-            session: None,
-            address: None,
-            transport: None,
-            properties_supported: true,
-            epoch: 0,
             channel_factory: Box::new(factory),
+            ..Self::default()
         }
     }
 }
@@ -1489,7 +1487,10 @@ impl BipSessionKeeper for PersistentBipSession {
             unreachable!("ensure() guarantees a held session on Ok");
         };
 
-        if image_type == BipImageType::Native && self.properties_supported {
+        if image_type == BipImageType::Native
+            && self.properties_supported
+            && self.variants_supported
+        {
             match get_image_properties_on(client, img_handle).await {
                 Ok(properties) => {
                     if let FormatSelection::Descriptor { width, height } =
@@ -1521,6 +1522,7 @@ impl BipSessionKeeper for PersistentBipSession {
                                     self.release();
                                     return Err(e);
                                 }
+                                self.variants_supported = false;
                             }
                         }
                     }
@@ -1593,6 +1595,7 @@ impl BipSessionKeeper for PersistentBipSession {
         }
         self.transport = None;
         self.properties_supported = true;
+        self.variants_supported = true;
     }
 
     fn epoch(&self) -> u64 {

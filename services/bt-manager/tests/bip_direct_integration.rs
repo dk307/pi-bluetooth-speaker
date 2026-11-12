@@ -1399,3 +1399,64 @@ async fn persistent_session_caches_unsupported_properties_across_fetches() {
         vec![false, false, false]
     );
 }
+
+#[tokio::test]
+async fn persistent_session_caches_rejected_variant_across_fetches() {
+    let xml = r#"<image-properties version="1.0" handle="0000001">
+  <native encoding="JPEG" pixel="200*200" />
+  <variant encoding="JPEG" pixel="640*480" />
+</image-properties>"#;
+
+    let body_track1 = body_bytes(512, 0xAA);
+    let body_track2 = body_bytes(512, 0xBB);
+
+    // Track 1: variant GET rejected (406), native fallback succeeds.
+    // Track 2: should go directly to native without repeating variant negotiation.
+    let stub = new_retry_stub(vec![
+        Err(Response::new(ResponseCode::NotAcceptable)),
+        Ok(body_track1.clone()),
+        Ok(body_track2.clone()),
+    ]);
+    stub.lock().await.properties_xml = Some(xml.to_string());
+
+    let stub_clone = Arc::clone(&stub);
+    let mut session = PersistentBipSession::with_channel_factory(move |_| {
+        Box::new(CustomServingChannel(Arc::clone(&stub_clone)))
+    });
+
+    let address = test_address();
+
+    // Fetch 1: requests variant, gets 406, falls back to native, sets variants_supported = false
+    let res1 = session
+        .fetch_image(
+            &address,
+            &BipTransport::SdpRfcomm,
+            BipImageType::Native,
+            "0000001",
+        )
+        .await
+        .expect("fallback to native must succeed");
+    assert_eq!(res1, body_track1);
+
+    // Fetch 2: variants_supported is false, skips variant negotiation and directly fetches native
+    let res2 = session
+        .fetch_image(
+            &address,
+            &BipTransport::SdpRfcomm,
+            BipImageType::Native,
+            "0000002",
+        )
+        .await
+        .expect("fetch 2 must skip variant query and succeed");
+    assert_eq!(res2, body_track2);
+
+    session.release();
+    let s = stub.lock().await;
+    // Exactly 4 requests total:
+    // Fetch 1: properties GET (false), variant GET (true, 406), fallback native GET (false)
+    // Fetch 2: native GET (false)
+    assert_eq!(
+        *s.descriptor_history.lock().await,
+        vec![false, true, false, false]
+    );
+}
