@@ -22,9 +22,10 @@ component CenteredAppBar inherits Rectangle {
         y: (parent.height - self.height) / 2;
         text: root.title;
         color: root.title_color;
-        font-size: 20px;
+        font-size: 24px;
         font-weight: 700;
         overflow: elide;
+        horizontal-alignment: center;
         width: parent.width - 2 * MaterialStyleMetrics.padding_24 - MaterialStyleMetrics.size_40;
     }
 
