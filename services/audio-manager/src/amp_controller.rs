@@ -112,8 +112,6 @@ pub struct AmpController {
     /// applied at write time via [`Self::effective_raw`] and never persisted.
     state: AmpState,
     ctrl: CtrlState,
-    /// Remembered unmute request while no stream is running.
-    pending_unmute: bool,
     /// Actual electrical mute state of the audio path (serial bit + GPIO
     /// `/MUTE`). Transient mutes (stream stop, PLL loss, fault recovery)
     /// drive this WITHOUT touching the persisted user intent in
@@ -167,7 +165,6 @@ impl AmpController {
             state_file,
             state: initial,
             ctrl: CtrlState::Muted,
-            pending_unmute: false,
             // Boot brings the amp up muted (mute-first); the user intent
             // lives in `initial.muted`.
             hardware_muted: true,
@@ -287,7 +284,6 @@ impl AmpController {
             AmpCommandKind::SetMute(true) => {
                 self.apply_muted(true).await?;
                 self.ctrl = CtrlState::Muted;
-                self.pending_unmute = false;
                 // GPIO /MUTE mirrors the mute; stream_live is unchanged so
                 // the stream keeps running muted and a later unmute can
                 // restore it without a new handshake.
@@ -306,10 +302,22 @@ impl AmpController {
                     self.stream_live = true;
                     info!("SetMute(false) applied while the stream is live");
                 } else if self.ctrl == CtrlState::Muted || self.ctrl == CtrlState::Faulted {
-                    self.pending_unmute = true;
-                    info!("Unmute requested without running stream; pending until StreamStarting");
+                    // No running stream (or faulted): record the user's
+                    // unmute INTENT immediately — mirror and state file
+                    // reflect it at once and it survives a daemon restart
+                    // — while the HARDWARE stays muted until the next
+                    // StreamStarting runs the PLL handshake. No separate
+                    // pending flag: `state.muted == false` IS the pending
+                    // unmute (audit round 4, Issue 1).
+                    let new_state = self.state.unmute();
+                    self.state = new_state;
+                    self.persist(&new_state).await;
+                    info!(
+                        "Unmute recorded without running stream; audio path stays muted until StreamStarting"
+                    );
                 }
-                // In AwaitingClock the handshake outcome governs.
+                // In AwaitingClock the handshake outcome governs (the state
+                // is transient — see start_stream's error guard).
             }
             AmpCommandKind::StreamStopping => {
                 // Transient mute: hardware only — the user's mute intent is
@@ -492,6 +500,24 @@ impl AmpController {
             return Ok(());
         }
         self.ctrl = CtrlState::AwaitingClock;
+        let result = self.start_stream_locked().await;
+        // Error guard (audit round 4, Issue 2): any `?`-return inside the
+        // body must never strand the machine in `AwaitingClock` — in that
+        // state `SetMute(false)` no-ops, the PLL-loss branch cannot match,
+        // and the safety tick cannot reset it. Fail safe to muted; the
+        // next StreamStarting retries the handshake.
+        if result.is_err() {
+            self.ctrl = CtrlState::Muted;
+        }
+        result
+    }
+
+    /// Handshake body of [`Self::start_stream`] (called with
+    /// `ctrl == AwaitingClock` already set).
+    ///
+    /// # Errors
+    /// Returns [`AmpError`] on bus faults.
+    async fn start_stream_locked(&mut self) -> AmpResult<()> {
         let locked = self
             .pll_lock_handshake(PLL_LOCK_TIMEOUT)
             .await
@@ -542,12 +568,12 @@ impl AmpController {
             self.device.clear_latched_errors_async().await?;
         }
         // Decide from USER INTENT captured BEFORE any mutation: a user
-        // mute is never overridden, but a normally unmuted boot state
-        // plays on stream start. (Mutating first via `apply_muted(false)`
-        // would make `!state.muted` a tautology — the original bug.)
-        let want_audio = self.pending_unmute || !self.state.muted;
+        // mute is never overridden, but a normally unmuted state (or an
+        // unmute recorded while idle) plays on stream start. (Mutating
+        // first via `apply_muted(false)` would make `!state.muted` a
+        // tautology — the original bug.)
+        let want_audio = !self.state.muted;
         if want_audio {
-            self.pending_unmute = false;
             self.device.clear_latched_errors_async().await?;
             self.apply_muted(false).await?;
             self.gpio.set_hardware_mute(false)?;

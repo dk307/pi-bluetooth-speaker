@@ -6,11 +6,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use audio_manager::StateFile;
-use audio_manager::amp_backend::I2cAmpBackend;
+use audio_manager::amp_backend::{I2cAmpBackend, MockAmpBackend};
 use audio_manager::amp_controller::{AmpCommand, AmpCommandKind, AmpController, CtrlState};
 use audio_manager::amp_gpio::{AmpGpio, AmpGpioMock};
 use audio_manager::amp_state::AmpState;
-use speaker_hardware::{AmpDeviceMock, AmpErrorFlags, AmpFault};
+use speaker_hardware::{AmpDevice, AmpDeviceMock, AmpErrorFlags, AmpFault};
 use tempfile::tempdir;
 
 /// Build live-error flags with a single fault bit set.
@@ -112,23 +112,38 @@ async fn set_mute_true_immediately_mutes() {
 }
 
 #[tokio::test]
-async fn unmute_without_stream_is_pending_until_stream_start() {
+async fn unmute_while_idle_records_intent_and_plays_on_next_stream() {
     let mut f = fixture();
     f.controller
         .boot_init(AmpState::new(60, true).unwrap())
         .await
         .unwrap();
 
-    // Unmute while muted with no stream: stays muted, remembered.
+    // Unmute while muted with no stream: the user INTENT is recorded
+    // immediately (mirror + state file), while the hardware audio path
+    // stays muted until the next PLL handshake (audit round 4, Issue 1).
     f.controller
         .handle_command(AmpCommandKind::SetMute(false))
         .await
         .unwrap();
     assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
     assert!(
-        f.controller.state().muted,
-        "serial mute stays until stream starts"
+        !f.controller.state().muted,
+        "user unmute intent must be recorded at once, not deferred"
     );
+    assert!(
+        !f.controller.mirror().lock().await.muted,
+        "D-Bus Muted property must reflect the unmute immediately"
+    );
+    assert!(
+        !f.state_file.load().unwrap().muted,
+        "unmute intent must survive a daemon restart"
+    );
+    assert!(
+        f.amp_mock.mock_serial_muted(),
+        "hardware audio path stays muted while no stream runs"
+    );
+    assert!(f.gpio_mock.mute_pin_low());
 
     // Stream starts with no I2S clock: handshake times out, stays muted.
     f.amp_mock
@@ -148,6 +163,86 @@ async fn unmute_without_stream_is_pending_until_stream_start() {
     assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
     assert!(!f.controller.state().muted);
     assert!(!f.gpio_mock.mute_pin_low(), "GPIO /MUTE released on play");
+}
+
+#[tokio::test]
+async fn explicit_set_mute_true_overrides_recorded_unmute_intent() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, true).unwrap())
+        .await
+        .unwrap();
+
+    // Unmute while idle (intent recorded) ...
+    f.controller
+        .handle_command(AmpCommandKind::SetMute(false))
+        .await
+        .unwrap();
+    assert!(!f.controller.state().muted);
+    // ... then an explicit mute wins (the intent flag is gone by design).
+    f.controller
+        .handle_command(AmpCommandKind::SetMute(true))
+        .await
+        .unwrap();
+    assert!(f.controller.state().muted);
+    assert!(f.state_file.load().unwrap().muted);
+
+    // And the next stream start respects it: stays muted.
+    f.amp_mock.set_live_errors(AmpErrorFlags::NONE);
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
+    assert!(f.amp_mock.mock_serial_muted());
+}
+
+#[tokio::test]
+async fn start_stream_write_error_fails_safe_to_muted_not_awaiting_clock() {
+    // This scenario needs a backend whose serial-mute WRITE can fail
+    // while the device READS (PLL handshake, live errors) keep working —
+    // exactly the transient-I2C shape that used to strand the machine in
+    // `AwaitingClock` (audit round 4, Issue 2). `MockAmpBackend` provides
+    // that injection point.
+    let dir = tempdir().unwrap();
+    let (backend, backend_ctrl) = MockAmpBackend::new_mocked();
+    let (gpio, _gpio_mock) = AmpGpio::new_mocked();
+    let state_file = StateFile::new(dir.path().join("amp-state.json"));
+    let (device, amp_mock) = AmpDevice::new_mocked();
+    let mut controller = AmpController::new(
+        Arc::new(backend),
+        Arc::new(device),
+        gpio,
+        state_file.clone(),
+        AmpState::default(),
+    );
+    controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    // The PLL handshake succeeds (device reads fine), but the serial-mute
+    // WRITE (the unmute step after the handshake) fails.
+    backend_ctrl.set_serial_mute_fail(true);
+    controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        controller.ctrl_state(),
+        CtrlState::Muted,
+        "error paths must reset AwaitingClock to Muted"
+    );
+
+    // The controller is fully functional afterwards: clearing the fault
+    // and retrying the stream start succeeds normally.
+    backend_ctrl.set_serial_mute_fail(false);
+    amp_mock.set_live_errors(AmpErrorFlags::NONE);
+    controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(controller.ctrl_state(), CtrlState::Playing);
 }
 
 #[tokio::test]
@@ -385,7 +480,7 @@ async fn idle_user_mute_survives_stream_start() {
     assert!(f.amp_mock.mock_serial_muted());
     assert!(f.gpio_mock.mute_pin_low());
 
-    // Explicit unmute (pending) + next stream start plays.
+    // Explicit unmute (intent recorded) + next stream start plays.
     f.controller
         .handle_command(AmpCommandKind::SetMute(false))
         .await
@@ -716,8 +811,9 @@ async fn pll_loss_while_user_muted_clears_stream_live() {
     assert!(f.amp_mock.mock_serial_muted());
     assert!(f.gpio_mock.mute_pin_low());
 
-    // The subsequent unmute must NOT restore audio (dead clock): it goes
-    // pending until the next real StreamStarting handshake.
+    // The subsequent unmute must NOT restore audio (dead clock): the
+    // intent is recorded while the audio path stays muted until the next
+    // real StreamStarting handshake.
     f.controller
         .handle_command(AmpCommandKind::SetMute(false))
         .await
