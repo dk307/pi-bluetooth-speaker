@@ -518,6 +518,10 @@ impl AmpController {
     /// # Errors
     /// Returns [`AmpError`] on bus faults.
     async fn reinit_registers(&mut self) -> AmpResult<()> {
+        // Kernel-parity init sequence (ma120x0p probe()): the error-history
+        // clear pulse (0x2D bit 2, 0→1→0) comes FIRST so boot-time faults
+        // latched while the bus was idle never masquerade as fresh faults.
+        self.device.clear_latched_errors_async().await?;
         self.device
             .write_i2s_format_async(I2sFormat::StandardI2s)
             .await?;
