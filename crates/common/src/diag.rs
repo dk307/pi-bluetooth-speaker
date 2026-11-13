@@ -323,7 +323,6 @@ pub fn parse_interval_arg(val: Option<String>) -> Result<Duration, String> {
 ///
 /// Returns [`ExitCode::FAILURE`] if at least one read was attempted and all reads failed;
 /// otherwise returns [`ExitCode::SUCCESS`].
-#[must_use]
 pub const fn exit_code_for_reads(total_reads: usize, successful_reads: usize) -> ExitCode {
     if total_reads > 0 && successful_reads == 0 {
         ExitCode::FAILURE

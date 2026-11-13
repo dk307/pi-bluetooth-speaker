@@ -1706,7 +1706,6 @@ pub fn run_shell_on_with_config(
 }
 
 /// Executes the core appliance daemon with parsed options.
-#[must_use]
 pub fn run_app(opts: &CoreCliOptions) -> ExitCode {
     let temp_sensor = TempSensor::new();
 

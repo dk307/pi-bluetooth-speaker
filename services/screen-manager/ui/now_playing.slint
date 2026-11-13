@@ -47,8 +47,8 @@ component MarqueeText inherits Rectangle {
     property <length> gap: 80px;
     property <length> cycle_distance: text_width + gap;
 
-    // Unidirectional marquee: 2.0s stationary pause at start, then constant-speed leftward
-    // scroll. The offset derives from the shared integer frame clock: each clock tick
+    // Continuous seamless marquee: constant-speed leftward scroll with no stationary
+    // pause. The offset derives from the shared integer frame clock: each clock tick
     // advances the scroll by `step_frames` physical px, so 60 fps = 1 px per 16.65 ms and
     // 30 fps = 2 px per 33.3 ms at identical on-screen speed. Halving the effective frame
     // rate halves the per-second software-renderer cost of scrolling the large
@@ -59,12 +59,8 @@ component MarqueeText inherits Rectangle {
     property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
     property <length> step: root.step_frames * 1px;
     property <int> cycle_frames: Math.max(1, Math.round(cycle_distance / root.step));
-    property <int> pause_frames: Math.round(pause_secs * root.marquee_fps);
-    property <int> total_frames: Math.max(pause_frames + cycle_frames, 1);
-    property <int> scroll_frame: Math.mod(root.clock_frame, root.total_frames);
-    property <float> pause_secs: 2.0;
-    property <float> progress: scroll_frame < pause_frames ?
-        0.0 : ((scroll_frame - pause_frames) * 1.0 / cycle_frames);
+    property <int> scroll_frame: Math.mod(root.clock_frame, root.cycle_frames);
+    property <float> progress: scroll_frame * 1.0 / cycle_frames;
     property <length> scroll_offset: is_overflow ? (-cycle_distance * progress) : 0px;
 
     // The wrap-around copy is only ever visible once the trailing gap of the first
@@ -78,7 +74,7 @@ component MarqueeText inherits Rectangle {
     // full-window redraw (~30 ms) in Slint's partial renderer
     // (`free_graphics_resources` -> `force_screen_refresh`), causing a ~70% CPU storm.
     property <bool> wrap_visible: root.is_overflow
-        && (root.scroll_frame - root.pause_frames) > root.cycle_frames - Math.round(root.width / root.step);
+        && root.scroll_frame > root.cycle_frames - Math.round(root.width / root.step);
 
     // The wrap-around copy is only ever visible once the trailing gap of the first
     // copy has entered the viewport's right edge; skipping it otherwise halves the
