@@ -416,10 +416,6 @@ pub enum TransportCommand {
     PreviousTrack,
     /// Seek to an absolute playback position in milliseconds.
     Seek(u32),
-    /// Set output volume percentage (`0..=100`) and unmute.
-    SetVolume(u8),
-    /// Set output mute state (`true` = muted, `false` = unmuted).
-    SetMute(bool),
 }
 
 /// Thread-safe command queue bridging Slint render-thread callbacks and the
@@ -456,20 +452,6 @@ impl TransportCommandQueue {
                 poisoned.into_inner()
             }
         };
-        // Coalesce consecutive SetVolume or SetMute updates so rapid slider drags
-        // or rotary encoder turns only execute the latest target on D-Bus without
-        // filling the 32-entry queue.
-        match (lock.back_mut(), command) {
-            (Some(TransportCommand::SetVolume(prev)), TransportCommand::SetVolume(next)) => {
-                *prev = next;
-                return;
-            }
-            (Some(TransportCommand::SetMute(prev)), TransportCommand::SetMute(next)) => {
-                *prev = next;
-                return;
-            }
-            _ => {}
-        }
         // Bounded to 32 commands: rapid-fire clicks can never accumulate an
         // unbounded backlog. Play/pause drops reconcile on the next publish,
         // but seek/navigation drops have no such reconciliation, so overflow

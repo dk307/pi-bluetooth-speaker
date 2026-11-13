@@ -1,6 +1,7 @@
 //! Integration tests for dbus_api module.
 
 use audio_manager::{AmpState, AudioManagerInterface, MockAmpBackend, MockAmpCtrl, StateFile};
+use speaker_hardware::amp::PERCENT_TO_RAW;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -92,8 +93,14 @@ async fn properties_reflect_state() {
     let level = iface.level().await;
     let muted = iface.muted().await;
 
-    // level should be close to 75 (inverse table lookup with quantization tolerance)
-    assert!((level as i16 - 75).abs() <= 4);
+    // Level must be the canonical inverse-curve midpoint percent of the raw
+    // value that percent 75 maps to — no tolerance slack needed.
+    let expected = AmpState {
+        level_raw: PERCENT_TO_RAW[75],
+        muted: false,
+    }
+    .level_percent(&PERCENT_TO_RAW);
+    assert_eq!(level, expected, "percent 75 must invert canonically");
     assert!(!muted);
 }
 

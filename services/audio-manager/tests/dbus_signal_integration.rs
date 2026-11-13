@@ -9,6 +9,7 @@
 
 use audio_manager::{AmpState, AudioManagerInterface, MockAmpBackend, StateFile};
 use futures_util::StreamExt;
+use speaker_hardware::amp::PERCENT_TO_RAW;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -128,13 +129,15 @@ async fn set_level_announces_properties_changed() {
     let level: Option<u8> = props
         .get("Level")
         .and_then(|v| u8::try_from(v.clone()).ok());
-    // Level must carry the committed value (the canonical inverse-curve
-    // percent, within quantization tolerance).
+    // Level must carry the committed value: the canonical inverse-curve
+    // midpoint percent of the raw value that percent 80 maps to.
     let level = level.expect("Level property must be announced");
-    assert!(
-        (i16::from(level) - 80).abs() <= 4,
-        "unexpected Level: {level}"
-    );
+    let expected = AmpState {
+        level_raw: PERCENT_TO_RAW[80],
+        muted: false,
+    }
+    .level_percent(&PERCENT_TO_RAW);
+    assert_eq!(level, expected, "unexpected Level: {level}");
 
     // The Muted property is announced in a second PropertiesChanged message.
     let msg2 = tokio::time::timeout(Duration::from_secs(5), stream.next())

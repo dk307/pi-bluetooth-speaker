@@ -64,8 +64,6 @@ memmap2 = "=0.9.12"
 thiserror = "=2.0.21"
 sd-notify = "=0.1.1"
 
-# Shared volume curve for Merus MA12070P amplifier
-
 # Direct OBEX Cover Art over RFCOMM/L2CAP (AVRCP/BIP)
 bluer = { version = "=0.17.4", default-features = false, features = ["rfcomm", "l2cap"] }
 alsa = { version = "=0.12.1", default-features = false, features = ["std"] }

@@ -957,19 +957,9 @@ fn bt_monitor_state_commands_settle_and_commit() {
     ));
     assert_eq!(state.keep_alive_interval(), BT_KEEP_ALIVE);
 
-    // Volume and Mute commands are no-op on the Bluetooth transport: screen
-    // volume is routed to the dedicated `amp-volume` worker instead.
-    let pcm_before = bt.audio_pcms().unwrap()[0].clone();
-    commands.push(TransportCommand::SetVolume(64));
-    assert!(state.poll_tick(&bt, &shared, &commands));
-    assert_eq!(
-        bt.audio_pcms().unwrap()[0].volume_percent,
-        pcm_before.volume_percent
-    );
-
-    commands.push(TransportCommand::SetMute(true));
-    assert!(state.poll_tick(&bt, &shared, &commands));
-    assert_eq!(bt.audio_pcms().unwrap()[0].muted, pcm_before.muted);
+    // (Volume/mute commands no longer exist on the Bluetooth transport: the
+    // screen routes them to the dedicated `amp-volume` worker instead, which
+    // is covered by the amp-volume integration tests.)
 
     // Fault injection on transport commands logs warning without panicking.
     mock.set_fault(Some("dbus transport fault".into()));

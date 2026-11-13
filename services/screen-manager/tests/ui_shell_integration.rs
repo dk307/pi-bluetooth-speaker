@@ -36,10 +36,6 @@ fn drain_worker_commands(
             speaker_bluetooth::TransportCommand::Seek(pos) => {
                 let _ = bt.player_seek(pos);
             }
-            // Volume/mute commands are executed by the dedicated `amp-volume`
-            // worker against `audio-manager`, never on the BT transport.
-            speaker_bluetooth::TransportCommand::SetVolume(_)
-            | speaker_bluetooth::TransportCommand::SetMute(_) => {}
         }
     }
     if let Ok(status) = bt.status() {

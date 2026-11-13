@@ -998,16 +998,13 @@ impl BtMonitorState {
         // A failed command is logged (never silently dropped) so operators can
         // diagnose why the authoritative state failed to reconcile the
         // optimistic UI flip; the next authoritative publish corrects the UI.
+        // Volume and mute commands are executed by the dedicated `amp-volume`
+        // worker against `audio-manager`, never by the Bluetooth transport.
         if let Err(e) = match command {
             speaker_bluetooth::TransportCommand::TogglePlayPause => bt.player_toggle().map(|_| ()),
             speaker_bluetooth::TransportCommand::NextTrack => bt.player_next(),
             speaker_bluetooth::TransportCommand::PreviousTrack => bt.player_previous(),
             speaker_bluetooth::TransportCommand::Seek(pos) => bt.player_seek(pos),
-            // Volume and mute commands are executed by the dedicated
-            // `amp-volume` worker against `audio-manager`, never by the
-            // Bluetooth transport.
-            speaker_bluetooth::TransportCommand::SetVolume(_)
-            | speaker_bluetooth::TransportCommand::SetMute(_) => Ok(()),
         } {
             tracing::warn!(error = %e, "Bluetooth transport command failed");
         }

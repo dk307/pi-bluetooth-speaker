@@ -108,18 +108,24 @@ pub enum PowerModeCtrl {
 }
 
 impl PowerModeCtrl {
-    /// Decodes a manual power mode from an isolated field value (`0..=3`).
+    /// Decodes a power mode from an isolated field value (`0..=3`).
     ///
-    /// Use this when the value already carries only the `PM_man` field,
-    /// e.g. a CLI argument — not a full register `0x00` byte.
+    /// Use this when the value already carries only the `PM_man` field
+    /// (`0` = dynamic, `1`-`3` = manual PM1-PM3), e.g. a CLI argument —
+    /// not a full register `0x00` byte. For full-register bytes, use
+    /// [`PowerModeCtrl::from_register`], which also honors the `manualPM`
+    /// gate (bit 6).
     #[must_use]
     pub const fn from_field(field: u8) -> Self {
         Self::from_raw(field << 4)
     }
 
-    /// Decodes the manual power mode from register 0x00 bits `[5:4]`.
+    /// Decodes the power mode from the isolated `PM_man` field of register
+    /// 0x00 bits `[5:4]` (`0` = dynamic, `1`-`3` = manual PM1-PM3).
     ///
-    /// The input `raw` is the full register 0x00 value; bits 5:4 are extracted.
+    /// The input `raw` is the full register 0x00 value; bits 5:4 are
+    /// extracted. Does **not** check the `manualPM` gate (bit 6) — use
+    /// [`PowerModeCtrl::from_register`] for full-register reads.
     #[must_use]
     pub const fn from_raw(raw: u8) -> Self {
         match (raw >> 4) & 0x03 {
