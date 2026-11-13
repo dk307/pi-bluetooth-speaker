@@ -128,7 +128,9 @@ fn parse_u8_in_range(value: &str, name: &str, max: u8) -> Result<u8, String> {
 fn parse_power_mode_ctrl(value: &str) -> Result<PowerModeCtrl, String> {
     let trimmed = value.trim().to_ascii_lowercase();
     match trimmed.as_str() {
-        "pm0" | "p0" | "0" => Ok(PowerModeCtrl::Pm0),
+        // Upstream semantics: value 0 is Dynamic (manualPM cleared), not a
+        // manually selectable PM0; `pm0` kept as a legacy alias.
+        "dynamic" | "auto" | "pm0" | "p0" | "0" => Ok(PowerModeCtrl::Dynamic),
         "pm1" | "p1" | "1" => Ok(PowerModeCtrl::Pm1),
         "pm2" | "p2" | "2" => Ok(PowerModeCtrl::Pm2),
         "pm3" | "p3" | "3" => Ok(PowerModeCtrl::Pm3),

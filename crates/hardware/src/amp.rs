@@ -91,8 +91,14 @@ pub const REG_PM_CTRL: u8 = 0x00;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum PowerModeCtrl {
-    /// Power Mode 0 (High Audio Performance / Class D).
-    Pm0 = 0,
+    /// Dynamic power mode (`manualPM` cleared; modulation follows the
+    /// `PMprofile` preset — upstream `R.Power Mode` control value `0x10`).
+    ///
+    /// Upstream register semantics (ma120x0p kernel driver + Infineon
+    /// HAT-ZW `R.Power Mode` control): `PM_man[1:0] = 00` is *dynamic*,
+    /// not a manually selectable "PM0"; PM0 only exists as a live mode
+    /// ([`PowerModeMon::Pm0`]) or via the `PMprofile` preset.
+    Dynamic = 0,
     /// Power Mode 1 (Low Idle Power Optimization).
     Pm1 = 1,
     /// Power Mode 2 (Default Balanced / Dynamic Power Mode).
@@ -117,14 +123,14 @@ impl PowerModeCtrl {
     #[must_use]
     pub const fn from_raw(raw: u8) -> Self {
         match (raw >> 4) & 0x03 {
-            0 => Self::Pm0,
+            0 => Self::Dynamic,
             1 => Self::Pm1,
             2 => Self::Pm2,
             _ => Self::Pm3,
         }
     }
 
-    /// Returns the raw 2-bit register value (0-3).
+    /// Returns the raw 2-bit register value (0-3; 0 = dynamic).
     #[must_use]
     pub const fn as_u8(self) -> u8 {
         self as u8
@@ -134,7 +140,7 @@ impl PowerModeCtrl {
     #[must_use]
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Pm0 => "PM0 (High Audio Performance / Class D)",
+            Self::Dynamic => "Dynamic power mode (profile-driven)",
             Self::Pm1 => "PM1 (Low Idle Power Optimization)",
             Self::Pm2 => "PM2 (Default Balanced / Dynamic Power Mode)",
             Self::Pm3 => "PM3 (Custom)",
@@ -1781,8 +1787,13 @@ impl AmpDeviceMock {
         if state.take_transient_write_failure() {
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
-        // Store the same encoded register value as hardware: (pm & 0x03) << 4 | 0x40
-        state.mock_pm_ctrl = 0x40 | ((pm.as_u8() & 0x03) << 4);
+        // Store the same encoded register value as hardware: Dynamic
+        // clears manualPM/PM_man (upstream `0x10` control value is
+        // manualPM=0); PM1-PM3 encode `0x40 | pm << 4`.
+        state.mock_pm_ctrl = match pm {
+            PowerModeCtrl::Dynamic => 0x00,
+            other => 0x40 | ((other.as_u8() & 0x03) << 4),
+        };
         Ok(())
     }
 
@@ -2276,13 +2287,21 @@ where
         Ok(())
     }
 
-    /// RMW of `PM_CTRL` (0x00): set manualPM=1, `PM_man` from `PowerModeCtrl`.
+    /// RMW of `PM_CTRL` (0x00): `Dynamic` clears `manualPM`/`PM_man`
+    /// (profile-driven mode); `Pm1`-`Pm3` set `manualPM=1` and the field.
     ///
     /// # Errors
     /// Returns [`AmpError`] if communication fails.
     pub fn write_power_mode_ctrl(&mut self, pm: PowerModeCtrl) -> Result<(), AmpError> {
         let reg = self.read_reg(REG_PM_CTRL)?;
-        let desired = (reg & 0x0F) | 0x40 | ((pm.as_u8() & 0x03) << 4);
+        // Upstream semantics (ma120x0p `R.Power Mode` control): Dynamic
+        // clears `manualPM` (bit 6) and `PM_man`; PM1-PM3 set `manualPM`
+        // and the field. Never write `manualPM=1` with `PM_man=00` — that
+        // combination is undefined on silicon.
+        let desired = match pm {
+            PowerModeCtrl::Dynamic => reg & 0x0F,
+            other => (reg & 0x0F) | 0x40 | ((other.as_u8() & 0x03) << 4),
+        };
         self.write_reg(REG_PM_CTRL, desired)
     }
 
@@ -2662,7 +2681,8 @@ impl AmpDevice {
         }
     }
 
-    /// Write `PM_CTRL` (0x00): set manualPM=1, `PM_man` from `PowerModeCtrl`.
+    /// Write `PM_CTRL` (0x00): `Dynamic` clears `manualPM`/`PM_man`;
+    /// `Pm1`-`Pm3` set `manualPM=1` and the field.
     ///
     /// # Errors
     /// Returns [`AmpError`] if communication fails.

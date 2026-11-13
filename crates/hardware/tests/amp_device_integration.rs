@@ -573,8 +573,8 @@ fn mock_write_power_mode_ctrl_and_read() {
     // Silicon reset default: manualPM=0, PM_man=3 (auto PM)
     assert_eq!(mock.mock_pm_ctrl(), PowerModeCtrl::Pm3);
 
-    amp.write_power_mode_ctrl(PowerModeCtrl::Pm0).unwrap(); // PMP0
-    assert_eq!(mock.mock_pm_ctrl(), PowerModeCtrl::Pm0);
+    amp.write_power_mode_ctrl(PowerModeCtrl::Dynamic).unwrap(); // manualPM cleared
+    assert_eq!(mock.mock_pm_ctrl(), PowerModeCtrl::Dynamic);
 
     amp.write_power_mode_ctrl(PowerModeCtrl::Pm3).unwrap(); // PMP3
     assert_eq!(mock.mock_pm_ctrl(), PowerModeCtrl::Pm3);
@@ -666,7 +666,7 @@ fn mock_fault_injection_on_write_paths() {
     assert!(amp.write_master_volume(100).unwrap_err().is_mock_fault());
     assert!(amp.write_serial_mute(true).unwrap_err().is_mock_fault());
     assert!(
-        amp.write_power_mode_ctrl(PowerModeCtrl::Pm0)
+        amp.write_power_mode_ctrl(PowerModeCtrl::Pm1)
             .unwrap_err()
             .is_mock_fault()
     );
@@ -859,9 +859,10 @@ mod hardware_device_tests {
         dev.write_power_mode_ctrl(PowerModeCtrl::Pm2).unwrap();
         assert_eq!(bus.get_register(REG_PM_CTRL), Some(0x60));
 
-        // Transition PMP2 -> PMP0 should clear old PM_man bits
-        dev.write_power_mode_ctrl(PowerModeCtrl::Pm0).unwrap();
-        assert_eq!(bus.get_register(REG_PM_CTRL), Some(0x40)); // manualPM=1, PM_man=0
+        // Transition manual PM2 -> Dynamic: manualPM (bit 6) and PM_man
+        // must both clear (upstream R.Power Mode value 0x10 semantics).
+        dev.write_power_mode_ctrl(PowerModeCtrl::Dynamic).unwrap();
+        assert_eq!(bus.get_register(REG_PM_CTRL), Some(0x00)); // manualPM=0, dynamic
     }
 
     #[test]
@@ -1203,7 +1204,7 @@ fn settings_from_raw_registers_decodes() {
     assert_eq!(s.master_volume_raw, 144);
     assert_eq!(s.master_volume_frac, 0);
     assert!(!s.serial_muted);
-    assert_eq!(s.pm_ctrl_pm, PowerModeCtrl::Pm0);
+    assert_eq!(s.pm_ctrl_pm, PowerModeCtrl::Dynamic);
     assert_eq!(s.pm_profile, PowerModeProfile::Pmp5Custom);
     assert_eq!(s.i2s_format, I2sFormat::Rj24);
     assert_eq!(s.audio_in_mode, AudioInputMode::Digital0dB);

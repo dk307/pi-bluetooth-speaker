@@ -41,6 +41,29 @@ Reference: `sound/soc/codecs/ma120x0p.c` (raspberrypi/linux, rpi-6.6.y),
   our `amp_gpio.rs` owns `/ENABLE` (GPIO 14) reset pulses and boot-time
   `/MUTE` (GPIO 15) wiring, mirroring the same pattern.
 
+## Power mode / profile / input mode parity (0x00, 0x1D, 0x25, 0x27)
+
+Audited against the upstream `R.Power Mode` / `Q.PM Prof` ALSA controls
+(`ma120x0p.c`, `ma120x0p_pi3.c`) and the register-header reset values:
+
+| Register / field | Upstream | Ours | Parity |
+|---|---|---|---|
+| `0x00` bit 6 `manualPM` (mask `0x40`, reset 0) | Dynamic when 0 | `PowerModeCtrl::Dynamic` clears bit 6 | ✅ |
+| `0x00` bits 5:4 `PM_man` (mask `0x30`, reset 3) | `0x10`=Dynamic, `0x50`=PM1, `0x60`=PM2, `0x70`=PM3; `manualPM=1` + `PM_man=00` is never written upstream | Writer never emits that combination; PM1-PM3 encode `0x40 \| pm << 4` exactly as the upstream control values | ✅ (fixed — previously `Pm0` wrote `manualPM=1 \| PM_man=00`, undefined on silicon) |
+| `0x1D` bits 2:0 `PMprofile` (mask `0x07`, reset 0) | presets 0-4 (`PMF0`-`PMF4`), 5 = custom | `PowerModeProfile` `Pmp0..Pmp4` + `Pmp5Custom`, RMW mask `0x07` | ✅ |
+| `0x25` bits 7:5 `audio_in_mode` (mask `0xE0`, reset 0) | **Never written by the kernel or HAT driver** — left at reset/fuse default | Production runtime (`boot_init`/`reinit_registers`) never writes it either; only the `amp-info` CLI exposes an explicit operator override | ✅ |
+| `0x27` bit 5 `audio_in_mode_ext` (mask `0x20`, reset 0) | reset 0 = fuse bank controls input mode | Same reset state at runtime; the CLI override correctly sets the ext gate when writing `0x25` (kernel parity: the driver exposes no such override at all) | ✅ |
+
+Gain labels for `audio_in_mode` values 0-5 (digital 20/26/32/0 dB, analog
+20/26 dB) come from the MA12070P datasheet register table; neither the
+kernel driver nor the Infineon/Sonocotta implementations define alternate
+labels, and the field/mask/reset encodings are identical.
+
+**Boot behavior matches upstream exactly:** neither driver writes any of
+these four registers during probe — power mode/profile/input mode stay at
+their reset/fuse/MSEL-pin defaults unless an operator explicitly overrides
+them via the diagnostic CLI.
+
 ## Deviations (all intentional, none accidental)
 
 1. **Startup volume:** kernel probes at 0 dB; we boot muted with the
