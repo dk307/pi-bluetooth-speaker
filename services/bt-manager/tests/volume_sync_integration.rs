@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use bt_manager::volume_sync::{
-    a2dp_volume, interfaces_added_path, is_bluealsa_volume_signal, VolumeSyncState, ECHO_CAPACITY,
-    FRESH_PCM_SETTLE,
+    ECHO_CAPACITY, FRESH_PCM_SETTLE, VolumeSyncState, a2dp_volume, interfaces_added_path,
+    is_bluealsa_volume_signal,
 };
 use speaker_bluetooth::{BlueAlsaPcm, BtAddress};
 

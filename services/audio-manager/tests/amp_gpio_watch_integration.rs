@@ -4,9 +4,9 @@
 //! in-memory `error_active` flag and fires the edge callback without any
 //! physical GPIO hardware.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::Duration;
 
 use audio_manager::amp_gpio::AmpGpio;
