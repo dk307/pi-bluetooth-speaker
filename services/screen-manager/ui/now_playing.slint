@@ -23,11 +23,13 @@ component MarqueeText inherits Rectangle {
     // During background capture the images keep their layout geometry but render
     // nothing, so `capture_region` snapshots the clean row background.
     in property <bool> strips_hidden: false;
+    // Minimum height floor to prevent zero-height geometry when strip is empty.
+    // Must stay in sync with the rasterization font size (MarqueeTypography::
+    // TITLE_FONT_SIZE_PX = 32 in src/ui/marquee.rs) — this default is the single
+    // Slint-side source of truth; instances inherit it and need not restate it.
+    in property <length> height_floor: 32px;
     clip: true;
-    // Ensure a minimum height matching the title font size (32px) so the Rust-side
-    // composer geometry validation never receives a zero-height rect when the strip
-    // is empty (e.g., at startup before the first rasterization completes).
-    height: Math.max(strip_item.preferred-height, 32px);
+    height: Math.max(strip_item.preferred-height, root.height_floor);
     horizontal-stretch: 1;
     preferred-width: 0px;
 
@@ -365,7 +367,8 @@ export component NowPlayingView inherits Rectangle {
             // Artist center tracks the actual title strip height (dynamic), with a
             // floor for the empty-strip startup state. Strip preferred-height varies
             // when the strip is empty, so a floor keeps distances deterministic at boot.
-            property <length> artist_center_y: 30px + Math.max(title_marquee.height, 32px) + 16px + 14px;
+            // Use title_marquee.height_floor (32px) as the floor to match the title font size.
+            property <length> artist_center_y: 30px + Math.max(title_marquee.height, title_marquee.height_floor) + 16px + 14px;
             property <length> settings_center_y: parent.height - 52px;
             property <length> center_step: (self.settings_center_y - self.artist_center_y) / 3.0;
             property <length> seek_center_y: self.artist_center_y + self.center_step;
