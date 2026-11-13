@@ -24,6 +24,39 @@ fn queue_push_drain_and_clone() {
 }
 
 #[test]
+fn drain_idle_wakes_on_change_notification_and_command() {
+    let queue = AmpVolumeCommandQueue::new();
+
+    // A change notification ends the idle wait early and is consumed once.
+    let notifier = queue.clone();
+    let handle = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        notifier.notify_change();
+    });
+    let (commands, changed) = queue.drain_idle(Duration::from_secs(5));
+    assert_eq!(commands, Vec::<AmpVolumeCommand>::new());
+    assert!(changed);
+    handle.join().expect("notifier thread panicked");
+
+    // A command pushed mid-wait is returned immediately (latency fix): the
+    // single condvar serves both wake-up sources.
+    let pusher = queue.clone();
+    let handle = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        pusher.push(AmpVolumeCommand::SetLevel(42));
+    });
+    let (commands, changed) = queue.drain_idle(Duration::from_secs(5));
+    assert_eq!(commands, vec![AmpVolumeCommand::SetLevel(42)]);
+    assert!(!changed);
+    handle.join().expect("pusher thread panicked");
+
+    // After both wake-ups were consumed, the wait times out with nothing.
+    let (commands, changed) = queue.drain_idle(Duration::from_millis(20));
+    assert_eq!(commands, Vec::<AmpVolumeCommand>::new());
+    assert!(!changed);
+}
+
+#[test]
 fn coalesce_keeps_last_value_per_kind_in_order() {
     let drained = vec![
         AmpVolumeCommand::SetMute(false),

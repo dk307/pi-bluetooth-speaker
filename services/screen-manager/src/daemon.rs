@@ -1279,12 +1279,20 @@ fn poll_encoder_input(
 /// Joins the `amp-volume` worker, re-raising a worker panic (fail-fast).
 #[cfg(feature = "ui")]
 fn join_amp_volume_worker(amp_worker: std::io::Result<std::thread::JoinHandle<()>>) {
-    if let Ok(handle) = amp_worker {
-        // Propagate a worker panic to this thread: a crashed amp-volume
-        // worker must fail the daemon (fail-fast) rather than leave screen
-        // volume silently unresponsive.
-        if let Err(panic) = handle.join() {
-            std::panic::resume_unwind(panic);
+    match amp_worker {
+        Ok(handle) => {
+            // Propagate a worker panic to this thread: a crashed amp-volume
+            // worker must fail the daemon (fail-fast) rather than leave screen
+            // volume silently unresponsive.
+            if let Err(panic) = handle.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "Failed to spawn amp-volume worker thread; screen volume disabled"
+            );
         }
     }
 }

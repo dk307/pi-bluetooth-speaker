@@ -25,17 +25,14 @@ use std::time::Duration;
 
 use zbus::MatchRule;
 
-/// amp-volume worker idle-wait cadence on the command queue (a cheap local
-/// condvar wait, no D-Bus traffic; bounds worst-case command latency).
-pub const AMP_POLL_INTERVAL: Duration = Duration::from_millis(250);
-
-/// Fallback amp state read cadence while idle, used only when no
-/// `PropertiesChanged` signal arrives (e.g. a dropped or silently wedged
-/// signal stream).
+/// amp-volume worker idle-wait timeout on the command queue condvar.
 ///
-/// The primary wake-up path is the audio-manager `PropertiesChanged`
-/// signal, so this is a low-frequency safety net, not the intended cadence.
-pub const AMP_FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// The primary wake-up path is a `push` (encoder/slider command) or a
+/// `notify_change` (audio-manager `PropertiesChanged` signal, i.e.
+/// phone-initiated sync), so this bounds only the worst case where the
+/// signal stream is wedged or dead — a low-frequency safety-net state read,
+/// not the intended cadence.
+pub const AMP_IDLE_WAIT: Duration = Duration::from_secs(2);
 
 /// A single volume or mute mutation for the `audio-manager` amp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,9 +45,21 @@ pub enum AmpVolumeCommand {
 
 /// Cloneable command queue bridging render-thread UI callbacks to the
 /// dedicated `amp-volume` worker.
+///
+/// Both wake-up sources share one condvar: `push` (a UI command) and
+/// `notify_change` (the `PropertiesChanged` signal watcher) wake the same
+/// idle wait, so a command pushed mid-wait is applied immediately instead of
+/// sitting behind a separate change-notification wait.
 #[derive(Debug, Clone, Default)]
 pub struct AmpVolumeCommandQueue {
-    inner: Arc<(Mutex<VecDeque<AmpVolumeCommand>>, Condvar)>,
+    inner: Arc<(Mutex<QueueState>, Condvar)>,
+}
+
+#[derive(Debug, Default)]
+struct QueueState {
+    commands: VecDeque<AmpVolumeCommand>,
+    /// Set by the signal watcher; consumed by `drain_idle`.
+    change_pending: bool,
 }
 
 impl AmpVolumeCommandQueue {
@@ -65,27 +74,55 @@ impl AmpVolumeCommandQueue {
         let (lock, cv) = &*self.inner;
         lock.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .commands
             .push_back(command);
+        cv.notify_all();
+    }
+
+    /// Wakes the worker because audio-manager reported an amp change
+    /// (phone-initiated sync). The worker's next idle wait returns early and
+    /// reads the authoritative state.
+    pub fn notify_change(&self) {
+        let (lock, cv) = &*self.inner;
+        let mut state = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.change_pending = true;
         cv.notify_all();
     }
 
     /// Drains every queued command (coalescing is the caller's concern).
     #[must_use]
     pub fn drain(&self) -> Vec<AmpVolumeCommand> {
-        let (lock, cv) = &*self.inner;
-        let mut queue = lock
+        let (lock, _) = &*self.inner;
+        let mut state = lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if queue.is_empty() {
-            // Wait until a command lands or the poll cadence elapses, then
-            // re-check so a command pushed during the wait is returned
-            // immediately instead of on the next tick.
-            let (guard, _timeout) = cv
-                .wait_timeout(queue, AMP_POLL_INTERVAL)
+        state.commands.drain(..).collect()
+    }
+
+    /// Waits up to `timeout` for a UI command or an amp-change notification,
+    /// then drains.
+    ///
+    /// Returns the queued commands and whether a change notification (a
+    /// possibly coalesced signal) arrived. Never waits when either is already
+    /// pending, so the worker reacts instantly to both sources.
+    #[must_use]
+    pub fn drain_idle(&self, timeout: Duration) -> (Vec<AmpVolumeCommand>, bool) {
+        let (lock, cv) = &*self.inner;
+        let mut state = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.commands.is_empty() && !state.change_pending {
+            let (guard, _) = cv
+                .wait_timeout(state, timeout)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            queue = guard;
+            state = guard;
         }
-        queue.drain(..).collect()
+        (
+            state.commands.drain(..).collect(),
+            std::mem::take(&mut state.change_pending),
+        )
     }
 
     /// Returns `true` if no command is queued.
@@ -94,6 +131,7 @@ impl AmpVolumeCommandQueue {
         let (lock, _) = &*self.inner;
         lock.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .commands
             .is_empty()
     }
 }
@@ -170,54 +208,8 @@ pub struct AmpVolumeClient {
 enum AmpVolumeBackend {
     /// Owned blocking proxy over the system bus, built once when the worker
     /// starts (`new_owned` keeps the connection alive via its internal Arc).
-    Hardware {
-        proxy: zbus::blocking::Proxy<'static>,
-        /// Wakes the worker when audio-manager emits `PropertiesChanged`
-        /// for the amp (phone-initiated sync), replacing an idle poll.
-        change_wakeup: Arc<ChangeWakeup>,
-    },
+    Hardware(zbus::blocking::Proxy<'static>),
     Mock(Arc<Mutex<MockState>>),
-}
-
-/// Condvar pair used by the signal-watcher thread to wake the worker when a
-/// D-Bus `PropertiesChanged` signal arrives.
-#[derive(Default, Debug)]
-struct ChangeWakeup {
-    pending: Mutex<bool>,
-    cv: Condvar,
-}
-
-impl ChangeWakeup {
-    /// Signals the worker that a change notification arrived.
-    fn notify(&self) {
-        let mut pending = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *pending = true;
-        self.cv.notify_all();
-    }
-
-    /// Waits until a change notification arrives or `timeout` elapses.
-    /// Returns `true` when a (possibly coalesced) notification arrived.
-    fn wait(&self, timeout: Duration) -> bool {
-        let mut pending = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !*pending {
-            let (guard, timed_out) = self
-                .cv
-                .wait_timeout(pending, timeout)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            pending = guard;
-            if timed_out.timed_out() && !*pending {
-                return false;
-            }
-        }
-        *pending = false;
-        true
-    }
 }
 
 impl AmpVolumeClient {
@@ -227,19 +219,27 @@ impl AmpVolumeClient {
     /// Returns an error when the system bus is unreachable.
     pub fn new_blocking() -> zbus::Result<Self> {
         let conn = zbus::blocking::Connection::system()?;
-        let proxy = zbus::blocking::Proxy::new_owned(
-            conn.clone(),
-            "org.speaker.AudioManager",
-            "/org/speaker/amp",
-            "org.speaker.AudioManager1",
-        )?;
-        let change_wakeup = Arc::new(ChangeWakeup::default());
-        spawn_signal_watcher(&conn, Arc::clone(&change_wakeup));
+        Self::with_connection(&conn)
+    }
+
+    /// Builds the hardware client against an arbitrary (already-connected)
+    /// bus — the DI seam private-bus integration tests inject a fake
+    /// `org.speaker.AudioManager1` service through.
+    ///
+    /// # Errors
+    /// Returns the zbus error when proxy construction fails.
+    pub fn with_connection(conn: &zbus::blocking::Connection) -> zbus::Result<Self> {
+        // Property caching must be off: the worker's read-back after a write
+        // is the authoritative revert source, and a lazily-cached value can
+        // be stale until the next PropertiesChanged round-trip propagates.
+        let proxy = zbus::blocking::proxy::Builder::new(conn)
+            .destination("org.speaker.AudioManager")?
+            .path("/org/speaker/amp")?
+            .interface("org.speaker.AudioManager1")?
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()?;
         Ok(Self {
-            backend: AmpVolumeBackend::Hardware {
-                proxy,
-                change_wakeup,
-            },
+            backend: AmpVolumeBackend::Hardware(proxy),
         })
     }
 
@@ -259,18 +259,13 @@ impl AmpVolumeClient {
         (client, ctrl)
     }
 
-    /// Waits for an amp-change notification, up to `timeout`.
-    ///
-    /// The mock backend has no signal source, so it just waits out the
-    /// timeout (the caller's fallback read then dedups against `last`).
-    fn wait_for_change(&self, timeout: Duration) {
+    /// Returns the shared system-bus connection behind the hardware proxy
+    /// (`None` for the mock backend), used to subscribe the
+    /// `PropertiesChanged` signal watcher.
+    fn connection(&self) -> Option<&zbus::blocking::Connection> {
         match &self.backend {
-            AmpVolumeBackend::Hardware { change_wakeup, .. } => {
-                change_wakeup.wait(timeout);
-            }
-            AmpVolumeBackend::Mock(_) => {
-                std::thread::sleep(timeout);
-            }
+            AmpVolumeBackend::Hardware(proxy) => Some(proxy.connection()),
+            AmpVolumeBackend::Mock(_) => None,
         }
     }
 
@@ -284,7 +279,7 @@ impl AmpVolumeClient {
     )]
     pub fn state(&self) -> Result<AmpVolumeState, VolumeError> {
         match &self.backend {
-            AmpVolumeBackend::Hardware { proxy: amp, .. } => {
+            AmpVolumeBackend::Hardware(amp) => {
                 let level: u8 = amp.get_property("Level").map_err(VolumeError::bus)?;
                 let muted: bool = amp.get_property("Muted").map_err(VolumeError::bus)?;
                 Ok(AmpVolumeState::new(level, muted))
@@ -310,7 +305,7 @@ impl AmpVolumeClient {
     )]
     pub fn apply(&self, command: AmpVolumeCommand) -> Result<AmpVolumeState, VolumeError> {
         match &self.backend {
-            AmpVolumeBackend::Hardware { proxy: amp, .. } => {
+            AmpVolumeBackend::Hardware(amp) => {
                 match command {
                     AmpVolumeCommand::SetLevel(percent) => {
                         amp.call::<_, _, ()>("SetLevel", &(percent,))
@@ -404,11 +399,14 @@ impl From<zbus::Error> for VolumeError {
 
 /// Spawns the `amp-volume-signal` watcher thread: it blocks on the
 /// audio-manager `PropertiesChanged` match-rule stream and wakes the worker
-/// for an immediate state read, replacing the former 4 Hz idle poll with an
-/// event-driven one (2 Hz→0.5 Hz worst-case fallback remains as a safety
-/// net). The thread exits when the connection dies; the worker's fallback
-/// poll keeps the UI converging until the process is restarted.
-fn spawn_signal_watcher(conn: &zbus::blocking::Connection, wakeup: Arc<ChangeWakeup>) {
+/// (through the command queue's condvar) for an immediate state read. The
+/// thread exits when the connection dies; the worker's fallback read keeps
+/// the UI converging until the process is restarted.
+///
+/// Called from `run_worker` (not client construction) so the watcher only
+/// exists while a worker is draining the queue, and so it can notify that
+/// queue directly — a single condvar serves commands and change signals.
+fn spawn_signal_watcher(conn: &zbus::blocking::Connection, queue: &AmpVolumeCommandQueue) {
     let rule = MatchRule::builder()
         .sender("org.speaker.AudioManager")
         .and_then(|b| {
@@ -427,17 +425,20 @@ fn spawn_signal_watcher(conn: &zbus::blocking::Connection, wakeup: Arc<ChangeWak
     };
     let spawned = std::thread::Builder::new()
         .name("amp-volume-signal".into())
-        .spawn(move || {
-            for message in iterator {
-                match message {
-                    Ok(_) => wakeup.notify(),
-                    Err(e) => {
-                        tracing::debug!(error = %e, "amp-volume signal stream errored");
-                        break;
+        .spawn({
+            let queue = queue.clone();
+            move || {
+                for message in iterator {
+                    match message {
+                        Ok(_) => queue.notify_change(),
+                        Err(e) => {
+                            tracing::debug!(error = %e, "amp-volume signal stream errored");
+                            break;
+                        }
                     }
                 }
+                tracing::debug!("amp-volume signal watcher ended (connection closed)");
             }
-            tracing::debug!("amp-volume signal watcher ended (connection closed)");
         });
     if let Err(e) = spawned {
         tracing::warn!(error = %e, "Failed to spawn amp-volume signal watcher");
@@ -458,16 +459,16 @@ pub fn run_worker(
 ) {
     let mut last: Option<AmpVolumeState> = None;
     publish(client.state().ok(), shared, &mut last);
+    if let Some(conn) = client.connection() {
+        spawn_signal_watcher(conn, commands);
+    }
     while running.load(std::sync::atomic::Ordering::Relaxed) {
-        let drained = commands.drain();
+        let (drained, _changed) = commands.drain_idle(AMP_IDLE_WAIT);
         if drained.is_empty() {
-            // Idle: wait for an audio-manager PropertiesChanged wakeup
-            // (phone-initiated sync via bt-manager) instead of hot-polling,
-            // with a low-frequency fallback read as a safety net. Republish
-            // only on change.
-            client.wait_for_change(AMP_FALLBACK_POLL_INTERVAL);
-            let now = client.state();
-            match now {
+            // Idle: the wait returned either on a PropertiesChanged wakeup
+            // (phone-initiated sync via bt-manager) or on the fallback
+            // timeout. Either way, read state and republish only on change.
+            match client.state() {
                 Ok(state) if last != Some(state) => {
                     tracing::info!(
                         level = state.level,
