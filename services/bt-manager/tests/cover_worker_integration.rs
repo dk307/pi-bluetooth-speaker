@@ -46,6 +46,10 @@ fn test_playback(handle: Option<&str>) -> BtPlaybackState {
         cover_art_path: None,
         phone_volume: None,
         avrcp_version: None,
+        equalizer: None,
+        repeat: None,
+        shuffle: None,
+        scan: None,
     }
 }
 

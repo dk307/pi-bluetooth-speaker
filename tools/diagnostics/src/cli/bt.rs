@@ -364,6 +364,18 @@ pub fn print_human_audio_pipeline(status: &BluetoothStatus, opts: &CliOptions) {
             let minor = ver & 0xFF;
             println!("  ↳ AVRCP Version   : {major}.{minor}");
         }
+        if let Some(ref eq) = p.equalizer {
+            println!("  ↳ Equalizer       : {eq}");
+        }
+        if let Some(ref r) = p.repeat {
+            println!("  ↳ Repeat          : {r}");
+        }
+        if let Some(ref s) = p.shuffle {
+            println!("  ↳ Shuffle         : {s}");
+        }
+        if let Some(ref s) = p.scan {
+            println!("  ↳ Scan            : {s}");
+        }
         if let Some(ref path) = p.cover_art_path {
             println!("  ↳ BIP Cover Art   : {path}");
         } else if let Some(ref handle) = p.image_handle {
@@ -500,6 +512,10 @@ pub fn build_json_status(
             "phone_volume": p.phone_volume,
             "phone_volume_percent": p.phone_volume_percent(),
             "avrcp_version": p.avrcp_version,
+            "equalizer": p.equalizer,
+            "repeat": p.repeat,
+            "shuffle": p.shuffle,
+            "scan": p.scan,
         })),
         "hardware": {
             "chip": status.hardware.chip,

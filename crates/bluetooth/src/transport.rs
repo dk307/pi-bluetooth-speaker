@@ -127,6 +127,14 @@ pub struct BtPlaybackState {
     pub phone_volume: Option<AvrcpVolume>,
     /// AVRCP protocol version (e.g., 0x0104 for 1.4), if reported by `MediaPlayer1`.
     pub avrcp_version: Option<u16>,
+    /// Equalizer setting (e.g., "off", "flat", "bass", "treble"), if reported by `MediaPlayer1`.
+    pub equalizer: Option<Box<str>>,
+    /// Repeat mode (e.g., "off", "alltrack", "group"), if reported by `MediaPlayer1`.
+    pub repeat: Option<Box<str>>,
+    /// Shuffle mode (e.g., "off", "alltrack", "group"), if reported by `MediaPlayer1`.
+    pub shuffle: Option<Box<str>>,
+    /// Scan mode (e.g., "off", "alltrack", "group"), if reported by `MediaPlayer1`.
+    pub scan: Option<Box<str>>,
 }
 
 /// Maximum AVRCP absolute volume value (0-127 per `BlueZ` `MediaPlayer1.Volume` spec).
@@ -198,6 +206,10 @@ impl Default for BtPlaybackState {
             cover_art_path: None,
             phone_volume: None,
             avrcp_version: None,
+            equalizer: None,
+            repeat: None,
+            shuffle: None,
+            scan: None,
         }
     }
 }
