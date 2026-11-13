@@ -26,7 +26,7 @@ async fn set_level_unmuted() {
 
     let write = ctrl.last_write().unwrap();
     assert!(!write.muted);
-    assert_eq!(write.level_raw, amp_curve::PERCENT_TO_RAW[80]);
+    assert_eq!(write.level_raw, speaker_hardware::amp::PERCENT_TO_RAW[80]);
 }
 
 #[tokio::test]
@@ -41,7 +41,7 @@ async fn set_level_while_muted_applies_level() {
     assert!(write.muted);
     // Level applies to the mixer even while muted (serial mute silences
     // output; unmute is instant).
-    assert_eq!(write.level_raw, amp_curve::PERCENT_TO_RAW[80]);
+    assert_eq!(write.level_raw, speaker_hardware::amp::PERCENT_TO_RAW[80]);
 }
 
 #[tokio::test]
@@ -54,7 +54,7 @@ async fn set_mute_on() {
     let write = ctrl.last_write().unwrap();
     assert!(write.muted);
     // Level stays live on the mixer while muted (serial mute silences).
-    assert_eq!(write.level_raw, amp_curve::PERCENT_TO_RAW[80]);
+    assert_eq!(write.level_raw, speaker_hardware::amp::PERCENT_TO_RAW[80]);
 }
 
 #[tokio::test]
@@ -68,8 +68,11 @@ async fn set_mute_off_restores() {
 
     let write = ctrl.last_write().unwrap();
     assert!(!write.muted);
-    assert_eq!(write.level_raw, amp_curve::PERCENT_TO_RAW[100]);
-    assert_eq!(write.hardware_level(), amp_curve::PERCENT_TO_RAW[100]);
+    assert_eq!(write.level_raw, speaker_hardware::amp::PERCENT_TO_RAW[100]);
+    assert_eq!(
+        write.hardware_level(),
+        speaker_hardware::amp::PERCENT_TO_RAW[100]
+    );
 }
 
 #[tokio::test]
@@ -115,10 +118,22 @@ async fn set_level_multiple_calls() {
 
     let writes = ctrl.all_writes();
     assert_eq!(writes.len(), 4);
-    assert_eq!(writes[0].level_raw, amp_curve::PERCENT_TO_RAW[25]);
-    assert_eq!(writes[1].level_raw, amp_curve::PERCENT_TO_RAW[50]);
-    assert_eq!(writes[2].level_raw, amp_curve::PERCENT_TO_RAW[75]);
-    assert_eq!(writes[3].level_raw, amp_curve::PERCENT_TO_RAW[100]);
+    assert_eq!(
+        writes[0].level_raw,
+        speaker_hardware::amp::PERCENT_TO_RAW[25]
+    );
+    assert_eq!(
+        writes[1].level_raw,
+        speaker_hardware::amp::PERCENT_TO_RAW[50]
+    );
+    assert_eq!(
+        writes[2].level_raw,
+        speaker_hardware::amp::PERCENT_TO_RAW[75]
+    );
+    assert_eq!(
+        writes[3].level_raw,
+        speaker_hardware::amp::PERCENT_TO_RAW[100]
+    );
 }
 
 #[tokio::test]
@@ -173,9 +188,9 @@ async fn properties_reflect_muted_state() {
     // Update the interface's state directly (ctrl.set_state only affects mock backend)
     {
         let mut state = iface.state.lock().await;
-        // level_raw 52 maps to 10% in PERCENT_TO_RAW (exact match in table)
+        // PERCENT_TO_RAW[10] is the midpoint of the raw flat segment for 10 %.
         *state = AmpState {
-            level_raw: 52,
+            level_raw: speaker_hardware::amp::PERCENT_TO_RAW[10],
             muted: true,
         };
     }
@@ -183,7 +198,7 @@ async fn properties_reflect_muted_state() {
     let muted = iface.muted().await;
     assert!(muted);
     let level = iface.level().await;
-    // level_raw 52 maps exactly to 10% in PERCENT_TO_RAW inverse lookup
+    // The midpoint inverse reads the 10 % raw level back as 10 %.
     assert_eq!(level, 10);
 }
 

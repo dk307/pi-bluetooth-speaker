@@ -945,7 +945,7 @@ async fn run_loop_replies_edge_close_errors_and_shutdown() {
             .expect("reply must arrive")
             .is_ok()
     );
-    let raw80 = amp_curve::PERCENT_TO_RAW[80];
+    let raw80 = speaker_hardware::amp::PERCENT_TO_RAW[80];
     assert_eq!(f.state_file.load().unwrap().level_raw, raw80);
 
     // 2. Failing command: reply carries the error summary and the loop
@@ -984,7 +984,7 @@ async fn run_loop_replies_edge_close_errors_and_shutdown() {
             .expect("reply must arrive")
             .is_ok()
     );
-    let raw70 = amp_curve::PERCENT_TO_RAW[70];
+    let raw70 = speaker_hardware::amp::PERCENT_TO_RAW[70];
     assert_eq!(f.state_file.load().unwrap().level_raw, raw70);
 
     // 4. Shutdown signal ends the loop promptly.

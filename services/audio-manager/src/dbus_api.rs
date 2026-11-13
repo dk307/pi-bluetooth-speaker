@@ -11,7 +11,7 @@ use crate::amp_backend::AmpBackend;
 use crate::amp_controller::{AmpCommand, AmpCommandKind};
 use crate::amp_state::AmpState;
 use crate::state_file::StateFile;
-use amp_curve::PERCENT_TO_RAW;
+use speaker_hardware::amp::PERCENT_TO_RAW;
 
 /// The D-Bus interface implementation.
 pub struct AudioManagerInterface {

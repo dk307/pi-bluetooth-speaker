@@ -56,7 +56,7 @@ async fn load_missing_file_returns_default() {
     let sf = StateFile::new(&path);
 
     let state = sf.load().unwrap();
-    assert_eq!(state.level_raw, 116); // default level_raw
+    assert_eq!(state.level_raw, AmpState::default().level_raw);
     assert!(!state.muted); // default muted
 }
 
@@ -183,7 +183,7 @@ async fn load_then_save_then_load() {
 
     // Initial load creates default
     let s1 = sf.load().unwrap();
-    assert_eq!(s1.level_raw, 116);
+    assert_eq!(s1.level_raw, AmpState::default().level_raw);
 
     // Save new state
     sf.save(&AmpState {

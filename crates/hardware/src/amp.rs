@@ -456,6 +456,73 @@ pub const fn decode_vlp_raw(reg: u16) -> u16 {
     }
 }
 
+/// Raw master-volume attenuation range (`0x40`): 0 = −144 dB, 144 = 0 dB.
+pub const MASTER_VOLUME_RAW_MAX: u16 = 144;
+
+/// Lowest usable attenuation, applied at 1 % (0 % is hard mute).
+pub const MIN_USABLE_DB: i16 = -60;
+
+/// Percent (`0..=100`) → master-volume raw (`0..=144`), linear in dB.
+///
+/// Percent 0 is a hard mute (raw 0). Percent `1..=100` is linear in dB across
+/// [`MIN_USABLE_DB`]`..=0` dB, so every percent step is about 0.6 dB instead
+/// of the old piecewise calibration, which spent 0–20 % on a −144 → −47 dB
+/// jump and compressed 35–100 % into only ≈16 dB. The 1 dB register
+/// granularity means some adjacent percents share a raw value, but the curve
+/// stays monotonic and no part of the slider is compressed.
+///
+/// `audio-manager` maps the D-Bus `SetLevel(percent)` through this table; the
+/// AVRCP side (`speaker-bluetooth`) rescales 0..127 to percent so the
+/// perceptual curve is applied exactly once, here at the register boundary.
+pub const PERCENT_TO_RAW: [u16; 101] = build_percent_to_raw();
+
+/// Raw level at 1 % in tenths of a dB (`1440 + 10 · MIN_USABLE_DB`).
+const RAW_AT_ONE_PERCENT_TENTHS: u16 = 840;
+
+/// Attenuation span in tenths of a dB across 1 %..=100 % (`-10 · MIN_USABLE_DB`).
+const USABLE_SPAN_TENTHS: u16 = 600;
+
+/// Builds [`PERCENT_TO_RAW`] at compile time.
+const fn build_percent_to_raw() -> [u16; 101] {
+    let mut table = [0u16; 101];
+    let mut p = 1u16;
+    while p <= 100 {
+        // Exact raw level in tenths, before rounding to the 1 dB register
+        // step: raw = 144 + dB, with dB linear from -60 dB (1 %) to 0 dB.
+        let raw_tenths = RAW_AT_ONE_PERCENT_TENTHS + USABLE_SPAN_TENTHS * (p - 1) / 99;
+        // Round once at the end so tenth-of-dB truncation never shifts a
+        // value across a register boundary (e.g. 98.5 dB must round up).
+        let raw = (raw_tenths + 5) / 10;
+        table[p as usize] = if raw > MASTER_VOLUME_RAW_MAX {
+            MASTER_VOLUME_RAW_MAX
+        } else {
+            raw
+        };
+        p += 1;
+    }
+    table
+}
+
+/// Compile-time proofs for the volume curve.
+const _: () = {
+    // The tenths constants derive from the dB anchors they encode.
+    assert!((RAW_AT_ONE_PERCENT_TENTHS as i32) == 1440 + (MIN_USABLE_DB as i32) * 10);
+    assert!((USABLE_SPAN_TENTHS as i32) == -(MIN_USABLE_DB as i32) * 10);
+    // Endpoints and perceptual anchors exact.
+    assert!(PERCENT_TO_RAW[0] == 0); // 0 % → mute (raw 0 = −144 dB)
+    assert!(PERCENT_TO_RAW[1] == 84); // 1 % → −60 dB
+    assert!(PERCENT_TO_RAW[50] == 114); // 50 % → −30 dB
+    assert!(PERCENT_TO_RAW[100] == 144); // 100 % → 0 dB
+    // Monotonic; from 1 % upward every step spans at most one 1 dB register
+    // step (the ideal step is ≈0.6 dB).
+    let mut p = 2;
+    while p <= 100 {
+        assert!(PERCENT_TO_RAW[p] >= PERCENT_TO_RAW[p - 1]);
+        assert!(PERCENT_TO_RAW[p] - PERCENT_TO_RAW[p - 1] <= 1);
+        p += 1;
+    }
+};
+
 /// Validated 7-bit I2C slave address for the MA12070P amplifier (`0x20..=0x23`).
 ///
 /// # Examples
@@ -1536,6 +1603,17 @@ struct MockState {
     mock_limiter_thresholds_dbfs: i16,
 }
 
+impl MockState {
+    /// Consumes one armed one-shot transient write failure, if any.
+    fn take_transient_write_failure(&mut self) -> bool {
+        if self.transient_write_failures > 0 {
+            self.transient_write_failures -= 1;
+            return true;
+        }
+        false
+    }
+}
+
 impl AmpDeviceMock {
     fn new() -> Self {
         Self {
@@ -1700,15 +1778,10 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        if state.transient_write_failures > 0 {
-            state.transient_write_failures -= 1;
+        if state.take_transient_write_failure() {
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
-        if state.transient_write_failures > 0 {
-            state.transient_write_failures -= 1;
-            return Err(AmpError::mock_fault(Box::from("transient write failure")));
-        }
-        if raw > 144 {
+        if raw > MASTER_VOLUME_RAW_MAX {
             return Err(AmpError::invalid_argument("master_volume_raw", raw));
         }
         // Store the same encoded register value as hardware: int = 168 − raw, frac = 0
@@ -1721,12 +1794,7 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        if state.transient_write_failures > 0 {
-            state.transient_write_failures -= 1;
-            return Err(AmpError::mock_fault(Box::from("transient write failure")));
-        }
-        if state.transient_write_failures > 0 {
-            state.transient_write_failures -= 1;
+        if state.take_transient_write_failure() {
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         // Real read-modify-write on the shared 0x36 byte (serial mute is
@@ -1740,8 +1808,7 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        if state.transient_write_failures > 0 {
-            state.transient_write_failures -= 1;
+        if state.take_transient_write_failure() {
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         // Store the same encoded register value as hardware: (pm & 0x03) << 4 | 0x40
@@ -1754,8 +1821,7 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        if state.transient_write_failures > 0 {
-            state.transient_write_failures -= 1;
+        if state.take_transient_write_failure() {
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         // Store encoded value: profile & 0x07
@@ -1768,8 +1834,7 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        if state.transient_write_failures > 0 {
-            state.transient_write_failures -= 1;
+        if state.take_transient_write_failure() {
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         // Real read-modify-write on the shared 0x35 byte (format bits 2:0;
@@ -1783,8 +1848,7 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        if state.transient_write_failures > 0 {
-            state.transient_write_failures -= 1;
+        if state.take_transient_write_failure() {
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         // Store encoded value: (mode & 0x07) << 5
@@ -1801,8 +1865,7 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        if state.transient_write_failures > 0 {
-            state.transient_write_failures -= 1;
+        if state.take_transient_write_failure() {
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         state.mock_reg_0x35 = (state.mock_reg_0x35 & !(LIMITER_ATTACK_MASK | LIMITER_RELEASE_MASK))
@@ -1816,8 +1879,7 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        if state.transient_write_failures > 0 {
-            state.transient_write_failures -= 1;
+        if state.take_transient_write_failure() {
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         state.mock_reg_0x35 |= AUDIO_PROC_ENABLE_MASK;
@@ -1829,8 +1891,7 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        if state.transient_write_failures > 0 {
-            state.transient_write_failures -= 1;
+        if state.take_transient_write_failure() {
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         state.mock_reg_0x36 |= LIMITER_ENABLE_MASK;
@@ -1842,8 +1903,7 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        if state.transient_write_failures > 0 {
-            state.transient_write_failures -= 1;
+        if state.take_transient_write_failure() {
             return Err(AmpError::mock_fault(Box::from("transient write failure")));
         }
         if !(-144..=0).contains(&dbfs) {
@@ -2148,7 +2208,7 @@ where
     /// Table 8-9: 0x18 = 0.00 dB, 0xA8 = −144.00 dB, boost below 0x18), so
     /// the user-scale attenuation raw maps to **`reg = 168 − raw`**
     /// (`0xA8` mutes, `0x30` = −24 dB). The fractional register 0x41 stays 0
-    /// (`amp_curve` produces integer dB).
+    /// ([`PERCENT_TO_RAW`] produces integer dB steps).
     ///
     /// Requires the VLP to be enabled (`0x35` bit 3 `audio_proc_enable`,
     /// see [`Self::enable_audio_processor`]) — writes have no audible effect
@@ -2157,12 +2217,11 @@ where
     /// # Errors
     /// Returns [`AmpError`] if communication fails or `raw > 144`.
     pub fn write_master_volume(&mut self, raw: u16) -> Result<(), AmpError> {
-        const RAW_MAX: u16 = 144;
-        if raw > RAW_MAX {
+        if raw > MASTER_VOLUME_RAW_MAX {
             return Err(AmpError::invalid_argument("master_volume_raw", raw));
         }
         let int_reg = (VLP_NEG144_DB_REG - raw) as u8;
-        let frac_reg = 0; // amp_curve produces integer dB; frac reg reserved for 0.25 dB steps
+        let frac_reg = 0; // [`PERCENT_TO_RAW`] yields integer dB; 0.25 dB steps reserved
         self.write_regs(&[(REG_VOL_DB_MASTER, int_reg), (REG_VOL_LSB_MASTER, frac_reg)])
     }
 
@@ -2617,7 +2676,7 @@ impl AmpDevice {
 
     /// Write master volume (0x40 integer dB, 0x41 fractional 0.25 dB).
     /// Raw attenuation: `dB = raw − 144` (0 = −144 dB mute, 144 = 0 dB).
-    /// Caller maps percent→raw via `amp_curve::PERCENT_TO_RAW`.
+    /// Caller maps percent→raw via [`PERCENT_TO_RAW`].
     ///
     /// # Errors
     /// Returns [`AmpError`] if communication fails or `raw > 144`.

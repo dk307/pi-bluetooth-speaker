@@ -199,6 +199,33 @@ pub fn decode_pcm_format(id: u16) -> Box<str> {
     }
 }
 
+/// AVRCP absolute-volume range (`0..=127`).
+pub const AVRCP_VOLUME_MAX: u8 = 127;
+
+/// Percent volume range (`0..=100`).
+pub const PERCENT_VOLUME_MAX: u8 = 100;
+
+/// Converts a *fractional* AVRCP absolute volume (`0.0..=127.0`, e.g. the
+/// average of per-channel 7-bit volumes) to a volume percentage, rounding to
+/// nearest and clamping into `0..=100`.
+///
+/// This is a plain linear rescale: the perceptual dB curve is applied once, by
+/// the amplifier's percent → register mapping, not here. AVRCP 0 maps to 0 %,
+/// which the amplifier treats as a hard mute.
+#[must_use]
+pub fn avrcp_avg_to_percent(avg: f64) -> u8 {
+    let percent = ((avg / f64::from(AVRCP_VOLUME_MAX)) * f64::from(PERCENT_VOLUME_MAX))
+        .round()
+        .clamp(0.0, f64::from(PERCENT_VOLUME_MAX));
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "percentage clamped 0.0..=100.0 fits in u8"
+    )]
+    let percent = percent as u8;
+    percent
+}
+
 /// Converts a volume percentage (`0..=100`) to a `BlueALSA` / AVRCP 7-bit level (`0..=127`).
 ///
 /// Percentages above `100` clamp to `127`. Rounding is chosen so that
@@ -273,7 +300,7 @@ pub fn format_volume_bytes(
         .join(" ");
 
     let avg_level = f64::from(total_level) / (bytes.len() as f64);
-    let percent = amp_curve::avrcp_avg_to_percent(avg_level);
+    let percent = avrcp_avg_to_percent(avg_level);
 
     (Some(volume.into()), muted, Some(percent))
 }

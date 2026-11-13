@@ -94,10 +94,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "amp-curve"
-version = "2.0.0"
-
-[[package]]
 name = "android-activity"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -387,7 +383,6 @@ name = "audio-manager"
 version = "2.0.0"
 dependencies = [
  "alsa",
- "amp-curve",
  "anyhow",
  "async-trait",
  "config",
@@ -4470,6 +4465,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zbus",
 ]
 
 [[package]]
@@ -4864,7 +4860,6 @@ dependencies = [
 name = "speaker-bluetooth"
 version = "2.0.0"
 dependencies = [
- "amp-curve",
  "futures-util",
  "serde",
  "serde_json",

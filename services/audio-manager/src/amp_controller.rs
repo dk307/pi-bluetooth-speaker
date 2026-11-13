@@ -36,7 +36,7 @@ use crate::amp_gpio::AmpGpio;
 use crate::amp_state::AmpState;
 use crate::error::AmpResult;
 use crate::state_file::StateFile;
-use amp_curve::PERCENT_TO_RAW;
+use speaker_hardware::amp::PERCENT_TO_RAW;
 
 /// Production PLL-lock handshake timeout (plan §3.1: ≤200 ms one-shot).
 ///

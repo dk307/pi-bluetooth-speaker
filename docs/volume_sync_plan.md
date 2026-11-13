@@ -12,7 +12,7 @@ Phone volume buttons (AVRCP absolute volume, 0-127)
     → org.bluealsa.PCM1 Volume (ay, per-channel bytes)
     → bt-manager `sync_volume` task (5 s dedup poll)
     → audio-manager D-Bus SetLevel(percent)
-    → amp_curve PERCENT_TO_RAW → ALSA A.Mstr Vol (Merus raw 0-144)
+    → speaker_hardware::amp::PERCENT_TO_RAW → 0x40/0x41 (Merus raw 0-144)
     → Speaker
 ```
 
@@ -20,11 +20,15 @@ Phone volume buttons (AVRCP absolute volume, 0-127)
 
 | Component | Writes | Reads |
 |-----------|--------|-------|
-| `audio-manager` | **Only writer** of `A.Mstr Vol`; persists/restores state | ALSA mixer |
-| bt-manager `sync_volume` | audio-manager `SetLevel` (deduped on change) | `org.bluealsa.PCM1 Volume` |
-| screen-manager UI knob | → `bt.set_volume` → BlueALSA PCM → phone (AVRCP absolute) | BlueALSA volume (readout) |
+| `audio-manager` | **Only writer** of `A.Mstr Vol`; persists/restores state | Amp VLP registers |
+| bt-manager `sync_volume` | audio-manager `SetLevel`/`SetMute` (deduped on change) | `org.bluealsa.PCM1 Volume` |
+| screen-manager UI knob | → audio-manager `SetLevel`/`SetMute` → amp (and bt-manager mirrors the `Level`/`Muted` signal to AVRCP) | audio-manager `Level`/`Muted` |
 | bt-manager pairing agent | BlueZ info file `Volume=` seed (one-shot at trust) | amixer `A.Mstr Vol` (one-shot) |
 | reconciler | connection healing only — never volume | BlueZ/BlueALSA topology |
+
+> **2026-11-12 update:** the screen-manager row above is the corrected design
+> (the original implementation wrote the BlueALSA PCM directly). See the
+> follow-up section at the end of this document for the active work items.
 
 ### Root causes that were fixed
 
@@ -240,3 +244,114 @@ VOL_CHG:  if !muted: volume=new, write both sides
 - `services/bt-manager/src/agent.rs` (device info seeding)
 - BlueZ Media API: `org.bluez.MediaTransport1`, `org.bluez.MediaPlayer1`, `org.bluez.AVRCPTarget1`
 - bluealsa v5.0.0 source: volume handling in `src/aplay.c`
+---
+
+## 2026-11-12 Follow-up: Dead Sync Task, Screen Routing, Loudness Curve
+
+Live hardware exposed three regressions after PR #58's first volume-sync
+iteration. This section is the implementation plan for the follow-up commits.
+
+### Issue 1 — bt-manager volume sync task stops processing forever
+
+**Symptom:** after a burst of phone volume changes the `sync_volume` task goes
+silent (last log `07:31:23.388`), while bt-manager stays `active`, no panic or
+error is logged, all threads sit idle, and later phone or `audio-manager`
+changes never reach the other side. `busctl` shows BlueALSA still emitting
+`PropertiesChanged(Volume)` and audio-manager still answering `SetLevel`.
+
+**Root cause:** zbus `MessageStream` subscription queues are bounded
+(`props=64`, `amp=8`, `iface=8`). The socket-reader task broadcasts every
+incoming message to each subscription with `broadcast_direct(...).await`; when
+a stream queue is full it blocks. The sync task polls those streams and then
+awaits a D-Bus method call **on the same connection**. If a queue fills while
+it is awaiting the reply, the socket reader is blocked on the full queue and
+can never read the method reply: a self-deadlock. The tiny capacity-8
+audio-manager stream makes this easy to hit during rapid volume drags (each
+forward `SetLevel` emits both `Level` and `Muted`).
+
+**Fix:**
+
+1. Use a **dedicated D-Bus connection for signal streams** and a separate
+   control connection for `audio-manager` method calls. Saturation of a signal
+   queue can then only delay signals, never block a method reply.
+2. Raise queue capacities (props `512`, audio-manager `256`, interfaces `32`)
+   and keep the event-driven FSM.
+3. Replace the single-slot `expect_am` echo flag with a bounded echo queue
+   (`VecDeque<u8>`, ±1 tolerance) so consecutive forward writes cannot clear
+   each other's echo.
+4. Record reverse pushes in the forward dedup state (`last_pcm_vol`) so the
+   BlueALSA `Volume` signal echoed by our own `set_volume` is not re-applied.
+5. Parse the `InterfacesAdded` **body** object path (signature `oa{sa{sv}}`),
+   not the signal header path (always `/org/bluealsa`).
+6. Seed `last_pcm_vol` from `GetManagedObjects` at startup **without applying
+   it** (never trust BlueALSA's initial volume).
+7. Push the persisted amp mute state in the catch-up path (previously only the
+   level was pushed and `Muted` was merely cached).
+8. Add a low-frequency (60 s) watchdog tick: heartbeat log, reverse
+   reconciliation when audio-manager changed (amp-cli/thermal), and forward
+   reconciliation of genuine PCM changes only after a fresh-PCM settle window.
+
+### Issue 2 — Screen volume changes do not reach the amplifier
+
+**Symptom:** dragging the on-screen slider or turning the encoder changes the
+phone/BlueALSA `Volume` but the speaker loudness does not change; the UI
+readout can also disagree with the amp.
+
+**Root cause:** screen-manager wrote the BlueALSA PCM (`bt.set_volume`), so it
+depended entirely on bt-manager's forward arm — the dead task above. The UI
+also displayed PCM volume, splitting the source of truth.
+
+**Fix:**
+
+1. Add a small `SpeakerVolume` client in screen-manager that calls
+   audio-manager `SetLevel`/`SetMute` and reads `Level`/`Muted` (blocking zbus,
+   executed on the `bt-monitor` worker thread, never the render thread).
+2. Route `TransportCommand::SetVolume` to `SetLevel` + `SetMute(false)` and
+   `SetMute` to `SetMute`; play/seek/navigation remain on `BluetoothDevice`.
+3. Publish the audio-manager snapshot through `BtSharedUpdate` and drive the
+   Slint volume/mute properties from it. Stop reading volume/mute from the
+   BlueALSA PCM; keep PCM only for stream metadata (codec/rate/bit depth).
+4. Remove the now-obsolete `SettleKind::Volume` / `pcm_settle` suppression:
+   audio-manager writes are synchronous and authoritative, so no optimistic
+   settle window is needed for volume.
+5. Provide `SpeakerVolume::new_mocked() -> (Self, MockVolumeCtrl)` for hermetic
+   host tests and private-bus integration coverage of the real D-Bus path.
+
+### Issue 3 — Loudness curve is bottom-heavy and excessively loud
+
+**Symptom:** 0 is silent, but most of the slider range sounds almost the same;
+50 % is too loud and the user has to keep it far below the midpoint.
+
+**Root cause:** `PERCENT_TO_RAW` is a piecewise calibration over AVRCP anchors
+(0, 32, 64, 96, 127). It spends 0–20 % on a −144 → −47 dB jump, then compresses
+35–100 % into only ≈16 dB (−16 → 0 dB). Half the slider therefore sits at
+−10 dB (near full output), and adjacent steps near the top share raw register
+values.
+
+**Fix:**
+
+1. Replace the piecewise table with a **linear-in-dB perceptual curve**:
+   percent 0 = raw 0 (hard mute), percent 1–100 spans −60 dB … 0 dB
+   (`dB = −60 + 60·(p−1)/99`), so every step is ≈0.6 dB and the midpoint is
+   −30 dB.
+2. Keep AVRCP → percent linear (`0..127 → 0..100`); the perceptual curve is
+   applied once, at the percent → raw boundary.
+3. Update the inverse lookup so `Level` readback is within ±1 % for every
+   percent (the old flat top segments caused ±3).
+4. Recalibrate tests and the default state comment; deployment sets the live
+   level explicitly (persisted raw values are not migrated automatically).
+
+### Verification checklist
+
+- [ ] Unit/integration: `VolumeSyncState` echo queue, dedup, ±1 tolerance,
+      fresh-connect suppression, body-path parsing, watchdog reconciliation.
+- [ ] Private-bus test: screen `SpeakerVolume` calls real `SetLevel`/`SetMute`
+      and reads `Level`/`Muted` against a fake audio-manager.
+- [ ] Volume-curve endpoints, monotonicity, linear-dB fit, and midpoint
+      loudness assertions (`amp_volume_curve_integration`, `volume_curve_integration`).
+- [ ] Host gates: fmt, clippy `-D warnings`, llvm-cov line/function ≥ 85 %,
+      aarch64 release build.
+- [ ] Live: phone drag fast in both directions for >30 s; screen slider and
+      encoder; amp-cli direct + D-Bus; bt-manager restart while streaming;
+      audio-manager restart; reboot at persisted level; no loud jump on fresh
+      A2DP connect.
