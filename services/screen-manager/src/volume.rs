@@ -378,6 +378,8 @@ pub fn run_worker(
                 }
                 _ => {}
             }
+            // Respect the configured idle poll interval (250 ms = 4 Hz).
+            std::thread::sleep(AMP_POLL_INTERVAL);
             continue;
         }
 
