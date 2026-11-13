@@ -125,6 +125,8 @@ pub struct BtPlaybackState {
     pub cover_art_path: Option<Box<str>>,
     /// Phone/remote device volume (AVRCP absolute volume, 0-127), if reported by `MediaPlayer1`.
     pub phone_volume: Option<AvrcpVolume>,
+    /// AVRCP protocol version (e.g., 0x0104 for 1.4), if reported by `MediaPlayer1`.
+    pub avrcp_version: Option<u16>,
 }
 
 /// Maximum AVRCP absolute volume value (0-127 per `BlueZ` `MediaPlayer1.Volume` spec).
@@ -195,6 +197,7 @@ impl Default for BtPlaybackState {
             image_handle: None,
             cover_art_path: None,
             phone_volume: None,
+            avrcp_version: None,
         }
     }
 }

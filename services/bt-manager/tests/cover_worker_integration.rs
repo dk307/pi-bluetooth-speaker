@@ -45,6 +45,7 @@ fn test_playback(handle: Option<&str>) -> BtPlaybackState {
         image_handle: handle.map(Box::from),
         cover_art_path: None,
         phone_volume: None,
+        avrcp_version: None,
     }
 }
 

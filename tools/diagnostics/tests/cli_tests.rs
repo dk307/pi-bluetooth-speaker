@@ -1893,6 +1893,7 @@ fn bt_info_phone_volume_output_and_json() {
             image_handle: None,
             cover_art_path: None,
             phone_volume: Some(AvrcpVolume::new(100).unwrap()), // 100/127 ≈ 79%
+            avrcp_version: None,
         }),
     };
     let timestamp = format_timestamp();
