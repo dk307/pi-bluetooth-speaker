@@ -1843,3 +1843,112 @@ fn bt_info_cli_mock_execution_and_controls() {
     pcm_opts.target_device = Some(target_addr);
     speaker_diagnostics::cli::bt::print_human_audio_pipeline(&pcm_status, &pcm_opts);
 }
+
+#[test]
+fn bt_info_phone_volume_output_and_json() {
+    use std::process::ExitCode;
+
+    use speaker_bluetooth::{
+        AvrcpVolume, BluetoothDevice, BluetoothHardwareInfo, BluetoothServices, BluetoothStatus,
+        BtAddress, BtPlaybackState,
+    };
+    use speaker_common::diag::{OutputFormat, format_timestamp};
+    use speaker_common::systemd::ServiceState;
+    use speaker_diagnostics::cli::bt::{CliOptions, build_json_status, run_app};
+
+    // Test human output with phone volume
+    let (device, mock) = BluetoothDevice::new_mocked();
+    let mut opts = CliOptions::default();
+    opts.common.max_count = Some(1);
+    opts.common.verbose = true;
+    opts.common.format = OutputFormat::Human;
+
+    // Verify phone volume is present in mock (80/127 ≈ 63%)
+    let status = device.status().unwrap();
+    let playback = status.playback.as_ref().unwrap();
+    assert_eq!(playback.phone_volume, Some(AvrcpVolume::new(80).unwrap()));
+    assert_eq!(playback.phone_volume_percent(), Some(63));
+
+    let code = run_app(&device, &opts);
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    // JSON payload carries the raw AVRCP level and its percentage
+    let json = build_json_status("12:00:00", &status, &opts);
+    let json_playback = &json["playback"];
+    assert_eq!(json_playback["phone_volume"], serde_json::json!(80));
+    assert_eq!(json_playback["phone_volume_percent"], serde_json::json!(63));
+
+    opts.common.format = OutputFormat::Json;
+    let code_json = run_app(&device, &opts);
+    assert_eq!(code_json, ExitCode::SUCCESS);
+
+    // Test with no phone volume: the keys are present but null
+    if let Ok(Some(mut pb)) = device.playback_state() {
+        pb.phone_volume = None;
+        mock.set_playback(Some(pb));
+    }
+    opts.common.format = OutputFormat::Human;
+    let code_none = run_app(&device, &opts);
+    assert_eq!(code_none, ExitCode::SUCCESS);
+
+    let status_none = device.status().unwrap();
+    let json_none = build_json_status("12:00:01", &status_none, &opts);
+    assert!(json_none["playback"]["phone_volume"].is_null());
+    assert!(json_none["playback"]["phone_volume_percent"].is_null());
+
+    opts.common.format = OutputFormat::Json;
+    let code_none_json = run_app(&device, &opts);
+    assert_eq!(code_none_json, ExitCode::SUCCESS);
+
+    // Test with valid phone volume restored
+    if let Ok(Some(mut pb)) = device.playback_state() {
+        pb.phone_volume = Some(AvrcpVolume::new(80).unwrap());
+        mock.set_playback(Some(pb));
+    }
+    let code_restored = run_app(&device, &opts);
+    assert_eq!(code_restored, ExitCode::SUCCESS);
+
+    // Test direct output_json_status with phone volume
+    let pcm_status = BluetoothStatus {
+        services: BluetoothServices {
+            bluetoothd: ServiceState::Active,
+            bluealsa: ServiceState::Active,
+            bluealsa_aplay: ServiceState::Active,
+            bt_agent: ServiceState::Active,
+        },
+        adapter: None,
+        devices: Box::default(),
+        pcms: Box::default(),
+        hardware: BluetoothHardwareInfo::rpi3(),
+        playback: Some(BtPlaybackState {
+            device_address: Some(BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])),
+            device_name: "Test Phone".into(),
+            status: "playing".into(),
+            title: "Test Track".into(),
+            artist: "Test Artist".into(),
+            album: "Test Album".into(),
+            position_ms: 0,
+            duration_ms: 0,
+            player_path: None,
+            obex_port: None,
+            image_handle: None,
+            cover_art_path: None,
+            phone_volume: Some(AvrcpVolume::new(100).unwrap()), // 100/127 ≈ 79%
+            equalizer: None,
+            repeat: None,
+            shuffle: None,
+            scan: None,
+        }),
+    };
+    let timestamp = format_timestamp();
+    let json_direct = build_json_status(&timestamp, &pcm_status, &CliOptions::default());
+    assert_eq!(
+        json_direct["playback"]["phone_volume"],
+        serde_json::json!(100)
+    );
+    assert_eq!(
+        json_direct["playback"]["phone_volume_percent"],
+        serde_json::json!(79)
+    );
+    assert_eq!(json_direct["timestamp"], serde_json::json!(timestamp));
+}

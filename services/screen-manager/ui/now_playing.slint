@@ -24,7 +24,10 @@ component MarqueeText inherits Rectangle {
     // nothing, so `capture_region` snapshots the clean row background.
     in property <bool> strips_hidden: false;
     clip: true;
-    height: strip_item.preferred-height;
+    // Ensure a minimum height matching the title font size (32px) so the Rust-side
+    // composer geometry validation never receives a zero-height rect when the strip
+    // is empty (e.g., at startup before the first rasterization completes).
+    height: Math.max(strip_item.preferred-height, 32px);
     horizontal-stretch: 1;
     preferred-width: 0px;
 
@@ -231,6 +234,13 @@ export component NowPlayingView inherits Rectangle {
     in-out property <int> marquee_clock <=> MarqueeCompose.clock;
     property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
     property <int> raw_tick: 0;
+    // Shadow properties that track the title marquee viewport geometry.
+    // Using `changed` on these root properties ensures the global is updated
+    // whenever the child component's layout changes (e.g., after initial layout
+    // or strip rasterization), not just when the strip image changes.
+    property <Point> _title_viewport_origin: title_marquee.viewport_origin;
+    property <length> _title_viewport_w: title_marquee.viewport_w;
+    property <length> _title_viewport_h: title_marquee.viewport_h;
     out property <bool> is_animating: title_marquee.is_overflow || root.is_playing;
 
     // Publish composer state to the shared global consumed by the Rust render loop.
@@ -267,6 +277,18 @@ export component NowPlayingView inherits Rectangle {
     }
     changed artist_marquee_strip => {
         root.marquee_clock = 0;
+        root.publish_composer_state();
+    }
+    // Ensure the composer global is updated when the title marquee viewport geometry
+    // changes (e.g., after initial layout or when strip rasterization completes).
+    // This prevents the Rust-side composer from reading stale/zero height values.
+    changed _title_viewport_origin => {
+        root.publish_composer_state();
+    }
+    changed _title_viewport_w => {
+        root.publish_composer_state();
+    }
+    changed _title_viewport_h => {
         root.publish_composer_state();
     }
 

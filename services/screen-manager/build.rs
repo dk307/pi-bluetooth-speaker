@@ -13,5 +13,18 @@ fn main() {
 
         slint_build::compile_with_config("ui/appwindow.slint", config)
             .expect("Failed to compile Slint UI definitions");
+
+        // Emit rerun-if-changed for all UI files so cargo rebuilds when they change
+        println!("cargo:rerun-if-changed=ui/appwindow.slint");
+        println!("cargo:rerun-if-changed=ui/now_playing.slint");
+        println!("cargo:rerun-if-changed=ui/marquee_state.slint");
+        println!("cargo:rerun-if-changed=ui/marquee_rasterizer.slint");
+        println!("cargo:rerun-if-changed=ui/status_bar.slint");
+        println!("cargo:rerun-if-changed=ui/volume_hud.slint");
+        println!("cargo:rerun-if-changed=ui/screen_app_bar.slint");
+        println!("cargo:rerun-if-changed=ui/splash.slint");
+        println!("cargo:rerun-if-changed=ui/viewport.slint");
+        println!("cargo:rerun-if-changed=ui/settings_view.slint");
+        println!("cargo:rerun-if-changed=ui/app_theme.slint");
     }
 }

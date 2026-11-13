@@ -372,6 +372,11 @@ fn ui_shell_now_playing_properties_and_playback_state() {
         obex_port: None,
         image_handle: None,
         cover_art_path: None,
+        phone_volume: None,
+        equalizer: None,
+        repeat: None,
+        shuffle: None,
+        scan: None,
     };
     shell.apply_bluetooth_playback(&playback);
     assert_eq!(shell.window().get_track_title(), "Telegraph Road");
@@ -424,6 +429,11 @@ fn ui_shell_pending_fetch_keeps_cover_art() {
         obex_port: Some(4097),
         image_handle: Some("2698226".into()),
         cover_art_path: None,
+        phone_volume: None,
+        equalizer: None,
+        repeat: None,
+        shuffle: None,
+        scan: None,
     };
     shell.set_has_cover_art(true);
     shell.apply_bluetooth_playback(&pending);
@@ -481,6 +491,11 @@ fn ui_shell_cover_art_and_pcm_stream_updates() {
         obex_port: None,
         image_handle: None,
         cover_art_path: Some(img_path.to_string_lossy().to_string().into_boxed_str()),
+        phone_volume: None,
+        equalizer: None,
+        repeat: None,
+        shuffle: None,
+        scan: None,
     };
     shell.apply_bluetooth_playback(&playback);
     // The bt-monitor worker decodes and publishes the cover via set_cover_image;
@@ -690,6 +705,11 @@ fn ui_shell_cover_art_loading_and_error_handling() {
         obex_port: Some(4097),
         image_handle: Some("h123".into()),
         cover_art_path: None,
+        phone_volume: None,
+        equalizer: None,
+        repeat: None,
+        shuffle: None,
+        scan: None,
     };
 
     // No cover art initially
