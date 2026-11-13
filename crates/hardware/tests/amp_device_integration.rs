@@ -568,10 +568,23 @@ fn mock_write_serial_mute_and_read() {
 }
 
 #[test]
+fn power_mode_ctrl_from_register_honors_manualpm_gate() {
+    // manualPM (bit 6) clear: always Dynamic, PM_man field is don't-care.
+    assert_eq!(PowerModeCtrl::from_register(0x3D), PowerModeCtrl::Dynamic); // stock reset state
+    assert_eq!(PowerModeCtrl::from_register(0x00), PowerModeCtrl::Dynamic);
+    assert_eq!(PowerModeCtrl::from_register(0x10), PowerModeCtrl::Dynamic);
+    // manualPM set: decode the PM_man field.
+    assert_eq!(PowerModeCtrl::from_register(0x40), PowerModeCtrl::Dynamic); // manual PM_man=00 invalid byte still decodes field 0
+    assert_eq!(PowerModeCtrl::from_register(0x50), PowerModeCtrl::Pm1);
+    assert_eq!(PowerModeCtrl::from_register(0x60), PowerModeCtrl::Pm2);
+    assert_eq!(PowerModeCtrl::from_register(0x70), PowerModeCtrl::Pm3);
+}
+
+#[test]
 fn mock_write_power_mode_ctrl_and_read() {
     let (amp, mock) = AmpDevice::new_mocked();
-    // Silicon reset default: manualPM=0, PM_man=3 (auto PM)
-    assert_eq!(mock.mock_pm_ctrl(), PowerModeCtrl::Pm3);
+    // Silicon reset default: manualPM=0 (dynamic), PM_man=3 don't-care.
+    assert_eq!(mock.mock_pm_ctrl(), PowerModeCtrl::Dynamic);
 
     amp.write_power_mode_ctrl(PowerModeCtrl::Dynamic).unwrap(); // manualPM cleared
     assert_eq!(mock.mock_pm_ctrl(), PowerModeCtrl::Dynamic);
@@ -1125,8 +1138,8 @@ fn mock_read_settings_defaults() {
     assert_eq!(s.master_volume_raw, 116);
     assert_eq!(s.master_volume_frac, 0);
     assert!(!s.serial_muted);
-    // Silicon reset defaults (ma120x0p.h): manualPM=0, pm_man=3, profile 0.
-    assert_eq!(s.pm_ctrl_pm, PowerModeCtrl::Pm3);
+    // Silicon reset defaults (ma120x0p.h): manualPM=0 (dynamic), profile 0.
+    assert_eq!(s.pm_ctrl_pm, PowerModeCtrl::Dynamic);
     assert_eq!(s.pm_profile, PowerModeProfile::Pmp0);
     assert_eq!(s.i2s_format, I2sFormat::LeftJustified);
     assert_eq!(s.audio_in_mode, AudioInputMode::Digital20dB);
@@ -1213,7 +1226,7 @@ fn settings_from_raw_registers_decodes() {
     let text = s.to_string();
     assert!(text.contains("Master Volume"));
     assert!(text.contains("Serial Mute"));
-    assert!(text.contains("Manual Power Mode"));
+    assert!(text.contains("Power Mode            :"));
     assert!(text.contains("Power Mode Profile"));
     assert!(text.contains("I2S Format Select"));
     assert!(text.contains("Audio Input Mode"));
@@ -1229,7 +1242,7 @@ async fn async_settings_read_and_audio_in_mode_write() {
     let (amp, mock) = AmpDevice::new_mocked();
 
     let s = amp.read_settings_async().await.unwrap();
-    assert_eq!(s.pm_ctrl_pm, PowerModeCtrl::Pm3); // silicon reset default (auto PM)
+    assert_eq!(s.pm_ctrl_pm, PowerModeCtrl::Dynamic); // silicon reset: manualPM=0
 
     amp.write_audio_in_mode_async(AudioInputMode::Digital26dB)
         .await

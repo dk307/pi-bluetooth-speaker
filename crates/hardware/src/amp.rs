@@ -130,6 +130,21 @@ impl PowerModeCtrl {
         }
     }
 
+    /// Decodes the power mode from the **full** register 0x00 byte,
+    /// honoring the `manualPM` gate (bit 6): when `manualPM` is clear the
+    /// amp is in dynamic (profile-driven) mode and the `PM_man` field is a
+    /// don't-care reset value (`0x03` per the upstream register header) —
+    /// decoding it as a manual mode would misreport e.g. the stock state
+    /// `0x3D` as "manual PM3".
+    #[must_use]
+    pub const fn from_register(raw: u8) -> Self {
+        if (raw >> 6) & 0x01 == 0 {
+            Self::Dynamic
+        } else {
+            Self::from_raw(raw)
+        }
+    }
+
     /// Returns the raw 2-bit register value (0-3; 0 = dynamic).
     #[must_use]
     pub const fn as_u8(self) -> u8 {
@@ -1236,7 +1251,7 @@ impl AmpSettings {
             master_volume_raw: decode_vlp_raw(vol_int as u16),
             master_volume_frac: vol_frac & 0x03,
             serial_muted: is_muted_bit(audio_proc),
-            pm_ctrl_pm: PowerModeCtrl::from_raw(pm_ctrl),
+            pm_ctrl_pm: PowerModeCtrl::from_register(pm_ctrl),
             pm_profile: PowerModeProfile::from_raw(pm_profile),
             i2s_format: I2sFormat::from_raw(i2s_format),
             audio_in_mode: AudioInputMode::from_raw(audio_in_mode),
@@ -1264,7 +1279,7 @@ impl Display for AmpSettings {
                 "Unmuted"
             }
         )?;
-        writeln!(f, "Manual Power Mode     : {}", self.pm_ctrl_pm)?;
+        writeln!(f, "Power Mode            : {}", self.pm_ctrl_pm)?;
         writeln!(f, "Power Mode Profile    : {}", self.pm_profile)?;
         writeln!(f, "I2S Format Select     : {}", self.i2s_format)?;
         write!(f, "Audio Input Mode      : {}", self.audio_in_mode)?;
@@ -1742,7 +1757,7 @@ impl AmpDeviceMock {
             master_volume_raw: decode_vlp_raw(state.mock_master_volume_reg),
             master_volume_frac: 0,
             serial_muted: state.mock_reg_0x36 & (1 << 7) != 0,
-            pm_ctrl_pm: PowerModeCtrl::from_raw(state.mock_pm_ctrl),
+            pm_ctrl_pm: PowerModeCtrl::from_register(state.mock_pm_ctrl),
             pm_profile: PowerModeProfile::from_raw(state.mock_pm_profile & 0x07),
             i2s_format: I2sFormat::from_raw(state.mock_reg_0x35 & 0x07),
             audio_in_mode: AudioInputMode::from_raw(state.mock_audio_in_mode),
@@ -1959,7 +1974,7 @@ impl AmpDeviceMock {
     #[must_use]
     pub fn mock_pm_ctrl(&self) -> PowerModeCtrl {
         let encoded = self.state.read().expect("mock lock poisoned").mock_pm_ctrl;
-        PowerModeCtrl::from_raw(encoded)
+        PowerModeCtrl::from_register(encoded)
     }
 
     /// Get the mocked `PM_PROFILE` value (0-5: 0-4 presets, 5 custom).
