@@ -1165,6 +1165,8 @@ fn playback_state_and_duration_formatting() {
     assert_eq!(def.obex_port, None);
     assert_eq!(def.image_handle, None);
     assert_eq!(def.cover_art_path, None);
+    assert_eq!(def.phone_volume, None);
+    assert_eq!(def.phone_volume_percent(), None);
     assert_eq!(def.progress_ratio(), 0.0);
     assert_eq!(def.format_position(), "00:00");
     assert_eq!(def.format_duration(), "00:00");
@@ -1182,11 +1184,26 @@ fn playback_state_and_duration_formatting() {
         obex_port: Some(4097),
         image_handle: Some("img001".into()),
         cover_art_path: Some("/tmp/test.jpg".into()),
+        phone_volume: None,
+        equalizer: None,
+        repeat: None,
+        shuffle: None,
+        scan: None,
     };
     assert!(state.is_playing());
     assert_eq!(state.format_position(), "02:05");
     assert_eq!(state.format_duration(), "06:55");
     assert!((state.progress_ratio() - (125.0 / 415.0)).abs() < 1e-4);
+
+    // AVRCP absolute volume → percentage conversion (0-127 → 0-100, rounded)
+    state.phone_volume = speaker_bluetooth::AvrcpVolume::new(0);
+    assert_eq!(state.phone_volume_percent(), Some(0));
+    state.phone_volume = speaker_bluetooth::AvrcpVolume::new(127);
+    assert_eq!(state.phone_volume_percent(), Some(100));
+    state.phone_volume = speaker_bluetooth::AvrcpVolume::new(64);
+    assert_eq!(state.phone_volume_percent(), Some(50));
+    state.phone_volume = speaker_bluetooth::AvrcpVolume::new(80);
+    assert_eq!(state.phone_volume_percent(), Some(63));
 
     state.status = "Playing".into();
     assert!(state.is_playing());
@@ -1206,6 +1223,60 @@ fn playback_state_and_duration_formatting() {
     assert_eq!(state.progress_ratio(), 1.0);
     state.duration_ms = 0;
     assert_eq!(state.progress_ratio(), 0.0);
+}
+
+#[test]
+fn avrcp_volume_construction_and_serde_roundtrip() {
+    use speaker_bluetooth::{AVRCP_MAX_VOLUME, AvrcpVolume};
+
+    // Boundary construction: 0 and the maximum are valid, one above is rejected.
+    assert_eq!(AvrcpVolume::new(0).map(AvrcpVolume::get), Some(0));
+    assert_eq!(
+        AvrcpVolume::new(AVRCP_MAX_VOLUME).map(AvrcpVolume::get),
+        Some(AVRCP_MAX_VOLUME)
+    );
+    assert!(AvrcpVolume::new(AVRCP_MAX_VOLUME + 1).is_none());
+    assert!(AvrcpVolume::new(u16::MAX).is_none());
+
+    // Percentage conversion boundaries (0-127 -> 0-100, rounded).
+    assert_eq!(AvrcpVolume::new(0).map(AvrcpVolume::to_percent), Some(0));
+    assert_eq!(AvrcpVolume::new(64).map(AvrcpVolume::to_percent), Some(50));
+    assert_eq!(AvrcpVolume::new(80).map(AvrcpVolume::to_percent), Some(63));
+    assert_eq!(
+        AvrcpVolume::new(AVRCP_MAX_VOLUME).map(AvrcpVolume::to_percent),
+        Some(100)
+    );
+
+    // Serialization emits the raw 0-127 level.
+    let vol = AvrcpVolume::new(96).expect("96 is within range");
+    assert_eq!(serde_json::to_string(&vol).expect("serialize"), "96");
+
+    // Deserialization validates the invariant: in-range values round-trip,
+    // out-of-range values are rejected with a canonical error.
+    let de: AvrcpVolume = serde_json::from_str("96").expect("96 deserializes");
+    assert_eq!(de, vol);
+    let err = serde_json::from_str::<AvrcpVolume>("200")
+        .expect_err("200 exceeds the AVRCP maximum and must be rejected");
+    assert!(
+        err.to_string().contains("exceeds maximum"),
+        "unexpected error: {err}"
+    );
+    let err = serde_json::from_str::<AvrcpVolume>("70000")
+        .expect_err("values beyond u16 must be rejected");
+    assert!(
+        err.to_string().contains("invalid value"),
+        "unexpected: {err}"
+    );
+
+    // A full BtPlaybackState round-trips through serde with the validated volume.
+    let state = BtPlaybackState {
+        phone_volume: Some(vol),
+        ..BtPlaybackState::default()
+    };
+    let json = serde_json::to_string(&state).expect("state serializes");
+    let back: BtPlaybackState = serde_json::from_str(&json).expect("state deserializes");
+    assert_eq!(back.phone_volume, Some(vol));
+    assert_eq!(back.phone_volume_percent(), Some(76));
 }
 
 #[test]
@@ -1419,6 +1490,7 @@ fn parse_bluez_all_with_media_player() {
         .unwrap();
     player_props.insert("Track".to_string(), to_val(Value::Dict(track_dict)));
     player_props.insert("ObexPort".to_string(), to_val(Value::from(4097u16)));
+    player_props.insert("Volume".to_string(), to_val(Value::from(96u16)));
 
     player_ifaces.insert(iface("org.bluez.MediaPlayer1"), player_props);
     objects.insert(player_path, player_ifaces);
@@ -1452,6 +1524,30 @@ fn parse_bluez_all_with_media_player() {
         pb.player_path.as_deref(),
         Some("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0")
     );
+    // MediaPlayer1.Volume (AVRCP absolute volume) parsed and converted
+    assert_eq!(pb.phone_volume, speaker_bluetooth::AvrcpVolume::new(96));
+    assert_eq!(pb.phone_volume_percent(), Some(76));
+}
+
+#[test]
+fn parse_bluez_playback_rejects_out_of_range_phone_volume() {
+    let mut objects: ManagedObjects = HashMap::new();
+
+    // MediaPlayer1 with an out-of-spec Volume (> 127) must be reported as absent
+    let player_path = OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0")
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let mut player_ifaces = HashMap::new();
+    let mut player_props = HashMap::new();
+    player_props.insert("Status".to_string(), to_val("playing"));
+    player_props.insert("Volume".to_string(), to_val(Value::from(200u16)));
+    player_ifaces.insert(iface("org.bluez.MediaPlayer1"), player_props);
+    objects.insert(player_path, player_ifaces);
+
+    let (_, _, playback) = DbusClient::parse_bluez_all(&objects, None).unwrap();
+    let pb = playback.expect("playback should still parse");
+    assert_eq!(pb.phone_volume, None);
+    assert_eq!(pb.phone_volume_percent(), None);
 }
 
 #[test]
