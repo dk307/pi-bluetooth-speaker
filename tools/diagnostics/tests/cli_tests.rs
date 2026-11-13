@@ -805,6 +805,47 @@ fn amp_info_cli_argument_parsing_and_stats() {
 }
 
 #[test]
+fn amp_info_cli_set_values_map_isolated_field_values() {
+    use speaker_common::diag::CliParse;
+    use speaker_diagnostics::cli::amp::{CliOptions, parse_cli_args_from};
+    use speaker_hardware::{AudioInputMode, I2sFormat, PowerModeCtrl, PowerModeProfile};
+
+    fn unwrap_options(parsed: Result<CliParse<CliOptions>, String>) -> CliOptions {
+        match parsed.unwrap() {
+            CliParse::Options(o) => o,
+            other => panic!("expected CliParse::Options, got {other:?}"),
+        }
+    }
+
+    // Numeric fallbacks must map the isolated CLI field value (not a full
+    // register byte) to the matching enum variant (regression: --set-pm 03
+    // previously decoded via from_raw(3) as PM0, and --set-audio-mode 04 as
+    // Digital20dB instead of Analog20dB).
+    let opts = unwrap_options(parse_cli_args_from([
+        "--set-pm".into(),
+        "03".into(),
+        "--set-profile".into(),
+        "5".into(),
+        "--set-i2s".into(),
+        "7".into(),
+        "--set-audio-mode".into(),
+        "04".into(),
+    ]));
+    assert_eq!(opts.set.pm, Some(PowerModeCtrl::Pm3));
+    assert_eq!(opts.set.profile, Some(PowerModeProfile::Pmp5Custom));
+    assert_eq!(opts.set.i2s_format, Some(I2sFormat::Rj24));
+    assert_eq!(opts.set.audio_mode, Some(AudioInputMode::Analog20dB));
+    let opts = unwrap_options(parse_cli_args_from([
+        "--set-pm".into(),
+        "1".into(),
+        "--set-audio-mode".into(),
+        "5".into(),
+    ]));
+    assert_eq!(opts.set.pm, Some(PowerModeCtrl::Pm1));
+    assert_eq!(opts.set.audio_mode, Some(AudioInputMode::Analog26dB));
+}
+
+#[test]
 fn amp_info_cli_mock_execution_and_fault_handling() {
     use std::process::ExitCode;
     use std::time::Duration;

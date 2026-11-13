@@ -102,7 +102,7 @@ fn parse_i2s_format(value: &str) -> Result<I2sFormat, String> {
             "Invalid I2S format value '{value}': 2 and 3 are reserved (valid: 0, 1, 4, 5, 6, 7)"
         ));
     }
-    Ok(I2sFormat::from_raw(parsed))
+    Ok(I2sFormat::from_field(parsed))
 }
 
 /// Parses an unsigned integer CLI value and enforces an inclusive upper bound.
@@ -134,7 +134,7 @@ fn parse_power_mode_ctrl(value: &str) -> Result<PowerModeCtrl, String> {
         "pm3" | "p3" | "3" => Ok(PowerModeCtrl::Pm3),
         _ => {
             let parsed = parse_u8_in_range(&trimmed, "power mode", 3)?;
-            Ok(PowerModeCtrl::from_raw(parsed))
+            Ok(PowerModeCtrl::from_field(parsed))
         }
     }
 }
@@ -151,7 +151,7 @@ fn parse_power_mode_profile(value: &str) -> Result<PowerModeProfile, String> {
         "pmp5" | "p5" | "custom" | "5" => Ok(PowerModeProfile::Pmp5Custom),
         _ => {
             let parsed = parse_u8_in_range(&trimmed, "power mode profile", 5)?;
-            Ok(PowerModeProfile::from_raw(parsed))
+            Ok(PowerModeProfile::from_field(parsed))
         }
     }
 }
@@ -168,7 +168,7 @@ fn parse_audio_input_mode(value: &str) -> Result<AudioInputMode, String> {
         "analog-26db" | "a26" | "5" => Ok(AudioInputMode::Analog26dB),
         _ => {
             let parsed = parse_u8_in_range(&trimmed, "audio input mode", 5)?;
-            Ok(AudioInputMode::from_raw(parsed))
+            Ok(AudioInputMode::from_field(parsed))
         }
     }
 }

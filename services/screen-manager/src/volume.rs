@@ -65,15 +65,16 @@ impl AmpVolumeCommandQueue {
         let mut queue = lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let drained: Vec<_> = queue.drain(..).collect();
-        if drained.is_empty() {
-            // Wait until a command lands or the poll cadence elapses; the
-            // returned guard is dropped to release the lock.
-            let (_guard, _timeout) = cv
+        if queue.is_empty() {
+            // Wait until a command lands or the poll cadence elapses, then
+            // re-check so a command pushed during the wait is returned
+            // immediately instead of on the next tick.
+            let (guard, _timeout) = cv
                 .wait_timeout(queue, AMP_POLL_INTERVAL)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            queue = guard;
         }
-        drained
+        queue.drain(..).collect()
     }
 
     /// Returns `true` if no command is queued.
@@ -335,8 +336,10 @@ fn amp_proxy(
 )]
 trait VolumeProxy {
     /// Reads the amp level percent.
+    #[zbus(property)]
     fn level(&self) -> zbus::Result<u8>;
     /// Reads the amp mute state.
+    #[zbus(property)]
     fn muted(&self) -> zbus::Result<bool>;
     /// Sets the amp level percent.
     fn set_level(&self, percent: u8) -> zbus::Result<()>;
@@ -378,8 +381,6 @@ pub fn run_worker(
                 }
                 _ => {}
             }
-            // Respect the configured idle poll interval (250 ms = 4 Hz).
-            std::thread::sleep(AMP_POLL_INTERVAL);
             continue;
         }
 

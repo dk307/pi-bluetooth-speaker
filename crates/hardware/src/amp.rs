@@ -102,6 +102,15 @@ pub enum PowerModeCtrl {
 }
 
 impl PowerModeCtrl {
+    /// Decodes a manual power mode from an isolated field value (`0..=3`).
+    ///
+    /// Use this when the value already carries only the `PM_man` field,
+    /// e.g. a CLI argument — not a full register `0x00` byte.
+    #[must_use]
+    pub const fn from_field(field: u8) -> Self {
+        Self::from_raw(field << 4)
+    }
+
     /// Decodes the manual power mode from register 0x00 bits `[5:4]`.
     ///
     /// The input `raw` is the full register 0x00 value; bits 5:4 are extracted.
@@ -172,6 +181,15 @@ pub enum AudioInputMode {
 }
 
 impl AudioInputMode {
+    /// Decodes an audio input mode from an isolated field value (`0..=5`).
+    ///
+    /// Use this when the value already carries only the `audio_in_mode`
+    /// field, e.g. a CLI argument — not a full register `0x25` byte.
+    #[must_use]
+    pub const fn from_field(field: u8) -> Self {
+        Self::from_raw(field << 5)
+    }
+
     /// Decodes the audio input mode from register 0x25 bits `[7:5]`.
     ///
     /// The input `raw` is the full register 0x25 value; bits 7:5 are extracted.
@@ -271,6 +289,15 @@ pub enum I2sFormat {
 impl I2sFormat {
     /// Decodes the I2S format from register 0x35 bits `[2:0]`.
     ///
+    /// Decodes an I2S format from an isolated field value (`0`, `1`, `4..=7`).
+    ///
+    /// Use this when the value already carries only the `i2s_format` field,
+    /// e.g. a CLI argument — not a full register `0x35` byte.
+    #[must_use]
+    pub const fn from_field(field: u8) -> Self {
+        Self::from_raw(field)
+    }
+
     /// Valid values: `0`, `1`, `4`, `5`, `6`, `7`. Values `2`, `3` are reserved and map to `LeftJustified`.
     #[must_use]
     pub const fn from_raw(raw: u8) -> Self {
@@ -855,6 +882,15 @@ pub enum PowerModeProfile {
 impl PowerModeProfile {
     /// Decodes a power mode profile from register 0x1D bits `[2:0]`.
     ///
+    /// Decodes a power mode profile from an isolated field value (`0..=5`).
+    ///
+    /// Use this when the value already carries only the `PMprofile` field,
+    /// e.g. a CLI argument — not a full register `0x1D` byte.
+    #[must_use]
+    pub const fn from_field(field: u8) -> Self {
+        Self::from_raw(field)
+    }
+
     /// Values 0-4 map to PMP0-PMP4; 5 maps to `PMP5Custom`; values 6-7 also map to `PMP5Custom`.
     #[must_use]
     pub const fn from_raw(raw: u8) -> Self {
