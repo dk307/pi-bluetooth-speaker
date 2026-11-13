@@ -125,8 +125,6 @@ pub struct BtPlaybackState {
     pub cover_art_path: Option<Box<str>>,
     /// Phone/remote device volume (AVRCP absolute volume, 0-127), if reported by `MediaPlayer1`.
     pub phone_volume: Option<AvrcpVolume>,
-    /// AVRCP protocol version (e.g., 0x0104 for 1.4), if reported by `MediaPlayer1`.
-    pub avrcp_version: Option<u16>,
     /// Equalizer setting (e.g., "off", "flat", "bass", "treble"), if reported by `MediaPlayer1`.
     pub equalizer: Option<Box<str>>,
     /// Repeat mode (e.g., "off", "alltrack", "group"), if reported by `MediaPlayer1`.
@@ -205,7 +203,6 @@ impl Default for BtPlaybackState {
             image_handle: None,
             cover_art_path: None,
             phone_volume: None,
-            avrcp_version: None,
             equalizer: None,
             repeat: None,
             shuffle: None,

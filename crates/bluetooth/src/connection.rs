@@ -1357,7 +1357,6 @@ impl DbusClient {
 
         let obex_port = get_u16(props, "ObexPort").filter(|&p| p > 0);
         let phone_volume = get_u16(props, "Volume").and_then(crate::transport::AvrcpVolume::new);
-        let avrcp_version = get_u16(props, "Version");
         let equalizer = get_str(props, "Equalizer").map(Into::into);
         let repeat = get_str(props, "Repeat").map(Into::into);
         let shuffle = get_str(props, "Shuffle").map(Into::into);
@@ -1382,7 +1381,6 @@ impl DbusClient {
             image_handle,
             cover_art_path: None,
             phone_volume,
-            avrcp_version,
             equalizer,
             repeat,
             shuffle,
@@ -2016,7 +2014,6 @@ impl BluetoothDeviceMock {
                 image_handle: Some("1000001".into()),
                 cover_art_path: None,
                 phone_volume: crate::transport::AvrcpVolume::new(80), // 80/127 ≈ 63%
-                avrcp_version: Some(0x0104),                          // AVRCP 1.4
                 equalizer: None,
                 repeat: None,
                 shuffle: None,

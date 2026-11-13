@@ -359,11 +359,6 @@ pub fn print_human_audio_pipeline(status: &BluetoothStatus, opts: &CliOptions) {
                 vol.get()
             );
         }
-        if let Some(ver) = p.avrcp_version {
-            let major = (ver >> 8) & 0xFF;
-            let minor = ver & 0xFF;
-            println!("  ↳ AVRCP Version   : {major}.{minor}");
-        }
         if let Some(ref eq) = p.equalizer {
             println!("  ↳ Equalizer       : {eq}");
         }
@@ -511,7 +506,6 @@ pub fn build_json_status(
             "cover_art_path": p.cover_art_path,
             "phone_volume": p.phone_volume,
             "phone_volume_percent": p.phone_volume_percent(),
-            "avrcp_version": p.avrcp_version,
             "equalizer": p.equalizer,
             "repeat": p.repeat,
             "shuffle": p.shuffle,

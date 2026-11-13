@@ -1185,7 +1185,6 @@ fn playback_state_and_duration_formatting() {
         image_handle: Some("img001".into()),
         cover_art_path: Some("/tmp/test.jpg".into()),
         phone_volume: None,
-        avrcp_version: None,
         equalizer: None,
         repeat: None,
         shuffle: None,
