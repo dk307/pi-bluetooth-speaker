@@ -805,6 +805,47 @@ fn amp_info_cli_argument_parsing_and_stats() {
 }
 
 #[test]
+fn amp_info_cli_set_values_map_isolated_field_values() {
+    use speaker_common::diag::CliParse;
+    use speaker_diagnostics::cli::amp::{CliOptions, parse_cli_args_from};
+    use speaker_hardware::{AudioInputMode, I2sFormat, PowerModeCtrl, PowerModeProfile};
+
+    fn unwrap_options(parsed: Result<CliParse<CliOptions>, String>) -> CliOptions {
+        match parsed.unwrap() {
+            CliParse::Options(o) => o,
+            other => panic!("expected CliParse::Options, got {other:?}"),
+        }
+    }
+
+    // Numeric fallbacks must map the isolated CLI field value (not a full
+    // register byte) to the matching enum variant (regression: --set-pm 03
+    // previously decoded via from_raw(3) as PM0, and --set-audio-mode 04 as
+    // Digital20dB instead of Analog20dB).
+    let opts = unwrap_options(parse_cli_args_from([
+        "--set-pm".into(),
+        "03".into(),
+        "--set-profile".into(),
+        "5".into(),
+        "--set-i2s".into(),
+        "7".into(),
+        "--set-audio-mode".into(),
+        "04".into(),
+    ]));
+    assert_eq!(opts.set.pm, Some(PowerModeCtrl::Pm3));
+    assert_eq!(opts.set.profile, Some(PowerModeProfile::Pmp5Custom));
+    assert_eq!(opts.set.i2s_format, Some(I2sFormat::Rj24));
+    assert_eq!(opts.set.audio_mode, Some(AudioInputMode::Analog20dB));
+    let opts = unwrap_options(parse_cli_args_from([
+        "--set-pm".into(),
+        "1".into(),
+        "--set-audio-mode".into(),
+        "5".into(),
+    ]));
+    assert_eq!(opts.set.pm, Some(PowerModeCtrl::Pm1));
+    assert_eq!(opts.set.audio_mode, Some(AudioInputMode::Analog26dB));
+}
+
+#[test]
 fn amp_info_cli_mock_execution_and_fault_handling() {
     use std::process::ExitCode;
     use std::time::Duration;
@@ -913,7 +954,7 @@ fn amp_info_cli_set_workflow_ordering_and_failure_stop() {
 
     use speaker_common::diag::{CommonCliOptions, OutputFormat};
     use speaker_diagnostics::cli::amp::{CliOptions, SetValues, run_app};
-    use speaker_hardware::{AmpDevice, AmpI2cAddress};
+    use speaker_hardware::{AmpDevice, AmpI2cAddress, I2sFormat};
 
     let (amp, mock) = AmpDevice::new_mocked();
     mock.set_mock_serial_muted(true);
@@ -986,13 +1027,13 @@ fn amp_info_cli_set_workflow_ordering_and_failure_stop() {
     mock.set_mock_serial_muted(true);
     mock.set_transient_write_failures(1);
     let opts = set_opts(SetValues {
-        i2s_format: Some(4),
+        i2s_format: Some(I2sFormat::Rj24),
         mute: Some(false),
         ..SetValues::default()
     });
     assert_eq!(run_app(&amp, &opts), ExitCode::FAILURE);
     assert!(mock.mock_serial_muted());
-    assert_eq!(mock.mock_i2s_format(), 0);
+    assert_eq!(mock.mock_i2s_format(), I2sFormat::LeftJustified);
 
     // Mute-first: with a fault, a requested MUTE is still recorded as the
     // attempted first write... it fails, so state stays; verify the failure

@@ -1,4 +1,8 @@
 [toolchain]
-channel = "1.99.0"
-components = ["rustfmt", "clippy"]
+# Pinned for coverage-gate parity. rustc 1.100 instruments roughly twice as
+# many lines/functions (async state machines and generated impls), which drops
+# the workspace line coverage from 86.3 % to 74.5 % with no code change.
+# Re-evaluate this pin (and recalibrate/expand tests) before bumping it.
+channel = "1.99.1"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
 targets = ["aarch64-unknown-linux-gnu"]

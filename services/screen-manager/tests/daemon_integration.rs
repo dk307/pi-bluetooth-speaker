@@ -312,18 +312,42 @@ fn run_render_loop_mocked_and_bluetooth_paths() {
     // 1. None bluetooth path breaking on render failure
     ctrl.set_render_error("simulated loop failure");
     let commands = speaker_bluetooth::TransportCommandQueue::new();
-    run_render_loop(&mut fb, &window, &shell, None, &commands, Some(10));
+    run_render_loop(
+        &mut fb,
+        &window,
+        &shell,
+        None,
+        &commands,
+        &screen_manager::volume::AmpVolumeCommandQueue::new(),
+        Some(10),
+    );
 
     // 2. Bluetooth sync branch with mocked BluetoothDevice breaking on render failure
     let (bt, _) = speaker_bluetooth::BluetoothDevice::new_mocked();
     ctrl.set_render_error("simulated bt loop failure");
     let commands = speaker_bluetooth::TransportCommandQueue::new();
-    run_render_loop(&mut fb, &window, &shell, Some(&bt), &commands, Some(10));
+    run_render_loop(
+        &mut fb,
+        &window,
+        &shell,
+        Some(&bt),
+        &commands,
+        &screen_manager::volume::AmpVolumeCommandQueue::new(),
+        Some(10),
+    );
 
     // 3. Bluetooth sync branch running short preview loop to completion (clear fault first)
     ctrl.clear_render_error();
     let commands = speaker_bluetooth::TransportCommandQueue::new();
-    run_render_loop(&mut fb, &window, &shell, Some(&bt), &commands, Some(1));
+    run_render_loop(
+        &mut fb,
+        &window,
+        &shell,
+        Some(&bt),
+        &commands,
+        &screen_manager::volume::AmpVolumeCommandQueue::new(),
+        Some(1),
+    );
 
     // 4. run_shell_on with render error
     ctrl.set_render_error("simulated shell render error");
@@ -877,6 +901,11 @@ fn run_render_loop_with_devices_polls_rotary_encoder_and_faults_gracefully() {
     let (enc, enc_mock) = EncoderDevice::new_mocked();
     enc_mock.simulate_rotation(speaker_hardware::RotationDirection::Clockwise, 2);
     let commands = TransportCommandQueue::new();
+    // Encoder volume is executed by the internal amp-volume worker (mock
+    // client because the framebuffer backend is mocked); wire the same queue
+    // it receives.
+    let amp_commands = screen_manager::volume::AmpVolumeCommandQueue::new();
+    shell.wire_amp_volume(&amp_commands);
 
     run_render_loop_with_devices(
         &mut fb,
@@ -884,6 +913,7 @@ fn run_render_loop_with_devices_polls_rotary_encoder_and_faults_gracefully() {
         &shell,
         None,
         &commands,
+        &amp_commands,
         Some(1),
         None,
         Some(&enc),
@@ -927,28 +957,9 @@ fn bt_monitor_state_commands_settle_and_commit() {
     ));
     assert_eq!(state.keep_alive_interval(), BT_KEEP_ALIVE);
 
-    // Volume and Mute commands arm pcm_settle and update mock PCM state.
-    commands.push(TransportCommand::SetVolume(64));
-    assert!(state.poll_tick(&bt, &shared, &commands));
-    assert_eq!(bt.audio_pcms().unwrap()[0].volume_percent, Some(64));
-
-    commands.push(TransportCommand::SetMute(true));
-    assert!(state.poll_tick(&bt, &shared, &commands));
-    assert!(bt.audio_pcms().unwrap()[0].muted);
-
-    // Verify SettleKind::Volume suppresses mismatched PCM volume/mute until caught up or expired.
-    let vol_settle = SettleWindow {
-        kind: SettleKind::Volume {
-            target_pct: Some(80),
-            target_muted: false,
-        },
-        started: Instant::now(),
-    };
-    let stale_pcm = &bt.audio_pcms().unwrap()[0];
-    assert!(vol_settle.suppresses_pcm(stale_pcm));
-    mock.set_pcm_volume_state(80, false);
-    let caught_up_pcm = &bt.audio_pcms().unwrap()[0];
-    assert!(!vol_settle.suppresses_pcm(caught_up_pcm));
+    // (Volume/mute commands no longer exist on the Bluetooth transport: the
+    // screen routes them to the dedicated `amp-volume` worker instead, which
+    // is covered by the amp-volume integration tests.)
 
     // Fault injection on transport commands logs warning without panicking.
     mock.set_fault(Some("dbus transport fault".into()));
@@ -977,6 +988,7 @@ fn bt_monitor_state_commands_settle_and_commit() {
             pcm: None,
             details: Some(screen_manager::ui::BtLinkDetails::default()),
             cover: Some(None),
+            amp_volume: None,
         },
     );
     let recovered = poisoned

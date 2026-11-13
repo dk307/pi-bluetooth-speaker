@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
+use crate::AmpError;
 use anyhow::Context;
 use tempfile::NamedTempFile;
 use tracing::debug;
@@ -25,7 +26,14 @@ impl StateFile {
 
     /// Load state from file. Returns error if file missing or corrupt.
     pub fn load(&self) -> AmpResult<AmpState> {
-        let file = File::open(&self.path).context("open state file")?;
+        let file = match File::open(&self.path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                debug!(path = %self.path.display(), "State file not found, returning default");
+                return Ok(AmpState::default());
+            }
+            Err(e) => return Err(AmpError::Io(e)),
+        };
         let reader = BufReader::new(file);
         let state: AmpState = serde_json::from_reader(reader).context("deserialize state")?;
         debug!(path = %self.path.display(), ?state, "Loaded amp state");

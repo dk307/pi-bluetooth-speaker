@@ -549,6 +549,8 @@ pub struct ShellInit {
     pub bt: Option<speaker_bluetooth::BluetoothDevice>,
     /// Queue bridging render-thread transport callbacks to the `bt-monitor` worker.
     pub commands: speaker_bluetooth::TransportCommandQueue,
+    /// Queue bridging render-thread volume/mute actions to the `amp-volume` worker.
+    pub amp_commands: crate::volume::AmpVolumeCommandQueue,
 }
 
 #[cfg(feature = "ui")]
@@ -576,6 +578,10 @@ pub fn init_shell_with_config(
     let shell = AppShell::new(main_window);
     shell.apply_config(config);
     let commands = speaker_bluetooth::TransportCommandQueue::new();
+    // Screen volume/mute always targets the amp, independent of Bluetooth
+    // presence, so the queue is wired unconditionally.
+    let amp_commands = crate::volume::AmpVolumeCommandQueue::new();
+    shell.wire_amp_volume(&amp_commands);
     let maybe_bt = if mocked_device {
         let (mock_bt, _) = speaker_bluetooth::BluetoothDevice::new_mocked();
         apply_initial_bt_state(&shell, &mock_bt);
@@ -605,6 +611,7 @@ pub fn init_shell_with_config(
         shell,
         bt: maybe_bt,
         commands,
+        amp_commands,
     }
 }
 
@@ -649,13 +656,16 @@ pub struct BtSharedUpdate {
     pub pcm: Option<speaker_bluetooth::BlueAlsaPcm>,
     /// Bluetooth connection details for the details screen, if they changed.
     pub details: Option<crate::ui::BtLinkDetails>,
-    /// Cover art delta: outer `Some` = cover state changed; inner `Some` = decoded
+    /// Cover art delta: outer `Some` = cover state changed; inner`Some` = decoded
     /// pixel buffer to display, inner `None` = clear the displayed cover art.
     /// Carried as a `SharedPixelBuffer` (which is `Send + Sync`) rather than a
     /// `slint::Image` (which is not `Send`): the expensive decode/upscale happens
     /// on the worker, and the render thread only wraps the buffer in an image.
     // The three cover states (unchanged / clear / show buffer) are intentional.
     pub cover: Option<Option<CoverPixelBuffer>>,
+    /// Authoritative amp level/mute snapshot, if it changed since the last
+    /// publish (pushed by the dedicated `amp-volume` worker).
+    pub amp_volume: Option<crate::volume::AmpVolumeState>,
 }
 
 /// Alias for the cross-thread pixel buffer backing cover art.
@@ -714,13 +724,6 @@ pub enum SettleKind {
         /// Target position (ms) the shell scrubbed the progress bar to.
         target_ms: u32,
     },
-    /// Suppress PCM snapshots that have not yet converged to the target volume or mute state.
-    Volume {
-        /// Target volume percentage (`0..=100`), if a volume change was issued.
-        target_pct: Option<u8>,
-        /// Target mute state expected after the command.
-        target_muted: bool,
-    },
 }
 
 /// A settle window during which conflicting snapshots are suppressed.
@@ -753,32 +756,6 @@ impl SettleWindow {
                 (i64::from(pb.position_ms) - i64::from(*target_ms)).abs()
                     > i64::from(BT_SEEK_STALE_TOLERANCE_MS)
             }
-            SettleKind::Volume { .. } => false,
-        }
-    }
-
-    /// Reports whether `pcm` still conflicts with an optimistic volume or mute
-    /// update protected by this settle window.
-    #[must_use]
-    pub fn suppresses_pcm(&self, pcm: &speaker_bluetooth::BlueAlsaPcm) -> bool {
-        if self.started.elapsed() >= BT_COMMAND_SETTLE {
-            return false;
-        }
-        match &self.kind {
-            SettleKind::Volume {
-                target_pct,
-                target_muted,
-            } => {
-                if pcm.muted != *target_muted {
-                    return true;
-                }
-                if let (Some(target), Some(actual)) = (target_pct, pcm.volume_percent) {
-                    actual.abs_diff(*target) > 1
-                } else {
-                    false
-                }
-            }
-            SettleKind::Toggle { .. } | SettleKind::Seek { .. } => false,
         }
     }
 }
@@ -940,7 +917,6 @@ pub struct BtMonitorState {
     last_details: Option<crate::ui::BtLinkDetails>,
     cover: CoverState,
     settle: Option<SettleWindow>,
-    pcm_settle: Option<SettleWindow>,
 }
 
 #[cfg(all(feature = "ui", feature = "test-util"))]
@@ -979,7 +955,7 @@ impl BtMonitorState {
 #[cfg(feature = "ui")]
 impl BtMonitorState {
     /// Arms the optimistic-UI [`SettleWindow`] when a command batch contains a
-    /// `TogglePlayPause`, `Seek`, `SetVolume`, or `SetMute` command.
+    /// `TogglePlayPause` or `Seek` command.
     fn arm_settle_for_batch(&mut self, drained: &[speaker_bluetooth::TransportCommand]) {
         // Play/pause flips the shell's status indicator and seek scrubs the
         // progress bar, both optimistically ahead of peer confirmation. A
@@ -1011,30 +987,6 @@ impl BtMonitorState {
                 started: Instant::now(),
             });
         }
-
-        let mut target_pct = None;
-        let mut target_muted = None;
-        for c in drained {
-            match c {
-                speaker_bluetooth::TransportCommand::SetVolume(pct) => {
-                    target_pct = Some(*pct);
-                    target_muted = Some(false);
-                }
-                speaker_bluetooth::TransportCommand::SetMute(muted) => {
-                    target_muted = Some(*muted);
-                }
-                _ => {}
-            }
-        }
-        if target_pct.is_some() || target_muted.is_some() {
-            self.pcm_settle = Some(SettleWindow {
-                kind: SettleKind::Volume {
-                    target_pct,
-                    target_muted: target_muted.unwrap_or(false),
-                },
-                started: Instant::now(),
-            });
-        }
     }
 
     /// Executes a single [`speaker_bluetooth::TransportCommand`] against `bt`,
@@ -1046,13 +998,13 @@ impl BtMonitorState {
         // A failed command is logged (never silently dropped) so operators can
         // diagnose why the authoritative state failed to reconcile the
         // optimistic UI flip; the next authoritative publish corrects the UI.
+        // Volume and mute commands are executed by the dedicated `amp-volume`
+        // worker against `audio-manager`, never by the Bluetooth transport.
         if let Err(e) = match command {
             speaker_bluetooth::TransportCommand::TogglePlayPause => bt.player_toggle().map(|_| ()),
             speaker_bluetooth::TransportCommand::NextTrack => bt.player_next(),
             speaker_bluetooth::TransportCommand::PreviousTrack => bt.player_previous(),
             speaker_bluetooth::TransportCommand::Seek(pos) => bt.player_seek(pos),
-            speaker_bluetooth::TransportCommand::SetVolume(pct) => bt.set_volume(pct),
-            speaker_bluetooth::TransportCommand::SetMute(muted) => bt.set_mute(muted),
         } {
             tracing::warn!(error = %e, "Bluetooth transport command failed");
         }
@@ -1065,14 +1017,6 @@ impl BtMonitorState {
         bt: &speaker_bluetooth::BluetoothDevice,
         update: &mut BtSharedUpdate,
     ) {
-        if self
-            .pcm_settle
-            .as_ref()
-            .is_some_and(|w| w.started.elapsed() >= BT_COMMAND_SETTLE)
-        {
-            self.pcm_settle = None;
-            self.last_pcms = None;
-        }
         let snapshot = match bt.link_snapshot() {
             Ok(s) => s,
             Err(e) => {
@@ -1082,17 +1026,9 @@ impl BtMonitorState {
         };
         if self.last_pcms.as_ref() != Some(&snapshot.pcms) {
             if let Some(active) = speaker_bluetooth::select_active_pcm(&snapshot.pcms) {
-                let settling = self
-                    .pcm_settle
-                    .as_ref()
-                    .is_some_and(|w| w.suppresses_pcm(active));
-                if !settling {
-                    update.pcm = Some(active.clone());
-                    self.last_pcms = Some(snapshot.pcms.clone());
-                }
-            } else {
-                self.last_pcms = Some(snapshot.pcms.clone());
+                update.pcm = Some(active.clone());
             }
+            self.last_pcms = Some(snapshot.pcms.clone());
         }
         let preferred = self.last_pb.as_ref().and_then(|pb| pb.device_address);
         let details = crate::ui::BtLinkDetails::select(&snapshot, preferred);
@@ -1118,6 +1054,7 @@ impl BtMonitorState {
             || update.pcm.is_some()
             || update.details.is_some()
             || update.cover.is_some()
+            || update.amp_volume.is_some()
         {
             // A poisoned mutex is recovered (not silently dropped): the snapshot
             // was already computed and the dedup state advanced, so losing it
@@ -1137,6 +1074,9 @@ impl BtMonitorState {
             }
             if update.cover.is_some() {
                 lock.cover = update.cover;
+            }
+            if update.amp_volume.is_some() {
+                lock.amp_volume = update.amp_volume;
             }
         }
     }
@@ -1246,6 +1186,7 @@ pub fn run_render_loop(
     shell: &AppShell,
     maybe_bt: Option<&speaker_bluetooth::BluetoothDevice>,
     commands: &speaker_bluetooth::TransportCommandQueue,
+    amp_commands: &crate::volume::AmpVolumeCommandQueue,
     preview_secs: Option<u64>,
 ) {
     let touch_dev = crate::ui::TouchInputDevice::auto_discover().ok();
@@ -1269,6 +1210,7 @@ pub fn run_render_loop(
         shell,
         maybe_bt,
         commands,
+        amp_commands,
         preview_secs,
         touch_dev,
         encoder_dev.as_ref(),
@@ -1277,12 +1219,17 @@ pub fn run_render_loop(
 
 /// Runs the UI render loop with explicit touch input device injection.
 #[cfg(feature = "ui")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "explicit peripheral injection seam for hermetic touch integration testing"
+)]
 pub fn run_render_loop_with_input(
     fb: &mut Framebuffer,
     window: &Rc<MinimalSoftwareWindow>,
     shell: &AppShell,
     maybe_bt: Option<&speaker_bluetooth::BluetoothDevice>,
     commands: &speaker_bluetooth::TransportCommandQueue,
+    amp_commands: &crate::volume::AmpVolumeCommandQueue,
     preview_secs: Option<u64>,
     touch_dev: Option<crate::ui::TouchInputDevice>,
 ) {
@@ -1292,6 +1239,7 @@ pub fn run_render_loop_with_input(
         shell,
         maybe_bt,
         commands,
+        amp_commands,
         preview_secs,
         touch_dev,
         None,
@@ -1325,6 +1273,108 @@ fn poll_encoder_input(
     }
 }
 
+/// Joins the `amp-volume` worker, re-raising a worker panic (fail-fast).
+#[cfg(feature = "ui")]
+fn join_amp_volume_worker(amp_worker: std::io::Result<std::thread::JoinHandle<()>>) {
+    match amp_worker {
+        Ok(handle) => {
+            // Propagate a worker panic to this thread: a crashed amp-volume
+            // worker must fail the daemon (fail-fast) rather than leave screen
+            // volume silently unresponsive.
+            if let Err(panic) = handle.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "Failed to spawn amp-volume worker thread; screen volume disabled"
+            );
+        }
+    }
+}
+
+/// Spawns the `bt-monitor` worker thread for a live Bluetooth device.
+#[cfg(feature = "ui")]
+fn spawn_bt_monitor_worker(
+    bt: &speaker_bluetooth::BluetoothDevice,
+    shared: &Arc<Mutex<BtSharedUpdate>>,
+    commands: &speaker_bluetooth::TransportCommandQueue,
+    running: &Arc<AtomicBool>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let bt = bt.clone();
+    let shared = Arc::clone(shared);
+    let commands = commands.clone();
+    let running = Arc::clone(running);
+    std::thread::Builder::new()
+        .name("bt-monitor".into())
+        .spawn(move || bt_monitor_loop(&bt, &shared, &commands, &running))
+}
+
+/// Spawns the dedicated `amp-volume` worker thread.
+///
+/// The worker always runs: in mocked sessions (host tests, splash previews)
+/// against a mock client so nothing touches the host system bus; in live
+/// sessions against the real `audio-manager` D-Bus API. The choice is keyed on
+/// the framebuffer backend, not on Bluetooth availability: a live appliance
+/// whose Bluetooth D-Bus connection failed at startup must still drive the real
+/// amplifier, never a silent mock.
+#[cfg(feature = "ui")]
+fn spawn_amp_volume_worker(
+    shared: &Arc<Mutex<BtSharedUpdate>>,
+    running: &Arc<AtomicBool>,
+    amp_commands: &crate::volume::AmpVolumeCommandQueue,
+    mocked: bool,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let shared = Arc::clone(shared);
+    let running = Arc::clone(running);
+    let amp_commands = amp_commands.clone();
+    std::thread::Builder::new()
+        .name("amp-volume".into())
+        .spawn(move || {
+            if mocked {
+                // Mocked sessions (host tests, splash previews) get a mock
+                // client seeded at 50 % unmuted; no system-bus call.
+                let (client, _ctrl) = crate::volume::AmpVolumeClient::new_mocked(
+                    crate::volume::AmpVolumeState::new(50, false),
+                );
+                crate::volume::run_worker(&client, &shared, &amp_commands, &running);
+            } else {
+                // Retry connection establishment with bounded backoff while
+                // the session runs: a temporarily unreachable system bus at
+                // startup must not kill screen volume control permanently.
+                let mut backoff = Duration::from_secs(1);
+                loop {
+                    if !running.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    match crate::volume::AmpVolumeClient::new_blocking() {
+                        Ok(client) => {
+                            crate::volume::run_worker(&client, &shared, &amp_commands, &running);
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                backoff_ms = backoff.as_millis() as u64,
+                                "System D-Bus unavailable; retrying amp-volume connection"
+                            );
+                            // Sleep in slices so shutdown is never delayed by
+                            // a long backoff.
+                            let mut remaining = backoff;
+                            while !remaining.is_zero() && running.load(Ordering::Relaxed) {
+                                let slice = remaining.min(Duration::from_millis(200));
+                                std::thread::sleep(slice);
+                                remaining = remaining.saturating_sub(slice);
+                            }
+                            backoff = (backoff * 2).min(Duration::from_secs(60));
+                        }
+                    }
+                }
+            }
+        })
+}
+
 /// Runs the UI render loop with explicit touch and rotary encoder device injection.
 #[cfg(feature = "ui")]
 #[expect(
@@ -1337,6 +1387,7 @@ pub fn run_render_loop_with_devices(
     shell: &AppShell,
     maybe_bt: Option<&speaker_bluetooth::BluetoothDevice>,
     commands: &speaker_bluetooth::TransportCommandQueue,
+    amp_commands: &crate::volume::AmpVolumeCommandQueue,
     preview_secs: Option<u64>,
     mut touch_dev: Option<crate::ui::TouchInputDevice>,
     encoder_dev: Option<&speaker_hardware::EncoderDevice>,
@@ -1351,18 +1402,20 @@ pub fn run_render_loop_with_devices(
     let shared_state_worker = Arc::clone(&shared_state);
     let commands_worker = commands.clone();
 
+    let amp_worker = spawn_amp_volume_worker(
+        &shared_state,
+        &bg_running,
+        amp_commands,
+        !fb.is_hardware_panel(),
+    );
+
     let bt_worker = maybe_bt.map(|bt| {
-        let bt = bt.clone();
-        std::thread::Builder::new()
-            .name("bt-monitor".into())
-            .spawn(move || {
-                bt_monitor_loop(
-                    &bt,
-                    &shared_state_worker,
-                    &commands_worker,
-                    &bg_running_worker,
-                );
-            })
+        spawn_bt_monitor_worker(
+            bt,
+            &shared_state_worker,
+            &commands_worker,
+            &bg_running_worker,
+        )
     });
 
     let mut loop_timing = FrameLoopTiming::default();
@@ -1437,6 +1490,7 @@ pub fn run_render_loop_with_devices(
 
     loop_timing.report();
     bg_running.store(false, Ordering::Relaxed);
+    join_amp_volume_worker(amp_worker);
     if let Some(worker) = bt_worker {
         // Propagate a worker panic to this thread: a crashed bt-monitor must fail
         // the daemon (fail-fast) rather than leave playback state silently stale.
@@ -1488,6 +1542,9 @@ fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpda
                 Some(buffer) => shell.set_cover_image(slint::Image::from_rgba8(buffer)),
                 None => shell.set_has_cover_art(false),
             }
+        }
+        if let Some(amp) = lock.amp_volume.take() {
+            shell.apply_amp_volume(&amp);
         }
     }
 }
@@ -1688,6 +1745,7 @@ pub fn run_shell_on_with_config(
         shell,
         bt,
         commands,
+        amp_commands,
     } = init_shell_with_config(main_window, !fb.is_hardware_panel(), tab, config);
     if let Err(e) = shell.window().show() {
         report_display(
@@ -1702,7 +1760,15 @@ pub fn run_shell_on_with_config(
         return;
     }
 
-    run_render_loop(fb, &window, &shell, bt.as_ref(), &commands, preview_secs);
+    run_render_loop(
+        fb,
+        &window,
+        &shell,
+        bt.as_ref(),
+        &commands,
+        &amp_commands,
+        preview_secs,
+    );
 }
 
 /// Executes the core appliance daemon with parsed options.

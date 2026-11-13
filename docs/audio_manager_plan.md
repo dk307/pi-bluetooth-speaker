@@ -1,7 +1,11 @@
 # Audio Manager Plan — Hardware Volume & Mute Owner
 
-> Status: **implemented & deployed 2026-11-10** (`services/audio-manager` +
-> `crates/amp_curve`). D-Bus API verified live on the Pi: `SetLevel 50` →
+> Status: **implemented & deployed 2026-11-10** (`services/audio-manager`).
+> **Update 2026-11-12 (PR #58):** the standalone `crates/amp_curve` crate was
+> folded away — `PERCENT_TO_RAW` now lives in `speaker-hardware::amp` (the
+> amp's register authority) and the AVRCP rescale in
+> `speaker-bluetooth::transport::avrcp_avg_to_percent`. References below are
+> historical. D-Bus API verified live on the Pi: `SetLevel 50` →
 > Merus raw 125, mute → raw 0, unmute → level restored. bt-manager's
 > `sync_volume` task routes phone volume into it (see
 > `docs/volume_sync_plan.md`, "Final Architecture"). Written 2026-11-09 after

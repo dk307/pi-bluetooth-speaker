@@ -11,7 +11,6 @@ publish = false
 speaker-common = { path = "../../crates/common" }
 speaker-hardware = { path = "../../crates/hardware" }
 speaker-dsp = { path = "../../crates/dsp" }
-amp-curve = { workspace = true }
 rppal = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 zbus = { workspace = true, features = ["tokio", "blocking-api"] }
@@ -31,6 +30,7 @@ config = { workspace = true }
 sd-notify = { version = "=0.1.1" }
 
 [dev-dependencies]
+futures-util = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 zbus = { workspace = true, features = ["tokio", "blocking-api"] }
 tempfile = { workspace = true }

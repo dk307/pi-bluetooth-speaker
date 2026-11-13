@@ -67,7 +67,8 @@ board) the control GPIOs. Volume ownership already lives in audio-manager
    No ALSA mixer control exists anymore to fight with.
 5. **Reuse, no parallel register tables.** Register constants, error bitflags
    (`AmpErrorFlags`), address newtypes (`AmpI2cAddress`) come from
-   `crates/hardware::amp`; the volume curve comes from `crates/amp_curve`.
+   `crates/hardware::amp`; the volume curve lives there too (folded in from
+   the former `crates/amp_curve` in PR #58).
    **Note (audit):** `AmpDevice` currently exposes only read operations and 7
    monitor/handler register constants; the volume (`0x40`/`0x41`), serial-mute
    (`0x36`), and format (`0x35`) constants plus all write operations are added

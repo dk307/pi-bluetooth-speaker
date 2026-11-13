@@ -4,8 +4,10 @@
 
 use std::time::Duration;
 
-use audio_manager::amp_controller::{AmpCommand, AmpCommandKind};
-use audio_manager::dsp_watch::{EmittedLifecycle, LifecycleTracker, run};
+use audio_manager::{
+    amp_controller::{AmpCommand, AmpCommandKind},
+    dsp_watch::{EmittedLifecycle, LifecycleTracker, MIN_POLL_INTERVAL, poll_interval, run},
+};
 use speaker_dsp::{DspDevice, DspDeviceMock, ProcessingState};
 
 // ---------------------------------------------------------------- tracker
@@ -366,7 +368,7 @@ fn poll_interval_halves_while_running_and_floors_at_minimum() {
     );
     assert_eq!(
         poll_interval(Duration::from_millis(10), EmittedLifecycle::Stopped),
-        audio_manager::dsp_watch::MIN_POLL_INTERVAL,
+        MIN_POLL_INTERVAL,
         "idle below MIN floor: clamped to MIN for Stopped too"
     );
 
@@ -378,7 +380,7 @@ fn poll_interval_halves_while_running_and_floors_at_minimum() {
     // Running below the floor: clamped to MIN.
     assert_eq!(
         poll_interval(Duration::from_millis(100), EmittedLifecycle::Running),
-        audio_manager::dsp_watch::MIN_POLL_INTERVAL,
+        MIN_POLL_INTERVAL,
         "half-of-idle below the floor must clamp to MIN_POLL_INTERVAL"
     );
 }
@@ -472,4 +474,224 @@ async fn loop_reissues_starting_while_running_until_confirmed() {
         .await
         .expect("watcher exits on channel close")
         .unwrap();
+}
+
+#[tokio::test]
+async fn loop_handles_running_to_paused_transition() {
+    let LoopFixture {
+        device,
+        mock,
+        cmd_tx,
+        mut cmd_rx,
+    } = loop_fixture();
+    mock.set_state(ProcessingState::Running);
+    let task = tokio::spawn(run(device, cmd_tx.clone(), TEST_INTERVAL));
+
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("StreamStarting")
+        .unwrap();
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStarting));
+
+    // Transition to Paused should emit StreamStopping
+    mock.set_state(ProcessingState::Paused);
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("StreamStopping")
+        .unwrap();
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStopping));
+
+    drop(cmd_tx);
+    drop(cmd_rx);
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("watcher must exit")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn loop_handles_paused_to_running_transition() {
+    let LoopFixture {
+        device,
+        mock,
+        cmd_tx,
+        mut cmd_rx,
+    } = loop_fixture();
+    mock.set_state(ProcessingState::Paused);
+    let task = tokio::spawn(run(device, cmd_tx.clone(), TEST_INTERVAL));
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(
+        received(&mut cmd_rx).await.is_empty(),
+        "no edges from Paused start"
+    );
+
+    // Transition to Running
+    mock.set_state(ProcessingState::Running);
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("StreamStarting")
+        .unwrap();
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStarting));
+
+    drop(cmd_tx);
+    drop(cmd_rx);
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("watcher must exit")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn loop_handles_inactive_to_running_transition() {
+    let LoopFixture {
+        device,
+        mock,
+        cmd_tx,
+        mut cmd_rx,
+    } = loop_fixture();
+    mock.set_state(ProcessingState::Inactive);
+    let task = tokio::spawn(run(device, cmd_tx.clone(), TEST_INTERVAL));
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(
+        received(&mut cmd_rx).await.is_empty(),
+        "no edges from Inactive start"
+    );
+
+    // Transition to Running
+    mock.set_state(ProcessingState::Running);
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("StreamStarting")
+        .unwrap();
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStarting));
+
+    drop(cmd_tx);
+    drop(cmd_rx);
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("watcher must exit")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn loop_handles_unknown_state_as_stopped() {
+    let LoopFixture {
+        device,
+        mock,
+        cmd_tx,
+        mut cmd_rx,
+    } = loop_fixture();
+    mock.set_state(ProcessingState::Unknown("test".into()));
+    let task = tokio::spawn(run(device, cmd_tx.clone(), TEST_INTERVAL));
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(
+        received(&mut cmd_rx).await.is_empty(),
+        "no edges from Unknown state"
+    );
+
+    // Unknown -> Running should emit Starting
+    mock.set_state(ProcessingState::Running);
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("StreamStarting")
+        .unwrap();
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStarting));
+
+    drop(cmd_tx);
+    drop(cmd_rx);
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("watcher must exit")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn loop_multiple_start_stop_cycles() {
+    let LoopFixture {
+        device,
+        mock,
+        cmd_tx,
+        mut cmd_rx,
+    } = loop_fixture();
+    mock.set_state(ProcessingState::Running);
+    let task = tokio::spawn(run(device, cmd_tx.clone(), TEST_INTERVAL));
+
+    // Cycle 1: Running -> Starting
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("StreamStarting")
+        .unwrap();
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStarting));
+
+    // Running -> Inactive -> Stopping
+    mock.set_state(ProcessingState::Inactive);
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("StreamStopping")
+        .unwrap();
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStopping));
+
+    // Inactive -> Running -> Starting
+    mock.set_state(ProcessingState::Running);
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("StreamStarting")
+        .unwrap();
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStarting));
+
+    // Running -> Inactive -> Stopping
+    mock.set_state(ProcessingState::Inactive);
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("StreamStopping")
+        .unwrap();
+    assert!(matches!(cmd.kind, AmpCommandKind::StreamStopping));
+
+    drop(cmd_tx);
+    drop(cmd_rx);
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("watcher must exit")
+        .unwrap();
+}
+
+#[test]
+fn poll_interval_adaptive_running() {
+    let idle = Duration::from_millis(500);
+    let running = poll_interval(idle, EmittedLifecycle::Running);
+    assert_eq!(
+        running,
+        Duration::from_millis(250),
+        "half interval while running"
+    );
+}
+
+#[test]
+fn poll_interval_adaptive_stopped() {
+    let idle = Duration::from_millis(500);
+    let stopped = poll_interval(idle, EmittedLifecycle::Stopped);
+    assert_eq!(stopped, idle, "full interval while stopped");
+}
+
+#[test]
+fn poll_interval_floor_at_min() {
+    let idle = Duration::from_millis(10);
+    let running = poll_interval(idle, EmittedLifecycle::Running);
+    assert_eq!(running, MIN_POLL_INTERVAL, "floor at 50ms");
+}
+
+#[test]
+fn lifecycle_tracker_start_retry_counter() {
+    let mut t = LifecycleTracker::new();
+    // Start in Running, emits Starting
+    assert_eq!(
+        t.step(&ProcessingState::Running),
+        Some(AmpCommandKind::StreamStarting)
+    );
+    // Stay in Running - should reset retry counter
+    assert_eq!(t.step(&ProcessingState::Running), None);
+    assert_eq!(t.lifecycle(), EmittedLifecycle::Running);
 }

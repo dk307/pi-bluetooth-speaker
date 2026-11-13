@@ -34,7 +34,10 @@ use crate::error::{AmpError, AmpResult};
 /// Production uses `RealAmpBackend`; tests inject `MockAmpBackend`.
 // `async_trait` wraps each async method in a pinned `Future`, which is itself
 // `#[must_use]`; clippy flags the generated wrapper as double-must-use.
-#[allow(clippy::double_must_use)]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait injects #[must_use] on every desugared boxed-future signature"
+)]
 #[async_trait]
 pub trait AmpBackend: Send + Sync {
     /// Write the complete amp state (level + mute) to hardware.
@@ -253,6 +256,7 @@ impl AmpBackend for RealAmpBackend {
 struct MockState {
     state: AmpState,
     last_write: Option<AmpState>,
+    writes: Vec<AmpState>,
     should_fail_write: bool,
     should_fail_read: bool,
     should_fail_validate: bool,
@@ -326,6 +330,12 @@ impl MockAmpCtrl {
         self.inner.lock().unwrap().state
     }
 
+    /// Get all states that were written.
+    #[must_use]
+    pub fn all_writes(&self) -> Vec<AmpState> {
+        self.inner.lock().unwrap().writes.clone()
+    }
+
     /// Set the mocked state directly (for test setup).
     pub fn set_state(&self, state: AmpState) {
         self.inner.lock().unwrap().state = state;
@@ -375,6 +385,7 @@ impl AmpBackend for MockAmpBackend {
         let applied = *state;
         guard.state = applied;
         guard.last_write = Some(applied);
+        guard.writes.push(applied);
         // Mirror the real backend: write_state applies the serial mute bit.
         guard.serial_muted = state.muted;
         guard.serial_mute_calls += 1;

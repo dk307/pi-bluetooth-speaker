@@ -29,14 +29,14 @@ use anyhow::Context;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use speaker_hardware::{AmpFault, LimiterSlew};
+use speaker_hardware::{AmpFault, I2sFormat, LimiterSlew};
 
 use crate::amp_backend::AmpBackend;
 use crate::amp_gpio::AmpGpio;
 use crate::amp_state::AmpState;
 use crate::error::AmpResult;
 use crate::state_file::StateFile;
-use amp_curve::PERCENT_TO_RAW;
+use speaker_hardware::amp::PERCENT_TO_RAW;
 
 /// Production PLL-lock handshake timeout (plan §3.1: ≤200 ms one-shot).
 ///
@@ -518,7 +518,13 @@ impl AmpController {
     /// # Errors
     /// Returns [`AmpError`] on bus faults.
     async fn reinit_registers(&mut self) -> AmpResult<()> {
-        self.device.write_i2s_format_async(0).await?;
+        // Kernel-parity init sequence (ma120x0p probe()): the error-history
+        // clear pulse (0x2D bit 2, 0→1→0) comes FIRST so boot-time faults
+        // latched while the bus was idle never masquerade as fresh faults.
+        self.device.clear_latched_errors_async().await?;
+        self.device
+            .write_i2s_format_async(I2sFormat::StandardI2s)
+            .await?;
         self.device.enable_audio_processor_async().await?;
         self.device.enable_limiter_async().await?;
         // Kernel-parity limiter timing: fast attack, slow release

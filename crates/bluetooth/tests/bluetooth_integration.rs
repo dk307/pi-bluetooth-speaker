@@ -2453,6 +2453,88 @@ async fn reconciler_real_dbus_wire_and_bluealsa_fallback_integration() {
     assert_eq!(*calls.connected.lock().unwrap(), 1);
 }
 
+/// Builds one `org.bluealsa.PCM1` object for the resolver regression tests.
+fn pcm_object(
+    path: &str,
+    running: bool,
+) -> (
+    OwnedObjectPath,
+    HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>,
+) {
+    let mut props = HashMap::new();
+    props.insert(
+        "Device".to_string(),
+        to_val(OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF").unwrap()),
+    );
+    props.insert("Transport".to_string(), to_val("A2DP-sink"));
+    props.insert("Mode".to_string(), to_val("source"));
+    props.insert("Running".to_string(), to_val(running));
+    props.insert("Channels".to_string(), to_val(2u8));
+    props.insert("Sampling".to_string(), to_val(48000u32));
+    props.insert("Volume".to_string(), to_val(vec![0x50u8, 0x50u8]));
+    let mut ifaces = HashMap::new();
+    ifaces.insert(iface("org.bluealsa.PCM1"), props);
+    (OwnedObjectPath::try_from(path).unwrap(), ifaces)
+}
+
+#[test]
+fn reverse_writes_target_a2dp_sink_pcm_only() {
+    // Regression (CodeRabbit): reverse amp-level writes must never land on a
+    // running HFP PCM during a call — the resolvers filter candidates to A2DP
+    // sink PCMs (both `a2dpsnk` and `a2dpsink` path spellings) before
+    // selection, and report no-active-player when only HFP exists.
+    let mut call_objects: ManagedObjects = HashMap::new();
+    let (hfp_path, hfp_ifaces) = pcm_object(
+        "/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/hfpag/source",
+        true,
+    );
+    call_objects.insert(hfp_path, hfp_ifaces);
+    assert!(
+        DbusClient::resolve_pcm_volume_target(&call_objects, 50)
+            .unwrap_err()
+            .is_no_active_player(),
+        "a running HFP PCM must never receive the music volume write"
+    );
+    assert!(
+        DbusClient::resolve_pcm_mute_target(&call_objects, true)
+            .unwrap_err()
+            .is_no_active_player()
+    );
+
+    // A running HFP PCM plus a paused A2DP PCM: the A2DP PCM wins (first
+    // available A2DP stream), never the call stream.
+    let mut mixed_objects = call_objects.clone();
+    let (a2dp_path, a2dp_ifaces) = pcm_object(
+        "/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/a2dpsink/source",
+        false,
+    );
+    mixed_objects.insert(a2dp_path, a2dp_ifaces);
+    let (target, _) = DbusClient::resolve_pcm_volume_target(&mixed_objects, 40).unwrap();
+    assert!(
+        target.contains("a2dp"),
+        "volume must target the A2DP PCM, got {target}"
+    );
+
+    // A running A2DP PCM outranks a paused one.
+    let mut two_a2dp = mixed_objects;
+    let a2dp_key =
+        OwnedObjectPath::try_from("/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/a2dpsink/source")
+            .unwrap();
+    if let Some(ifaces) = two_a2dp.get_mut(&a2dp_key) {
+        for (key, value) in ifaces
+            .get_mut(&iface("org.bluealsa.PCM1"))
+            .unwrap()
+            .iter_mut()
+        {
+            if key == "Running" {
+                *value = to_val(true);
+            }
+        }
+    }
+    let (target, _) = DbusClient::resolve_pcm_volume_target(&two_a2dp, 60).unwrap();
+    assert!(target.contains("a2dpsink"));
+}
+
 #[test]
 fn dbus_pcm_volume_and_mute_target_resolution_and_mock_controls() {
     use speaker_bluetooth::{
@@ -2504,7 +2586,8 @@ fn dbus_pcm_volume_and_mute_target_resolution_and_mock_controls() {
     pcm_props.insert("Volume".to_string(), to_val(vec![0x7Fu8, 0x7Fu8]));
     pcm_ifaces.insert(iface("org.bluealsa.PCM1"), pcm_props);
     bluealsa_objects.insert(
-        OwnedObjectPath::try_from("/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/hfpag/source").unwrap(),
+        OwnedObjectPath::try_from("/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/a2dpsnk/source")
+            .unwrap(),
         pcm_ifaces,
     );
 
