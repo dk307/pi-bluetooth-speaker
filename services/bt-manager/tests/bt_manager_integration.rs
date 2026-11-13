@@ -2,8 +2,10 @@
 
 use bt_manager::agent::AgentCapabilityMode;
 use bt_manager::daemon::{
-    BtManagerOptions, is_audio_manager_amp_signal, is_bluealsa_volume_signal, parse_cli_args_from,
-    parse_interval_secs, parse_ticks, run_app, run_tick,
+    BtManagerOptions, parse_cli_args_from, parse_interval_secs, parse_ticks, run_app, run_tick,
+};
+use bt_manager::volume_sync::{
+    is_audio_manager_amp_signal, is_bluealsa_volume_signal, volume_bytes_from_value,
 };
 use speaker_bluetooth::BluetoothDevice;
 use speaker_common::diag::CliParse;
@@ -343,7 +345,6 @@ fn bluealsa_volume_signal_predicate() {
 
 #[test]
 fn volume_bytes_from_value_parses_scalar_and_rejects_garbage() {
-    use bt_manager::daemon::volume_bytes_from_value;
     use zbus::zvariant::Value;
 
     // Scalar byte (`BlueALSA` may emit a single `y` for mono transports)

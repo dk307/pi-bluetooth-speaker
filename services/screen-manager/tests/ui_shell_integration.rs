@@ -2,6 +2,20 @@
 
 /// Simulates the `bt-monitor` worker: drains queued transport commands,
 /// executes them on the device, and applies authoritative state to the UI.
+/// Simulates the `amp-volume` worker: drains amp commands, applies them to the
+/// mocked audio-manager client, and publishes the authoritative read-back.
+#[cfg(feature = "ui")]
+fn drain_amp_commands(
+    amp_commands: &screen_manager::volume::AmpVolumeCommandQueue,
+    client: &screen_manager::volume::AmpVolumeClient,
+    shell: &screen_manager::ui::AppShell,
+) {
+    for command in amp_commands.drain() {
+        let state = client.apply(command).expect("mock amp write");
+        shell.apply_amp_volume(&state);
+    }
+}
+
 #[cfg(feature = "ui")]
 fn drain_worker_commands(
     bt: &speaker_bluetooth::BluetoothDevice,
@@ -22,12 +36,10 @@ fn drain_worker_commands(
             speaker_bluetooth::TransportCommand::Seek(pos) => {
                 let _ = bt.player_seek(pos);
             }
-            speaker_bluetooth::TransportCommand::SetVolume(pct) => {
-                let _ = bt.set_volume(pct);
-            }
-            speaker_bluetooth::TransportCommand::SetMute(muted) => {
-                let _ = bt.set_mute(muted);
-            }
+            // Volume/mute commands are executed by the dedicated `amp-volume`
+            // worker against `audio-manager`, never on the BT transport.
+            speaker_bluetooth::TransportCommand::SetVolume(_)
+            | speaker_bluetooth::TransportCommand::SetMute(_) => {}
         }
     }
     if let Ok(status) = bt.status() {
@@ -507,7 +519,10 @@ fn ui_shell_cover_art_and_pcm_stream_updates() {
     assert_eq!(shell.window().get_stream_codec(), "LDAC");
     assert_eq!(shell.window().get_stream_sample_rate(), "96 kHz");
     assert_eq!(shell.window().get_stream_bit_depth(), "24-bit");
-    assert_eq!(shell.window().get_volume_value(), 85.0);
+    // PCM volume/mute are phone-owned stream metadata; the shell level and
+    // mute indicator reflect the amp exclusively (apply_amp_volume) and are
+    // untouched by PCM pushes (75 % is the Slint default level).
+    assert_eq!(shell.window().get_volume_value(), 75.0);
     assert!(!shell.window().get_is_muted());
 
     pcm.sampling_rate = 0;
@@ -741,8 +756,9 @@ fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
     shell.set_volume_step_percent(2);
     assert_eq!(shell.volume_step_percent(), 2);
 
-    // 3. Initial PCM seed does NOT pop up the Volume HUD on boot
-    let mut pcm = BlueAlsaPcm {
+    // 3. PCM stream metadata never drives the volume: the level and mute
+    // indicator reflect the amp exclusively (apply_amp_volume).
+    let pcm = BlueAlsaPcm {
         pcm_path: "/org/bluealsa/pcm0".into(),
         device_address: BtAddress::new([1, 2, 3, 4, 5, 6]),
         resolved_name: "Phone".into(),
@@ -755,27 +771,29 @@ fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
         format: "S16_LE".into(),
         volume: Some("L: 64 R: 64".into()),
         volume_percent: Some(50),
-        muted: false,
+        muted: true,
         delay: None,
     };
     shell.apply_pcm_stream(&pcm);
-    assert_eq!(shell.volume(), 50.0);
+    assert_eq!(shell.volume(), 75.0);
+    assert!(!shell.is_volume_hud_visible());
+    assert!(!shell.is_muted());
+
+    // 4. The amp-volume worker publish path drives the shell level and mute.
+    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(64, false));
+    assert_eq!(shell.volume(), 64.0);
+    assert!(!shell.is_muted());
+    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(64, true));
+    assert!(shell.is_muted());
     assert!(
         !shell.is_volume_hud_visible(),
-        "initial startup PCM seed must not pop up the Volume HUD"
+        "worker publish must not pop up the Volume HUD"
     );
 
-    // 4. Subsequent external PCM volume change DOES open the Volume HUD
-    pcm.volume_percent = Some(64);
-    shell.apply_pcm_stream(&pcm);
-    assert_eq!(shell.volume(), 64.0);
-    assert!(
-        shell.is_volume_hud_visible(),
-        "external AVRCP/BlueALSA volume change must open the Volume HUD"
-    );
-    assert!(shell.is_volume_hud_active());
-
-    // Dismiss HUD manually and verify marquee suppression toggles cleanly
+    // Volume HUD user interaction still suppresses marquee scrolling; open it
+    // explicitly since PCM/worker publishes intentionally never auto-open it.
+    shell.show_volume_hud();
+    assert!(shell.is_volume_hud_visible());
     shell.set_marquee_compose_in_rust(true);
     shell.set_track_metadata(
         "A Very Long Track Title That Overflows The Viewport Width",
@@ -805,9 +823,15 @@ fn ui_shell_rotary_encoder_volume_and_mute_integration() {
     let shell = AppShell::new(main_window);
     shell.set_volume(64.0);
 
-    let (bt, _bt_mock) = BluetoothDevice::new_mocked();
+    let (_bt, _bt_mock) = BluetoothDevice::new_mocked();
     let commands = TransportCommandQueue::new();
     shell.wire_bluetooth_transport(&commands);
+    // Encoder volume targets the amp; a mock amp client simulates the worker.
+    let amp_commands = screen_manager::volume::AmpVolumeCommandQueue::new();
+    shell.wire_amp_volume(&amp_commands);
+    let (amp_client, _amp_mock) = screen_manager::volume::AmpVolumeClient::new_mocked(
+        screen_manager::volume::AmpVolumeState::new(64, false),
+    );
 
     let (encoder, enc_mock) = EncoderDevice::new_mocked();
     let mut tracker = EncoderVolumeTracker::seeded(&encoder.read_status().unwrap());
@@ -821,19 +845,19 @@ fn ui_shell_rotary_encoder_volume_and_mute_integration() {
     assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
     assert_eq!(shell.volume(), 70.0);
     assert!(shell.is_volume_hud_visible());
-    drain_worker_commands(&bt, &commands, &shell);
+    drain_amp_commands(&amp_commands, &amp_client, &shell);
     assert_eq!(
-        bt.status().unwrap().pcms[0].volume_percent,
-        Some(70),
-        "rotary encoder CW detents must update BlueALSA PCM volume"
+        amp_client.state().unwrap().level,
+        70,
+        "rotary encoder CW detents must update the amp level"
     );
 
     // Rotate 5 detents CCW (-10% at 2%/detent -> 70% - 10% = 60%)
     enc_mock.simulate_rotation(RotationDirection::CounterClockwise, 5);
     assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
     assert_eq!(shell.volume(), 60.0);
-    drain_worker_commands(&bt, &commands, &shell);
-    assert_eq!(bt.status().unwrap().pcms[0].volume_percent, Some(60));
+    drain_amp_commands(&amp_commands, &amp_client, &shell);
+    assert_eq!(amp_client.state().unwrap().level, 60);
 
     // Press encoder push-switch -> toggles mute on and keeps Volume HUD visible
     enc_mock.set_switch_pressed(true);
@@ -841,17 +865,17 @@ fn ui_shell_rotary_encoder_volume_and_mute_integration() {
     assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
     assert!(shell.is_muted());
     assert!(shell.is_volume_hud_visible());
-    drain_worker_commands(&bt, &commands, &shell);
-    assert!(bt.status().unwrap().pcms[0].muted);
+    drain_amp_commands(&amp_commands, &amp_client, &shell);
+    assert!(amp_client.state().unwrap().muted);
 
     // Turning encoder while muted automatically unmutes and applies step
     enc_mock.simulate_rotation(RotationDirection::Clockwise, 1);
     assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
     assert!(!shell.is_muted());
     assert_eq!(shell.volume(), 62.0);
-    drain_worker_commands(&bt, &commands, &shell);
-    assert!(!bt.status().unwrap().pcms[0].muted);
-    assert_eq!(bt.status().unwrap().pcms[0].volume_percent, Some(62));
+    drain_amp_commands(&amp_commands, &amp_client, &shell);
+    assert!(!amp_client.state().unwrap().muted);
+    assert_eq!(amp_client.state().unwrap().level, 62);
 
     // Equal CW and CCW detents in same poll still refresh HUD visibility
     shell.dismiss_volume_hud();
