@@ -157,9 +157,11 @@ pub struct AmpVolumeClient {
 
 #[derive(Debug)]
 enum AmpVolumeBackend {
-    /// Blocking system-bus proxy; each method call opens on the shared
-    /// connection owned by this worker.
-    Hardware(zbus::blocking::Connection),
+    /// Owned blocking proxy over the system bus, built once when the worker
+    /// starts (`new_owned` keeps the connection alive via its internal Arc).
+    /// Built once instead of per call: the idle poll reads state at 4 Hz, so
+    /// per-call proxy construction would be continuous D-Bus/allocator churn.
+    Hardware(zbus::blocking::Proxy<'static>),
     Mock(Arc<Mutex<MockState>>),
 }
 
@@ -170,8 +172,14 @@ impl AmpVolumeClient {
     /// Returns an error when the system bus is unreachable.
     pub fn new_blocking() -> zbus::Result<Self> {
         let conn = zbus::blocking::Connection::system()?;
+        let proxy = zbus::blocking::Proxy::new_owned(
+            conn,
+            "org.speaker.AudioManager",
+            "/org/speaker/amp",
+            "org.speaker.AudioManager1",
+        )?;
         Ok(Self {
-            backend: AmpVolumeBackend::Hardware(conn),
+            backend: AmpVolumeBackend::Hardware(proxy),
         })
     }
 
@@ -201,9 +209,10 @@ impl AmpVolumeClient {
     )]
     pub fn state(&self) -> Result<AmpVolumeState, VolumeError> {
         match &self.backend {
-            AmpVolumeBackend::Hardware(conn) => {
-                let amp = amp_proxy(conn)?;
-                Ok(AmpVolumeState::new(amp.level()?, amp.muted()?))
+            AmpVolumeBackend::Hardware(amp) => {
+                let level: u8 = amp.get_property("Level").map_err(VolumeError::bus)?;
+                let muted: bool = amp.get_property("Muted").map_err(VolumeError::bus)?;
+                Ok(AmpVolumeState::new(level, muted))
             }
             AmpVolumeBackend::Mock(state) => {
                 let lock = state
@@ -226,14 +235,15 @@ impl AmpVolumeClient {
     )]
     pub fn apply(&self, command: AmpVolumeCommand) -> Result<AmpVolumeState, VolumeError> {
         match &self.backend {
-            AmpVolumeBackend::Hardware(conn) => {
-                let amp = amp_proxy(conn)?;
+            AmpVolumeBackend::Hardware(amp) => {
                 match command {
                     AmpVolumeCommand::SetLevel(percent) => {
-                        amp.set_level(percent)?;
+                        amp.call::<_, _, ()>("SetLevel", &(percent,))
+                            .map_err(VolumeError::bus)?;
                     }
                     AmpVolumeCommand::SetMute(muted) => {
-                        amp.set_mute(muted)?;
+                        amp.call::<_, _, ()>("SetMute", &(muted,))
+                            .map_err(VolumeError::bus)?;
                     }
                 }
                 self.state()
@@ -315,36 +325,6 @@ impl From<zbus::Error> for VolumeError {
     fn from(e: zbus::Error) -> Self {
         Self::bus(e)
     }
-}
-
-#[expect(
-    clippy::result_large_err,
-    reason = "canonical error with backtrace for debuggability"
-)]
-fn amp_proxy(
-    conn: &zbus::blocking::Connection,
-) -> Result<VolumeProxyProxyBlocking<'_>, VolumeError> {
-    VolumeProxyProxyBlocking::new(conn).map_err(VolumeError::bus)
-}
-
-/// Typed client proxy over the `audio-manager` amp interface, driven via the
-/// blocking zbus API from the dedicated `amp-volume` worker thread.
-#[zbus::proxy(
-    interface = "org.speaker.AudioManager1",
-    default_service = "org.speaker.AudioManager",
-    default_path = "/org/speaker/amp"
-)]
-trait VolumeProxy {
-    /// Reads the amp level percent.
-    #[zbus(property)]
-    fn level(&self) -> zbus::Result<u8>;
-    /// Reads the amp mute state.
-    #[zbus(property)]
-    fn muted(&self) -> zbus::Result<bool>;
-    /// Sets the amp level percent.
-    fn set_level(&self, percent: u8) -> zbus::Result<()>;
-    /// Sets the amp mute state.
-    fn set_mute(&self, muted: bool) -> zbus::Result<()>;
 }
 
 /// Worker loop: drains commands, applies them, and publishes authoritative

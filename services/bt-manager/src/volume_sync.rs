@@ -49,6 +49,37 @@ pub const FRESH_PCM_SETTLE: Duration = Duration::from_secs(2);
 /// Watchdog period for missed-signal reconciliation and heartbeat logging.
 pub const WATCHDOG_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Initial reconnect backoff for the volume-sync reconnect loop.
+const RECONNECT_BACKOFF_BASE: Duration = Duration::from_millis(500);
+
+/// Maximum reconnect backoff for the volume-sync reconnect loop.
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Consecutive reconnect attempts after which the failure is re-reported at
+/// `warn!` (intermediate failures downgrade to `debug!` to avoid flooding
+/// the journal while the bus is down for a long time).
+const RECONNECT_WARN_EVERY: u32 = 20;
+
+/// Flood-controlled reconnect-failure logging: `warn!` on the first failure
+/// and every [`RECONNECT_WARN_EVERY`]th, `debug!` in between.
+fn log_reconnect_failure(
+    stage: &'static str,
+    error: &zbus::Error,
+    attempt: u32,
+    backoff: Duration,
+) {
+    if attempt == 1 || attempt.is_multiple_of(RECONNECT_WARN_EVERY) {
+        tracing::warn!(
+            error = %error,
+            attempt,
+            backoff_ms = backoff.as_millis() as u64,
+            "Volume sync reconnect failed: {stage}"
+        );
+    } else {
+        tracing::debug!(error = %error, "Volume sync reconnect retry failed: {stage}");
+    }
+}
+
 /// Maximum number of queued forward `Level` echoes.
 ///
 /// The oldest echo is dropped when the queue is full; the watchdog repairs
@@ -442,37 +473,65 @@ fn build_match_rules() -> Option<(MatchRule<'static>, MatchRule<'static>, MatchR
     Some((props_rule, interfaces_rule, amp_rule))
 }
 
-/// Subscribes all three signal streams, retrying with backoff until every
-/// subscription succeeds (Signal-Listener Reconnect Loop, no hot-spin).
-async fn subscribe_streams(
-    signal_conn: &Connection,
-    rules: (MatchRule<'static>, MatchRule<'static>, MatchRule<'static>),
-) -> (MessageStream, MessageStream, MessageStream) {
-    const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
+/// Subscribes all three signal streams in a single attempt.
+///
+/// Failure is reported to the caller, which owns the reconnect policy —
+/// including tearing down and rebuilding the connection itself (zbus
+/// connections do not auto-reconnect after a bus restart).
+///
+/// # Errors
+/// Returns the first subscription error; note the earlier streams of a
+/// partially successful attempt are dropped (harmless — the whole connection
+/// is rebuilt on the next cycle).
+/// Drives the three live signal streams (plus the watchdog) until one of
+/// them errors or closes, then returns so the caller can rebuild the
+/// connections.
+async fn run_signal_streams(
+    amp: &Proxy<'_>,
+    bt: &BluetoothDevice,
+    state: &mut VolumeSyncState,
+    watchdog: &mut tokio::time::Interval,
+    mut props_stream: MessageStream,
+    mut iface_stream: MessageStream,
+    mut amp_stream: MessageStream,
+) {
     loop {
-        match (
-            MessageStream::for_match_rule(rules.0.clone(), signal_conn, Some(BLUEALSA_PROPS_QUEUE))
-                .await,
-            MessageStream::for_match_rule(rules.1.clone(), signal_conn, Some(BLUEALSA_IFACE_QUEUE))
-                .await,
-            MessageStream::for_match_rule(rules.2.clone(), signal_conn, Some(AUDIO_MANAGER_QUEUE))
-                .await,
-        ) {
-            (Ok(props), Ok(interfaces), Ok(amp)) => {
-                return (props, interfaces, amp);
+        tokio::select! {
+            _ = watchdog.tick() => {
+                watchdog_tick(amp, bt, state).await;
             }
-            (Err(e), _, _) => {
-                tracing::warn!(error = %e, "Failed to subscribe to BlueALSA PropertiesChanged");
+            signal = props_stream.next() => {
+                if handle_bluealsa_props_signal(signal, amp, state).await.is_err() {
+                    return;
+                }
             }
-            (_, Err(e), _) => {
-                tracing::warn!(error = %e, "Failed to subscribe to BlueALSA InterfacesAdded");
+            signal = amp_stream.next() => {
+                if handle_amp_signal(signal, bt, state).await.is_err() {
+                    return;
+                }
             }
-            (_, _, Err(e)) => {
-                tracing::warn!(error = %e, "Failed to subscribe to audio-manager PropertiesChanged");
+            signal = iface_stream.next() => {
+                if handle_interfaces_added_signal(signal, amp, bt, state).await.is_err() {
+                    return;
+                }
             }
         }
-        tokio::time::sleep(RECONNECT_BACKOFF).await;
     }
+}
+
+/// Subscribes all three signal streams in a single attempt.
+async fn subscribe_streams_once(
+    signal_conn: &Connection,
+    rules: (MatchRule<'static>, MatchRule<'static>, MatchRule<'static>),
+) -> Result<(MessageStream, MessageStream, MessageStream), zbus::Error> {
+    Ok((
+        MessageStream::for_match_rule(rules.0.clone(), signal_conn, Some(BLUEALSA_PROPS_QUEUE))
+            .await?,
+        MessageStream::for_match_rule(rules.1.clone(), signal_conn, Some(BLUEALSA_IFACE_QUEUE))
+            .await?,
+        MessageStream::for_match_rule(rules.2.clone(), signal_conn, Some(AUDIO_MANAGER_QUEUE))
+            .await?,
+    ))
 }
 
 /// Handles one `BlueALSA` `PropertiesChanged` signal: parses the PCM volume and
@@ -623,10 +682,44 @@ pub(crate) async fn run_task(
     // after startup instead of racing the initial catch-up.
     watchdog.tick().await;
 
-    // Signal-Listener Reconnect Loop: if a stream dies or setup fails, rebuild
-    // it from scratch after a backoff instead of hot-spinning.
+    // Signal-Listener Reconnect Loop: if a stream dies or setup fails, tear
+    // down and rebuild the CONNECTIONS from scratch after a backoff — zbus
+    // connections do not auto-reconnect, so retrying subscriptions on a stale
+    // connection would fail forever (e.g. after `systemctl restart dbus`).
+    let mut backoff = RECONNECT_BACKOFF_BASE;
+    let mut failures: u32 = 0;
+    let mut signal_conn = signal_conn;
+    let mut control_conn = control_conn;
+
     loop {
-        let (mut props_stream, mut iface_stream, mut amp_stream) = subscribe_streams(
+        if failures > 0 {
+            match tokio::try_join!(Connection::system(), Connection::system()) {
+                Ok((sig, ctrl)) => {
+                    signal_conn = sig;
+                    control_conn = ctrl;
+                }
+                Err(e) => {
+                    failures += 1;
+                    log_reconnect_failure("D-Bus connection", &e, failures, backoff);
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
+                    continue;
+                }
+            }
+        }
+
+        let amp = match build_amp_proxy(&control_conn).await {
+            Ok(amp) => amp,
+            Err(e) => {
+                failures += 1;
+                log_reconnect_failure("audio-manager proxy", &e, failures, backoff);
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
+                continue;
+            }
+        };
+
+        match subscribe_streams_once(
             &signal_conn,
             (
                 props_rule.clone(),
@@ -634,32 +727,33 @@ pub(crate) async fn run_task(
                 amp_rule.clone(),
             ),
         )
-        .await;
-
-        loop {
-            tokio::select! {
-                _ = watchdog.tick() => {
-                    watchdog_tick(&amp, &bt, &mut state).await;
-                }
-                signal = props_stream.next() => {
-                    if handle_bluealsa_props_signal(signal, &amp, &mut state).await.is_err() {
-                        break;
-                    }
-                }
-                signal = amp_stream.next() => {
-                    if handle_amp_signal(signal, &bt, &mut state).await.is_err() {
-                        break;
-                    }
-                }
-                signal = iface_stream.next() => {
-                    if handle_interfaces_added_signal(signal, &amp, &bt, &mut state).await.is_err() {
-                        break;
-                    }
-                }
+        .await
+        {
+            Ok((props_stream, iface_stream, amp_stream)) => {
+                backoff = RECONNECT_BACKOFF_BASE;
+                run_signal_streams(
+                    &amp,
+                    &bt,
+                    &mut state,
+                    &mut watchdog,
+                    props_stream,
+                    iface_stream,
+                    amp_stream,
+                )
+                .await;
+                // A stream died (bus hiccup or connection closure); the
+                // `failures > 0` guard above rebuilds the connections next
+                // cycle instead of re-subscribing on a possibly-stale socket.
+                failures = 1;
+                tracing::warn!("Volume sync signal stream ended; rebuilding D-Bus connections");
+            }
+            Err(e) => {
+                failures += 1;
+                log_reconnect_failure("signal subscription", &e, failures, backoff);
             }
         }
 
-        // Backoff before rebuilding the match rules / streams.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
     }
 }

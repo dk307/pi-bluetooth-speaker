@@ -366,11 +366,7 @@ pub fn apply_mute_to_volume_bytes(existing: &[u8], channels: u8, muted: bool) ->
         .iter()
         .map(|&b| {
             let level = b & 0x7F;
-            if muted {
-                level | 0x80
-            } else {
-                level
-            }
+            if muted { level | 0x80 } else { level }
         })
         .collect()
 }
