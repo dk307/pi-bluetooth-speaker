@@ -213,7 +213,7 @@ pub fn is_bluealsa_volume_signal<'a>(
     interface: &str,
     mut changed_keys: impl Iterator<Item = &'a str>,
 ) -> bool {
-    path.is_some_and(|p| p.contains("a2dpsnk"))
+    path.is_some_and(speaker_bluetooth::transport::is_a2dp_pcm_path)
         && interface == "org.bluealsa.PCM1"
         && changed_keys.any(|k| k == "Volume")
 }
@@ -266,7 +266,10 @@ pub fn volume_bytes_from_value(value: &Value<'_>) -> Option<Vec<u8>> {
 /// other PCMs are ignored so a voice call cannot change the music volume.
 #[must_use]
 pub fn a2dp_volume(pcms: &[BlueAlsaPcm]) -> Option<u8> {
-    let a2dp = || pcms.iter().filter(|pcm| pcm.pcm_path.contains("a2dpsnk"));
+    let a2dp = || {
+        pcms.iter()
+            .filter(|pcm| speaker_bluetooth::transport::is_a2dp_pcm_path(&pcm.pcm_path))
+    };
     a2dp()
         .find(|pcm| pcm.running)
         .or_else(|| a2dp().next())
@@ -290,6 +293,19 @@ async fn apply_pcm_volume(
 }
 
 /// Pushes one level to the `BlueALSA` PCM (propagating to the phone via AVRCP).
+/// Resumes a blocking-task panic, or logs an expected cancellation.
+///
+/// `M-PANIC-ON-BUG`: a panicked worker is a programming bug, not a recoverable
+/// volume-sync failure, so the panic is re-raised on the caller's task instead
+/// of being logged and forgotten.
+fn handle_join_error(context: &str, err: tokio::task::JoinError) {
+    if err.is_panic() {
+        std::panic::resume_unwind(err.into_panic());
+    }
+    tracing::warn!(task = context, error = %err, "Blocking task cancelled");
+}
+
+/// Pushes one level to the `BlueALSA` PCM (phone AVRCP volume follows).
 async fn push_level(bt: &BluetoothDevice, state: &mut VolumeSyncState, level: u8) {
     let bt_for_push = bt.clone();
     match tokio::task::spawn_blocking(move || bt_for_push.set_volume(level)).await {
@@ -298,7 +314,7 @@ async fn push_level(bt: &BluetoothDevice, state: &mut VolumeSyncState, level: u8
             tracing::info!(level, "Volume sync: audio-manager -> BlueALSA");
         }
         Ok(Err(e)) => tracing::debug!(error = %e, "Reverse volume sync failed"),
-        Err(e) => tracing::debug!(error = %e, "Reverse volume sync task panicked"),
+        Err(e) => handle_join_error("reverse volume sync", e),
     }
 }
 
@@ -311,7 +327,7 @@ async fn push_muted(bt: &BluetoothDevice, state: &mut VolumeSyncState, muted: bo
             tracing::info!(muted, "Mute sync: audio-manager -> BlueALSA");
         }
         Ok(Err(e)) => tracing::debug!(error = %e, "Reverse mute sync failed"),
-        Err(e) => tracing::debug!(error = %e, "Reverse mute sync task panicked"),
+        Err(e) => handle_join_error("reverse mute sync", e),
     }
 }
 
@@ -340,7 +356,7 @@ async fn read_pcm_volume(bt: &BluetoothDevice) -> Option<u8> {
             None
         }
         Err(e) => {
-            tracing::debug!(error = %e, "Volume sync: PCM read task panicked");
+            handle_join_error("PCM volume read", e);
             None
         }
     }
@@ -381,11 +397,6 @@ async fn watchdog_tick(amp: &Proxy<'_>, bt: &BluetoothDevice, state: &mut Volume
     }
 }
 
-/// Runs the volume sync task forever.
-///
-/// The caller must supply two independent connections: one for signal
-/// subscriptions and one for method calls. See the module documentation for
-/// why sharing a single connection can deadlock.
 /// Builds the audio-manager proxy on the control connection.
 ///
 /// # Errors
@@ -564,7 +575,7 @@ async fn handle_interfaces_added_signal(
     let Some(path) = interfaces_added_path(&signal.body()) else {
         return Ok(());
     };
-    if path.contains("a2dpsnk") {
+    if speaker_bluetooth::transport::is_a2dp_pcm_path(&path) {
         tracing::info!("Fresh A2DP PCM: pushing amp level, settling forward sync");
         state.arm_fresh_pcm(Instant::now());
         reconcile_reverse(amp, bt, state).await;

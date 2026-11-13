@@ -18,6 +18,7 @@
 //! pushes `SetMute(false)` after a `SetLevel` issued while muted so changing
 //! the volume with the slider audibly unmutes, matching common amplifier UX.
 
+use std::backtrace::Backtrace;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -193,6 +194,10 @@ impl AmpVolumeClient {
     ///
     /// # Errors
     /// Returns an error on D-Bus/mock failure.
+    #[expect(
+        clippy::result_large_err,
+        reason = "canonical error with backtrace for debuggability"
+    )]
     pub fn state(&self) -> Result<AmpVolumeState, VolumeError> {
         match &self.backend {
             AmpVolumeBackend::Hardware(conn) => {
@@ -214,6 +219,10 @@ impl AmpVolumeClient {
     /// # Errors
     /// Returns an error on D-Bus/mock failure; the caller must publish the
     /// last known-good state so the UI reverts an optimistic flip.
+    #[expect(
+        clippy::result_large_err,
+        reason = "canonical error with backtrace for debuggability"
+    )]
     pub fn apply(&self, command: AmpVolumeCommand) -> Result<AmpVolumeState, VolumeError> {
         match &self.backend {
             AmpVolumeBackend::Hardware(conn) => {
@@ -254,6 +263,7 @@ impl AmpVolumeClient {
 #[derive(Debug)]
 pub struct VolumeError {
     kind: VolumeErrorKind,
+    backtrace: Backtrace,
 }
 
 #[derive(Debug)]
@@ -269,6 +279,7 @@ impl VolumeError {
     fn bus(source: zbus::Error) -> Self {
         Self {
             kind: VolumeErrorKind::Bus(source),
+            backtrace: Backtrace::capture(),
         }
     }
 
@@ -276,18 +287,19 @@ impl VolumeError {
     fn failed(message: &str) -> Self {
         Self {
             kind: VolumeErrorKind::Failed(Box::from(message)),
+            backtrace: Backtrace::capture(),
         }
     }
-}
 
-impl std::fmt::Display for VolumeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt_kind(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
             VolumeErrorKind::Bus(e) => write!(f, "amp volume D-Bus error: {e}"),
             VolumeErrorKind::Failed(msg) => write!(f, "amp volume error: {msg}"),
         }
     }
 }
+
+speaker_common::impl_canonical_error_display!(VolumeError);
 
 impl std::error::Error for VolumeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
@@ -304,6 +316,10 @@ impl From<zbus::Error> for VolumeError {
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "canonical error with backtrace for debuggability"
+)]
 fn amp_proxy(
     conn: &zbus::blocking::Connection,
 ) -> Result<VolumeProxyProxyBlocking<'_>, VolumeError> {
@@ -392,9 +408,10 @@ pub fn run_worker(
 
 /// Coalesces a drained batch.
 ///
-/// Drops `SetMute(false)` when a later `SetLevel` exists (the level write
-/// already unmutes the audible path) and keeps only the last `SetLevel` /
-/// `SetMute` value per kind in command order.
+/// Keeps only the last `SetLevel` and the last `SetMute` value per kind, in
+/// first-seen order: rapid slider drags collapse to one level write, and mute
+/// flips collapse to one mute write, while the relative order of the two kinds
+/// is preserved so a level command followed by a mute stays in that order.
 #[must_use]
 pub fn coalesce(drained: Vec<AmpVolumeCommand>) -> Vec<AmpVolumeCommand> {
     let mut level: Option<usize> = None;

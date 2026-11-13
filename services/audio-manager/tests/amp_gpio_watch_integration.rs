@@ -102,11 +102,14 @@ fn mock_gpio_power_up_calls() {
 #[test]
 fn mock_gpio_mute_pin_state() {
     let (gpio, gpio_mock) = AmpGpio::new_mocked();
-    assert!(!gpio_mock.mute_pin_low()); // Default is HIGH (unmuted)
-    gpio.set_hardware_mute(true).unwrap();
-    assert!(gpio_mock.mute_pin_low());
+    assert!(
+        gpio_mock.mute_pin_low(),
+        "mock must mirror open(): /MUTE is driven LOW at claim time"
+    );
     gpio.set_hardware_mute(false).unwrap();
     assert!(!gpio_mock.mute_pin_low());
+    gpio.set_hardware_mute(true).unwrap();
+    assert!(gpio_mock.mute_pin_low());
 }
 
 #[test]
@@ -122,17 +125,7 @@ fn mock_gpio_booster_state() {
 #[test]
 fn mock_gpio_amp_awake_state() {
     let (gpio, gpio_mock) = AmpGpio::new_mocked();
-    let awake1 = gpio_mock.amp_awake();
-    eprintln!("Initial awake 1: {}", awake1);
-    let awake2 = gpio_mock.amp_awake();
-    eprintln!("Initial awake 2: {}", awake2);
-    let awake3 = gpio_mock.amp_awake();
-    eprintln!("Initial awake 3: {}", awake3);
-    let val = gpio_mock.amp_awake();
-    eprintln!("Direct call: {}", val);
-    if val {
-        panic!("val is true!");
-    }
+    assert!(!gpio_mock.amp_awake(), "mock starts in reset (asleep)");
     gpio.wake().unwrap();
     assert!(gpio_mock.amp_awake());
     gpio.reset().unwrap();

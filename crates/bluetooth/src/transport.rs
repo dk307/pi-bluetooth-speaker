@@ -199,6 +199,17 @@ pub fn decode_pcm_format(id: u16) -> Box<str> {
     }
 }
 
+/// Returns `true` when a `BlueALSA` PCM object path identifies an A2DP stream.
+///
+/// bluez-alsa has emitted both `a2dpsnk` and `a2dpsink` transport tokens across
+/// releases, so match the `a2dp` token prefix instead of one spelling. Matching
+/// whole path segments keeps device (`dev_XX`) and PCM-direction segments from
+/// producing false positives.
+#[must_use]
+pub fn is_a2dp_pcm_path(path: &str) -> bool {
+    path.split('/').any(|segment| segment.starts_with("a2dp"))
+}
+
 /// AVRCP absolute-volume range (`0..=127`).
 pub const AVRCP_VOLUME_MAX: u8 = 127;
 

@@ -902,7 +902,8 @@ fn run_render_loop_with_devices_polls_rotary_encoder_and_faults_gracefully() {
     enc_mock.simulate_rotation(speaker_hardware::RotationDirection::Clockwise, 2);
     let commands = TransportCommandQueue::new();
     // Encoder volume is executed by the internal amp-volume worker (mock
-    // client because Bluetooth is mocked); wire the same queue it receives.
+    // client because the framebuffer backend is mocked); wire the same queue
+    // it receives.
     let amp_commands = screen_manager::volume::AmpVolumeCommandQueue::new();
     shell.wire_amp_volume(&amp_commands);
 

@@ -177,7 +177,7 @@ impl AudioInputMode {
     /// The input `raw` is the full register 0x25 value; bits 7:5 are extracted.
     #[must_use]
     pub const fn from_raw(raw: u8) -> Self {
-        #[allow(
+        #[expect(
             clippy::match_same_arms,
             reason = "0 and _ both return Digital20dB as safe default"
         )]
@@ -192,39 +192,22 @@ impl AudioInputMode {
         }
     }
 
-    /// Returns `true` if this mode was created from a valid register value (0-5).
-    #[must_use]
-    pub const fn is_valid(self) -> bool {
-        self.as_u8() <= 5
-    }
-
     /// Returns the raw 3-bit register value (0-5).
     #[must_use]
     pub const fn as_u8(self) -> u8 {
         self as u8
     }
 
-    /// Validates that a raw register value (0-7) represents a valid audio input mode.
+    /// Tries to create an `AudioInputMode` from a full register `0x25` value.
     ///
-    /// Returns `Ok(())` if valid (bits 7:5 = 0-5), `Err` with the invalid value if invalid (6-7).
-    ///
-    /// # Errors
-    /// Returns the invalid mode value (6 or 7) if bits 7:5 are out of range.
-    pub const fn validate_raw(raw: u8) -> Result<(), u8> {
-        let v = (raw >> 5) & 0x07;
-        if v <= 5 { Ok(()) } else { Err(v) }
-    }
-
-    /// Tries to create an `AudioInputMode` from a raw register value.
-    ///
-    /// Returns `Ok(Self)` if the raw value is valid (bits 7:5 = 0-5), `Err` with the invalid value otherwise.
+    /// Bits 7:5 carry the mode; values 6 and 7 are reserved.
     ///
     /// # Errors
     /// Returns the invalid mode value (6 or 7) if bits 7:5 are out of range.
     pub const fn try_from_raw(raw: u8) -> Result<Self, u8> {
         let v = (raw >> 5) & 0x07;
         if v <= 5 {
-            Ok(Self::from_raw(v))
+            Ok(Self::from_raw(raw))
         } else {
             Err(v)
         }
@@ -291,7 +274,7 @@ impl I2sFormat {
     /// Valid values: `0`, `1`, `4`, `5`, `6`, `7`. Values `2`, `3` are reserved and map to `LeftJustified`.
     #[must_use]
     pub const fn from_raw(raw: u8) -> Self {
-        #[allow(
+        #[expect(
             clippy::match_same_arms,
             reason = "1 and _ both return LeftJustified as reset default"
         )]
@@ -306,44 +289,15 @@ impl I2sFormat {
         }
     }
 
-    /// Returns `true` if this format is a valid (non-reserved) I2S format.
-    #[must_use]
-    pub const fn is_valid(self) -> bool {
-        matches!(
-            self,
-            Self::StandardI2s
-                | Self::LeftJustified
-                | Self::Rj16
-                | Self::Rj18
-                | Self::Rj20
-                | Self::Rj24
-        )
-    }
-
     /// Returns the raw 3-bit register value.
     #[must_use]
     pub const fn as_u8(self) -> u8 {
         self as u8
     }
 
-    /// Validates that a raw register value (0-7) represents a valid I2S format.
-    ///
-    /// Returns `Ok(())` if valid (0, 1, 4, 5, 6, 7), `Err` with the invalid value if reserved (2, 3).
-    ///
-    /// # Errors
-    /// Returns the invalid format value (2 or 3) if the value is reserved.
-    pub const fn validate_raw(raw: u8) -> Result<(), u8> {
-        let v = raw & 0x07;
-        if matches!(v, 0 | 1 | 4 | 5 | 6 | 7) {
-            Ok(())
-        } else {
-            Err(v)
-        }
-    }
-
     /// Tries to create an `I2sFormat` from a raw register value.
     ///
-    /// Returns `Ok(Self)` if the raw value is valid (0, 1, 4, 5, 6, 7), `Err` with the invalid value if reserved (2, 3).
+    /// Valid values are `0`, `1`, `4`, `5`, `6`, `7`; `2` and `3` are reserved.
     ///
     /// # Errors
     /// Returns the invalid format value (2 or 3) if the value is reserved.
@@ -914,12 +868,6 @@ impl PowerModeProfile {
         }
     }
 
-    /// Returns `true` if this profile was created from a valid register value (0-5).
-    #[must_use]
-    pub const fn is_valid(self) -> bool {
-        self.as_u8() <= 5
-    }
-
     /// Returns the raw 3-bit register value.
     #[must_use]
     pub const fn as_u8(self) -> u8 {
@@ -933,23 +881,9 @@ impl PowerModeProfile {
         }
     }
 
-    /// Validates that a raw register value (0-7) represents a valid power mode profile.
-    ///
-    /// Returns `Ok(())` if valid (0-5), `Err` with the invalid value if invalid (6-7).
-    ///
-    /// # Errors
-    /// Returns the invalid profile value (6 or 7) if out of range.
-    pub const fn validate_raw(raw: u8) -> Result<(), u8> {
-        if (raw & 0x07) <= 5 {
-            Ok(())
-        } else {
-            Err(raw & 0x07)
-        }
-    }
-
     /// Tries to create a `PowerModeProfile` from a raw register value.
     ///
-    /// Returns `Ok(Self)` if the raw value is valid (0-5), `Err` with the invalid value otherwise.
+    /// Valid values are `0..=5`; `6` and `7` are reserved.
     ///
     /// # Errors
     /// Returns the invalid profile value (6 or 7) if out of range.
@@ -2319,14 +2253,8 @@ where
     /// Write `PM_PROFILE` (0x1D) bits 2:0 (0-5; 5 = custom profile).
     ///
     /// # Errors
-    /// Returns [`AmpError`] if communication fails or `profile` is invalid.
+    /// Returns [`AmpError`] if communication fails.
     pub fn write_power_mode_profile(&mut self, profile: PowerModeProfile) -> Result<(), AmpError> {
-        if !profile.is_valid() {
-            return Err(AmpError::invalid_argument(
-                "pm_profile",
-                u16::from(profile.as_u8()),
-            ));
-        }
         let reg = self.read_reg(REG_PM_PROFILE)?;
         let desired = (reg & 0xF8) | (profile.as_u8() & 0x07);
         self.write_reg(REG_PM_PROFILE, desired)
@@ -2344,14 +2272,8 @@ where
     /// 2 and 3 are reserved/invalid.
     ///
     /// # Errors
-    /// Returns [`AmpError`] if communication fails or `format` is reserved (2 or 3).
+    /// Returns [`AmpError`] if communication fails.
     pub fn write_i2s_format(&mut self, format: I2sFormat) -> Result<(), AmpError> {
-        if !format.is_valid() {
-            return Err(AmpError::invalid_argument(
-                "i2s_format",
-                u16::from(format.as_u8()),
-            ));
-        }
         let reg = self.read_reg(REG_I2S_FORMAT)?;
         let desired = (reg & 0xF8) | (format.as_u8() & 0x07);
         self.write_reg(REG_I2S_FORMAT, desired)
@@ -2363,14 +2285,8 @@ where
     /// input mode.
     ///
     /// # Errors
-    /// Returns [`AmpError`] if communication fails or `mode` is invalid.
+    /// Returns [`AmpError`] if communication fails.
     pub fn write_audio_in_mode(&mut self, mode: AudioInputMode) -> Result<(), AmpError> {
-        if !mode.is_valid() {
-            return Err(AmpError::invalid_argument(
-                "audio_in_mode",
-                u16::from(mode.as_u8()),
-            ));
-        }
         let reg = self.read_reg(REG_AUDIO_IN_MODE)?;
         let desired = (reg & 0x1F) | ((mode.as_u8() & 0x07) << 5);
         self.write_reg(REG_AUDIO_IN_MODE, desired)?;

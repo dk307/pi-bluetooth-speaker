@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use bt_manager::volume_sync::{
     ECHO_CAPACITY, FRESH_PCM_SETTLE, VolumeSyncState, a2dp_volume, interfaces_added_path,
+    is_bluealsa_volume_signal,
 };
 use speaker_bluetooth::{BlueAlsaPcm, BtAddress};
 
@@ -28,6 +29,8 @@ fn pcm(path: &str, running: bool, volume_percent: Option<u8>) -> BlueAlsaPcm {
 }
 
 const A2DP: &str = "/org/bluealsa/hci0/dev_30_E0_44_67_38_A2/a2dpsnk/source";
+/// Alternate transport token emitted by other bluez-alsa releases.
+const A2DP_ALT: &str = "/org/bluealsa/hci0/dev_30_E0_44_67_38_A2/a2dpsink/source";
 const HFP: &str = "/org/bluealsa/hci0/dev_30_E0_44_67_38_A2/hfphf/sink";
 
 #[test]
@@ -145,4 +148,21 @@ fn a2dp_volume_ignores_hfp_and_prefers_running_stream() {
 
     let pcms = vec![pcm(HFP, true, Some(10))];
     assert_eq!(a2dp_volume(&pcms), None);
+}
+
+#[test]
+fn a2dp_detection_accepts_both_transport_spellings() {
+    // bluez-alsa has shipped `a2dpsnk` and `a2dpsink`; either must drive sync.
+    for path in [A2DP, A2DP_ALT] {
+        assert_eq!(a2dp_volume(&[pcm(path, true, Some(42))]), Some(42));
+        assert!(
+            is_bluealsa_volume_signal(Some(path), "org.bluealsa.PCM1", ["Volume"].into_iter()),
+            "volume signal must be recognised on {path}"
+        );
+    }
+    assert!(!is_bluealsa_volume_signal(
+        Some(HFP),
+        "org.bluealsa.PCM1",
+        ["Volume"].into_iter()
+    ));
 }

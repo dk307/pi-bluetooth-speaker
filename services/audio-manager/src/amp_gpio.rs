@@ -319,8 +319,9 @@ impl AmpGpio {
     #[must_use]
     pub fn new_mocked() -> (Self, AmpGpioMock) {
         let state = Arc::new(Mutex::new(MockGpioState {
-            // Mock starts unmuted (matching test expectations)
-            mute_low: false,
+            // Mirror `open()`: the hardware claim drives /MUTE LOW, so the
+            // amp always boots electrically muted.
+            mute_low: true,
             ..MockGpioState::default()
         }));
         let ctrl = AmpGpioMock {

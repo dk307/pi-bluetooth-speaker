@@ -34,7 +34,10 @@ use crate::error::{AmpError, AmpResult};
 /// Production uses `RealAmpBackend`; tests inject `MockAmpBackend`.
 // `async_trait` wraps each async method in a pinned `Future`, which is itself
 // `#[must_use]`; clippy flags the generated wrapper as double-must-use.
-#[allow(clippy::double_must_use)]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait injects #[must_use] on every desugared boxed-future signature"
+)]
 #[async_trait]
 pub trait AmpBackend: Send + Sync {
     /// Write the complete amp state (level + mute) to hardware.

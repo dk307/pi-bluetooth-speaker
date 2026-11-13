@@ -1276,8 +1276,6 @@ fn poll_encoder_input(
     }
 }
 
-/// Runs the UI render loop with explicit touch and rotary encoder device injection.
-#[cfg(feature = "ui")]
 /// Joins the `amp-volume` worker, re-raising a worker panic (fail-fast).
 #[cfg(feature = "ui")]
 fn join_amp_volume_worker(amp_worker: std::io::Result<std::thread::JoinHandle<()>>) {
@@ -1310,9 +1308,12 @@ fn spawn_bt_monitor_worker(
 
 /// Spawns the dedicated `amp-volume` worker thread.
 ///
-/// The worker always runs: in mock-BT sessions (host tests, splash previews)
+/// The worker always runs: in mocked sessions (host tests, splash previews)
 /// against a mock client so nothing touches the host system bus; in live
-/// sessions against the real `audio-manager` D-Bus API.
+/// sessions against the real `audio-manager` D-Bus API. The choice is keyed on
+/// the framebuffer backend, not on Bluetooth availability: a live appliance
+/// whose Bluetooth D-Bus connection failed at startup must still drive the real
+/// amplifier, never a silent mock.
 #[cfg(feature = "ui")]
 fn spawn_amp_volume_worker(
     shared: &Arc<Mutex<BtSharedUpdate>>,
@@ -1349,6 +1350,8 @@ fn spawn_amp_volume_worker(
         })
 }
 
+/// Runs the UI render loop with explicit touch and rotary encoder device injection.
+#[cfg(feature = "ui")]
 #[expect(
     clippy::too_many_arguments,
     reason = "explicit peripheral injection seam for hermetic touch + encoder integration testing"
@@ -1374,8 +1377,12 @@ pub fn run_render_loop_with_devices(
     let shared_state_worker = Arc::clone(&shared_state);
     let commands_worker = commands.clone();
 
-    let amp_worker =
-        spawn_amp_volume_worker(&shared_state, &bg_running, amp_commands, maybe_bt.is_none());
+    let amp_worker = spawn_amp_volume_worker(
+        &shared_state,
+        &bg_running,
+        amp_commands,
+        !fb.is_hardware_panel(),
+    );
 
     let bt_worker = maybe_bt.map(|bt| {
         spawn_bt_monitor_worker(

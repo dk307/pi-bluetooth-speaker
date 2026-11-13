@@ -865,7 +865,7 @@ mod hardware_device_tests {
     }
 
     #[test]
-    fn hardware_device_write_power_mode_profile_validates_range() {
+    fn hardware_device_write_power_mode_profile_encodes_enum_values() {
         let bus = MockBus::new().with_register(REG_PM_PROFILE, 0x00);
         let mut dev = HardwareDevice::new(bus.clone(), addr());
 
@@ -874,18 +874,22 @@ mod hardware_device_tests {
         assert_eq!(bus.get_register(REG_PM_PROFILE), Some(4));
 
         // Test validation at the enum boundary
-        assert!(
-            PowerModeProfile::validate_raw(6).is_err(),
-            "expected error for invalid profile 6"
+        assert_eq!(
+            PowerModeProfile::try_from_raw(5),
+            Ok(PowerModeProfile::Pmp5Custom)
         );
         assert!(
             PowerModeProfile::try_from_raw(6).is_err(),
             "expected error for invalid profile 6"
         );
+        assert!(
+            PowerModeProfile::try_from_raw(7).is_err(),
+            "expected error for invalid profile 7"
+        );
     }
 
     #[test]
-    fn hardware_device_write_i2s_format_validates_range() {
+    fn hardware_device_write_i2s_format_encodes_enum_values() {
         let bus = MockBus::new().with_register(REG_I2S_FORMAT, 0x00);
         let mut dev = HardwareDevice::new(bus.clone(), addr());
 
@@ -893,17 +897,14 @@ mod hardware_device_tests {
         assert_eq!(bus.get_register(REG_I2S_FORMAT), Some(7));
 
         // Test validation at the enum boundary
-        assert!(
-            I2sFormat::validate_raw(2).is_err(),
-            "expected error for reserved I2S format 2"
+        assert_eq!(
+            I2sFormat::try_from_raw(7),
+            Ok(I2sFormat::Rj24),
+            "RJ-24 must decode from its register value"
         );
         assert!(
             I2sFormat::try_from_raw(2).is_err(),
             "expected error for reserved I2S format 2"
-        );
-        assert!(
-            I2sFormat::validate_raw(3).is_err(),
-            "expected error for reserved I2S format 3"
         );
         assert!(
             I2sFormat::try_from_raw(3).is_err(),
@@ -912,7 +913,7 @@ mod hardware_device_tests {
     }
 
     #[test]
-    fn hardware_device_write_audio_in_mode_validates_range() {
+    fn hardware_device_write_audio_in_mode_encodes_enum_values() {
         // Register 0x25 typically has bit 7 set at reset (0x80), preserved by mask 0x9F
         let bus = MockBus::new().with_register(REG_AUDIO_IN_MODE, 0x80);
         let mut dev = HardwareDevice::new(bus.clone(), addr());
@@ -921,10 +922,11 @@ mod hardware_device_tests {
         // Mode 5 (Analog26dB) -> bits 7:5 = 101; lower bits preserved -> 0x80 | 0xA0 = 0xA0... 0x80&0x1F=0, so 0xA0
         assert_eq!(bus.get_register(REG_AUDIO_IN_MODE), Some(0xA0));
 
-        // Test validation at the enum boundary
-        assert!(
-            AudioInputMode::validate_raw((6 << 5) | 0x80).is_err(),
-            "expected error for invalid audio mode 6"
+        // Test validation at the enum boundary. `try_from_raw` takes the full
+        // register value (bits 7:5), so a valid mode must decode correctly.
+        assert_eq!(
+            AudioInputMode::try_from_raw(0x20),
+            Ok(AudioInputMode::Digital26dB)
         );
         assert!(
             AudioInputMode::try_from_raw((6 << 5) | 0x80).is_err(),
