@@ -184,6 +184,10 @@ fn worker_failed_command_reverts_optimistic_state() {
         std::thread::sleep(Duration::from_millis(10));
     }
 
+    // Optimistic UI flip: the shared state already shows the target level 90
+    // BEFORE the command is queued, so the wait below can only exit after the
+    // worker processes the (failing) command and republishes the revert.
+    shared.lock().unwrap().amp_volume = Some(AmpVolumeState::new(90, false));
     // Inject a write failure, then push a command: the optimistic UI flip
     // (to 90) must be reverted to the last known-good 50.
     ctrl.fail_next_write();

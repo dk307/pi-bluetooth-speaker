@@ -1033,10 +1033,12 @@ impl AppShell {
                 w.invoke_show_volume_hud();
                 if let Some(cmds) = transport_vol.borrow().as_ref() {
                     // A level change while muted audibly unmutes: queue both.
+                    // The level write MUST be queued (and applied) before the
+                    // unmute so the amp never plays its stored previous level.
+                    cmds.push(crate::volume::AmpVolumeCommand::SetLevel(clamped));
                     if was_muted {
                         cmds.push(crate::volume::AmpVolumeCommand::SetMute(false));
                     }
-                    cmds.push(crate::volume::AmpVolumeCommand::SetLevel(clamped));
                 }
                 tracing::debug!("Amp volume changed to {clamped}%");
             }

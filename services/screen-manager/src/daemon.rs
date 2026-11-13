@@ -1340,15 +1340,35 @@ fn spawn_amp_volume_worker(
                 );
                 crate::volume::run_worker(&client, &shared, &amp_commands, &running);
             } else {
-                match crate::volume::AmpVolumeClient::new_blocking() {
-                    Ok(client) => {
-                        crate::volume::run_worker(&client, &shared, &amp_commands, &running);
+                // Retry connection establishment with bounded backoff while
+                // the session runs: a temporarily unreachable system bus at
+                // startup must not kill screen volume control permanently.
+                let mut backoff = Duration::from_secs(1);
+                loop {
+                    if !running.load(Ordering::Relaxed) {
+                        return;
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "Amp-volume worker could not connect to system D-Bus; screen volume disabled"
-                        );
+                    match crate::volume::AmpVolumeClient::new_blocking() {
+                        Ok(client) => {
+                            crate::volume::run_worker(&client, &shared, &amp_commands, &running);
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                backoff_ms = backoff.as_millis() as u64,
+                                "System D-Bus unavailable; retrying amp-volume connection"
+                            );
+                            // Sleep in slices so shutdown is never delayed by
+                            // a long backoff.
+                            let mut remaining = backoff;
+                            while !remaining.is_zero() && running.load(Ordering::Relaxed) {
+                                let slice = remaining.min(Duration::from_millis(200));
+                                std::thread::sleep(slice);
+                                remaining = remaining.saturating_sub(slice);
+                            }
+                            backoff = (backoff * 2).min(Duration::from_secs(60));
+                        }
                     }
                 }
             }

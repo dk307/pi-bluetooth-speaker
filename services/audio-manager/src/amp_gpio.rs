@@ -416,7 +416,8 @@ impl AmpGpio {
                     let mut s = mock_lock(state);
                     s.awake = false;
                     s.mute_low = true;
-                    s.booster_on = false;
+                    // The hardware reset branches never touch the booster
+                    // line, so the mock must preserve its state too.
                 }
             }
         }

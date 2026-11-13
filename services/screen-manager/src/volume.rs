@@ -541,6 +541,15 @@ pub fn coalesce(drained: Vec<AmpVolumeCommand>) -> Vec<AmpVolumeCommand> {
             }
         }
     }
+    // Ordering invariant: an unmute must never be applied before the level
+    // write in the same batch, or the amp plays its stored previous level.
+    if let (Some(mute_idx), Some(level_idx)) = (mute, level)
+        && mute_idx < level_idx
+        && matches!(out[mute_idx], AmpVolumeCommand::SetMute(false))
+    {
+        let unmute = out.remove(mute_idx);
+        out.push(unmute);
+    }
     out
 }
 

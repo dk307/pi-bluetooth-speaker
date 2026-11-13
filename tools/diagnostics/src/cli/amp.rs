@@ -434,10 +434,12 @@ pub fn output_json_settings(timestamp: &str, amp: &AmpDevice, settings: &AmpSett
             "master_volume_db": i64::from(settings.master_volume_raw) - 144,
             "master_volume_frac": settings.master_volume_frac,
             "serial_muted": settings.serial_muted,
-            "pm_ctrl_pm": settings.pm_ctrl_pm,
-            "pm_profile": settings.pm_profile,
-            "i2s_format": settings.i2s_format,
-            "audio_in_mode": settings.audio_in_mode,
+            // Numeric register values (JSON contract predates the strong
+            // enums; variant-name serialization would break consumers).
+            "pm_ctrl_pm": settings.pm_ctrl_pm.as_u8(),
+            "pm_profile": settings.pm_profile.as_u8(),
+            "i2s_format": settings.i2s_format.as_u8(),
+            "audio_in_mode": settings.audio_in_mode.as_u8(),
         },
     });
     println!("{obj}");

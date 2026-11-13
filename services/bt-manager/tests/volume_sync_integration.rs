@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use bt_manager::volume_sync::{
-    ECHO_CAPACITY, FRESH_PCM_SETTLE, VolumeSyncState, a2dp_volume, interfaces_added_path,
-    is_bluealsa_volume_signal,
+    a2dp_volume, interfaces_added_path, is_bluealsa_volume_signal, VolumeSyncState, ECHO_CAPACITY,
+    FRESH_PCM_SETTLE,
 };
 use speaker_bluetooth::{BlueAlsaPcm, BtAddress};
 
@@ -53,6 +53,47 @@ fn forward_dedup_tracks_applied_values() {
     state.record_forward_applied(50);
     assert!(!state.should_forward_pcm(50, now));
     assert!(state.should_forward_pcm(51, now));
+}
+
+#[test]
+fn pcm_path_gating_tracks_established_pcms() {
+    // Regression (CodeRabbit, heavy-lift race): a fresh PCM's default-volume
+    // `PropertiesChanged` can arrive before its `InterfacesAdded`. Signals
+    // from untracked paths are gated; only after establishment is the path
+    // accepted (and the fresh-connect suppression window applies).
+    let mut state = VolumeSyncState::new();
+    assert!(!state.is_pcm_known(A2DP));
+    assert!(state.mark_pcm_known(A2DP), "first sighting is new");
+    assert!(!state.mark_pcm_known(A2DP), "second sighting is not new");
+    assert!(state.is_pcm_known(A2DP));
+    assert!(
+        !state.is_pcm_known(A2DP_ALT),
+        "alternate spelling is its own path"
+    );
+
+    // The alternate-spelling path is tracked independently; both spellings
+    // map through `is_a2dp_pcm_path` at the call site.
+    assert!(state.mark_pcm_known(A2DP_ALT));
+    assert!(state.is_pcm_known(A2DP_ALT));
+}
+
+#[test]
+fn forward_apply_records_last_pushed_level() {
+    // Regression (CodeRabbit): a forward write must record the applied value
+    // as `last_pushed_level`, mirroring `record_reverse_push`. Without it,
+    // amp/phone at 40 with a stale `last_pushed_level == Some(40)` makes the
+    // return to 40 a no-op after the 60 echo is consumed: the phone stays at
+    // 60 while the amp is at 40 until the level changes or the service
+    // restarts.
+    let mut state = VolumeSyncState::new();
+    state.record_forward_applied(40);
+    state.record_forward_applied(60);
+    assert!(state.take_echo(60), "the 60 echo must be consumed");
+    assert!(
+        state.should_push_level(40),
+        "returning to 40 after the consumed 60 echo must push back to the phone"
+    );
+    assert!(!state.should_push_level(60));
 }
 
 #[test]

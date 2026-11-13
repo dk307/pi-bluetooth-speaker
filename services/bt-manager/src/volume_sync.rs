@@ -19,7 +19,7 @@
 //! The state machine ([`VolumeSyncState`]) is pure and host-testable; only the
 //! thin D-Bus/signal loop touches the bus.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
@@ -111,6 +111,12 @@ pub struct VolumeSyncState {
     pending_echoes: VecDeque<u8>,
     /// End of the fresh-connect suppression window, if armed.
     forward_suppress_until: Option<Instant>,
+    /// A2DP PCM object paths observed via the startup snapshot or
+    /// `InterfacesAdded`. A `PropertiesChanged` volume from an untracked path
+    /// is rejected: a PCM that appears mid-session can emit its default-volume
+    /// signal *before* the `InterfacesAdded` handler arms suppression, and an
+    /// unbiased `select!` may deliver it first.
+    known_pcm_paths: HashSet<Box<str>>,
 }
 
 impl Default for VolumeSyncState {
@@ -121,6 +127,7 @@ impl Default for VolumeSyncState {
             last_pushed_muted: None,
             pending_echoes: VecDeque::with_capacity(ECHO_CAPACITY),
             forward_suppress_until: None,
+            known_pcm_paths: HashSet::new(),
         }
     }
 }
@@ -139,6 +146,21 @@ impl VolumeSyncState {
     /// win over the amp's persisted level.
     pub fn seed_pcm_volume(&mut self, pcm_vol: u8) {
         self.last_pcm_vol = Some(pcm_vol);
+    }
+
+    /// Marks a PCM path as known and returns `true` when it was newly seen.
+    ///
+    /// Called for every A2DP path in the startup snapshot and for every
+    /// `InterfacesAdded` path. Forward volume signals from unknown paths are
+    /// rejected until the PCM's fresh-connect state is established.
+    pub fn mark_pcm_known(&mut self, path: &str) -> bool {
+        self.known_pcm_paths.insert(Box::<str>::from(path))
+    }
+
+    /// Returns `true` when a PCM path has been observed and is tracked.
+    #[must_use]
+    pub fn is_pcm_known(&self, path: &str) -> bool {
+        self.known_pcm_paths.contains(path)
     }
 
     /// Records a successful amp → `BlueALSA` push.
@@ -163,8 +185,15 @@ impl VolumeSyncState {
 
     /// Records a PCM volume that was successfully applied to audio-manager
     /// and queues its `Level` echo.
+    ///
+    /// The applied value is also recorded as `last_pushed_level`, mirroring
+    /// [`VolumeSyncState::record_reverse_push`]: the echo consumes the
+    /// audio-manager signal, so without this the stale `last_pushed_level`
+    /// would make `should_push_level` skip a legitimate return to the old
+    /// level (phone and amp would stay out of sync).
     pub fn record_forward_applied(&mut self, pcm_vol: u8) {
         self.last_pcm_vol = Some(pcm_vol);
+        self.last_pushed_level = Some(pcm_vol);
         if self.pending_echoes.len() >= ECHO_CAPACITY {
             self.pending_echoes.pop_front();
         }
@@ -395,13 +424,24 @@ async fn read_pcm_volume(bt: &BluetoothDevice) -> Option<u8> {
 
 /// Seeds the forward dedup state from the current PCM volume without applying
 /// it, so a stale `BlueALSA` default never overrides the persisted amp level.
-async fn seed_pcm_volume(bt: &BluetoothDevice, state: &mut VolumeSyncState) {
-    if let Some(pcm_vol) = read_pcm_volume(bt).await {
-        state.seed_pcm_volume(pcm_vol);
-        tracing::info!(
-            pcm_volume = pcm_vol,
-            "Volume sync seeded from BlueALSA (not applied)"
-        );
+/// Also marks every observed PCM path as known (fresh-PCM gating).
+async fn seed_pcm_state(bt: &BluetoothDevice, state: &mut VolumeSyncState) {
+    let bt_for_read = bt.clone();
+    match tokio::task::spawn_blocking(move || bt_for_read.link_snapshot()).await {
+        Ok(Ok(snapshot)) => {
+            for pcm in &snapshot.pcms {
+                state.mark_pcm_known(pcm.pcm_path.as_ref());
+            }
+            if let Some(pcm_vol) = a2dp_volume(&snapshot.pcms) {
+                state.seed_pcm_volume(pcm_vol);
+                tracing::info!(
+                    pcm_volume = pcm_vol,
+                    "Volume sync seeded from BlueALSA (not applied)"
+                );
+            }
+        }
+        Ok(Err(e)) => tracing::debug!(error = %e, "Volume sync: PCM seed read failed"),
+        Err(e) => handle_join_error("PCM seed read", e),
     }
 }
 
@@ -496,7 +536,16 @@ async fn run_signal_streams(
     mut amp_stream: MessageStream,
 ) {
     loop {
+        // Biased polling: `InterfacesAdded` is prioritized so a fresh PCM's
+        // establishment (path tracking + suppression arming) is processed
+        // before any of its queued `PropertiesChanged` volume signals.
         tokio::select! {
+            biased;
+            signal = iface_stream.next() => {
+                if handle_interfaces_added_signal(signal, amp, bt, state).await.is_err() {
+                    return;
+                }
+            }
             _ = watchdog.tick() => {
                 watchdog_tick(amp, bt, state).await;
             }
@@ -507,11 +556,6 @@ async fn run_signal_streams(
             }
             signal = amp_stream.next() => {
                 if handle_amp_signal(signal, bt, state).await.is_err() {
-                    return;
-                }
-            }
-            signal = iface_stream.next() => {
-                if handle_interfaces_added_signal(signal, amp, bt, state).await.is_err() {
                     return;
                 }
             }
@@ -558,6 +602,19 @@ async fn handle_bluealsa_props_signal(
         &interface,
         props.keys().map(String::as_str),
     ) {
+        return Ok(());
+    }
+    // Fresh-PCM gating: a PCM that appears mid-session can emit its
+    // default-volume `PropertiesChanged` before the `InterfacesAdded`
+    // handler arms suppression. Reject volumes from untracked paths so a
+    // default can never reach audio-manager ahead of the settle window.
+    if let Some(pcm_path) = &path
+        && !state.is_pcm_known(pcm_path)
+    {
+        tracing::debug!(
+            pcm = %pcm_path,
+            "Volume sync skipped: PCM not yet established (no InterfacesAdded)"
+        );
         return Ok(());
     }
     let Some(pcm_vol) = props
@@ -636,6 +693,10 @@ async fn handle_interfaces_added_signal(
     };
     if speaker_bluetooth::transport::is_a2dp_pcm_path(&path) {
         tracing::info!("Fresh A2DP PCM: pushing amp level, settling forward sync");
+        // Track the path BEFORE arming: any of this PCM's volume signals
+        // already queued (default volume included) are now gated by the
+        // fresh-connect suppression window instead of being forwarded.
+        state.mark_pcm_known(&path);
         state.arm_fresh_pcm(Instant::now());
         reconcile_reverse(amp, bt, state).await;
     }
@@ -668,7 +729,7 @@ pub(crate) async fn run_task(
     };
 
     let mut state = VolumeSyncState::new();
-    seed_pcm_volume(&bt, &mut state).await;
+    seed_pcm_state(&bt, &mut state).await;
     reconcile_reverse(&amp, &bt, &mut state).await;
 
     let Some((props_rule, interfaces_rule, amp_rule)) = build_match_rules() else {
@@ -718,6 +779,17 @@ pub(crate) async fn run_task(
                 continue;
             }
         };
+
+        if failures > 0 {
+            // Reconnect state reset: PCMs may have been recreated while the
+            // listener was disconnected (their `InterfacesAdded` was missed),
+            // so re-snapshot the paths, re-arm fresh-PCM protection, and
+            // force a reverse reconcile before accepting forward updates.
+            seed_pcm_state(&bt, &mut state).await;
+            state.arm_fresh_pcm(Instant::now());
+            reconcile_reverse(&amp, &bt, &mut state).await;
+            tracing::info!("Volume sync state re-armed after D-Bus reconnect");
+        }
 
         match subscribe_streams_once(
             &signal_conn,

@@ -177,10 +177,14 @@ async fn set_mute_off_when_already_unmuted() {
 #[tokio::test]
 async fn set_mute_on_when_already_muted() {
     let (iface, ctrl, _dir) = make_interface();
-    ctrl.set_state(AmpState {
+    // Both the mock backend and the interface state must start muted so the
+    // call exercises a repeated mute (no state transition), not mute-on.
+    let muted_state = AmpState {
         level_raw: 50,
         muted: true,
-    });
+    };
+    ctrl.set_state(muted_state);
+    *iface.state.lock().await = muted_state;
 
     iface.set_mute_inner(true).await.unwrap();
 
