@@ -123,6 +123,63 @@ pub struct BtPlaybackState {
     pub image_handle: Option<Box<str>>,
     /// Local cache path to downloaded cover art image (e.g. `/var/cache/speaker-covers/...jpg`).
     pub cover_art_path: Option<Box<str>>,
+    /// Phone/remote device volume (AVRCP absolute volume, 0-127), if reported by `MediaPlayer1`.
+    pub phone_volume: Option<AvrcpVolume>,
+    /// Equalizer setting (e.g., "off", "flat", "bass", "treble"), if reported by `MediaPlayer1`.
+    pub equalizer: Option<Box<str>>,
+    /// Repeat mode (e.g., "off", "alltrack", "group"), if reported by `MediaPlayer1`.
+    pub repeat: Option<Box<str>>,
+    /// Shuffle mode (e.g., "off", "alltrack", "group"), if reported by `MediaPlayer1`.
+    pub shuffle: Option<Box<str>>,
+    /// Scan mode (e.g., "off", "alltrack", "group"), if reported by `MediaPlayer1`.
+    pub scan: Option<Box<str>>,
+}
+
+/// Maximum AVRCP absolute volume value (0-127 per `BlueZ` `MediaPlayer1.Volume` spec).
+pub const AVRCP_MAX_VOLUME: u16 = 127;
+
+/// AVRCP absolute volume (0-127) with validated construction.
+///
+/// `BlueZ` `MediaPlayer1.Volume` is a uint16 in the range 0-127 representing
+/// the remote device's volume level. This newtype enforces the invariant at
+/// construction time, preventing invalid values from propagating through the
+/// system (M-STRONG-TYPES-GUARD).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AvrcpVolume(u16);
+
+impl<'de> serde::Deserialize<'de> for AvrcpVolume {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let v = u16::deserialize(deserializer)?;
+        Self::new(v).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "AVRCP absolute volume {v} exceeds maximum {AVRCP_MAX_VOLUME}"
+            ))
+        })
+    }
+}
+
+impl AvrcpVolume {
+    /// Creates a new `AvrcpVolume` from a raw value, returning `None` if out of range.
+    #[must_use]
+    pub fn new(v: u16) -> Option<Self> {
+        (v <= AVRCP_MAX_VOLUME).then_some(Self(v))
+    }
+
+    /// Returns the raw volume value (0-127).
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+
+    /// Converts to percentage (0-100), rounded.
+    #[must_use]
+    pub fn to_percent(self) -> u8 {
+        ((u32::from(self.0) * 100 + u32::from(AVRCP_MAX_VOLUME) / 2) / u32::from(AVRCP_MAX_VOLUME))
+            as u8
+    }
 }
 
 /// Placeholder title shown whenever no Bluetooth media player is connected.
@@ -145,6 +202,11 @@ impl Default for BtPlaybackState {
             obex_port: None,
             image_handle: None,
             cover_art_path: None,
+            phone_volume: None,
+            equalizer: None,
+            repeat: None,
+            shuffle: None,
+            scan: None,
         }
     }
 }
@@ -173,6 +235,30 @@ impl BtPlaybackState {
     pub fn format_duration(&self) -> String {
         format_duration_ms(self.duration_ms)
     }
+
+    /// Converts the AVRCP absolute volume (0-127) to a percentage (0-100),
+    /// rounded. `None` when no phone volume is reported.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use speaker_bluetooth::{BtPlaybackState, AvrcpVolume};
+    /// let mut s = BtPlaybackState::default();
+    /// s.phone_volume = AvrcpVolume::new(0);
+    /// assert_eq!(s.phone_volume_percent(), Some(0));
+    /// s.phone_volume = AvrcpVolume::new(64);
+    /// assert_eq!(s.phone_volume_percent(), Some(50));
+    /// s.phone_volume = AvrcpVolume::new(80);
+    /// assert_eq!(s.phone_volume_percent(), Some(63));
+    /// s.phone_volume = AvrcpVolume::new(127);
+    /// assert_eq!(s.phone_volume_percent(), Some(100));
+    /// s.phone_volume = None;
+    /// assert_eq!(s.phone_volume_percent(), None);
+    /// ```
+    #[must_use]
+    pub fn phone_volume_percent(&self) -> Option<u8> {
+        self.phone_volume.map(AvrcpVolume::to_percent)
+    }
 }
 
 /// Decodes a `BlueALSA` 16-bit PCM format identifier into a human-readable name.
@@ -197,6 +283,47 @@ pub fn decode_pcm_format(id: u16) -> Box<str> {
     } else {
         format!("{sign}{width}_{bytes_per_sample}{endian}").into()
     }
+}
+
+/// Returns `true` when a `BlueALSA` PCM object path identifies an A2DP stream.
+///
+/// bluez-alsa has emitted both `a2dpsnk` and `a2dpsink` transport tokens across
+/// releases, so match the `a2dp` token prefix instead of one spelling. Matching
+/// whole path segments keeps device (`dev_XX`) and PCM-direction segments from
+/// producing false positives.
+#[must_use]
+pub fn is_a2dp_pcm_path(path: &str) -> bool {
+    path.split('/').any(|segment| segment.starts_with("a2dp"))
+}
+
+/// AVRCP absolute-volume range (`0..=127`).
+///
+/// Single source of truth: re-encodes [`AVRCP_MAX_VOLUME`] (the `BlueZ`
+/// `MediaPlayer1.Volume` bound) as the 7-bit transport range.
+pub const AVRCP_VOLUME_MAX: u8 = AVRCP_MAX_VOLUME as u8;
+
+/// Percent volume range (`0..=100`).
+pub const PERCENT_VOLUME_MAX: u8 = 100;
+
+/// Converts a *fractional* AVRCP absolute volume (`0.0..=127.0`, e.g. the
+/// average of per-channel 7-bit volumes) to a volume percentage, rounding to
+/// nearest and clamping into `0..=100`.
+///
+/// This is a plain linear rescale: the perceptual dB curve is applied once, by
+/// the amplifier's percent → register mapping, not here. AVRCP 0 maps to 0 %,
+/// which the amplifier treats as a hard mute.
+#[must_use]
+pub fn avrcp_avg_to_percent(avg: f64) -> u8 {
+    let percent = ((avg / f64::from(AVRCP_VOLUME_MAX)) * f64::from(PERCENT_VOLUME_MAX))
+        .round()
+        .clamp(0.0, f64::from(PERCENT_VOLUME_MAX));
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "percentage clamped 0.0..=100.0 fits in u8"
+    )]
+    let percent = percent as u8;
+    percent
 }
 
 /// Converts a volume percentage (`0..=100`) to a `BlueALSA` / AVRCP 7-bit level (`0..=127`).
@@ -273,7 +400,7 @@ pub fn format_volume_bytes(
         .join(" ");
 
     let avg_level = f64::from(total_level) / (bytes.len() as f64);
-    let percent = amp_curve::avrcp_avg_to_percent(avg_level);
+    let percent = avrcp_avg_to_percent(avg_level);
 
     (Some(volume.into()), muted, Some(percent))
 }
@@ -289,10 +416,6 @@ pub enum TransportCommand {
     PreviousTrack,
     /// Seek to an absolute playback position in milliseconds.
     Seek(u32),
-    /// Set output volume percentage (`0..=100`) and unmute.
-    SetVolume(u8),
-    /// Set output mute state (`true` = muted, `false` = unmuted).
-    SetMute(bool),
 }
 
 /// Thread-safe command queue bridging Slint render-thread callbacks and the
@@ -329,20 +452,6 @@ impl TransportCommandQueue {
                 poisoned.into_inner()
             }
         };
-        // Coalesce consecutive SetVolume or SetMute updates so rapid slider drags
-        // or rotary encoder turns only execute the latest target on D-Bus without
-        // filling the 32-entry queue.
-        match (lock.back_mut(), command) {
-            (Some(TransportCommand::SetVolume(prev)), TransportCommand::SetVolume(next)) => {
-                *prev = next;
-                return;
-            }
-            (Some(TransportCommand::SetMute(prev)), TransportCommand::SetMute(next)) => {
-                *prev = next;
-                return;
-            }
-            _ => {}
-        }
         // Bounded to 32 commands: rapid-fire clicks can never accumulate an
         // unbounded backlog. Play/pause drops reconcile on the next publish,
         // but seek/navigation drops have no such reconciliation, so overflow

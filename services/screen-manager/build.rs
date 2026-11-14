@@ -13,5 +13,12 @@ fn main() {
 
         slint_build::compile_with_config("ui/appwindow.slint", config)
             .expect("Failed to compile Slint UI definitions");
+
+        // Watch the whole ui/ directory: slint-build's own emitted rerun-if-changed
+        // paths are unreliable across stale fingerprints (AGENTS.md §4.13), and a
+        // directory watch also covers .slint files added or renamed later — a
+        // hardcoded per-file list silently misses new imports.
+        println!("cargo:rerun-if-changed=ui/appwindow.slint");
+        println!("cargo:rerun-if-changed=ui");
     }
 }

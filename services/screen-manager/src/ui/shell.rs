@@ -249,8 +249,8 @@ pub struct AppShell {
     window: MainWindow,
     strips: Rc<RefCell<MarqueeStripCache>>,
     volume_step_percent: Cell<u8>,
-    has_initial_pcm_seed: Cell<bool>,
     transport_commands: Rc<RefCell<Option<speaker_bluetooth::TransportCommandQueue>>>,
+    amp_commands: Rc<RefCell<Option<crate::volume::AmpVolumeCommandQueue>>>,
     last_toggle: Rc<Cell<std::time::Instant>>,
 }
 
@@ -271,8 +271,8 @@ impl AppShell {
             window,
             strips: Rc::new(RefCell::new(MarqueeStripCache::default())),
             volume_step_percent: Cell::new(DEFAULT_VOLUME_STEP_PERCENT),
-            has_initial_pcm_seed: Cell::new(false),
             transport_commands: Rc::new(RefCell::new(None)),
+            amp_commands: Rc::new(RefCell::new(None)),
             last_toggle: Rc::new(Cell::new(
                 std::time::Instant::now()
                     .checked_sub(std::time::Duration::from_secs(1))
@@ -383,13 +383,10 @@ impl AppShell {
         };
         let delta = detents.saturating_mul(i32::from(self.volume_step_percent()));
         let target = u8::try_from(current.saturating_add(delta).clamp(0, 100)).unwrap_or(0);
-        let target_f32 = f32::from(target);
-        self.set_volume(target_f32);
-        if self.is_muted() {
-            self.set_muted(false);
-        }
-        self.show_volume_hud();
-        self.window.invoke_volume_changed(target_f32);
+        // The `volume_changed` callback owns the optimistic UI update, the
+        // mute-clear (queued as an explicit `SetMute(false)` amp command when
+        // the slider is moved while muted), and the Volume HUD refresh.
+        self.window.invoke_volume_changed(f32::from(target));
         target
     }
 
@@ -690,22 +687,30 @@ impl AppShell {
         if self.window.get_stream_bit_depth().as_str() != bit_depth {
             self.set_stream_bit_depth(bit_depth);
         }
-        let was_seeded = self.has_initial_pcm_seed.replace(true);
-        let mut volume_or_mute_changed = false;
-        if self.window.get_is_muted() != pcm.muted {
-            self.window.set_is_muted(pcm.muted);
-            volume_or_mute_changed = true;
+        // PCM volume/mute are stream metadata owned by the phone (BlueALSA);
+        // the on-screen level and mute indicator exclusively reflect the amp
+        // via `apply_amp_volume`, so they are intentionally not applied here.
+    }
+
+    /// Applies the authoritative amp level/mute snapshot published by the
+    /// `amp-volume` worker to the volume slider and mute indicator.
+    pub fn apply_amp_volume(&self, state: &crate::volume::AmpVolumeState) {
+        let volume = f32::from(state.level);
+        if (self.window.get_volume_value() - volume).abs() >= 0.5 {
+            self.set_volume(volume);
         }
-        if let Some(pct) = pcm.volume_percent {
-            let volume = f32::from(pct);
-            if (self.window.get_volume_value() - volume).abs() >= 0.5 {
-                self.set_volume(volume);
-                volume_or_mute_changed = true;
-            }
+        if self.window.get_is_muted() != state.muted {
+            self.window.set_is_muted(state.muted);
         }
-        if was_seeded && volume_or_mute_changed {
-            self.show_volume_hud();
-        }
+    }
+
+    /// Wires the volume slider / mute toggle / encoder callbacks to the
+    /// dedicated `amp-volume` worker command queue.
+    ///
+    /// Screen-initiated volume changes drive the amplifier directly
+    /// (`audio-manager` D-Bus), not the Bluetooth PCM transport.
+    pub fn wire_amp_volume(&self, commands: &crate::volume::AmpVolumeCommandQueue) {
+        *self.amp_commands.borrow_mut() = Some(commands.clone());
     }
 
     /// Updates the mini peak meter visualization ratios (0.0 to 1.0).
@@ -974,7 +979,7 @@ impl AppShell {
             }
         });
 
-        let transport_mute = Rc::clone(&self.transport_commands);
+        let transport_mute = Rc::clone(&self.amp_commands);
         let win = self.window.as_weak();
         self.window.on_toggle_mute(move || {
             if let Some(w) = win.upgrade() {
@@ -982,9 +987,9 @@ impl AppShell {
                 w.set_is_muted(next_muted);
                 w.invoke_show_volume_hud();
                 if let Some(cmds) = transport_mute.borrow().as_ref() {
-                    cmds.push(speaker_bluetooth::TransportCommand::SetMute(next_muted));
+                    cmds.push(crate::volume::AmpVolumeCommand::SetMute(next_muted));
                 }
-                tracing::debug!("Mute toggled to {next_muted}");
+                tracing::debug!("Amp mute toggled to {next_muted}");
             }
         });
 
@@ -1006,7 +1011,7 @@ impl AppShell {
             }
         });
 
-        let transport_vol = Rc::clone(&self.transport_commands);
+        let transport_vol = Rc::clone(&self.amp_commands);
         let win = self.window.as_weak();
         self.window.on_volume_changed(move |val| {
             if let Some(w) = win.upgrade() {
@@ -1020,15 +1025,22 @@ impl AppShell {
                 } else {
                     0
                 };
+                let was_muted = w.get_is_muted();
                 w.set_volume_value(f32::from(clamped));
-                if w.get_is_muted() {
+                if was_muted {
                     w.set_is_muted(false);
                 }
                 w.invoke_show_volume_hud();
                 if let Some(cmds) = transport_vol.borrow().as_ref() {
-                    cmds.push(speaker_bluetooth::TransportCommand::SetVolume(clamped));
+                    // A level change while muted audibly unmutes: queue both.
+                    // The level write MUST be queued (and applied) before the
+                    // unmute so the amp never plays its stored previous level.
+                    cmds.push(crate::volume::AmpVolumeCommand::SetLevel(clamped));
+                    if was_muted {
+                        cmds.push(crate::volume::AmpVolumeCommand::SetMute(false));
+                    }
                 }
-                tracing::debug!("Volume changed to {clamped}%");
+                tracing::debug!("Amp volume changed to {clamped}%");
             }
         });
     }

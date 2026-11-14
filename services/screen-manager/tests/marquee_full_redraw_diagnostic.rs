@@ -161,7 +161,7 @@ fn shell_marquee_compose_mode_scrolls_without_slint_dirty() {
     let mut last_row: Option<Vec<u8>> = None;
     let mut distinct_rows = 0;
     let mut slint_drawn_frames = 0;
-    // 160 frames cover the 2 s stationary pause plus ~1.6 s of scrolling.
+    // 160 frames cover ~2.7 s of continuous, pause-free scrolling.
     let frames = 160;
     for _ in 0..frames {
         std::thread::sleep(std::time::Duration::from_micros(16_700));

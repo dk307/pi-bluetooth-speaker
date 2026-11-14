@@ -27,6 +27,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+zbus = { workspace = true, features = ["tokio", "blocking-api"] }
 
 # Slint UI
 i-slint-core = { workspace = true, optional = true }

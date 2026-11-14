@@ -805,6 +805,47 @@ fn amp_info_cli_argument_parsing_and_stats() {
 }
 
 #[test]
+fn amp_info_cli_set_values_map_isolated_field_values() {
+    use speaker_common::diag::CliParse;
+    use speaker_diagnostics::cli::amp::{CliOptions, parse_cli_args_from};
+    use speaker_hardware::{AudioInputMode, I2sFormat, PowerModeCtrl, PowerModeProfile};
+
+    fn unwrap_options(parsed: Result<CliParse<CliOptions>, String>) -> CliOptions {
+        match parsed.unwrap() {
+            CliParse::Options(o) => o,
+            other => panic!("expected CliParse::Options, got {other:?}"),
+        }
+    }
+
+    // Numeric fallbacks must map the isolated CLI field value (not a full
+    // register byte) to the matching enum variant (regression: --set-pm 03
+    // previously decoded via from_raw(3) as PM0, and --set-audio-mode 04 as
+    // Digital20dB instead of Analog20dB).
+    let opts = unwrap_options(parse_cli_args_from([
+        "--set-pm".into(),
+        "03".into(),
+        "--set-profile".into(),
+        "5".into(),
+        "--set-i2s".into(),
+        "7".into(),
+        "--set-audio-mode".into(),
+        "04".into(),
+    ]));
+    assert_eq!(opts.set.pm, Some(PowerModeCtrl::Pm3));
+    assert_eq!(opts.set.profile, Some(PowerModeProfile::Pmp5Custom));
+    assert_eq!(opts.set.i2s_format, Some(I2sFormat::Rj24));
+    assert_eq!(opts.set.audio_mode, Some(AudioInputMode::Analog20dB));
+    let opts = unwrap_options(parse_cli_args_from([
+        "--set-pm".into(),
+        "1".into(),
+        "--set-audio-mode".into(),
+        "5".into(),
+    ]));
+    assert_eq!(opts.set.pm, Some(PowerModeCtrl::Pm1));
+    assert_eq!(opts.set.audio_mode, Some(AudioInputMode::Analog26dB));
+}
+
+#[test]
 fn amp_info_cli_mock_execution_and_fault_handling() {
     use std::process::ExitCode;
     use std::time::Duration;
@@ -913,7 +954,7 @@ fn amp_info_cli_set_workflow_ordering_and_failure_stop() {
 
     use speaker_common::diag::{CommonCliOptions, OutputFormat};
     use speaker_diagnostics::cli::amp::{CliOptions, SetValues, run_app};
-    use speaker_hardware::{AmpDevice, AmpI2cAddress};
+    use speaker_hardware::{AmpDevice, AmpI2cAddress, I2sFormat};
 
     let (amp, mock) = AmpDevice::new_mocked();
     mock.set_mock_serial_muted(true);
@@ -986,13 +1027,13 @@ fn amp_info_cli_set_workflow_ordering_and_failure_stop() {
     mock.set_mock_serial_muted(true);
     mock.set_transient_write_failures(1);
     let opts = set_opts(SetValues {
-        i2s_format: Some(4),
+        i2s_format: Some(I2sFormat::Rj24),
         mute: Some(false),
         ..SetValues::default()
     });
     assert_eq!(run_app(&amp, &opts), ExitCode::FAILURE);
     assert!(mock.mock_serial_muted());
-    assert_eq!(mock.mock_i2s_format(), 0);
+    assert_eq!(mock.mock_i2s_format(), I2sFormat::LeftJustified);
 
     // Mute-first: with a fault, a requested MUTE is still recorded as the
     // attempted first write... it fails, so state stays; verify the failure
@@ -1801,4 +1842,113 @@ fn bt_info_cli_mock_execution_and_controls() {
     speaker_diagnostics::cli::bt::print_human_audio_pipeline(&pcm_status, &pcm_opts);
     pcm_opts.target_device = Some(target_addr);
     speaker_diagnostics::cli::bt::print_human_audio_pipeline(&pcm_status, &pcm_opts);
+}
+
+#[test]
+fn bt_info_phone_volume_output_and_json() {
+    use std::process::ExitCode;
+
+    use speaker_bluetooth::{
+        AvrcpVolume, BluetoothDevice, BluetoothHardwareInfo, BluetoothServices, BluetoothStatus,
+        BtAddress, BtPlaybackState,
+    };
+    use speaker_common::diag::{OutputFormat, format_timestamp};
+    use speaker_common::systemd::ServiceState;
+    use speaker_diagnostics::cli::bt::{CliOptions, build_json_status, run_app};
+
+    // Test human output with phone volume
+    let (device, mock) = BluetoothDevice::new_mocked();
+    let mut opts = CliOptions::default();
+    opts.common.max_count = Some(1);
+    opts.common.verbose = true;
+    opts.common.format = OutputFormat::Human;
+
+    // Verify phone volume is present in mock (80/127 ≈ 63%)
+    let status = device.status().unwrap();
+    let playback = status.playback.as_ref().unwrap();
+    assert_eq!(playback.phone_volume, Some(AvrcpVolume::new(80).unwrap()));
+    assert_eq!(playback.phone_volume_percent(), Some(63));
+
+    let code = run_app(&device, &opts);
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    // JSON payload carries the raw AVRCP level and its percentage
+    let json = build_json_status("12:00:00", &status, &opts);
+    let json_playback = &json["playback"];
+    assert_eq!(json_playback["phone_volume"], serde_json::json!(80));
+    assert_eq!(json_playback["phone_volume_percent"], serde_json::json!(63));
+
+    opts.common.format = OutputFormat::Json;
+    let code_json = run_app(&device, &opts);
+    assert_eq!(code_json, ExitCode::SUCCESS);
+
+    // Test with no phone volume: the keys are present but null
+    if let Ok(Some(mut pb)) = device.playback_state() {
+        pb.phone_volume = None;
+        mock.set_playback(Some(pb));
+    }
+    opts.common.format = OutputFormat::Human;
+    let code_none = run_app(&device, &opts);
+    assert_eq!(code_none, ExitCode::SUCCESS);
+
+    let status_none = device.status().unwrap();
+    let json_none = build_json_status("12:00:01", &status_none, &opts);
+    assert!(json_none["playback"]["phone_volume"].is_null());
+    assert!(json_none["playback"]["phone_volume_percent"].is_null());
+
+    opts.common.format = OutputFormat::Json;
+    let code_none_json = run_app(&device, &opts);
+    assert_eq!(code_none_json, ExitCode::SUCCESS);
+
+    // Test with valid phone volume restored
+    if let Ok(Some(mut pb)) = device.playback_state() {
+        pb.phone_volume = Some(AvrcpVolume::new(80).unwrap());
+        mock.set_playback(Some(pb));
+    }
+    let code_restored = run_app(&device, &opts);
+    assert_eq!(code_restored, ExitCode::SUCCESS);
+
+    // Test direct output_json_status with phone volume
+    let pcm_status = BluetoothStatus {
+        services: BluetoothServices {
+            bluetoothd: ServiceState::Active,
+            bluealsa: ServiceState::Active,
+            bluealsa_aplay: ServiceState::Active,
+            bt_agent: ServiceState::Active,
+        },
+        adapter: None,
+        devices: Box::default(),
+        pcms: Box::default(),
+        hardware: BluetoothHardwareInfo::rpi3(),
+        playback: Some(BtPlaybackState {
+            device_address: Some(BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])),
+            device_name: "Test Phone".into(),
+            status: "playing".into(),
+            title: "Test Track".into(),
+            artist: "Test Artist".into(),
+            album: "Test Album".into(),
+            position_ms: 0,
+            duration_ms: 0,
+            player_path: None,
+            obex_port: None,
+            image_handle: None,
+            cover_art_path: None,
+            phone_volume: Some(AvrcpVolume::new(100).unwrap()), // 100/127 ≈ 79%
+            equalizer: None,
+            repeat: None,
+            shuffle: None,
+            scan: None,
+        }),
+    };
+    let timestamp = format_timestamp();
+    let json_direct = build_json_status(&timestamp, &pcm_status, &CliOptions::default());
+    assert_eq!(
+        json_direct["playback"]["phone_volume"],
+        serde_json::json!(100)
+    );
+    assert_eq!(
+        json_direct["playback"]["phone_volume_percent"],
+        serde_json::json!(79)
+    );
+    assert_eq!(json_direct["timestamp"], serde_json::json!(timestamp));
 }

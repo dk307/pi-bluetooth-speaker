@@ -5,3 +5,4 @@ pub mod bip_direct;
 pub mod config;
 pub mod cover_provider;
 pub mod daemon;
+pub mod volume_sync;

@@ -319,7 +319,8 @@ impl AmpGpio {
     #[must_use]
     pub fn new_mocked() -> (Self, AmpGpioMock) {
         let state = Arc::new(Mutex::new(MockGpioState {
-            // Mock starts in the same safe orientation `open()` asserts.
+            // Mirror `open()`: the hardware claim drives /MUTE LOW, so the
+            // amp always boots electrically muted.
             mute_low: true,
             ..MockGpioState::default()
         }));
@@ -415,6 +416,8 @@ impl AmpGpio {
                     let mut s = mock_lock(state);
                     s.awake = false;
                     s.mute_low = true;
+                    // The hardware reset branches never touch the booster
+                    // line, so the mock must preserve its state too.
                 }
             }
         }

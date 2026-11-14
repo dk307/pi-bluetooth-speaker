@@ -12,6 +12,7 @@ use screen_manager::ui::{
     AppShell, Framebuffer, MainWindow, TouchAction, TouchCalibration, TouchDecoder,
     TouchInputDevice,
 };
+use screen_manager::volume::{AmpVolumeCommand, coalesce};
 use slint::platform::{PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition};
 use speaker_bluetooth::{TransportCommand, TransportCommandQueue};
@@ -332,6 +333,9 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
 
     let commands = TransportCommandQueue::new();
     shell.wire_bluetooth_transport(&commands);
+    // Screen volume/mute actions target the amp worker queue, not BlueALSA.
+    let amp_commands = screen_manager::volume::AmpVolumeCommandQueue::new();
+    shell.wire_amp_volume(&amp_commands);
 
     assert!(!shell.is_volume_hud_visible());
 
@@ -351,42 +355,52 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
         "Clicking top status bar volume control must open the Volume HUD screen"
     );
     let _ = fb.render_frame(&window).expect("Render HUD open");
+    // Let the 200 ms HUD fade-in complete; mid-fade presses do not reach the HUD.
+    // Slint animations advance by wall-clock time, so sleep ~1 frame (16.7 ms, like
+    // the marquee test) per iteration instead of relying on render cost.
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_micros(16_700));
+        slint::platform::update_timers_and_animations();
+        let _ = fb.render_frame(&window).expect("Render HUD fade");
+    }
+    assert_eq!(shell.volume_hud_opacity(), 1.0, "HUD fade must complete");
 
-    // 2. Touch and drag the big-circle slider in the Volume HUD (centered at Y: ~348, X: 112..688)
+    // 2. Touch and drag the big-circle slider in the Volume HUD (centered at Y: ~382, X: 112..688)
     // Tap near the left end of the track (X: 112 -> 0%) and drag to center (X: 400 -> 50%) and right (X: 688 -> 100%)
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(112.0, 348.0),
+        position: LogicalPosition::new(112.0, 382.0),
         button: PointerEventButton::Left,
     });
     assert_eq!(shell.volume(), 0.0);
 
     window.dispatch_event(WindowEvent::PointerMoved {
-        position: LogicalPosition::new(400.0, 348.0),
+        position: LogicalPosition::new(400.0, 382.0),
     });
     assert_eq!(shell.volume(), 50.0);
 
     window.dispatch_event(WindowEvent::PointerMoved {
-        position: LogicalPosition::new(688.0, 348.0),
+        position: LogicalPosition::new(688.0, 382.0),
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(688.0, 348.0),
+        position: LogicalPosition::new(688.0, 382.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
     assert_eq!(shell.volume(), 100.0);
 
-    // Consecutive SetVolume commands coalesce to the latest value (100%)
-    let drained = commands.drain();
-    assert_eq!(drained, vec![TransportCommand::SetVolume(100)]);
+    // Consecutive amp SetLevel commands coalesce to the latest value (100%);
+    // the worker's coalesce() keeps exactly one SetLevel per batch.
+    let drained = coalesce(amp_commands.drain());
+    assert_eq!(drained, vec![AmpVolumeCommand::SetLevel(100)]);
 
-    // 3. Click the dedicated MUTE / UNMUTE button at the bottom of the Volume HUD (X: 400, Y: 439)
+    // 3. Click the dedicated MUTE / UNMUTE button at the bottom of the Volume HUD (X: 400, Y: 438)
     assert!(!shell.is_muted());
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(400.0, 439.0),
+        position: LogicalPosition::new(400.0, 438.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(400.0, 439.0),
+        position: LogicalPosition::new(400.0, 438.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
@@ -395,20 +409,20 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
         shell.is_muted(),
         "Clicking dedicated MUTE button inside Volume HUD must mute audio"
     );
-    assert_eq!(commands.drain(), vec![TransportCommand::SetMute(true)]);
+    assert_eq!(amp_commands.drain(), vec![AmpVolumeCommand::SetMute(true)]);
 
     // Click UNMUTE button again
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(400.0, 439.0),
+        position: LogicalPosition::new(400.0, 438.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(400.0, 439.0),
+        position: LogicalPosition::new(400.0, 438.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
     assert!(!shell.is_muted());
-    assert_eq!(commands.drain(), vec![TransportCommand::SetMute(false)]);
+    assert_eq!(amp_commands.drain(), vec![AmpVolumeCommand::SetMute(false)]);
 
     // 4. Tap backdrop outside controls (e.g., X: 40, Y: 100) to dismiss HUD immediately
     window.dispatch_event(WindowEvent::PointerPressed {

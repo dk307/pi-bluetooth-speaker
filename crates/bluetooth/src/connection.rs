@@ -1356,6 +1356,11 @@ impl DbusClient {
         };
 
         let obex_port = get_u16(props, "ObexPort").filter(|&p| p > 0);
+        let phone_volume = get_u16(props, "Volume").and_then(crate::transport::AvrcpVolume::new);
+        let equalizer = get_str(props, "Equalizer").map(Into::into);
+        let repeat = get_str(props, "Repeat").map(Into::into);
+        let shuffle = get_str(props, "Shuffle").map(Into::into);
+        let scan = get_str(props, "Scan").map(Into::into);
         let image_handle = props
             .get("Track")
             .and_then(|track_val| get_track_prop_str(track_val, "ImgHandle"))
@@ -1375,6 +1380,11 @@ impl DbusClient {
             obex_port,
             image_handle,
             cover_art_path: None,
+            phone_volume,
+            equalizer,
+            repeat,
+            shuffle,
+            scan,
         }
     }
 
@@ -1663,40 +1673,50 @@ impl DbusClient {
         Ok(pcms)
     }
 
-    fn select_active_pcm(pcms: &[BlueAlsaPcm]) -> Result<&BlueAlsaPcm, BtError> {
-        crate::transport::select_active_pcm(pcms).ok_or_else(|| {
-            BtError::no_active_player("no active BlueALSA PCM stream found on D-Bus")
-        })
+    /// Filters the candidate PCMs to A2DP streams (both `a2dpsnk` and
+    /// `a2dpsink` path spellings) before selection: reverse amp-level writes
+    /// must never land on an `HFP-AG` or other non-music PCM during a call.
+    fn select_active_a2dp_pcm(pcms: &[BlueAlsaPcm]) -> Result<&BlueAlsaPcm, BtError> {
+        let a2dp = || {
+            pcms.iter()
+                .filter(|pcm| crate::transport::is_a2dp_pcm_path(pcm.pcm_path.as_ref()))
+        };
+        a2dp()
+            .find(|pcm| pcm.running)
+            .or_else(|| a2dp().next())
+            .ok_or_else(|| {
+                BtError::no_active_player("no active A2DP BlueALSA PCM stream found on D-Bus")
+            })
     }
 
     /// Selects the target `BlueALSA` PCM stream (preferring an actively `running`
-    /// stream, otherwise the first available stream) and encodes its new `Volume`
+    /// A2DP stream, otherwise the first available A2DP stream) and encodes its new `Volume`
     /// (`ay`) byte array for `percent` (`0..=100`, unmuted).
     ///
     /// # Errors
-    /// Returns [`BtError`] if no `BlueALSA` PCM stream is present.
+    /// Returns [`BtError`] if no A2DP `BlueALSA` PCM stream is present.
     pub fn resolve_pcm_volume_target(
         objects: &ManagedObjects,
         percent: u8,
     ) -> Result<(Box<str>, Vec<u8>), BtError> {
         let pcms = Self::parse_bluealsa_objects(objects, &[]);
-        let pcm = Self::select_active_pcm(&pcms)?;
+        let pcm = Self::select_active_a2dp_pcm(&pcms)?;
         let bytes = encode_volume_bytes(pcm.channels, percent, false);
         Ok((pcm.pcm_path.clone(), bytes))
     }
 
-    /// Selects the target `BlueALSA` PCM stream and computes its updated `Volume`
+    /// Selects the target A2DP `BlueALSA` PCM stream and computes its updated `Volume`
     /// (`ay`) byte array with the mute bit (`0x80`) set or cleared while preserving
     /// per-channel 7-bit levels.
     ///
     /// # Errors
-    /// Returns [`BtError`] if no `BlueALSA` PCM stream is present.
+    /// Returns [`BtError`] if no A2DP `BlueALSA` PCM stream is present.
     pub fn resolve_pcm_mute_target(
         objects: &ManagedObjects,
         muted: bool,
     ) -> Result<(Box<str>, Vec<u8>), BtError> {
         let pcms = Self::parse_bluealsa_objects(objects, &[]);
-        let pcm = Self::select_active_pcm(&pcms)?;
+        let pcm = Self::select_active_a2dp_pcm(&pcms)?;
         let existing = objects
             .iter()
             .find(|(path, _)| path.as_str() == pcm.pcm_path.as_ref())
@@ -2003,6 +2023,11 @@ impl BluetoothDeviceMock {
                 obex_port: Some(4097),
                 image_handle: Some("1000001".into()),
                 cover_art_path: None,
+                phone_volume: crate::transport::AvrcpVolume::new(80), // 80/127 ≈ 63%
+                equalizer: None,
+                repeat: None,
+                shuffle: None,
+                scan: None,
             }),
             fault: None,
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),

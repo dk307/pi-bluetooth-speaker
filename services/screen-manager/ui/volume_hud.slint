@@ -56,29 +56,19 @@ export component VolumeHudOverlay inherits Rectangle {
             padding-bottom: 18px;
             padding-left: 24px;
             padding-right: 24px;
-            alignment: space-between;
 
-            // 1. Header Label
-            Text {
-                text: root.is_muted ? "VOLUME — MUTED" : "VOLUME";
-                color: root.is_muted ? MaterialPalette.error : MaterialPalette.secondary;
-                font-size: 16px;
-                font-weight: 800;
-                letter-spacing: 2px;
-                horizontal-alignment: center;
-            }
-
-            // 2. Giant Center Volume Readout (as big as possible in center)
+            // 1. Giant Center Volume Readout (expands into the space freed by the
+            // removed header label; the app bar already carries the "Volume" title)
             Rectangle {
-                height: 148px;
+                vertical-stretch: 1;
                 background: transparent;
 
                 Text {
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
                     text: root.is_muted ? "MUTE" : (Math.round(root.clamped_ratio * 100.0) + "%");
-                    color: root.is_muted ? MaterialPalette.error : MaterialPalette.on_surface;
-                    font-size: 128px;
+                    color: root.is_muted ? MaterialPalette.error : MaterialPalette.primary;
+                    font-size: 176px;
                     font-weight: 800;
                     horizontal-alignment: center;
                     vertical-alignment: center;
