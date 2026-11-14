@@ -15,26 +15,14 @@ fn make_interface() -> (AudioManagerInterface, MockAmpCtrl, tempfile::TempDir) {
     (iface, ctrl, dir)
 }
 
-fn make_interface_with_commands() -> (AudioManagerInterface, tokio::sync::mpsc::Sender<audio_manager::amp_controller::AmpCommand>, tempfile::TempDir) {
+fn make_interface_with_commands() -> (AudioManagerInterface, tokio::sync::mpsc::Receiver<audio_manager::amp_controller::AmpCommand>, tempfile::TempDir) {
     let dir = tempdir().unwrap();
     let state_path = dir.path().join("state.json");
     let state_file = StateFile::new(&state_path);
     let state = Arc::new(tokio::sync::Mutex::new(AmpState::default()));
-    let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(32);
-    let iface = AudioManagerInterface::with_commands(state, state_file, cmd_tx.clone());
-    (iface, cmd_tx, dir)
-}
-
-#[tokio::test]
-async fn dbus_api_new_constructor() {
-    let (_iface, _ctrl, _dir) = make_interface();
-    // Just verifies construction works
-}
-
-#[tokio::test]
-async fn dbus_api_with_commands_constructor() {
-    let (_iface, _cmd_tx, _dir) = make_interface_with_commands();
-    // Just verifies construction works
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
+    let iface = AudioManagerInterface::with_commands(state, state_file, cmd_tx);
+    (iface, cmd_rx, dir)
 }
 
 #[tokio::test]
@@ -133,21 +121,6 @@ async fn backend_failure_propagates() {
 }
 
 #[tokio::test]
-async fn set_level_i2c_mode_dispatches() {
-    let (_iface, _cmd_tx, _dir) = make_interface_with_commands();
-    // In i2c mode, set_level should dispatch to the command channel
-    // The i2c mode uses the D-Bus interface methods which require SignalEmitter
-    // Can't easily test without a full zbus setup, so we skip this test
-}
-
-#[tokio::test]
-async fn set_mute_i2c_mode_dispatches() {
-    let (_iface, _cmd_tx, _dir) = make_interface_with_commands();
-    // In i2c mode, set_mute should dispatch to the command channel
-    // Can't easily test without a full zbus setup, so we skip this test
-}
-
-#[tokio::test]
 async fn level_property_returns_percent() {
     let (iface, _ctrl, _dir) = make_interface();
     // Use the interface method to set the state, which updates the interface's state
@@ -188,9 +161,8 @@ async fn interface_creation_modes() {
     assert!(result1.is_ok());
 
     // i2c mode: no backend, has commands
-    let (_iface2, _cmd_tx, _dir2) = make_interface_with_commands();
+    let (_iface2, _cmd_rx, _dir2) = make_interface_with_commands();
     // In i2c mode, set_level dispatches to command channel
     // We can't easily test the D-Bus interface methods without SignalEmitter
-    // but we can verify the interface has commands
-    // assert!(iface2.commands.is_some()); // private field
+    // but we can verify the command receiver is available
 }

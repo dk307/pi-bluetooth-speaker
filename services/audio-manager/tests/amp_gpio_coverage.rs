@@ -13,8 +13,8 @@ fn amp_gpio_config_default() {
 
 #[test]
 fn amp_gpio_new_mocked_initial_state() {
-#[allow(unused_variables)]
-    let (gpio, mock) = AmpGpio::new_mocked();
+    let (_gpio, _mock) = AmpGpio::new_mocked();
+    let (_gpio, mock) = AmpGpio::new_mocked();
 
     // Initial state matches open() safe orientation
     assert!(mock.mute_pin_low());
@@ -65,7 +65,6 @@ fn amp_gpio_mock_reset() {
 
 #[test]
 fn amp_gpio_mock_reset_calls_hook() {
-#[allow(unused_variables)]
     let (gpio, mock) = AmpGpio::new_mocked();
 
     let hook_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -149,25 +148,11 @@ fn amp_gpio_config_custom() {
     assert_eq!(config.error, 13);
 }
 
-// Test constants by checking their values match expected
-#[test]
-fn amp_gpio_constants_via_behavior() {
-    // The constants are private but we can verify behavior
-    // BOOSTER_SETTLE = 200ms, ENABLE_SETTLE = 50ms
-    // RESET_PULSE = 1ms, RESET_SETTLE = 50ms
-    // EDGE_POLL_INTERVAL = 500ms
-
-    // Just verify the test compiles and runs
-    // The actual timing is tested in integration tests
-}
-
 #[test]
 fn amp_gpio_mock_state_debug() {
-#[allow(unused_variables)]
-    let (gpio, mock) = AmpGpio::new_mocked();
+    let (_gpio, mock) = AmpGpio::new_mocked();
     let debug_str = format!("{:?}", mock);
     assert!(debug_str.contains("MockGpioState"));
     assert!(debug_str.contains("awake"));
     assert!(debug_str.contains("mute_low"));
 }
-
