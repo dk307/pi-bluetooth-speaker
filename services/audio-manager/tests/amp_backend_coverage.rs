@@ -1,8 +1,7 @@
 //! Additional integration tests for amp_backend module to increase coverage.
 
 use audio_manager::amp_backend::{AmpBackend, MockAmpBackend, RealAmpBackend, I2cAmpBackend};
-use audio_manager::{AmpState, MockAmpCtrl};
-use speaker_hardware::{AmpDevice, AmpDeviceMock, AmpI2cAddress, MA12070P_DEFAULT_I2C_BUS};
+use audio_manager::AmpState;
 
 #[tokio::test]
 async fn mock_ctrl_sticky_serial_mute_fail() {
@@ -29,9 +28,9 @@ async fn mock_ctrl_sticky_serial_mute_fail() {
 async fn mock_ctrl_set_state_and_read() {
     let (backend, ctrl) = MockAmpBackend::new_mocked();
 
-    // Initial state
+    // Initial state (50% = raw 114)
     let state = backend.read_state().await.unwrap();
-    assert_eq!(state.level_raw, 116); // default
+    assert_eq!(state.level_raw, 114); // default
     assert!(!state.muted);
 
     // Set new state
@@ -114,7 +113,7 @@ async fn mock_backend_write_and_read_called_counts() {
 
 #[tokio::test]
 async fn i2c_amp_backend_new_mocked() {
-    let (backend, mock) = I2cAmpBackend::new_mocked();
+    let (backend, _mock) = I2cAmpBackend::new_mocked();
 
     assert_eq!(backend.backend_id(), "i2c-ma12070p@0x20");
 
@@ -296,7 +295,7 @@ fn amp_state_mute_unmute_idempotent() {
 
 #[test]
 fn amp_state_with_percent() {
-    use amp_curve::PERCENT_TO_RAW;
+    use speaker_hardware::PERCENT_TO_RAW;
 
     // When muted, only stores the level
     let state = AmpState {
@@ -317,7 +316,7 @@ fn amp_state_with_percent() {
 
 #[test]
 fn amp_state_level_percent_inverse() {
-    use amp_curve::PERCENT_TO_RAW;
+    use speaker_hardware::PERCENT_TO_RAW;
 
     for (p, &raw) in PERCENT_TO_RAW.iter().enumerate() {
         let state = AmpState {
@@ -338,7 +337,7 @@ fn amp_state_level_percent_inverse() {
 
 #[test]
 fn amp_state_level_percent_muted() {
-    use amp_curve::PERCENT_TO_RAW;
+    use speaker_hardware::PERCENT_TO_RAW;
 
     let state = AmpState {
         level_raw: 100,
@@ -350,7 +349,7 @@ fn amp_state_level_percent_muted() {
 
 #[test]
 fn amp_state_hardware_level_percent() {
-    use amp_curve::PERCENT_TO_RAW;
+    use speaker_hardware::PERCENT_TO_RAW;
 
     for (p, &raw) in PERCENT_TO_RAW.iter().enumerate() {
         let state = AmpState {
@@ -371,7 +370,7 @@ fn amp_state_hardware_level_percent() {
 
 #[test]
 fn amp_state_hardware_level_percent_muted() {
-    use amp_curve::PERCENT_TO_RAW;
+    use speaker_hardware::amp::PERCENT_TO_RAW;
 
     // Mute no longer clamps the hardware level; it reads back as the level.
     let state = AmpState {
@@ -379,6 +378,8 @@ fn amp_state_hardware_level_percent_muted() {
         muted: true,
     };
     let p = state.hardware_level_percent(&PERCENT_TO_RAW);
-    // raw 100 (-44 dB) reads back as the nearest/midpoint percent (~20%).
-    assert_eq!(p, 20);
+    // With the new linear calibration (1% = -60 dB, 100% = 0 dB), raw 100
+    // maps exactly to percent 27 and 28. The midpoint inverse returns the
+    // ceiling of the average: (27 + 28).div_ceil(2) = 28.
+    assert_eq!(p, 28);
 }

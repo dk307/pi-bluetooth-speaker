@@ -1,7 +1,6 @@
 //! Additional integration tests for amp_gpio module to increase coverage.
 
 use audio_manager::amp_gpio::{AmpGpio, AmpGpioConfig};
-use std::time::Duration;
 
 #[test]
 fn amp_gpio_config_default() {
@@ -14,6 +13,7 @@ fn amp_gpio_config_default() {
 
 #[test]
 fn amp_gpio_new_mocked_initial_state() {
+#[allow(unused_variables)]
     let (gpio, mock) = AmpGpio::new_mocked();
 
     // Initial state matches open() safe orientation
@@ -65,6 +65,7 @@ fn amp_gpio_mock_reset() {
 
 #[test]
 fn amp_gpio_mock_reset_calls_hook() {
+#[allow(unused_variables)]
     let (gpio, mock) = AmpGpio::new_mocked();
 
     let hook_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -162,9 +163,11 @@ fn amp_gpio_constants_via_behavior() {
 
 #[test]
 fn amp_gpio_mock_state_debug() {
+#[allow(unused_variables)]
     let (gpio, mock) = AmpGpio::new_mocked();
     let debug_str = format!("{:?}", mock);
     assert!(debug_str.contains("MockGpioState"));
     assert!(debug_str.contains("awake"));
     assert!(debug_str.contains("mute_low"));
 }
+

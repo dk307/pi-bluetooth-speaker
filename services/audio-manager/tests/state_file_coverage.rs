@@ -1,18 +1,18 @@
 //! Additional integration tests for state_file module to increase coverage.
 
-use amp_curve::PERCENT_TO_RAW;
+use speaker_hardware::PERCENT_TO_RAW;
 use audio_manager::{AmpState, StateFile};
 use speaker_common::diag::ScopedTempDir;
 
 #[test]
-fn state_file_load_missing_returns_error() {
+fn state_file_load_missing_returns_default() {
     let dir = ScopedTempDir::new("state_file_missing");
     let path = dir.path().join("missing.json");
     let state_file = StateFile::new(&path);
-    let err = state_file.load().unwrap_err();
-    // A missing file surfaces as an open failure (the daemon falls back to
+    // A missing file returns the default state (the daemon falls back to
     // `AmpState::default()` at the call site in `load_persisted_state`).
-    assert!(err.to_string().contains("open state file"), "{err}");
+    let state = state_file.load().unwrap();
+    assert_eq!(state, AmpState::default());
 }
 
 #[tokio::test]

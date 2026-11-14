@@ -118,7 +118,10 @@ fn amp_error_constructors() {
 fn amp_result_type_alias() {
     // Verify AmpResult works as expected
     let ok: AmpResult<i32> = Ok(42);
-    assert_eq!(ok.unwrap(), 42);
+    match ok {
+        Ok(v) => assert_eq!(v, 42),
+        Err(_) => panic!("expected Ok"),
+    }
 
     let err: AmpResult<i32> = Err(AmpError::Internal("test".into()));
     assert!(err.is_err());
