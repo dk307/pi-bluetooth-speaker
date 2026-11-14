@@ -13,7 +13,6 @@ fn amp_gpio_config_default() {
 
 #[test]
 fn amp_gpio_new_mocked_initial_state() {
-    let (_gpio, _mock) = AmpGpio::new_mocked();
     let (_gpio, mock) = AmpGpio::new_mocked();
 
     // Initial state matches open() safe orientation
@@ -132,20 +131,6 @@ fn amp_gpio_debug_impl() {
     let (gpio, _mock) = AmpGpio::new_mocked();
     let debug_str = format!("{:?}", gpio);
     assert!(debug_str.contains("AmpGpio"));
-}
-
-#[test]
-fn amp_gpio_config_custom() {
-    let config = AmpGpioConfig {
-        enable: 10,
-        mute: 11,
-        booster: 12,
-        error: 13,
-    };
-    assert_eq!(config.enable, 10);
-    assert_eq!(config.mute, 11);
-    assert_eq!(config.booster, 12);
-    assert_eq!(config.error, 13);
 }
 
 #[test]

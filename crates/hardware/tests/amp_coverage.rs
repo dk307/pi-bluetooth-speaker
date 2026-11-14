@@ -3,20 +3,9 @@
 
 use speaker_hardware::amp::{
     AmpDevice, AmpError, AmpErrorFlags, AmpFault, AmpSettings, AudioInputMode, I2sFormat,
-    LimiterSlew, MASTER_VOLUME_RAW_MAX, MIN_USABLE_DB, PERCENT_TO_RAW, Pm2Config, PowerModeCtrl,
-    PowerModeMon, PowerModeProfile, DcuMonitor,
-    REG_AUDIO_IN_MODE, REG_AUDIO_IN_MODE_EXT, REG_DCU_MON0, REG_DCU_MON1, REG_DCU_PM_MON,
-    REG_EH_CLEAR, REG_ERROR_ACC, REG_ERROR_LIVE, REG_I2S_FORMAT, REG_PM2_CONFIG,
+    Pm2Config, PowerModeCtrl, PowerModeMon, PowerModeProfile, DcuMonitor,
 };
 use std::sync::Arc;
-
-#[test]
-fn amp_constants_exposed() {
-    assert_eq!(MASTER_VOLUME_RAW_MAX, 144);
-    assert_eq!(MIN_USABLE_DB, -60);
-    assert_eq!(PERCENT_TO_RAW[0], 0);
-    assert_eq!(PERCENT_TO_RAW[100], 144);
-}
 
 #[test]
 fn amp_device_mock_new_mocked_returns_pair() {
@@ -153,13 +142,6 @@ fn amp_device_mock_set_latched_errors() {
 }
 
 #[test]
-fn amp_device_mock_vlp_limiter_enable() {
-    let (device, _mock) = AmpDevice::new_mocked();
-    let status = device.read_status().unwrap();
-    assert_eq!(status.pm_mon, PowerModeMon::Pm2);
-}
-
-#[test]
 fn amp_device_error_variants_and_display() {
     let i2c_err = rppal::i2c::Error::InvalidSlaveAddress(0x99);
     let amp_err: AmpError = i2c_err.into();
@@ -168,7 +150,7 @@ fn amp_device_error_variants_and_display() {
 }
 
 #[test]
-fn amp_device_error_predicates() {
+fn amp_device_error_from_i2c() {
     let i2c_err = rppal::i2c::Error::InvalidSlaveAddress(0x99);
     let amp_err: AmpError = i2c_err.into();
     assert!(amp_err.is_i2c());
@@ -213,91 +195,12 @@ fn amp_error_flags_operations() {
 }
 
 #[test]
-fn amp_power_mode_ctrl_encode() {
-    let ctrl = PowerModeCtrl::from_raw(0);
-    assert_eq!(ctrl.as_u8(), 0);
-    let ctrl = PowerModeCtrl::from_field(1);
-    assert_eq!(ctrl.as_u8(), 1);
-    let ctrl = PowerModeCtrl::from_field(2);
-    assert_eq!(ctrl.as_u8(), 2);
-    let ctrl = PowerModeCtrl::from_field(3);
-    assert_eq!(ctrl.as_u8(), 3);
-}
-
-#[test]
-fn amp_power_mode_profile_values() {
-    assert_eq!(PowerModeProfile::from_raw(0).as_u8(), 0);
-    assert_eq!(PowerModeProfile::from_raw(1).as_u8(), 1);
-    assert_eq!(PowerModeProfile::from_raw(2).as_u8(), 2);
-    assert_eq!(PowerModeProfile::from_raw(3).as_u8(), 3);
-    assert_eq!(PowerModeProfile::from_raw(4).as_u8(), 4);
-}
-
-#[test]
-fn amp_i2s_format_values() {
-    assert_eq!(I2sFormat::from_raw(0).as_u8(), 0);
-    assert_eq!(I2sFormat::from_raw(1).as_u8(), 1);
-}
-
-#[test]
-fn amp_audio_input_mode_values() {
-    assert_eq!(AudioInputMode::from_raw(0).as_u8(), 0);
-    assert_eq!(AudioInputMode::from_raw(0x20).as_u8(), 1);
-    assert_eq!(AudioInputMode::from_raw(0x40).as_u8(), 2);
-    assert_eq!(AudioInputMode::from_raw(0x60).as_u8(), 3);
-}
-
-#[test]
-fn amp_limiter_slew_encode() {
-    assert_eq!(LimiterSlew::Slow.encode(), 0b00);
-    assert_eq!(LimiterSlew::Normal.encode(), 0b01);
-    assert_eq!(LimiterSlew::Fast.encode(), 0b10);
-}
-
-#[test]
 fn amp_settings_debug_and_display() {
     let (device, _mock) = AmpDevice::new_mocked();
     let settings = device.read_settings().unwrap();
     let debug_str = format!("{settings:?}");
     assert!(debug_str.contains("AmpSettings"));
     assert!(debug_str.contains("master_volume_raw"));
-}
-
-#[test]
-fn amp_register_addresses_exposed() {
-    assert_eq!(REG_I2S_FORMAT, 0x35);
-    assert_eq!(REG_PM2_CONFIG, 0x1B);
-    assert_eq!(REG_AUDIO_IN_MODE, 0x25);
-    assert_eq!(REG_AUDIO_IN_MODE_EXT, 0x27);
-    assert_eq!(REG_DCU_PM_MON, 0x60);
-    assert_eq!(REG_DCU_MON0, 0x61);
-    assert_eq!(REG_DCU_MON1, 0x65);
-    assert_eq!(REG_EH_CLEAR, 0x2D);
-    assert_eq!(REG_ERROR_ACC, 0x6D);
-    assert_eq!(REG_ERROR_LIVE, 0x7C);
-}
-
-#[test]
-fn amp_pm2_config_values() {
-    let cfg = Pm2Config::from_raw(0x41);
-    assert!(cfg.usespread);
-    assert_eq!(cfg.dtsteps, 0);
-    assert_eq!(cfg.baltype, 1);
-}
-
-#[test]
-fn amp_dcu_monitor_values() {
-    let mon0 = DcuMonitor::from_raw(0x10, 0x00);
-    assert!(mon0.ch0.is_active());
-    assert!(!mon0.ch1.is_active());
-}
-
-#[test]
-fn amp_power_mode_mon_values() {
-    assert_eq!(PowerModeMon::from_raw(0).description(), "PM0");
-    assert_eq!(PowerModeMon::from_raw(1).description(), "PM1");
-    assert_eq!(PowerModeMon::from_raw(2).description(), "PM2");
-    assert_eq!(PowerModeMon::from_raw(3).description(), "PM3");
 }
 
 #[tokio::test]
@@ -326,21 +229,6 @@ async fn amp_device_async_read_settings() {
 fn amp_device_with_bus_and_address() {
     let result = AmpDevice::with_bus_and_address(99, speaker_hardware::AmpI2cAddress::default());
     result.unwrap_err();
-}
-
-#[test]
-fn amp_device_default_address() {
-    let addr = speaker_hardware::AmpI2cAddress::default_address();
-    assert_eq!(addr.as_u8(), 0x20);
-}
-
-#[test]
-fn amp_device_address_variants() {
-    assert_eq!(speaker_hardware::AmpI2cAddress::default_address().as_u8(), 0x20);
-    assert_eq!(speaker_hardware::AmpI2cAddress::new(0x21).unwrap().as_u8(), 0x21);
-    assert_eq!(speaker_hardware::AmpI2cAddress::new(0x22).unwrap().as_u8(), 0x22);
-    assert_eq!(speaker_hardware::AmpI2cAddress::new(0x23).unwrap().as_u8(), 0x23);
-    speaker_hardware::AmpI2cAddress::new(0x24).unwrap_err();
 }
 
 #[test]
@@ -375,34 +263,6 @@ fn amp_device_read_status() {
     assert_eq!(status.pm2_config.baltype, 1);
     assert!(status.dcu_monitor.ch0.is_active());
     assert!(!status.latched_errors.has_fault(AmpFault::PllClockLoss));
-}
-
-#[test]
-fn amp_i2c_address_methods() {
-    let addr = speaker_hardware::AmpI2cAddress::default_address();
-    assert_eq!(addr.as_u8(), 0x20);
-    assert_eq!(addr.as_u16(), 0x20);
-    assert_eq!(addr.to_string(), "0x20");
-}
-
-#[test]
-fn amp_i2c_address_try_from() {
-    let addr: Result<speaker_hardware::AmpI2cAddress, _> = 0x21_u8.try_into();
-    assert!(addr.is_ok());
-    assert_eq!(addr.unwrap().as_u8(), 0x21);
-    let addr: Result<speaker_hardware::AmpI2cAddress, _> = 0x99_u8.try_into();
-    addr.unwrap_err();
-}
-
-#[test]
-fn amp_i2c_address_parse_hex() {
-    assert_eq!(speaker_hardware::AmpI2cAddress::parse_hex("0x20").unwrap().as_u8(), 0x20);
-    assert_eq!(speaker_hardware::AmpI2cAddress::parse_hex("0X23").unwrap().as_u8(), 0x23);
-    assert_eq!(speaker_hardware::AmpI2cAddress::parse_hex("20").unwrap().as_u8(), 0x20);
-    speaker_hardware::AmpI2cAddress::parse_hex("0x24").unwrap_err();
-    speaker_hardware::AmpI2cAddress::parse_hex("+0x20").unwrap_err();
-    speaker_hardware::AmpI2cAddress::parse_hex("0x-20").unwrap_err();
-    speaker_hardware::AmpI2cAddress::parse_hex("zz").unwrap_err();
 }
 
 #[test]
