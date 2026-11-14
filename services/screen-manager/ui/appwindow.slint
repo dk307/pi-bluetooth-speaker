@@ -54,9 +54,9 @@ export component MainWindow inherits Window {
     out property <float> volume_hud_opacity: root.volume_hud_visible ? 1.0 : 0.0;
     animate volume_hud_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
     // Codec information overlay: opened from the codec badge in the top bar.
-    // It shares the HUD timeout and fade duration with the Volume HUD (both are
-    // transient, self-dismissing overlays driven by the same configuration).
+    // It has its own auto-dismiss timeout (default 30s) and shares the HUD fade duration.
     in-out property <bool> codec_hud_visible: false;
+    in-out property <int> codec_hud_timeout_ms: 30000;
     in-out property <int> codec_hud_elapsed_ms: 0;
     out property <float> codec_hud_opacity: root.codec_hud_visible ? 1.0 : 0.0;
     animate codec_hud_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
@@ -114,7 +114,7 @@ export component MainWindow inherits Window {
         running: root.codec_hud_visible;
         triggered() => {
             root.codec_hud_elapsed_ms += 50;
-            if (root.codec_hud_elapsed_ms >= root.volume_hud_timeout_ms) {
+            if (root.codec_hud_elapsed_ms >= root.codec_hud_timeout_ms) {
                 root.codec_hud_visible = false;
                 root.codec_hud_elapsed_ms = 0;
             }

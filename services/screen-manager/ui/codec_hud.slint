@@ -5,7 +5,7 @@ import { OverlayAppBar } from "screen_app_bar.slint";
 component CodecRow inherits Rectangle {
     in property <string> label;
     in property <string> value;
-    height: 34px;
+    height: 40px;
 
     HorizontalLayout {
         spacing: 12px;
@@ -13,16 +13,16 @@ component CodecRow inherits Rectangle {
         Text {
             text: root.label;
             color: MaterialPalette.secondary;
-            font-size: 13px;
+            font-size: 15px;
             font-weight: 800;
             vertical-alignment: center;
-            width: 120px;
+            width: 140px;
         }
 
         Text {
             text: root.value;
             color: MaterialPalette.on_surface;
-            font-size: 18px;
+            font-size: 22px;
             font-weight: 700;
             vertical-alignment: center;
             horizontal-stretch: 1;
@@ -92,23 +92,8 @@ export component CodecHudOverlay inherits Rectangle {
             padding-right: 24px;
             spacing: 6px;
 
-            // 1. Negotiated codec name (hero readout)
-            Rectangle {
-                height: 104px;
-                background: transparent;
-
-                Text {
-                    width: 100%;
-                    height: 100%;
-                    text: root.connected ? root.codec : "No stream";
-                    color: root.connected ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
-                    font-size: 56px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-            }
+            // 1. Negotiated codec name (as a normal row)
+            CodecRow { label: "CODEC"; value: root.connected ? root.codec : root.unknown; }
 
             // 2. Stream property rows, centered as a fixed-width column
             HorizontalLayout {

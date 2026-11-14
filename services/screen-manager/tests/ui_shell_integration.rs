@@ -735,7 +735,8 @@ fn ui_shell_cover_art_loading_and_error_handling() {
 #[test]
 fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
     use screen_manager::config::{
-        CoreConfig, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+        CodecHudTimeoutMs, CoreConfig, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
+        VolumeStepPercent,
     };
     use screen_manager::ui::{AppShell, Framebuffer, MainWindow, ThemePreset};
     use slint::ComponentHandle;
@@ -761,6 +762,7 @@ fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
         volume_step_percent: VolumeStepPercent::new(4),
         volume_hud_timeout_ms: VolumeHudTimeoutMs::new(1_500),
         volume_hud_fade_ms: VolumeHudFadeMs::new(150),
+        codec_hud_timeout_ms: CodecHudTimeoutMs::new(10_000),
     };
     shell.apply_config(&cfg);
     assert_eq!(shell.current_theme(), ThemePreset::MarantzAmber);

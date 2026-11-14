@@ -288,12 +288,13 @@ impl AppShell {
     }
 
     /// Applies runtime parameters from [`CoreConfig`] (theme, marquee fps, volume step,
-    /// and Volume HUD timeout/fade durations) to this shell.
+    /// Volume HUD timeout/fade durations, and Codec HUD timeout) to this shell.
     pub fn apply_config(&self, config: &CoreConfig) {
         self.set_marquee_fps(config.marquee_fps.value());
         self.set_volume_step_percent(config.volume_step_percent.value());
         self.set_volume_hud_timeout_ms(config.volume_hud_timeout_ms.value());
         self.set_volume_hud_fade_ms(config.volume_hud_fade_ms.value());
+        self.set_codec_hud_timeout_ms(config.codec_hud_timeout_ms.value());
         if let Some(theme) = config.theme {
             self.apply_theme(theme);
         }
@@ -390,6 +391,18 @@ impl AppShell {
     /// Immediately begins dismissing (fading out) the codec information overlay.
     pub fn dismiss_codec_hud(&self) {
         self.window.invoke_dismiss_codec_hud();
+    }
+
+    /// Returns the Codec HUD auto-dismiss timeout in milliseconds.
+    #[must_use]
+    pub fn codec_hud_timeout_ms(&self) -> u32 {
+        u32::try_from(self.window.get_codec_hud_timeout_ms()).unwrap_or(30_000)
+    }
+
+    /// Sets the Codec HUD auto-dismiss timeout in milliseconds.
+    pub fn set_codec_hud_timeout_ms(&self, timeout_ms: u32) {
+        self.window
+            .set_codec_hud_timeout_ms(i32::try_from(timeout_ms).unwrap_or(i32::MAX));
     }
 
     /// Adjusts volume by `detents * volume_step_percent`, unmutes, opens/refreshes the
