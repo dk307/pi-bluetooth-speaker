@@ -355,25 +355,34 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
         "Clicking top status bar volume control must open the Volume HUD screen"
     );
     let _ = fb.render_frame(&window).expect("Render HUD open");
+    // Let the 200 ms HUD fade-in complete; mid-fade presses do not reach the HUD.
+    // Slint animations advance by wall-clock time, so sleep ~1 frame (16.7 ms, like
+    // the marquee test) per iteration instead of relying on render cost.
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_micros(16_700));
+        slint::platform::update_timers_and_animations();
+        let _ = fb.render_frame(&window).expect("Render HUD fade");
+    }
+    assert_eq!(shell.volume_hud_opacity(), 1.0, "HUD fade must complete");
 
-    // 2. Touch and drag the big-circle slider in the Volume HUD (centered at Y: ~348, X: 112..688)
+    // 2. Touch and drag the big-circle slider in the Volume HUD (centered at Y: ~382, X: 112..688)
     // Tap near the left end of the track (X: 112 -> 0%) and drag to center (X: 400 -> 50%) and right (X: 688 -> 100%)
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(112.0, 348.0),
+        position: LogicalPosition::new(112.0, 382.0),
         button: PointerEventButton::Left,
     });
     assert_eq!(shell.volume(), 0.0);
 
     window.dispatch_event(WindowEvent::PointerMoved {
-        position: LogicalPosition::new(400.0, 348.0),
+        position: LogicalPosition::new(400.0, 382.0),
     });
     assert_eq!(shell.volume(), 50.0);
 
     window.dispatch_event(WindowEvent::PointerMoved {
-        position: LogicalPosition::new(688.0, 348.0),
+        position: LogicalPosition::new(688.0, 382.0),
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(688.0, 348.0),
+        position: LogicalPosition::new(688.0, 382.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
@@ -384,14 +393,14 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
     let drained = coalesce(amp_commands.drain());
     assert_eq!(drained, vec![AmpVolumeCommand::SetLevel(100)]);
 
-    // 3. Click the dedicated MUTE / UNMUTE button at the bottom of the Volume HUD (X: 400, Y: 439)
+    // 3. Click the dedicated MUTE / UNMUTE button at the bottom of the Volume HUD (X: 400, Y: 438)
     assert!(!shell.is_muted());
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(400.0, 439.0),
+        position: LogicalPosition::new(400.0, 438.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(400.0, 439.0),
+        position: LogicalPosition::new(400.0, 438.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
@@ -404,11 +413,11 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
 
     // Click UNMUTE button again
     window.dispatch_event(WindowEvent::PointerPressed {
-        position: LogicalPosition::new(400.0, 439.0),
+        position: LogicalPosition::new(400.0, 438.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerReleased {
-        position: LogicalPosition::new(400.0, 439.0),
+        position: LogicalPosition::new(400.0, 438.0),
         button: PointerEventButton::Left,
     });
     window.dispatch_event(WindowEvent::PointerExited);
