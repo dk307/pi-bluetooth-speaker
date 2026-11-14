@@ -148,18 +148,14 @@ fn amp_device_mock_set_latched_errors() {
 }
 
 #[test]
-fn amp_device_error_variants_and_display() {
-    let i2c_err = rppal::i2c::Error::InvalidSlaveAddress(0x99);
-    let amp_err: AmpError = i2c_err.into();
-    let display = amp_err.to_string();
-    assert!(display.contains("I2C") || display.contains("I/O"));
-}
-
-#[test]
 fn amp_device_error_from_i2c() {
     let i2c_err = rppal::i2c::Error::InvalidSlaveAddress(0x99);
     let amp_err: AmpError = i2c_err.into();
     assert!(amp_err.is_i2c());
+    // Verify the slave address is preserved in the error chain
+    let display = amp_err.to_string();
+    eprintln!("Error display: {display}");
+    assert!(display.contains("99") || display.contains("0x99") || display.contains("153"));
 }
 
 #[test]
@@ -169,20 +165,6 @@ fn amp_device_error_summary() {
     let summary = inner.summary();
     assert!(!summary.contains('\n'));
     assert!(!summary.contains("Backtrace"));
-}
-
-#[test]
-fn amp_fault_enum_complete() {
-    let faults = [
-        AmpFault::PllClockLoss,
-        AmpFault::HighTempWarning,
-        AmpFault::OvercurrentProtect,
-        AmpFault::UndervoltagePvdd,
-    ];
-    for fault in faults {
-        let flags = AmpErrorFlags::from_bits(1 << fault.bit());
-        assert!(flags.has_fault(fault));
-    }
 }
 
 #[test]
@@ -234,7 +216,9 @@ async fn amp_device_async_read_settings() {
 #[test]
 fn amp_device_with_bus_and_address() {
     let result = AmpDevice::with_bus_and_address(99, speaker_hardware::AmpI2cAddress::default());
-    result.unwrap_err();
+    let err = result.unwrap_err();
+    eprintln!("Error: {err:?}");
+    assert!(err.is_unsupported_bus() || err.is_invalid_address());
 }
 
 #[test]

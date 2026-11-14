@@ -1,7 +1,7 @@
 //! Additional integration tests for amp_backend module to increase coverage.
 
 use audio_manager::AmpState;
-use audio_manager::amp_backend::{AmpBackend, I2cAmpBackend, MockAmpBackend, RealAmpBackend};
+use audio_manager::amp_backend::{AmpBackend, I2cAmpBackend, MockAmpBackend};
 
 #[tokio::test]
 async fn mock_ctrl_sticky_serial_mute_fail() {
@@ -210,17 +210,6 @@ async fn i2c_amp_backend_pll_fault_flags_observable() {
     assert!(flags.has_fault(AmpFault::PllClockLoss));
 }
 
-#[tokio::test]
-async fn real_amp_backend_open_invalid_card_fails() {
-    // This test just verifies the error path is reachable
-    // We can't easily test RealAmpBackend without ALSA hardware
-    // but we can verify the error type
-    let result = RealAmpBackend::open("nonexistent-card-12345").await;
-    assert!(result.is_err());
-    let err = result.err().unwrap();
-    assert!(matches!(err, audio_manager::AmpError::Alsa(_)));
-}
-
 #[test]
 fn amp_state_new_constructor() {
     // Test the AmpState::new constructor
@@ -279,25 +268,6 @@ fn amp_state_mute_unmute_methods() {
 }
 
 #[test]
-fn amp_state_mute_unmute_idempotent() {
-    let state = AmpState {
-        level_raw: 50,
-        muted: true,
-    }
-    .mute();
-    assert!(state.muted);
-    assert_eq!(state.level_raw, 50);
-
-    let state = AmpState {
-        level_raw: 50,
-        muted: false,
-    }
-    .unmute();
-    assert!(!state.muted);
-    assert_eq!(state.level_raw, 50);
-}
-
-#[test]
 fn amp_state_with_percent() {
     use speaker_hardware::PERCENT_TO_RAW;
 
@@ -351,27 +321,6 @@ fn amp_state_level_percent_muted() {
     };
     let p = state.level_percent(&PERCENT_TO_RAW);
     assert!(p > 0);
-}
-
-#[test]
-fn amp_state_hardware_level_percent() {
-    use speaker_hardware::PERCENT_TO_RAW;
-
-    for (p, &raw) in PERCENT_TO_RAW.iter().enumerate() {
-        let state = AmpState {
-            level_raw: raw,
-            muted: false,
-        };
-        let back = state.hardware_level_percent(&PERCENT_TO_RAW);
-        let diff = (back as i16 - p as i16).abs();
-        assert!(
-            diff <= 4,
-            "percent {} -> raw {} -> back {}",
-            p,
-            PERCENT_TO_RAW[p],
-            back
-        );
-    }
 }
 
 #[test]

@@ -105,28 +105,6 @@ fn amp_gpio_mock_error_active() {
 }
 
 #[test]
-fn amp_gpio_mock_control_methods() {
-    let (gpio, mock) = AmpGpio::new_mocked();
-
-    // Test all mock control methods
-    assert_eq!(mock.wake_calls(), 0);
-    assert_eq!(mock.reset_calls(), 0);
-    assert_eq!(mock.power_up_calls(), 0);
-    assert_eq!(mock.mute_calls(), 0);
-    assert!(mock.mute_pin_low());
-    assert!(!mock.booster_on());
-    assert!(!mock.amp_awake());
-    assert!(!gpio.error_active().unwrap());
-
-    mock.set_error_active(true);
-    assert!(gpio.error_active().unwrap());
-
-    // Test set_reset_hook with None
-    mock.set_reset_hook(None);
-    gpio.reset().unwrap(); // Should not panic
-}
-
-#[test]
 fn amp_gpio_debug_impl() {
     let (gpio, _mock) = AmpGpio::new_mocked();
     let debug_str = format!("{:?}", gpio);

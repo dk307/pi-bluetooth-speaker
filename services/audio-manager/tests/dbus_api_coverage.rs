@@ -158,7 +158,31 @@ async fn muted_property_returns_state() {
 #[tokio::test]
 async fn i2c_mode_command_dispatch() {
     // Test that i2c mode dispatches commands to the command channel
-    let (_iface, mut cmd_rx, _dir) = make_interface_with_commands();
+    let (iface, mut cmd_rx, _dir) = make_interface_with_commands();
+
     // Verify the command receiver is available and functional
     assert!(cmd_rx.try_recv().is_err()); // Channel is empty initially
+
+    // Spawn a command processor that handles commands and sends replies
+    let processor = tokio::spawn(async move {
+        while let Some(cmd) = cmd_rx.recv().await {
+            if let Some(reply) = cmd.reply {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+
+    // Drive a command through the i2c-mode interface
+    iface.set_level_inner(50).await.unwrap();
+
+    // Test mute command dispatch
+    iface.set_mute_inner(true).await.unwrap();
+
+    // Give the processor time to handle the commands
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // Clean up
+    processor.abort();
+
+    // If we reach here without deadlocking, the command dispatch works
 }
