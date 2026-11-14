@@ -31,6 +31,9 @@ export component TopStatusBar inherits Rectangle {
     in property <string> stream_bit_depth: "16-bit";
     in property <float> volume_value: 75.0;
     in property <bool> is_muted: false;
+    // Bluetooth link state. The codec badge describes the negotiated A2DP stream, so it
+    // is only rendered while a device is actually connected.
+    in property <bool> bt_connected: false;
 
     // Display stream specs (sample rate & bit depth) only for codecs where specifications can vary
     in property <bool> show_stream_specs: !CodecSpecs.is-fixed-spec(root.stream_codec);
@@ -50,6 +53,18 @@ export component TopStatusBar inherits Rectangle {
     callback device_clicked();
     callback protocol_clicked();
 
+    // --- Layout of the centered device name -------------------------------------
+    // The name lives in the free space between the Bluetooth logo and the
+    // right-hand controls, so a long device name is elided instead of being drawn
+    // over the codec badge. Both edges are taken from the live layout geometry,
+    // which keeps the gap correct when the codec badge appears or disappears.
+    out property <length> logo_right: logo_image.absolute-position.x - root.absolute-position.x + logo_image.width;
+    out property <length> controls_left: controls.absolute-position.x - root.absolute-position.x;
+    property <length> name_gap: 12px;
+    property <length> name_max_width: Math.max(0px, root.controls_left - root.logo_right - 2 * root.name_gap);
+    property <length> name_width: Math.min(Math.min(device_text.preferred-width, 320px), root.name_max_width);
+    property <length> name_x: root.logo_right + root.name_gap + (root.name_max_width - root.name_width) / 2;
+
     HorizontalLayout {
         padding-left: MaterialStyleMetrics.padding_24;
         padding-right: MaterialStyleMetrics.padding_24;
@@ -68,7 +83,7 @@ export component TopStatusBar inherits Rectangle {
 
                     // Bluetooth Source Logo (icon + wordmark; full bar height,
                     // width pinned to the SVG's 370:100 aspect at bar scale)
-                    Image {
+                    logo_image := Image {
                         source: @image-url("../../../assets/icons/bluetooth-logo-word.svg");
                         colorize: MaterialPalette.primary;
                         height: root.height;
@@ -80,40 +95,40 @@ export component TopStatusBar inherits Rectangle {
         }
 
         // Right: Codec Badge + Volume + DIM Toggle (Vertically centered)
-        VerticalLayout {
+        controls := VerticalLayout {
             alignment: center;
             HorizontalLayout {
                 spacing: 10px;
 
-                // 1. Codec Badge (aptX-HD / AAC / SBC / LDAC) - original style with Material colors
-                VerticalLayout {
-                    alignment: center;
-                    Rectangle {
-                        // Fixed size so codec name changes never shift neighbors.
-                        width: 120px;
-                        height: 40px;
-                        background: MaterialPalette.surface;
-                        border-radius: 10px;
-                        border-width: 1px;
-                        border-color: MaterialPalette.outline_variant;
+                // 1. Codec Badge (aptX-HD / AAC / SBC / LDAC) - original style with Material colors.
+                // Rendered only while a Bluetooth device is connected: without a link there is
+                // no negotiated codec to report. The conditional removes the badge from the
+                // layout entirely, so the volume and DIM controls move inwards.
+                if root.bt_connected : Rectangle {
+                    // Fixed size so codec name changes never shift neighbors.
+                    width: 120px;
+                    height: 40px;
+                    background: MaterialPalette.surface;
+                    border-radius: 10px;
+                    border-width: 1px;
+                    border-color: MaterialPalette.outline_variant;
 
-                        Text {
-                            width: parent.width - 12px;
-                            height: parent.height;
-                            x: (parent.width - self.width) / 2;
-                            text: root.stream_codec;
-                            color: MaterialPalette.primary;
-                            font-size: 16px;
-                            font-weight: 800;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
+                    Text {
+                        width: parent.width - 12px;
+                        height: parent.height;
+                        x: (parent.width - self.width) / 2;
+                        text: root.stream_codec;
+                        color: MaterialPalette.primary;
+                        font-size: 16px;
+                        font-weight: 800;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
 
-                        TouchArea {
-                            clicked => {
-                                root.protocol_clicked();
-                            }
+                    TouchArea {
+                        clicked => {
+                            root.protocol_clicked();
                         }
                     }
                 }
@@ -220,39 +235,31 @@ export component TopStatusBar inherits Rectangle {
         }
     }
 
-    // Center: Track / Client Quick Info — a full-width overlay stretched across
-    // the bar (out of the flow layout so space-between of side elements can't
-    // shift it). HorizontalLayout { alignment: center } centers the text element
-    // horizontally on the bar; VerticalLayout centers it vertically. Only the
-    // bounded name hit-box has a TouchArea; clicks elsewhere pass through.
-    VerticalLayout {
-        height: parent.height;
-        alignment: center;
+    // Center: Track / Client Quick Info — laid out inside the gap between the logo
+    // and the right-hand controls (see `name_max_width`), so it can never overlap
+    // the codec badge. Only the bounded name hit-box is touchable; clicks
+    // elsewhere pass through to the logo and the volume / DIM controls.
+    name_box := Rectangle {
+        x: root.name_x;
+        y: (root.height - self.height) / 2;
+        width: root.name_width;
+        height: 48px;
 
-        HorizontalLayout {
-            alignment: center;
+        device_text := Text {
+            width: parent.width;
+            height: parent.height;
+            text: root.track_or_device;
+            color: MaterialPalette.on_surface;
+            font-size: 26px;
+            font-weight: 800;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
 
-            // Touch target hugs the (elided) name so it never covers the volume / DIM controls.
-            Rectangle {
-                width: min(device_name.preferred-width, 320px);
-                height: 48px;
-
-                device_name := Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: root.track_or_device;
-                    color: MaterialPalette.on_surface;
-                    font-size: 26px;
-                    font-weight: 800;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-
-                TouchArea {
-                    clicked => {
-                        root.device_clicked();
-                    }
-                }
+        TouchArea {
+            clicked => {
+                root.device_clicked();
             }
         }
     }

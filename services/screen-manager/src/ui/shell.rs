@@ -364,6 +364,34 @@ impl AppShell {
         self.window.invoke_dismiss_volume_hud();
     }
 
+    /// Returns whether the codec information overlay is currently in its active hold state.
+    #[must_use]
+    pub fn is_codec_hud_visible(&self) -> bool {
+        self.window.get_codec_hud_visible()
+    }
+
+    /// Returns the current opacity (`0.0..=1.0`) of the codec information overlay.
+    #[must_use]
+    pub fn codec_hud_opacity(&self) -> f32 {
+        self.window.get_codec_hud_opacity()
+    }
+
+    /// Returns `true` while the codec overlay is visible or actively fading out.
+    #[must_use]
+    pub fn is_codec_hud_active(&self) -> bool {
+        self.is_codec_hud_visible() || self.codec_hud_opacity() > 0.01
+    }
+
+    /// Opens the codec information overlay and resets its auto-dismiss countdown.
+    pub fn show_codec_hud(&self) {
+        self.window.invoke_show_codec_hud();
+    }
+
+    /// Immediately begins dismissing (fading out) the codec information overlay.
+    pub fn dismiss_codec_hud(&self) {
+        self.window.invoke_dismiss_codec_hud();
+    }
+
     /// Adjusts volume by `detents * volume_step_percent`, unmutes, opens/refreshes the
     /// Volume HUD, and fires the `volume_changed` callback.
     ///
@@ -465,10 +493,10 @@ impl AppShell {
     }
 
     /// Returns whether the raw marquee overlay should be suppressed
-    /// (e.g. when not on the Now Playing tab or when the Volume HUD is active).
+    /// (e.g. when not on the Now Playing tab or when a HUD overlay is active).
     #[must_use]
     pub fn should_suppress_marquee(&self) -> bool {
-        self.current_tab() != 0 || self.is_volume_hud_active()
+        self.current_tab() != 0 || self.is_volume_hud_active() || self.is_codec_hud_active()
     }
 
     /// Builds [`MarqueeRowSpec`]s for the Rust-side composer from the shared global and

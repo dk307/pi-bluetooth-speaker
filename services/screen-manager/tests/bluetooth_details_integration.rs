@@ -81,24 +81,18 @@ fn status_bar_logo_and_device_name_open_and_close_details() {
 }
 
 #[test]
-fn status_bar_codec_badge_opens_details_from_player_tab() {
+fn status_bar_codec_badge_does_not_open_details_from_player_tab() {
     let (shell, window) = shell_with_window();
 
-    // Fixed-spec codec ("aptX-HD"): sample-rate and bit-depth pills are hidden,
-    // but the codec badge itself still opens the details screen.
+    // Without a Bluetooth connection the codec badge is not rendered, so a tap on
+    // the badge slot must not open the details screen (the codec information is
+    // shown in its own overlay, see `top_bar_codec_integration.rs`).
     click(&window, 600.0, 30.0);
-    assert_eq!(shell.current_tab(), 2, "codec badge tap opens details");
-    assert_eq!(shell.window().get_previous_tab(), 0);
-
-    // Variable-spec codec ("AAC"): sample-rate and bit-depth pills are visible
-    // and tapping them also opens the Bluetooth details screen.
-    shell.set_stream_codec("AAC");
-    shell.set_stream_sample_rate("48 kHz");
-    shell.set_stream_bit_depth("24-bit");
-    shell.set_tab(0);
-    window.draw_if_needed(|_| {});
-    click(&window, 590.0, 30.0);
-    assert_eq!(shell.current_tab(), 2, "bit-depth badge tap opens details");
+    assert_eq!(
+        shell.current_tab(),
+        0,
+        "the hidden codec badge must not open details"
+    );
     assert_eq!(shell.window().get_previous_tab(), 0);
 }
 

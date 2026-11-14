@@ -1,0 +1,134 @@
+import { MaterialPalette } from "@material/material.slint";
+import { OverlayAppBar } from "screen_app_bar.slint";
+
+// One label / value line in the codec information panel.
+component CodecRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    height: 34px;
+
+    HorizontalLayout {
+        spacing: 12px;
+
+        Text {
+            text: root.label;
+            color: MaterialPalette.secondary;
+            font-size: 13px;
+            font-weight: 800;
+            vertical-alignment: center;
+            width: 120px;
+        }
+
+        Text {
+            text: root.value;
+            color: MaterialPalette.on_surface;
+            font-size: 18px;
+            font-weight: 700;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+}
+
+// Codec information overlay, opened by tapping the codec badge in the top bar.
+//
+// Mirrors the Volume HUD: a full-viewport panel below the top bar with its own
+// overlay app bar ("Codec" + close) and a backdrop touch catcher that dismisses
+// the panel when the user taps outside the information.
+export component CodecHudOverlay inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: @linear-gradient(150deg, MaterialPalette.surface 0%, MaterialPalette.background 100%);
+    border-width: 1px;
+    border-color: MaterialPalette.outline_variant;
+    clip: true;
+
+    // Negotiated stream properties of the connected device.
+    in property <string> codec: "";
+    in property <string> sample_rate: "";
+    in property <string> bit_depth: "";
+    in property <string> stream_format: "";
+    in property <string> delay_text: "";
+    // False while no Bluetooth device is connected (no stream to report).
+    in property <bool> connected: false;
+
+    callback dismiss_requested();
+
+    // Value shown for a property that is not available (no active stream).
+    property <string> unknown: "—";
+
+    // Full-viewport backdrop touch catcher: prevents touches from leaking through to
+    // the underlying tab and allows tapping empty space to dismiss the panel early.
+    backdrop_touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            root.dismiss_requested();
+        }
+    }
+
+    // Main content column: header (60px) + body (fills remaining)
+    VerticalLayout {
+        // Overlay app bar header (60px) — title "Codec", close icon on the right
+        Rectangle {
+            height: 60px;
+            width: 100%;
+            OverlayAppBar {
+                width: 100%;
+                height: 100%;
+                title: "Codec";
+                trailing_icon: @image-url("../../../assets/icons/close.svg");
+                trailing_tooltip: "Close";
+                trailing_clicked => { root.dismiss_requested(); }
+            }
+        }
+
+        // Body content (fills remaining space)
+        VerticalLayout {
+            padding-top: 18px;
+            padding-bottom: 18px;
+            padding-left: 24px;
+            padding-right: 24px;
+            spacing: 6px;
+
+            // 1. Negotiated codec name (hero readout)
+            Rectangle {
+                height: 104px;
+                background: transparent;
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: root.connected ? root.codec : "No stream";
+                    color: root.connected ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
+                    font-size: 56px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            // 2. Stream property rows, centered as a fixed-width column
+            HorizontalLayout {
+                alignment: center;
+                vertical-stretch: 1;
+
+                Rectangle {
+                    width: 560px;
+                    background: transparent;
+
+                    VerticalLayout {
+                        spacing: 6px;
+
+                        CodecRow { label: "SAMPLE RATE"; value: root.connected ? root.sample_rate : root.unknown; }
+                        CodecRow { label: "BIT DEPTH"; value: root.connected ? root.bit_depth : root.unknown; }
+                        CodecRow { label: "FORMAT"; value: root.connected ? root.stream_format : root.unknown; }
+                        CodecRow { label: "LATENCY"; value: root.connected ? root.delay_text : root.unknown; }
+                    }
+                }
+            }
+        }
+    }
+}
