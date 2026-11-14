@@ -8,9 +8,16 @@ Implement the three-screen Bluetooth device-management flow specified by the
 user (Main Device List → Add Device / Discovery → Connecting & Pairing Passkey)
 plus the Delete-Confirmation dialog, on the fixed 800×480 appliance panel.
 
+**Decision (user-confirmed): this new screen *replaces* the existing Bluetooth
+details tab (tab 2) entirely.** The details tab, its ten `bt_*` text properties,
+its worker publish path, and its test file are removed — not extended. The
+Bluetooth surface becomes one full-screen "screen" (not a tab) reachable from
+everywhere the details tab used to be reachable.
+
 **In scope**
-- New full-screen Slint surface: `ui/bluetooth_devices.slint` (list + discovery +
+- New full-screen Slint surface `ui/bluetooth_devices.slint` (list + discovery +
   pairing + delete dialog + toast + thin scrollbar + overflow cue).
+- Retirement of the tab-2 details screen (§4) with a precise removal list.
 - New `speaker-bluetooth` admin API: BlueZ discovery, `Device1.Connect`,
   `Device1.Disconnect`, `Adapter1.RemoveDevice`, `Device1.Pair` +
   `org.bluez.Agent1` passkey capture, all with a mock backend.
@@ -19,31 +26,31 @@ plus the Delete-Confirmation dialog, on the fixed 800×480 appliance panel.
 - Icons, integration tests, coverage ≥ 90 % for `screen-manager`.
 
 **Out of scope (explicitly)**
-- No changes to `bt-manager` (its auto-trust agent stays as the system default).
+- No changes to `bt-manager` (its auto-trust agent stays the system default).
 - No changes to the material-1.1.0 vendored library.
-- No rework of the existing Bluetooth *details* tab (tab 2), Now Playing, VU
-  meter, DSP, or settings screens.
+- No rework of Now Playing, VU meter, CD, DSP, Settings, status bar visuals, or
+  the volume/DSP pipelines.
 - No AVRCP/media work, no BLE GATT, no multi-adapter selection.
 
 ## 2. Spec → Implementation Mapping
 
 | Spec item | Implementation |
 |---|---|
-| 800×480, fixed 88 px app bar + 392 px scroll viewport | Full-window overlay layer in `MainWindow` (see D1). `BtMetrics.header_height = 88px`, `viewport_height: root.height - BtMetrics.header_height` (= 392 px). |
+| 800×480, fixed 88 px app bar + 392 px scroll viewport | Full-window overlay layer in `MainWindow` (D1). `BtMetrics.header_height = 88px`, `viewport_height: root.height - BtMetrics.header_height` (= 392 px). |
 | Background `surface`, cards `surface-container`, active card `secondary-container` | `MaterialPalette.surface` / `surface_container` / `secondary_container` (already pushed per-theme by `ThemePreset::apply`). |
 | Typography `on-surface` / `on-surface-variant` / `on-secondary-container` | `MaterialPalette.on_surface`, `on_surface_variant`, `on_secondary_container`. |
 | Primary action `primary`/`on-primary` (pill, 48 px) | Reuse `FilledButton` (pill radius = `height/2`) for `+ Add Device`, `Pair`, `Connect`. |
 | Destructive `error`/`on-error` (delete confirm) | New `BtDestructivePill` built on the same `BaseButton`/`Elevation` pattern with `MaterialPalette.error`. |
 | Dismiss/Cancel `outline`/`secondary` | Reuse `OutlinedButton` for `Cancel` / `Disconnect`. |
 | Momentum scrolling, overscroll glow disabled | `Flickable` inside the new list component (Slint has no overscroll glow by default). |
-| Scrollbar 4 px wide, 8 px right margin, auto-hide after 1500 ms | New `BtScrollBar` (see §5.1); 1.5 s hide `Timer` mirrors the material `ScrollBar` behaviour. |
-| Bottom overflow cue: 32 px gradient `surface` 100 %→0 % + ~35 % of 4th card visible | 32 px `@linear-gradient` overlay pinned to the viewport bottom; card list is a plain `VerticalLayout` so the last row is naturally clipped (no special code). |
-| Modal backdrop disables scrolling underneath | `flickable.interactive: !root.bt_delete_open` + full-screen scrim above the list (see D4). |
-| Cards 740 × 88, radius 20, padding 0 20, gap 12 | `BtDeviceCard`; width derived: `800 - 2×24 (list padding) - 4 (scrollbar) - 8 (scrollbar margin) = 740`. |
+| Scrollbar 4 px wide, 8 px right margin, auto-hide after 1500 ms | New `BtScrollBar` (§5.1); 1.5 s hide `Timer` mirrors the material `ScrollBar` behaviour. |
+| Bottom overflow cue: 32 px gradient `surface` 100 %→0 % + ~35 % of 4th card visible | 32 px `@linear-gradient` overlay pinned to the viewport bottom; card list is a plain `VerticalLayout`, so the last row is clipped naturally (no special code). |
+| Modal backdrop disables scrolling underneath | `flickable.interactive: !root.bt_delete_open` + full-screen scrim above the list (D4). |
+| Cards 740 × 88, radius 20, padding 0 20, gap 12 | `BtDeviceCard`; width derived: `800 − 2×24 (list padding) − 4 (scrollbar) − 8 (margin) = 740`. |
 | Discovery cards: icon + name + sub-type + `Pair` (44 px) | Same `BtDeviceCard` with `variant: pairing`. |
-| Connecting/pairing: non-scrollable centered, ring + icon, `Pairing Code: 482910` (`headline-large`), helper text | `BtPairingView`; progress ring driven by an integer frame `Timer` (D6), **not** the material `CircularProgressIndicator` (it reads `animation-tick()`, which violates M-NO-PERPETUAL-ANIMATION-DRIVER). |
+| Connecting/pairing: non-scrollable centered, ring + icon, `Pairing Code: 482910` (`headline-large`), helper text | `BtPairingView`; progress ring driven by an integer frame `Timer` (D6), **not** the material `CircularProgressIndicator` (it reads `animation-tick()`, violating M-NO-PERPETUAL-ANIMATION-DRIVER). |
 | 30 s pairing timeout → back to Add Device + toast `Pairing timed out` | Worker-owned deadline (`BT_PAIRING_TIMEOUT`), published as `PairingStatus::TimedOut` + `toast`; render thread applies both. |
-| Header subtitle `Visible as "Home Speaker"` | Adapter alias from `LinkSnapshot.adapter` (`BtLinkDetails::adapter_name_text` logic reused). |
+| Header subtitle `Visible as "Home Speaker"` | Live adapter alias from `LinkSnapshot.adapter` (defaults to `"Home Speaker"`), reusing `BtLinkDetails::adapter_name_text`. |
 
 ### Documented deviations from the spec text
 - **740 px card width is derived, not literal**: the spec's 740 px only closes
@@ -58,26 +65,26 @@ plus the Delete-Confirmation dialog, on the fixed 800×480 appliance panel.
 
 ## 3. Architecture Decisions
 
-**D1 — Full-window overlay layer, not a new tab.**
+**D1 — Full-window overlay layer, not a tab.**
 The spec's chrome is 88 px (bar) + 392 px (viewport) = exactly 480 px, which
-only fits if the screen owns the whole panel. A 7th tab would render below the
+only fits if the screen owns the whole panel. A tab would render below the
 existing 60 px top-bar slot, leaving 332 px of viewport and duplicating chrome.
 Precedent: `VolumeHudOverlay` is already a stacked full-panel layer with its own
-scrim. The layer is **conditionally mounted** (`if root.bt_devices_open`) so it
-costs nothing (no bindings, no layout) while closed, and the underlying Now
-Playing tab stays mounted underneath.
+scrim. The layer is **conditionally mounted** (`if root.bt_devices_open`), so it
+costs nothing (no bindings, no layout) while closed, and the underlying tab
+(usually Now Playing) stays mounted underneath.
 
 **D2 — All Bluetooth D-Bus mutations live in `speaker-bluetooth`.**
 `screen-manager` is a consumer; adding BlueZ admin calls there would fork the
-D-Bus client model. New module `crates/bluetooth/src/device_admin.rs` +
+D-Bus client model. New modules `crates/bluetooth/src/device_admin.rs` +
 `crates/bluetooth/src/pairing_agent.rs`, exposed through `BluetoothDevice`
 dispatch (`Backend::Mock` / `Backend::Dbus`), with symmetric mock failure modes
 (M-MOCKABLE-SYSCALLS / "Symmetric Mock Error Fidelity on Absent Entities").
 
-**D3 — Reuse the existing `bt-monitor` worker; do not spawn a second Bluetooth
-thread.** One owner of the `BluetoothDevice` handle, one connection, one object
-server. New `DeviceCommandQueue` (same shape as `TransportCommandQueue`) drained
-in the same tick; new fields on `BtSharedUpdate`; render thread applies via
+**D3 — Reuse the existing `bt-monitor` worker; no second Bluetooth thread.**
+One owner of the `BluetoothDevice` handle, one connection, one object server.
+New `DeviceCommandQueue` (same shape as `TransportCommandQueue`) drained in the
+same tick; new fields on `BtSharedUpdate`; render thread applies via
 `AppShell::apply_bt_devices`.
 
 **D4 — Delete confirmation is a modal layer inside the screen**, not a pop-up:
@@ -93,7 +100,7 @@ full-panel scrim (`MaterialPalette.background_modal`) + centered card with
 user-initiated pairing**, then unregisters; bt-manager's supervisor reclaims
 default within ~3 s. This keeps the passkey in-process (no new D-Bus contract),
 is host-testable on a private bus, and logs an `info!` on both hijack and
-release. Risk + mitigation in §11.
+release. Risk + mitigation in §10.
 
 **D6 — Animations obey the appliance power rules.**
 - Ring spin: integer frame `Timer` (33 ms ≈ 30 fps) with `running:` bound to the
@@ -102,7 +109,8 @@ release. Risk + mitigation in §11.
   not perpetual drivers.
 - `MainWindow.is_animating` gains `|| root.bt_devices_open` so the render loop's
   60 fps branch engages exactly while the screen is up. Without this the ring
-  Timer would dirty the window with no `is_animating` and the loop would idle-sleep.
+  Timer would dirty the window while `is_animating` was false and the loop would
+  idle-sleep.
 
 **D7 — Model = array of structs.** `property <[BtDeviceRow]> bt_device_rows`
 (Slint 1.18.1 supports struct arrays; `splash.slint` already exports a struct).
@@ -115,7 +123,64 @@ A local `global BtMetrics` in the new file holds every spec constant (88, 392,
 740, 20, 12, 48, 44, 24, 4, 8, 32). All *positions* stay dynamic
 (`(parent.height - self.height) / 2`, layout centering) per M-SLINT-MATH-LAYOUT.
 
-## 4. Slint: `services/screen-manager/ui/bluetooth_devices.slint`
+## 4. Retiring the Bluetooth Details Tab (tab 2)
+
+Precise removal list. **Tab indices are NOT renumbered** (0 player, 1 vu,
+3 cd, 4 dsp, 5 settings; index 2 is retired and never selectable) — renumbering
+would silently change the meaning of every existing `--tab N` value for zero
+functional gain (repo blast-radius rule).
+
+`ui/viewport.slint`
+- Delete the `if root.active_tab == 2` branch (lines 141–207) and the `DetailRow`
+  component it alone uses.
+- Delete the ten `bt_*` input properties (62–70).
+
+`ui/appwindow.slint`
+- Delete properties `bt_connected`, `bt_device_address`, `bt_link_text`,
+  `bt_rssi_text`, `bt_battery_text`, `bt_stream_format`, `bt_delay_text`,
+  `bt_adapter_name`, `bt_adapter_address` (91–99).
+- Replace `toggle_bluetooth_details()` with `open_bt_devices()` /
+  `close_bt_devices()` / `bt_devices_back()` (see §5).
+- Status bar `source_clicked` / `device_clicked` / `protocol_clicked` →
+  `open_bt_devices()` (lines 175/178/179).
+- `app_bar_back()`: drop the `active_tab == 2` arm (the screen owns its own back
+  handling).
+- ScreenAppBar title: drop the `== 2 ? "Bluetooth"` arm.
+- Remove the `bt_*` bindings passed into `MainViewport` (222–230).
+
+`src/ui/shell.rs`
+- Delete `apply_bt_link_details` and the text formatters it uses
+  (`address_text`, `link_text`, `rssi_text`, `battery_text`,
+  `stream_format_text`, `delay_text`, `adapter_address_text`) and the now-unused
+  `NO_DETAIL` constant.
+- **Keep** `BtLinkDetails::select` (active-device selection) and
+  `adapter_name_text` (reused for the "Visible as …" subtitle).
+- **Keep** `pcm_bit_depth` — it is also used by `apply_pcm_stream` (line 686)
+  for the Now Playing status bar.
+
+`src/daemon.rs`
+- `BtSharedUpdate.details: Option<BtLinkDetails>` → `devices: Option<BtDevicesUpdate>`.
+- `BtMonitorState.last_details` / `last_details()` → `last_devices` / `last_devices()`.
+- `publish_link_state` → `publish_devices_state` (rows + discovered + adapter
+  alias + pairing status + toast).
+- `init_shell_with_config` gains a `bt_devices_on_startup: bool` that opens the
+  screen; CLI gains `-B, --bt-devices`.
+- `parse_tab_arg`: keep indices 0,1,3,4,5 unchanged; `bt`/`bluetooth`/`2`
+  remain accepted aliases and now set the `bt_devices` startup flag (the
+  `--help` text documents this). No external caller passes `--tab` (verified:
+  no systemd unit, script, or doc does).
+
+`src/ui/mod.rs` — `BtLinkDetails` stays exported (trimmed shape).
+
+Tests
+- `tests/bluetooth_details_integration.rs` is **replaced** by
+  `tests/bt_devices_integration.rs`: the `BtLinkDetails::select` preferred/
+  fallback coverage migrates into the new file; the assertions on the removed
+  `bt_*` text properties are deleted with the properties.
+- `tests/daemon_integration.rs`, `tests/ui_shell_integration.rs`,
+  `tests/cli_tests.rs`: update the tab assertions that reference 2/bt (§8).
+
+## 5. Slint: `services/screen-manager/ui/bluetooth_devices.slint`
 
 ```
 global BtMetrics { header_height, viewport_height (derived), card_radius,
@@ -168,24 +233,25 @@ callback bt_delete_cancel_clicked();
 out property <bool> is_animating: ... || root.bt_devices_open;
 
 public function open_bt_devices()  { bt_devices_open = true; bt_devices_mode = 0; }
-public function close_bt_devices() { bt_devices_open = false; ...reset... }
+public function close_bt_devices() { bt_devices_open = false; reset mode/dialog/toast }
 public function bt_devices_back()  { pairing -> add ; add -> list ; list -> close }
 ```
 
-Navigation wiring inside `BluetoothDevicesScreen` (pure Slint, no Rust):
+Navigation inside `BluetoothDevicesScreen` is pure Slint (no Rust):
 `Add Device` → mode 1 + `bt_add_device_clicked()`; `Cancel` (add) → mode 0 +
 `bt_cancel_scan_clicked()`; pairing `Cancel` / timeout → mode 1 +
 `bt_pair_cancel_clicked()`; list back → `close_bt_devices()`.
 
-### Entry points (see §9 for the decision)
-- Settings hub `Bluetooth` tile and/or a new action on the Bluetooth details
-  tab (tab 2) call `open_bt_devices()`.
-- `close_bt_devices()` restores the tab that opened it (`previous_tab` already
-  exists and is maintained by `select_tab`/`app_bar_back`).
+### Entry points (replacing the details tab)
+- Status bar: source (logo), device name, and protocol/codec taps → `open_bt_devices()`.
+- Settings hub `Bluetooth` tile → `open_bt_devices()`.
+- CLI startup: `--tab bt|bluetooth|2` or `-B/--bt-devices` → open on boot.
+- Closing returns to the previously active tab (`previous_tab` already
+  maintained by `select_tab`; `open_bt_devices` does not disturb it).
 
-## 5. Rust: `crates/bluetooth` (new files + minimal edits)
+## 6. Rust: `crates/bluetooth` (new files + minimal edits)
 
-### 5.1 `src/device_admin.rs`
+### 6.1 `src/device_admin.rs`
 ```rust
 pub enum DeviceCommand {                    // queued by the render thread
     Refresh, StartDiscovery, StopDiscovery,
@@ -209,13 +275,13 @@ impl DeviceAdmin {
     pub fn cancel_pairing(&self, addr: &BtAddress) -> Result<(), BtError>;
     pub fn remove_device(&self, adapter: &str, addr: &BtAddress) -> Result<(), BtError>;
 }
-pub fn device_object_path(adapter: &str, addr: &BtAddress) -> Result<ObjectPath<...>, BtError>;
+pub fn device_object_path(adapter: &str, addr: &BtAddress) -> Result<ObjectPath<'_>, BtError>;
 pub fn pairing_failure_message(err: &BtError) -> &'static str;   // pure, unit-tested
 pub fn device_action_message(err: &BtError) -> &'static str;     // pure, unit-tested
 ```
 - `zbus` 5.19 proxies for `org.bluez.Adapter1` (StartDiscovery/StopDiscovery/
   RemoveDevice) and `org.bluez.Device1` (Connect/Disconnect/Pair/CancelPairing),
-  mirroring the existing proxy style in `agent.rs`.
+  mirroring the existing proxy style in `bt-manager/src/agent.rs`.
 - Device path helper: `/org/bluez/{adapter}/dev_{AA}_{BB}_{CC}_{DD}_{EE}_{FF}`
   (upper-case, `:`→`_`); validated against the existing
   `extract_mac_from_pcm_path` inverse convention.
@@ -226,7 +292,7 @@ pub fn device_action_message(err: &BtError) -> &'static str;     // pure, unit-t
   `new()/new_blocking()/with_connection()/new_mocked()`, and expose delegation
   setters on `BluetoothDeviceMock` for admin mock state.
 
-### 5.2 `src/pairing_agent.rs`
+### 6.2 `src/pairing_agent.rs`
 ```rust
 pub struct PairingCode { pub device: BtAddress, pub passkey: u32 }   // 0..=999_999
 pub struct PairingAgentHandle { /* owned registration; Drop unregisters */ }
@@ -242,14 +308,14 @@ impl PairingAgentHandle {
 The passkey is observed by the worker through the shared `Arc<Mutex<…>>` — no
 polling of D-Bus, no extra thread.
 
-### 5.3 `src/lib.rs`
+### 6.3 `src/lib.rs`
 `#[doc(inline)] pub use device_admin::{DeviceAdmin, DeviceAdminMock, DeviceCommand,
 DeviceCommandQueue, PairingStatus, DiscoveryPhase, pairing_failure_message,
 device_action_message};` + `pairing_agent::{PairingAgentHandle, PairingCode}`.
 
-## 6. Rust: `services/screen-manager`
+## 7. Rust: `services/screen-manager`
 
-### 6.1 `src/ui/bt_devices.rs` (new)
+### 7.1 `src/ui/bt_devices.rs` (new)
 ```rust
 pub struct BtDevicesUpdate {           // worker -> render thread delta
     pub rows: Vec<BtDeviceRow>, pub discovered: Vec<BtDeviceRow>,
@@ -267,17 +333,18 @@ pub fn pairing_code_text(passkey: u32) -> String;               // "482910" (6 d
 ```
 Row/model construction is pure and host-testable; no Slint knowledge.
 
-### 6.2 `src/ui/shell.rs`
+### 7.2 `src/ui/shell.rs`
 - `AppShell` gains `bt_devices: Rc<RefCell<BtDevicesController>>` (dedup state) —
-  no shadow screen state beyond what Slint already owns (M-SINGLE-SOURCE-OF-TRUTH-SLINT).
+  no shadow screen state beyond what Slint already owns
+  (M-SINGLE-SOURCE-OF-TRUTH-SLINT).
 - `setup_navigation_callbacks` wires the new callbacks: push `DeviceCommand`s
   onto the queue and apply the **optimistic** UI transition immediately
   (mode/toast), mirroring the transport-callback pattern.
 - New `wire_bluetooth_devices(&DeviceCommandQueue)` next to `wire_bluetooth_transport`.
-- `BtLinkDetails::select` already picks the active device; reuse it to compute
-  `active_address` for row labels.
+- `BtLinkDetails::select` still picks the active device and its PCM; its result
+  feeds `active_address` for the row labels.
 
-### 6.3 `src/daemon.rs`
+### 7.3 `src/daemon.rs`
 - `BtSharedUpdate` gains `pub devices: Option<BtDevicesUpdate>` (+ merge logic in
   `commit_update`, poisoned-mutex recovery preserved).
 - `BtMonitorState` gains `devices: BtDevicesMonitorState`:
@@ -288,16 +355,15 @@ Row/model construction is pure and host-testable; no Slint knowledge.
   `Pair(addr)` → register agent → `pair_device()` → publish
   `AwaitingConfirmation{passkey}` when the code arrives →
   `Paired`/`Failed{message}`/`TimedOut` (30 s) / `Cancelled`.
-  On any terminal state: unregister agent, `stop_discovery()` if it was started
-  by this screen, then toast + mode change.
+  On any terminal state: unregister agent, `stop_discovery()` if this screen
+  started it, then toast + mode change.
 - `spawn_bt_monitor_worker` / `bt_monitor_loop` take the extra queue (used by
   `run_render_loop_with_devices` and by the existing test at
   `tests/daemon_integration.rs:886`).
 - `apply_shared_bt_state` additionally applies `devices` (one call site).
-- `init_shell_with_config` builds the queue, wires it, and pushes
-  `DeviceCommand::Refresh` when the screen opens (fast first paint).
+- Startup: `init_shell_with_config(..., bt_devices_on_startup)`.
 
-## 7. Icons / assets (new, MIT Material Symbols)
+## 8. Icons / assets (new, MIT Material Symbols)
 `assets/icons/phone.svg`, `laptop.svg`, `tablet.svg`, `headset.svg`,
 `delete.svg` — viewBox-normalised to the existing icon style, provenance noted in
 an SVG header comment (existing assets mix Material/SVG-Repo sources; keep the
@@ -305,12 +371,12 @@ same convention). BlueZ icon slug → asset mapping in `icon_slug`:
 `phone|telephone → phone`, `computer|laptop|desktop → laptop`, `tablet → tablet`,
 `audio-card|headset|headphones|speaker → headset`, else `bluetooth.svg`.
 
-## 8. Testing Plan
+## 9. Testing Plan
 
 **`crates/bluetooth`** (private `dbus-daemon` via `speaker_common::diag::spawn_private_bus`):
 - `tests/device_admin_integration.rs`: fake `org.bluez` serving `Adapter1`,
   `Device1`, `AgentManager1`, `ObjectManager` (the `bluetooth_integration.rs`
-  fake pattern at line ~2330 is the template). Table-driven cases:
+  fake pattern at ~line 2330 is the template). Table-driven cases:
   start/stop discovery, connect/disconnect happy path, `RemoveDevice` →
   `AdapterNotFound` / `Dbus` error mapping, `Pair` with an injected
   `DisplayPasskey` (assert the captured code), `Pair` failure error names
@@ -325,28 +391,30 @@ same convention). BlueZ icon slug → asset mapping in `icon_slug`:
   `device_object_path` (invalid address, signed input, wrong length).
 
 **`services/screen-manager`**
-- `tests/bt_devices_integration.rs` (new, `#![cfg(feature = "ui")]`):
-  `Framebuffer::new_mocked()` + `MainWindow` + `AppShell`; seeded
-  `BluetoothDevice::new_mocked()` rows; drive the real `BtMonitorState`/publish
-  path and the click harness from `bluetooth_details_integration.rs`.
-  Cases: open/close, mode transitions (list → add → pairing → add → list),
-  active card vs paired card rendering properties (`bt_device_rows` fields),
-  trash → dialog open → cancel (rows untouched) → confirm (remove command
-  queued), discovery filtering of already-paired devices, `Refresh` forces an
-  immediate publish, passkey text zero-padding, `TimedOut` toast + mode,
-  transient `Err` keeps the last good rows (no placeholder flash).
-- UI-only guard tests: `is_animating` true while open, `flickable.interactive`
-  false while the dialog is open (via property assertions on the generated
-  window), no `animation-tick()` usage anywhere in the new file (grep guard
-  test).
+- `tests/bt_devices_integration.rs` (new, `#![cfg(feature = "ui")]`, replaces
+  `bluetooth_details_integration.rs`): `Framebuffer::new_mocked()` + `MainWindow`
+  + `AppShell`; seeded `BluetoothDevice::new_mocked()` rows; drive the real
+  `BtMonitorState`/publish path and the click harness from
+  `bluetooth_details_integration.rs`.
+  Cases: `BtLinkDetails::select` preferred/fallback (migrated); open/close;
+  mode transitions (list → add → pairing → add → list); active card vs paired
+  card row fields; trash → dialog open → cancel (rows untouched) → confirm
+  (remove command queued); discovery filtering of already-paired devices;
+  `Refresh` forces an immediate publish; passkey zero-padding; `TimedOut` toast
+  + mode; transient `Err` keeps the last good rows (no placeholder flash).
+- UI guard tests: `is_animating` true while open, `flickable.interactive` false
+  while the dialog is open (assertions on the generated window), and a grep
+  guard asserting the new file never reads `animation-tick()`.
 - `tests/daemon_integration.rs`: extend the worker test with device commands
   drained through the queue; assert the pairing deadline expiry path with a
   short injected deadline (production constant stays unconditional; tests use a
   parameterised variant per the repo rule).
-- Subprocess CLI tests inherit `SPEAKER_CORE_HEADLESS=1` (already done in
+- `tests/cli_tests.rs`: `--help` text, `--tab bt` / `-B/--bt-devices` mapping,
+  retired `--tab 2` behaviour, backtrace-free rejections.
+- Subprocess tests inherit `SPEAKER_CORE_HEADLESS=1` (already done in
   `cli_tests.rs`).
 
-## 9. Gates (service + workspace, run in order)
+## 10. Gates (service + workspace, run in order)
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo llvm-cov -p screen-manager --target x86_64-unknown-linux-gnu --fail-under-lines 90 --fail-under-functions 90`
@@ -355,38 +423,37 @@ same convention). BlueZ icon slug → asset mapping in `icon_slug`:
 5. After editing `.slint` files: `rm -rf target/*/{debug,release}/build/screen-manager-* target/*/{debug,release}/.fingerprint/screen-manager-*` (AGENTS rule 12), then rebuild.
 6. Optional live check on `root@192.168.2.120` (deploy to `/tmp`, run, delete).
 
-## 10. PR sequencing (3 reviewable PRs off this branch)
+## 11. PR sequencing (3 reviewable PRs off this branch)
 1. **PR-1 `speaker-bluetooth` admin + agent**: `device_admin.rs`,
    `pairing_agent.rs`, `connection.rs` field/visibility edits, mock, lib re-exports,
    `crates/bluetooth/tests/device_admin_integration.rs`.
 2. **PR-2 screen-manager worker + controller**: `bt_devices.rs`, `BtSharedUpdate`
    fields, worker state machine, `shell.rs` wiring, `daemon.rs` spawn/queue.
-3. **PR-3 Slint screens + assets + UI tests**: `bluetooth_devices.slint`,
-   `appwindow.slint` layer, icons, `tests/bt_devices_integration.rs`.
-   (PR-2 lands with a headless/no-UI fallback so the workspace always builds.)
+3. **PR-3 Slint screens + details-tab retirement + assets + UI tests**:
+   `bluetooth_devices.slint`, `appwindow.slint` layer, `viewport.slint` cleanup,
+   icons, `tests/bt_devices_integration.rs` (replacing
+   `bluetooth_details_integration.rs`), CLI flag, doc touch-ups.
+   PR-2 lands with a headless/no-UI fallback so the workspace always builds.
 
-## 11. Risks & mitigations
+## 12. Risks & mitigations
 | Risk | Mitigation |
 |---|---|
-| Two default agents (bt-manager auto-trust + screen pairing agent) | Screen agent is registered **only** for one pairing attempt and unregistered on every terminal path (incl. panic-free `Drop`); `info!`/`warn!` logs on hijack/release; bt-manager's 3 s supervisor reclaims default. Documented in AGENTS.md after review. |
-| `Device1.Pair` fails when the peer is unpaired and BlueZ needs the agent *before* the call | Register the agent first, then call `Pair` (ordering asserted by the integration test). |
-| Discovery results only arrive via `InterfacesAdded`, which the existing listener does not match | Keep-alive tick re-queries `GetManagedObjects` ≤ 1 s; row updates are deduped. If this proves too slow, add the signal to the listener rule in a follow-up (Tier-1 fix, not deferred silently). |
+| Two default agents (bt-manager auto-trust + screen pairing agent) | Screen agent is registered **only** for one pairing attempt and unregistered on every terminal path (incl. panic-free `Drop`); `info!`/`warn!` logs on hijack/release; bt-manager's 3 s supervisor reclaims default. |
+| `Device1.Pair` fails when the peer needs the agent *before* the call | Register the agent first, then call `Pair` (ordering asserted by the integration test). |
+| Discovery results only arrive via `InterfacesAdded`, which the existing listener does not match | Keep-alive tick re-queries `GetManagedObjects` ≤ 1 s; row updates are deduped. If this proves too slow, extend the listener rule in a follow-up (Tier-1 fix, never silently deferred). |
 | Adapter powered off / `bluetoothd` absent | `start_discovery` error → toast + stay on list; adapter errors map through `BtError::is_adapter_not_found()` → `AdapterNotFound` message. |
 | `RemoveDevice` while the device streams audio | Disconnect-then-remove ordering in the worker; audio-manager volume path is untouched (`amp-volume` worker independent). |
-| Slint struct-array codegen friction | Fallback: keep a single `[BtDeviceRow]` list plus a `mode` filter (verified pattern; still no fixed max). First compile in PR-3 proves it. |
+| Removing tab 2 breaks startup scripts | No caller passes `--tab` (verified: no systemd unit, script, or doc); indices 0,1,3,4,5 keep their meaning and `bt`/`bluetooth`/`2` open the new screen. |
+| Slint struct-array codegen friction | Fallback: single `[BtDeviceRow]` list plus a `mode` filter (still no fixed max). First compile in PR-3 proves it. |
 | Per-frame cost on BCM2837 | Ring at 30 fps only during pairing; row text updates deduped ≤ ~1/s; scrollbar/gradient use `visible` not conditional `if`; `is_animating` includes the screen. |
 
-## 12. Open decisions (need your pick before PR-1)
-1. **Entry point**: (a) Settings `Bluetooth` tile opens the new device screen
-   (details tab stays reachable from the status bar) — *recommended*;
-   (b) keep Settings → details tab and add a `Manage Devices` action on the
-   details tab; (c) both.
+## 13. Decisions taken (user-confirmed)
+1. **Entry point**: the new screen *replaces* the old details screen — retire
+   tab 2; every previous entry point (status bar source/device/protocol taps,
+   Settings `Bluetooth` tile, `--tab bt`) opens the new screen.
 2. **Pairing confirmation**: auto-confirm after showing the passkey (matches the
-   spec's Cancel-only pairing screen and bt-manager's existing behaviour) —
-   *recommended*; or add a `Confirm` button and hold the agent until tapped.
-3. **Trash on discovered-but-unpaired rows**: show `Delete` (removes the BlueZ
-   cache entry) or hide it until paired. Spec shows trash only on paired/active
-   rows — *recommended: hide on discovery rows*.
-4. **Adapter alias**: hard-code the display alias `"Home Speaker"` as the
-   subtitle (spec text) vs. mirror the live adapter alias (`bt_adapter_name`).
-   *Recommended: mirror the live alias, defaulting to `"Home Speaker"`*.
+   spec's Cancel-only pairing screen and bt-manager's existing behaviour).
+3. **Trash on discovery rows**: hidden until paired (spec mock shows delete only
+   on paired/active rows).
+4. **Header subtitle**: mirror the live adapter alias, defaulting to
+   `"Home Speaker"`.
