@@ -1,8 +1,8 @@
 //! Additional integration tests for state_file module to increase coverage.
 
-use speaker_hardware::PERCENT_TO_RAW;
 use audio_manager::{AmpState, StateFile};
 use speaker_common::diag::ScopedTempDir;
+use speaker_hardware::PERCENT_TO_RAW;
 
 #[test]
 fn state_file_load_missing_returns_default() {

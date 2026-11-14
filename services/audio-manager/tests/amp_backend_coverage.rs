@@ -1,7 +1,7 @@
 //! Additional integration tests for amp_backend module to increase coverage.
 
-use audio_manager::amp_backend::{AmpBackend, MockAmpBackend, RealAmpBackend, I2cAmpBackend};
 use audio_manager::AmpState;
+use audio_manager::amp_backend::{AmpBackend, I2cAmpBackend, MockAmpBackend, RealAmpBackend};
 
 #[tokio::test]
 async fn mock_ctrl_sticky_serial_mute_fail() {
@@ -264,14 +264,16 @@ fn amp_state_mute_unmute_methods() {
     let state = AmpState {
         level_raw: 100,
         muted: false,
-    }.mute();
+    }
+    .mute();
     assert!(state.muted);
     assert_eq!(state.level_raw, 100);
 
     let state = AmpState {
         level_raw: 100,
         muted: true,
-    }.unmute();
+    }
+    .unmute();
     assert!(!state.muted);
     assert_eq!(state.level_raw, 100);
 }
@@ -281,14 +283,16 @@ fn amp_state_mute_unmute_idempotent() {
     let state = AmpState {
         level_raw: 50,
         muted: true,
-    }.mute();
+    }
+    .mute();
     assert!(state.muted);
     assert_eq!(state.level_raw, 50);
 
     let state = AmpState {
         level_raw: 50,
         muted: false,
-    }.unmute();
+    }
+    .unmute();
     assert!(!state.muted);
     assert_eq!(state.level_raw, 50);
 }
@@ -301,7 +305,8 @@ fn amp_state_with_percent() {
     let state = AmpState {
         level_raw: 50,
         muted: true,
-    }.with_percent(80, &PERCENT_TO_RAW);
+    }
+    .with_percent(80, &PERCENT_TO_RAW);
     assert!(state.muted);
     assert_eq!(state.level_raw, PERCENT_TO_RAW[80]);
 
@@ -309,7 +314,8 @@ fn amp_state_with_percent() {
     let state = AmpState {
         level_raw: 50,
         muted: false,
-    }.with_percent(80, &PERCENT_TO_RAW);
+    }
+    .with_percent(80, &PERCENT_TO_RAW);
     assert!(!state.muted);
     assert_eq!(state.level_raw, PERCENT_TO_RAW[80]);
 }

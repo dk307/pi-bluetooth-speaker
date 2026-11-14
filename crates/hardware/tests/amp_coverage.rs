@@ -2,8 +2,8 @@
 //! covering register operations, settings, faults, mocks, and error paths.
 
 use speaker_hardware::amp::{
-    AmpDevice, AmpError, AmpErrorFlags, AmpFault, AmpSettings, AudioInputMode, I2sFormat,
-    Pm2Config, PowerModeCtrl, PowerModeMon, PowerModeProfile, DcuMonitor,
+    AmpDevice, AmpError, AmpErrorFlags, AmpFault, AmpSettings, AudioInputMode, DcuMonitor,
+    I2sFormat, Pm2Config, PowerModeCtrl, PowerModeMon, PowerModeProfile,
 };
 use std::sync::Arc;
 
@@ -65,7 +65,9 @@ fn amp_device_mock_write_limiter_thresholds() {
 #[test]
 fn amp_device_mock_write_power_mode_ctrl() {
     let (device, _mock) = AmpDevice::new_mocked();
-    device.write_power_mode_ctrl(PowerModeCtrl::from_field(1)).unwrap();
+    device
+        .write_power_mode_ctrl(PowerModeCtrl::from_field(1))
+        .unwrap();
     let settings = device.read_settings().unwrap();
     assert_eq!(settings.pm_ctrl_pm.as_u8(), 1);
 }
@@ -73,7 +75,9 @@ fn amp_device_mock_write_power_mode_ctrl() {
 #[test]
 fn amp_device_mock_write_power_mode_profile() {
     let (device, _mock) = AmpDevice::new_mocked();
-    device.write_power_mode_profile(PowerModeProfile::from_raw(0)).unwrap();
+    device
+        .write_power_mode_profile(PowerModeProfile::from_raw(0))
+        .unwrap();
     let settings = device.read_settings().unwrap();
     assert_eq!(settings.pm_profile.as_u8(), 0);
 }
@@ -89,7 +93,9 @@ fn amp_device_mock_write_i2s_format() {
 #[test]
 fn amp_device_mock_write_audio_in_mode() {
     let (device, _mock) = AmpDevice::new_mocked();
-    device.write_audio_in_mode(AudioInputMode::from_raw(0)).unwrap();
+    device
+        .write_audio_in_mode(AudioInputMode::from_raw(0))
+        .unwrap();
     let settings = device.read_settings().unwrap();
     assert_eq!(settings.audio_in_mode.as_u8(), 0);
 }
@@ -187,7 +193,7 @@ fn amp_error_flags_operations() {
     assert!(flags.has_fault(AmpFault::PllClockLoss));
     assert!(!flags.has_fault(AmpFault::OvercurrentProtect));
     let combined = AmpErrorFlags::from_bits(
-        (1 << AmpFault::PllClockLoss.bit()) | (1 << AmpFault::HighTempWarning.bit())
+        (1 << AmpFault::PllClockLoss.bit()) | (1 << AmpFault::HighTempWarning.bit()),
     );
     assert!(combined.has_fault(AmpFault::PllClockLoss));
     assert!(combined.has_fault(AmpFault::HighTempWarning));
@@ -352,15 +358,23 @@ fn amp_device_mock_set_live_errors_changes_status() {
 #[test]
 fn amp_device_mock_set_latched_errors_changes_status() {
     let (device, mock) = AmpDevice::new_mocked();
-    mock.set_latched_errors(AmpErrorFlags::from_bits(1 << AmpFault::OvercurrentProtect.bit()));
+    mock.set_latched_errors(AmpErrorFlags::from_bits(
+        1 << AmpFault::OvercurrentProtect.bit(),
+    ));
     let status = device.read_status().unwrap();
-    assert!(status.latched_errors.has_fault(AmpFault::OvercurrentProtect));
+    assert!(
+        status
+            .latched_errors
+            .has_fault(AmpFault::OvercurrentProtect)
+    );
 }
 
 #[test]
 fn amp_settings_audio_in_mode_as_u8() {
     let (device, _mock) = AmpDevice::new_mocked();
-    device.write_audio_in_mode(AudioInputMode::from_raw(0x40)).unwrap();
+    device
+        .write_audio_in_mode(AudioInputMode::from_raw(0x40))
+        .unwrap();
     let settings = device.read_settings().unwrap();
     assert_eq!(settings.audio_in_mode.as_u8(), 2);
 }

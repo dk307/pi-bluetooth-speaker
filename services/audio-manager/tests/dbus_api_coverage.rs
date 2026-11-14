@@ -15,7 +15,11 @@ fn make_interface() -> (AudioManagerInterface, MockAmpCtrl, tempfile::TempDir) {
     (iface, ctrl, dir)
 }
 
-fn make_interface_with_commands() -> (AudioManagerInterface, tokio::sync::mpsc::Receiver<audio_manager::amp_controller::AmpCommand>, tempfile::TempDir) {
+fn make_interface_with_commands() -> (
+    AudioManagerInterface,
+    tokio::sync::mpsc::Receiver<audio_manager::amp_controller::AmpCommand>,
+    tempfile::TempDir,
+) {
     let dir = tempdir().unwrap();
     let state_path = dir.path().join("state.json");
     let state_file = StateFile::new(&state_path);

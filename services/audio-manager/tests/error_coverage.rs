@@ -51,9 +51,10 @@ fn amp_error_hardware_validation() {
     let err = AmpError::HardwareValidation {
         reason: "validation failed".into(),
     };
-    assert!(err
-        .to_string()
-        .contains("Hardware validation failed: validation failed"));
+    assert!(
+        err.to_string()
+            .contains("Hardware validation failed: validation failed")
+    );
     assert!(matches!(err, AmpError::HardwareValidation { .. }));
 }
 
@@ -69,9 +70,10 @@ fn amp_error_card_missing() {
 #[test]
 fn amp_error_control_error() {
     let err = AmpError::ControlError("control missing".into());
-    assert!(err
-        .to_string()
-        .contains("Mixer control error: control missing"));
+    assert!(
+        err.to_string()
+            .contains("Mixer control error: control missing")
+    );
     assert!(matches!(err, AmpError::ControlError(_)));
 }
 
