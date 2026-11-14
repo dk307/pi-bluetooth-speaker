@@ -352,7 +352,10 @@ fn touch_top_bar_volume_opens_hud_and_slider_and_mute_work() {
     );
     let _ = fb.render_frame(&window).expect("Render HUD open");
     // Let the 200 ms HUD fade-in complete; mid-fade presses do not reach the HUD.
+    // Slint animations advance by wall-clock time, so sleep ~1 frame (16.7 ms, like
+    // the marquee test) per iteration instead of relying on render cost.
     for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_micros(16_700));
         slint::platform::update_timers_and_animations();
         let _ = fb.render_frame(&window).expect("Render HUD fade");
     }
