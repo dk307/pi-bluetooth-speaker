@@ -44,7 +44,11 @@ pub const CALIBRATION_POINTS: &[(u8, u16, i16)] = &[
 /// Piecewise-linear interpolation on the dB domain.
 /// Given a value `x` in domain [x0, x1] with corresponding dB values [db0, db1],
 /// returns the interpolated dB (as tenths of dB for precision).
-const fn interp_db_tenths(x: u16, x0: u16, x1: u16, db0: i16, db1: i16) -> i16 {
+///
+/// Public so tests can exercise the interpolation at runtime (the const table
+/// initializers only evaluate it at compile time, which yields no coverage).
+#[must_use]
+pub const fn interp_db_tenths(x: u16, x0: u16, x1: u16, db0: i16, db1: i16) -> i16 {
     if x <= x0 {
         return db0 * 10;
     }
@@ -60,7 +64,11 @@ const fn interp_db_tenths(x: u16, x0: u16, x1: u16, db0: i16, db1: i16) -> i16 {
 
 /// Build the PERCENT_TO_RAW table at compile time.
 /// Percent 0..100 maps to raw 0..144 via the perceptual dB curve.
-const fn build_percent_to_raw() -> [u16; 101] {
+///
+/// Public so tests can rebuild the table at runtime and verify it against the
+/// [`PERCENT_TO_RAW`] const (compile-time evaluation alone yields no coverage).
+#[must_use]
+pub const fn build_percent_to_raw() -> [u16; 101] {
     let mut table = [0u16; 101];
     let mut p = 0u16;
     while p <= 100 {
@@ -105,7 +113,11 @@ const fn build_percent_to_raw() -> [u16; 101] {
 /// Build the AVRCP_TO_PERCENT table at compile time.
 /// Simple linear rescaling: AVRCP 0..127 → Percent 0..100.
 /// The perceptual curve is applied in PERCENT_TO_RAW (percent → raw).
-const fn build_avrcp_to_percent() -> [u8; 128] {
+///
+/// Public so tests can rebuild the table at runtime and verify it against the
+/// [`AVRCP_TO_PERCENT`] const (compile-time evaluation alone yields no coverage).
+#[must_use]
+pub const fn build_avrcp_to_percent() -> [u8; 128] {
     let mut table = [0u8; 128];
     let mut avrcp = 0u8;
     while avrcp <= AVRCP_MAX {
@@ -120,7 +132,11 @@ const fn build_avrcp_to_percent() -> [u8; 128] {
 /// Build the RAW_TO_DB_TENTHS table at compile time.
 /// Raw 0..144 maps to dB × 10 (tenths of dB). Since raw = 144 + dB,
 /// dB = raw - 144. This is exact, no interpolation needed.
-const fn build_raw_to_db_tenths() -> [i16; 145] {
+///
+/// Public so tests can rebuild the table at runtime and verify it against the
+/// [`RAW_TO_DB_TENTHS`] const (compile-time evaluation alone yields no coverage).
+#[must_use]
+pub const fn build_raw_to_db_tenths() -> [i16; 145] {
     let mut table = [0i16; 145];
     let mut raw = 0u16;
     while raw <= RAW_MAX {
@@ -195,7 +211,7 @@ const _: () = {
     assert!(PERCENT_TO_RAW[100] == 144); // 100% → 0 dB (raw 144)
     assert!(AVRCP_TO_PERCENT[0] == 0); // AVRCP 0 → 0%
     assert!(AVRCP_TO_PERCENT[127] == 100); // AVRCP 127 → 100%
-    // Monotonicity
+                                           // Monotonicity
     let mut p = 1;
     while p <= 100 {
         assert!(PERCENT_TO_RAW[p] >= PERCENT_TO_RAW[p - 1]);

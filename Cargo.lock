@@ -4467,6 +4467,7 @@ dependencies = [
  "speaker-hardware",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
 ]
