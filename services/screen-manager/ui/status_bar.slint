@@ -178,20 +178,24 @@ export component TopStatusBar inherits Rectangle {
                                 image-fit: contain;
                             }
 
-                            if !root.is_muted : Text {
-                                width: 48px;
-                                text: Math.round(root.volume_value);
-                                color: MaterialPalette.secondary;
-                                font-size: 20px;
-                                font-weight: 800;
-                                vertical-alignment: center;
-                            }
-
+                            // The mute icon takes the same slot as the level icons so
+                            // the readout keeps its "icon then value" order while muted.
                             if root.is_muted : Image {
                                 source: @image-url("../../../assets/icons/volume-mute.svg");
                                 colorize: MaterialPalette.error;
                                 width: 44px;
                                 image-fit: contain;
+                            }
+
+                            // The level readout stays visible while muted: it shows
+                            // the stored amp level, tinted like the mute icon.
+                            Text {
+                                width: 48px;
+                                text: Math.round(root.volume_value);
+                                color: root.is_muted ? MaterialPalette.error : MaterialPalette.secondary;
+                                font-size: 20px;
+                                font-weight: 800;
+                                vertical-alignment: center;
                             }
                         }
 
