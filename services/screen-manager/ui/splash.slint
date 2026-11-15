@@ -86,11 +86,12 @@ component EqBars inherits Rectangle {
     }
 }
 
-export component SplashScreen inherits Window {
-    width: 800px;
-    height: 480px;
+// Full-screen splash body (equalizer logo band + single boot-check line),
+// extracted so it can be embedded either as a standalone window (preview
+// mode) or as an in-window overlay inside MainWindow (appliance boot phase —
+// the KMS backend allows only ONE window per process lifetime).
+export component SplashContent inherits Rectangle {
     background: MaterialPalette.background;
-    default-font-family: "Inter";
 
     // Single bottom check line, replaced as each boot check progresses.
     in property <BootCheckLine> current_check: {
@@ -99,8 +100,9 @@ export component SplashScreen inherits Window {
         ok: false,
     };
 
-    // Integer frame clock advanced by a Timer while the splash is visible
-    // (the splash is transient, so the equalizer animation is always needed).
+    // Integer frame clock advanced by the Timer below while the content is
+    // mounted (the splash is transient, so the equalizer animation is
+    // always needed).
     in-out property <int> eq_frame: 0;
 
     Timer {
@@ -135,5 +137,25 @@ export component SplashScreen inherits Window {
                 check: root.current_check;
             }
         }
+    }
+}
+
+// Standalone splash window (used only by ScreenTarget::Splash preview mode).
+export component SplashScreen inherits Window {
+    width: 800px;
+    height: 480px;
+    background: MaterialPalette.background;
+    default-font-family: "Inter";
+
+    in property <BootCheckLine> current_check: {
+        text: "Starting system checks …",
+        running: true,
+        ok: false,
+    };
+
+    SplashContent {
+        width: 100%;
+        height: 100%;
+        current_check: root.current_check;
     }
 }
