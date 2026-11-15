@@ -5,29 +5,32 @@ import { OverlayAppBar } from "screen_app_bar.slint";
 component CodecRow inherits Rectangle {
     in property <string> label;
     in property <string> value;
+    in property <length> row_y;
     height: 40px;
 
-    HorizontalLayout {
-        spacing: 12px;
+    Text {
+        x: 0;
+        y: root.row_y;
+        width: 140px;
+        height: 40px;
+        text: root.label;
+        color: MaterialPalette.secondary;
+        font-size: 15px;
+        font-weight: 800;
+        vertical-alignment: center;
+    }
 
-        Text {
-            text: root.label;
-            color: MaterialPalette.secondary;
-            font-size: 15px;
-            font-weight: 800;
-            vertical-alignment: center;
-            width: 140px;
-        }
-
-        Text {
-            text: root.value;
-            color: MaterialPalette.on_surface;
-            font-size: 22px;
-            font-weight: 700;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-            overflow: elide;
-        }
+    Text {
+        x: 152px;  // 140px label + 12px spacing
+        y: root.row_y;
+        width: 408px;  // 560 - 140 - 12
+        height: 40px;
+        text: root.value;
+        color: MaterialPalette.on_surface;
+        font-size: 22px;
+        font-weight: 700;
+        vertical-alignment: center;
+        overflow: elide;
     }
 }
 
@@ -68,51 +71,45 @@ export component CodecHudOverlay inherits Rectangle {
         }
     }
 
-    // Main content column: header (60px) + body (fills remaining)
-    VerticalLayout {
-        // Overlay app bar header (60px) — title "Codec", close icon on the right
-        Rectangle {
-            height: 60px;
+    // App bar header (60px) — title "Codec", close icon on the right
+    Rectangle {
+        height: 60px;
+        width: 100%;
+        OverlayAppBar {
             width: 100%;
-            OverlayAppBar {
-                width: 100%;
-                height: 100%;
-                title: "Codec";
-                trailing_icon: @image-url("../../../assets/icons/close.svg");
-                trailing_tooltip: "Close";
-                trailing_clicked => { root.dismiss_requested(); }
-            }
+            height: 100%;
+            title: "Codec";
+            trailing_icon: @image-url("../../../assets/icons/close.svg");
+            trailing_tooltip: "Close";
+            trailing_clicked => { root.dismiss_requested(); }
         }
+    }
 
-        // Body content (fills remaining space)
-        VerticalLayout {
-            padding-top: 18px;
-            padding-bottom: 18px;
-            padding-left: 24px;
-            padding-right: 24px;
-            spacing: 6px;
+    // Body — Volume HUD style: VerticalLayout with centered inner Rectangle
+    VerticalLayout {
+        padding-top: 18px;
+        padding-bottom: 18px;
+        padding-left: 24px;
+        padding-right: 24px;
 
-            // 1. Negotiated codec name (as a normal row)
-            CodecRow { label: "CODEC"; value: root.connected ? root.codec : root.unknown; }
+        // Outer transparent full-width rectangle (Volume HUD slider pattern)
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: transparent;
 
-            // 2. Stream property rows, centered as a fixed-width column
-            HorizontalLayout {
-                alignment: center;
-                vertical-stretch: 1;
+            // Inner centered container (560px) — centered within outer via x formula
+            Rectangle {
+                width: 560px;
+                height: 100%;
+                background: transparent;
+                x: (parent.width - self.width) / 2;
 
-                Rectangle {
-                    width: 560px;
-                    background: transparent;
-
-                    VerticalLayout {
-                        spacing: 6px;
-
-                        CodecRow { label: "SAMPLE RATE"; value: root.connected ? root.sample_rate : root.unknown; }
-                        CodecRow { label: "BIT DEPTH"; value: root.connected ? root.bit_depth : root.unknown; }
-                        CodecRow { label: "FORMAT"; value: root.connected ? root.stream_format : root.unknown; }
-                        CodecRow { label: "LATENCY"; value: root.connected ? root.delay_text : root.unknown; }
-                    }
-                }
+                CodecRow { label: "CODEC"; row_y: 0px; value: root.connected ? root.codec : root.unknown; }
+                CodecRow { label: "SAMPLE RATE"; row_y: 46px; value: root.connected ? root.sample_rate : root.unknown; }
+                CodecRow { label: "BIT DEPTH"; row_y: 92px; value: root.connected ? root.bit_depth : root.unknown; }
+                CodecRow { label: "FORMAT"; row_y: 138px; value: root.connected ? root.stream_format : root.unknown; }
+                CodecRow { label: "LATENCY"; row_y: 184px; value: root.connected ? root.delay_text : root.unknown; }
             }
         }
     }
