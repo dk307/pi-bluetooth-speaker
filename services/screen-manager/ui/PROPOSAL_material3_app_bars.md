@@ -23,7 +23,7 @@ Three distinct app bar kinds govern the UI:
 | Volume HUD (overlay) | Overlay (modal) | full screen, above dimmed background | "Volume" | close (X) | none |
 
 Notes:
-- Status chips (device/codec/volume/DIM) live **only** on the Now Playing status bar. Entry to Bluetooth details is via status bar taps (existing) or Settings grid — no chip duplication.
+- Status chips (device/codec/volume/DIM) live **only** on the Now Playing status bar. Entry to Bluetooth details is via the logo / device name taps (existing) or the Settings grid — no chip duplication. The codec chip opens its own codec information overlay (mirroring the Volume HUD) instead of the details screen.
 - `show_themes` is lifted to `MainWindow` via `<=>` bindings through `MainViewport` → title switches "Settings" ↔ "Themes".
 
 ---

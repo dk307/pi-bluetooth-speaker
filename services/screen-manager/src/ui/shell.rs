@@ -288,12 +288,13 @@ impl AppShell {
     }
 
     /// Applies runtime parameters from [`CoreConfig`] (theme, marquee fps, volume step,
-    /// and Volume HUD timeout/fade durations) to this shell.
+    /// Volume HUD timeout/fade durations, and Codec HUD timeout) to this shell.
     pub fn apply_config(&self, config: &CoreConfig) {
         self.set_marquee_fps(config.marquee_fps.value());
         self.set_volume_step_percent(config.volume_step_percent.value());
         self.set_volume_hud_timeout_ms(config.volume_hud_timeout_ms.value());
         self.set_volume_hud_fade_ms(config.volume_hud_fade_ms.value());
+        self.set_codec_hud_timeout_ms(config.codec_hud_timeout_ms.value());
         if let Some(theme) = config.theme {
             self.apply_theme(theme);
         }
@@ -362,6 +363,46 @@ impl AppShell {
     /// Immediately begins dismissing (fading out) the Volume HUD overlay.
     pub fn dismiss_volume_hud(&self) {
         self.window.invoke_dismiss_volume_hud();
+    }
+
+    /// Returns whether the codec information overlay is currently in its active hold state.
+    #[must_use]
+    pub fn is_codec_hud_visible(&self) -> bool {
+        self.window.get_codec_hud_visible()
+    }
+
+    /// Returns the current opacity (`0.0..=1.0`) of the codec information overlay.
+    #[must_use]
+    pub fn codec_hud_opacity(&self) -> f32 {
+        self.window.get_codec_hud_opacity()
+    }
+
+    /// Returns `true` while the codec overlay is visible or actively fading out.
+    #[must_use]
+    pub fn is_codec_hud_active(&self) -> bool {
+        self.is_codec_hud_visible() || self.codec_hud_opacity() > 0.01
+    }
+
+    /// Opens the codec information overlay and resets its auto-dismiss countdown.
+    pub fn show_codec_hud(&self) {
+        self.window.invoke_show_codec_hud();
+    }
+
+    /// Immediately begins dismissing (fading out) the codec information overlay.
+    pub fn dismiss_codec_hud(&self) {
+        self.window.invoke_dismiss_codec_hud();
+    }
+
+    /// Returns the Codec HUD auto-dismiss timeout in milliseconds.
+    #[must_use]
+    pub fn codec_hud_timeout_ms(&self) -> u32 {
+        u32::try_from(self.window.get_codec_hud_timeout_ms()).unwrap_or(30_000)
+    }
+
+    /// Sets the Codec HUD auto-dismiss timeout in milliseconds.
+    pub fn set_codec_hud_timeout_ms(&self, timeout_ms: u32) {
+        self.window
+            .set_codec_hud_timeout_ms(i32::try_from(timeout_ms).unwrap_or(i32::MAX));
     }
 
     /// Adjusts volume by `detents * volume_step_percent`, unmutes, opens/refreshes the
@@ -465,10 +506,10 @@ impl AppShell {
     }
 
     /// Returns whether the raw marquee overlay should be suppressed
-    /// (e.g. when not on the Now Playing tab or when the Volume HUD is active).
+    /// (e.g. when not on the Now Playing tab or when a HUD overlay is active).
     #[must_use]
     pub fn should_suppress_marquee(&self) -> bool {
-        self.current_tab() != 0 || self.is_volume_hud_active()
+        self.current_tab() != 0 || self.is_volume_hud_active() || self.is_codec_hud_active()
     }
 
     /// Builds [`MarqueeRowSpec`]s for the Rust-side composer from the shared global and

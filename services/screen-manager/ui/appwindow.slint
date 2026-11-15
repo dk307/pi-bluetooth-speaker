@@ -7,6 +7,7 @@ import { MarqueeRasterizer } from "marquee_rasterizer.slint";
 import { MarqueeCompose } from "marquee_state.slint";
 import { ScreenAppBar } from "screen_app_bar.slint";
 import { VolumeHudOverlay } from "volume_hud.slint";
+import { CodecHudOverlay } from "codec_hud.slint";
 
 // Re-exported so slint-build generates the Rust global accessor for the composer bridge.
 export { MarqueeCompose }
@@ -52,12 +53,19 @@ export component MainWindow inherits Window {
     in-out property <int> volume_hud_elapsed_ms: 0;
     out property <float> volume_hud_opacity: root.volume_hud_visible ? 1.0 : 0.0;
     animate volume_hud_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
+    // Codec information overlay: opened from the codec badge in the top bar.
+    // It has its own auto-dismiss timeout (default 30s) and shares the HUD fade duration.
+    in-out property <bool> codec_hud_visible: false;
+    in-out property <int> codec_hud_timeout_ms: 30000;
+    in-out property <int> codec_hud_elapsed_ms: 0;
+    out property <float> codec_hud_opacity: root.codec_hud_visible ? 1.0 : 0.0;
+    animate codec_hud_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
     in-out property <bool> has_cover_art: false;
     in-out property <image> cover_image;
     in-out property <float> left_peak_ratio: 0.0;
     in-out property <float> right_peak_ratio: 0.0;
     in-out property <bool> cd_enabled: false;
-    out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01;
+    out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01;
 
     // NEW: show_themes lifted to MainWindow for title switching in ScreenAppBar
     in-out property <bool> show_themes: false;
@@ -68,11 +76,25 @@ export component MainWindow inherits Window {
     public function show_volume_hud() {
         root.volume_hud_elapsed_ms = 0;
         root.volume_hud_visible = true;
+        root.codec_hud_visible = false;
     }
 
     public function dismiss_volume_hud() {
         root.volume_hud_visible = false;
         root.volume_hud_elapsed_ms = 0;
+    }
+
+    // Opens the codec information overlay. The Volume HUD and the codec overlay are
+    // mutually exclusive: only one of them can cover the viewport at a time.
+    public function show_codec_hud() {
+        root.codec_hud_elapsed_ms = 0;
+        root.codec_hud_visible = true;
+        root.volume_hud_visible = false;
+    }
+
+    public function dismiss_codec_hud() {
+        root.codec_hud_visible = false;
+        root.codec_hud_elapsed_ms = 0;
     }
 
     Timer {
@@ -83,6 +105,18 @@ export component MainWindow inherits Window {
             if (root.volume_hud_elapsed_ms >= root.volume_hud_timeout_ms) {
                 root.volume_hud_visible = false;
                 root.volume_hud_elapsed_ms = 0;
+            }
+        }
+    }
+
+    Timer {
+        interval: 50ms;
+        running: root.codec_hud_visible;
+        triggered() => {
+            root.codec_hud_elapsed_ms += 50;
+            if (root.codec_hud_elapsed_ms >= root.codec_hud_timeout_ms) {
+                root.codec_hud_visible = false;
+                root.codec_hud_elapsed_ms = 0;
             }
         }
     }
@@ -171,12 +205,13 @@ export component MainWindow inherits Window {
                     stream_bit_depth: root.stream_bit_depth;
                     volume_value: root.volume_value;
                     is_muted: root.is_muted;
+                    bt_connected: root.bt_connected;
                     source_clicked => {
                         root.toggle_bluetooth_details();
                         root.source_clicked();
                     }
                     device_clicked => { root.toggle_bluetooth_details(); }
-                    protocol_clicked => { root.toggle_bluetooth_details(); }
+                    protocol_clicked => { root.show_codec_hud(); }
                     night_mode_clicked => { root.night_mode_clicked(); }
                     volume_clicked => {
                         root.show_volume_hud();
@@ -258,8 +293,8 @@ export component MainWindow inherits Window {
             width: 100%;
             height: parent.height - 60px;
             background: #000000;
-            opacity: root.volume_hud_opacity * 0.55;
-            visible: root.volume_hud_opacity > 0.01;
+            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) * 0.55;
+            visible: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) > 0.01;
         }
 
         // Volume HUD overlay (top layer) — same below-the-top-bar geometry.
@@ -275,6 +310,22 @@ export component MainWindow inherits Window {
             toggle_mute => { root.toggle_mute(); }
             dismiss_requested => { root.dismiss_volume_hud(); }
             interaction_activity => { root.show_volume_hud(); }
+        }
+
+        // Codec information overlay (top layer) — same below-the-top-bar geometry.
+        codec_hud := CodecHudOverlay {
+            y: 60px;
+            width: 100%;
+            height: parent.height - 60px;
+            visible: root.codec_hud_opacity > 0.01;
+            opacity: root.codec_hud_opacity;
+            codec: root.stream_codec;
+            sample_rate: root.stream_sample_rate;
+            bit_depth: root.stream_bit_depth;
+            stream_format: root.bt_stream_format;
+            delay_text: root.bt_delay_text;
+            connected: root.bt_connected;
+            dismiss_requested => { root.dismiss_codec_hud(); }
         }
     }
 }
