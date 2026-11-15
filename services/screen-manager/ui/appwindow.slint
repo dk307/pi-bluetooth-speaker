@@ -309,7 +309,9 @@ export component MainWindow inherits Window {
 
         // HUD scrim (above the background) — covers only the viewport area below
         // the 60px top-bar slot: an overlay overlays content, never the top bar.
-        // It dims the screen while the blurred backdrop fades in.
+        // The 0.25 dimming is intentionally softened from the pre-backdrop 0.55:
+        // the blurred backdrop now provides most of the visual separation and the
+        // scrim only adds a slight dimming while the backdrop fades in.
         hud_scrim := Rectangle {
             y: root.overlay_top_inset;
             width: 100%;
@@ -321,7 +323,8 @@ export component MainWindow inherits Window {
 
         // Blurred backdrop (middle layer, above the scrim) — the frozen, blurred
         // snapshot of the screen that the overlay is covering. Published by Rust
-        // when an overlay opens.
+        // when an overlay opens. By design it is not refreshed while the overlay
+        // stays open: content changes underneath only appear after a reopen.
         hud_backdrop := Image {
             y: root.overlay_top_inset;
             width: 100%;

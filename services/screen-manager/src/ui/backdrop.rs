@@ -135,28 +135,64 @@ pub enum BackdropAction {
 ///
 /// The backdrop is captured once when an overlay opens and kept until every
 /// overlay has closed again, so that switching between overlays (for example
-/// from the Volume HUD to the codec panel) reuses the same snapshot.
+/// from the Volume HUD to the codec panel) reuses the same snapshot. The
+/// snapshot is intentionally frozen for the overlay period: content changes
+/// underneath are not re-captured until the overlay reopens.
+///
+/// A failed capture attempt re-arms the tracker so the renderer retries on the
+/// next poll instead of leaving the overlay without a backdrop for its whole
+/// lifetime.
 #[derive(Debug, Default)]
 pub struct OverlayBackdropTracker {
     active: bool,
+    retry_pending: bool,
 }
 
 impl OverlayBackdropTracker {
     /// Creates a tracker in the "no overlay on screen" state.
     #[must_use]
     pub const fn new() -> Self {
-        Self { active: false }
+        Self {
+            active: false,
+            retry_pending: false,
+        }
     }
 
     /// Reports the current overlay state and returns the action the renderer must take.
+    ///
+    /// A `Capture` action is returned when an overlay opens or when a previous
+    /// capture attempt failed while the overlay is still on screen, so a failed
+    /// capture retries on the next poll instead of being stranded.
     pub fn on_overlay_state_changed(&mut self, overlay_active: bool) -> BackdropAction {
-        let action = match (self.active, overlay_active) {
-            (false, true) => BackdropAction::Capture,
-            (true, false) => BackdropAction::Clear,
-            _ => BackdropAction::Keep,
-        };
+        let was_active = self.active;
         self.active = overlay_active;
-        action
+        if !overlay_active {
+            self.retry_pending = false;
+            return if was_active {
+                BackdropAction::Clear
+            } else {
+                BackdropAction::Keep
+            };
+        }
+        if !was_active || self.retry_pending {
+            return BackdropAction::Capture;
+        }
+        BackdropAction::Keep
+    }
+
+    /// Records a failed capture attempt so the next poll retries it.
+    ///
+    /// Returns `true` for the first failure of the current streak so callers
+    /// can log at `warn!` once and downgrade consecutive retries to `debug!`.
+    pub fn capture_failed(&mut self) -> bool {
+        let first_failure = !self.retry_pending;
+        self.retry_pending = true;
+        first_failure
+    }
+
+    /// Records a successful capture, ending the retry streak.
+    pub fn capture_succeeded(&mut self) {
+        self.retry_pending = false;
     }
 
     /// Returns `true` while an overlay is on screen.
