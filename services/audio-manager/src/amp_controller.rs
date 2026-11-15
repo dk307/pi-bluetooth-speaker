@@ -13,6 +13,7 @@
 //!    Faulted ◄── GPIO error edge / I2C fault    Muted (warn!, stay muted)
 //!      │  recovery: mute → /ENABLE cycle + full
 //!      │  register re-init → Muted
+//!      │    (live stream: immediate PLL re-handshake, no DSP edge needed)
 //! ```
 //!
 //! Event-driven, no polling as the primary path: `tokio::select!` over the
@@ -412,6 +413,11 @@ impl AmpController {
     /// mask an OCP/DC/flying-cap condition; `PllClockLoss` during playback
     /// is treated as a stream stop (mute, not recovery).
     ///
+    /// A critical fault that interrupts a live stream re-runs the PLL
+    /// handshake immediately after recovery — the DSP watcher cannot be
+    /// relied on to emit a fresh `StreamStarting` edge, because CamillaDSP
+    /// usually keeps running through a transient amp fault.
+    ///
     /// # Errors
     /// Propagated hardware faults.
     pub async fn handle_faults(&mut self, flags: speaker_hardware::AmpErrorFlags) -> AmpResult<()> {
@@ -422,9 +428,28 @@ impl AmpController {
         if has_critical_fault(flags) {
             warn!(?flags, "Critical amp fault; entering fault recovery");
             self.ctrl = CtrlState::Faulted;
+            // Capture BEFORE clearing: if the fault interrupted a live
+            // stream, the handshake must re-run immediately after recovery.
+            // CamillaDSP usually never stops through a transient amp fault
+            // (it keeps processing the BT stream), so the DSP watcher never
+            // emits a new Stopped→Running edge — waiting for one leaves the
+            // amp muted indefinitely (live incident 2026-11-14: a PVDD
+            // glitch muted playback for 53 minutes until a track change).
+            let was_stream_live = self.stream_live;
             self.stream_live = false;
             self.fault_recovery().await?;
             self.ctrl = CtrlState::Muted;
+            if was_stream_live {
+                // Re-run the bounded PLL handshake now: if the clock is
+                // back (the usual transient case) the amp unmutes at once
+                // at the user's level; `start_stream`'s internal guards
+                // keep it muted for a user mute (with `stream_live` set so
+                // a later unmute restores instantly) and re-run recovery
+                // if the fault is still live. If the clock is genuinely
+                // gone, the handshake times out and we stay muted — the
+                // next real StreamStarting edge retries as before.
+                self.start_stream().await?;
+            }
             return Ok(());
         }
         // 2. PLL clock loss while a stream is live (playing OR user-muted
