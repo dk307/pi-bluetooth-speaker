@@ -688,7 +688,10 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
     );
     assert!(bt_mock.is_some());
     assert!(shell_mock.is_playing());
-    assert_eq!(shell_mock.current_tab(), 2);
+    // Tab 2 is retired (plan A6): `--tab bt|bluetooth|2` opens the full-screen
+    // devices view instead of selecting a dock tab, so the active tab stays 0.
+    assert_eq!(shell_mock.current_tab(), 0);
+    assert!(shell_mock.window().get_bt_devices_open());
 }
 
 #[cfg(feature = "ui")]
@@ -1015,7 +1018,6 @@ fn bt_monitor_state_commands_settle_and_commit() {
         BtSharedUpdate {
             playback: Some(playback(None, false)),
             pcm: None,
-            details: Some(screen_manager::ui::BtLinkDetails::default()),
             cover: Some(None),
             amp_volume: None,
             devices: None,
@@ -1026,12 +1028,11 @@ fn bt_monitor_state_commands_settle_and_commit() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(recovered.playback.is_some());
     assert!(recovered.cover.is_some());
-    assert!(recovered.details.is_some());
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn publish_link_state_stages_details_once_and_resets() {
+fn publish_link_state_stages_pcm_once_and_resets() {
     use speaker_bluetooth::BluetoothDevice;
 
     let (bt, _mock) = BluetoothDevice::new_mocked();
@@ -1039,22 +1040,24 @@ fn publish_link_state_stages_details_once_and_resets() {
 
     let mut first = BtSharedUpdate::default();
     let _ = state.publish_link_state(&bt, &mut first);
-    let details = first.details.expect("first tick publishes details");
+    assert!(first.pcm.is_some());
+    let details = state.last_details().expect("first tick caches details");
     assert!(details.device.is_some());
     assert!(details.pcm.is_some());
-    assert!(first.pcm.is_some());
 
     // Unchanged snapshot is deduplicated.
     let mut second = BtSharedUpdate::default();
     let _ = state.publish_link_state(&bt, &mut second);
-    assert!(second.details.is_none());
     assert!(second.pcm.is_none());
+    assert!(state.last_details().is_some());
 
     // A dedup reset forces a full republish.
     state.reset_dedup();
+    assert!(state.last_details().is_none());
     let mut third = BtSharedUpdate::default();
     let _ = state.publish_link_state(&bt, &mut third);
-    assert!(third.details.is_some());
+    assert!(third.pcm.is_some());
+    assert!(state.last_details().is_some());
 }
 
 #[cfg(feature = "ui")]
@@ -1067,7 +1070,6 @@ fn publish_link_state_keeps_state_on_query_fault() {
     let mut state = BtMonitorState::default();
     let mut update = BtSharedUpdate::default();
     assert!(state.publish_link_state(&bt, &mut update).is_none());
-    assert!(update.details.is_none());
     assert!(state.last_details().is_none());
 }
 
@@ -1082,9 +1084,10 @@ fn publish_link_state_clears_details_on_disconnect() {
 
     mock.clear_devices();
     mock.clear_pcms();
-    let mut update = BtSharedUpdate::default();
-    let _ = state.publish_link_state(&bt, &mut update);
-    let details = update.details.expect("disconnect republishes details");
+    let _ = state.publish_link_state(&bt, &mut BtSharedUpdate::default());
+    let details = state
+        .last_details()
+        .expect("disconnect republishes details");
     assert!(details.device.is_none());
     assert!(details.pcm.is_none());
 }

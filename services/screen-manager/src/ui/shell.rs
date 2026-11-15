@@ -102,13 +102,10 @@ impl EncoderVolumeTracker {
     }
 }
 
-/// Placeholder shown for details that are unknown or not applicable.
-const NO_DETAIL: &str = "—";
-
-/// Point-in-time Bluetooth connection details shown on the details screen.
+/// Point-in-time Bluetooth connection details selected from a link snapshot.
 ///
-/// Built off the render thread from a [`speaker_bluetooth::LinkSnapshot`] and applied
-/// by [`AppShell::apply_bt_link_details`]; `None` fields clear the matching text.
+/// Used by the worker to derive the active device for Devices-screen rows and,
+/// at startup, to seed the audio-stream inspector pill.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BtLinkDetails {
     /// Connected remote device, if any.
@@ -149,72 +146,12 @@ impl BtLinkDetails {
         }
     }
 
-    fn address_text(&self) -> String {
-        self.device
-            .as_ref()
-            .map_or_else(|| NO_DETAIL.into(), |d| d.address.to_string())
-    }
-
-    fn link_text(&self) -> String {
-        let Some(device) = &self.device else {
-            return "Waiting for connection".into();
-        };
-        let mut parts = vec![if self.pcm.as_ref().is_some_and(|p| p.running) {
-            "Streaming"
-        } else {
-            "Connected"
-        }];
-        if device.paired {
-            parts.push("Paired");
-        }
-        if device.trusted {
-            parts.push("Trusted");
-        }
-        parts.join(" • ")
-    }
-
-    fn rssi_text(&self) -> String {
-        self.device
-            .as_ref()
-            .and_then(|d| d.rssi)
-            .map_or_else(String::new, |rssi| format!("{rssi} dBm"))
-    }
-
-    fn battery_text(&self) -> String {
-        self.device
-            .as_ref()
-            .and_then(|d| d.battery_percentage)
-            .map_or_else(String::new, |pct| format!("{pct}%"))
-    }
-
-    fn stream_format_text(&self) -> String {
-        let Some(pcm) = &self.pcm else {
-            return NO_DETAIL.into();
-        };
-        let rate = if pcm.sampling_rate % 1000 == 0 {
-            format!("{} kHz", pcm.sampling_rate / 1000)
-        } else {
-            format!("{:.1} kHz", f64::from(pcm.sampling_rate) / 1000.0)
-        };
-        let channels = match pcm.channels {
-            1 => "Mono".to_string(),
-            2 => "Stereo".to_string(),
-            n => format!("{n} ch"),
-        };
-        format!("{rate} • {} • {channels}", pcm_bit_depth(&pcm.format))
-    }
-
-    fn delay_text(&self) -> String {
-        self.pcm
-            .as_ref()
-            .and_then(|p| p.delay.as_deref())
-            .unwrap_or(NO_DETAIL)
-            .into()
-    }
-
-    fn adapter_name_text(&self) -> String {
+    /// Adapter display name: alias when set, otherwise the adapter model name;
+    /// `—` when no adapter was detected.
+    #[must_use]
+    pub fn adapter_name_text(&self) -> String {
         self.adapter.as_ref().map_or_else(
-            || NO_DETAIL.into(),
+            || "—".to_string(),
             |a| {
                 if a.alias.is_empty() {
                     a.name.to_string()
@@ -223,12 +160,6 @@ impl BtLinkDetails {
                 }
             },
         )
-    }
-
-    fn adapter_address_text(&self) -> String {
-        self.adapter
-            .as_ref()
-            .map_or_else(|| NO_DETAIL.into(), |a| a.address.to_string())
     }
 }
 
@@ -812,51 +743,6 @@ impl AppShell {
         // handle-less track or a fetch pending on the cover-fetch worker — blanking
         // here would drop working art on every 250 ms position tick. Only an
         // explicit device-disconnect delta clears the displayed cover.
-    }
-
-    /// Applies Bluetooth connection details to the details screen (change-guarded).
-    pub fn apply_bt_link_details(&self, details: &BtLinkDetails) {
-        let w = &self.window;
-        let connected = details.device.is_some();
-        if w.get_bt_connected() != connected {
-            w.set_bt_connected(connected);
-        }
-        macro_rules! guarded {
-            ($get:ident, $set:ident, $text:expr) => {
-                let text = $text;
-                if w.$get().as_str() != text.as_str() {
-                    w.$set(text.into());
-                }
-            };
-        }
-        guarded!(
-            get_bt_device_address,
-            set_bt_device_address,
-            details.address_text()
-        );
-        guarded!(get_bt_link_text, set_bt_link_text, details.link_text());
-        guarded!(get_bt_rssi_text, set_bt_rssi_text, details.rssi_text());
-        guarded!(
-            get_bt_battery_text,
-            set_bt_battery_text,
-            details.battery_text()
-        );
-        guarded!(
-            get_bt_stream_format,
-            set_bt_stream_format,
-            details.stream_format_text()
-        );
-        guarded!(get_bt_delay_text, set_bt_delay_text, details.delay_text());
-        guarded!(
-            get_bt_adapter_name,
-            set_bt_adapter_name,
-            details.adapter_name_text()
-        );
-        guarded!(
-            get_bt_adapter_address,
-            set_bt_adapter_address,
-            details.adapter_address_text()
-        );
     }
 
     /// Applies a Bluetooth devices screen update pushed by the `bt-monitor`

@@ -192,6 +192,8 @@ functional gain (repo blast-radius rule).
   `NO_DETAIL` constant.
 - **Keep** `BtLinkDetails::select` (active-device selection) and
   `adapter_name_text` (reused for the "Visible as …" subtitle).
+  **(As implemented:** promoted to `#[must_use] pub fn` with a literal `"—"`
+  fallback once `NO_DETAIL` was deleted, so it stays reachable and tested.)
 - **Keep** `pcm_bit_depth` — it is also used by `apply_pcm_stream` (line 686)
   for the Now Playing status bar.
 
@@ -210,6 +212,14 @@ functional gain (repo blast-radius rule).
   remain accepted aliases and now open the device screen via the mapping above
   (the `--help` text documents this). No external caller passes `--tab` (verified:
   no systemd unit, script, or doc does).
+- **As implemented (audited A6):** `-B/--bt-devices` is parse-time sugar that
+  sets `opts.tab = Some(2)`, and `init_shell_with_config` maps `Some(2)` to
+  `shell.window().invoke_open_bt_devices()` instead of `set_tab(2)` — no new
+  field or parameter, same observable mapping. Also as implemented:
+  `BtSharedUpdate.details` was deleted outright (nothing consumed it),
+  `last_details` kept its name (it feeds active-row derivation), and
+  `publish_link_state` caches `BtLinkDetails::select(...)` unconditionally
+  (no staging/dedup for a field no longer rendered).
 
 `src/ui/mod.rs` — `BtLinkDetails` stays exported (trimmed shape).
 
@@ -280,12 +290,18 @@ callback bt_row_delete(int);          // index resolved to row.address at tap ti
 callback bt_pair_cancel_clicked();    callback bt_delete_confirm_clicked();
 callback bt_delete_cancel_clicked();
 out property <bool> is_animating: ... || (root.bt_devices_open &&
-    (root.bt_devices_mode == 2 || root.bt_toast_visible));   // audited A9
+    (root.bt_devices_mode == 2 || (root.bt_devices_mode == 1 &&
+    root.bt_scanning) || root.bt_toast_visible));   // audited A9, extended A16
 
-public function open_bt_devices()  { bt_devices_open = true; bt_devices_mode = 0; }
+public function open_bt_devices()  { bt_devices_open = true; /* mode untouched */ }
 public function close_bt_devices() { bt_devices_open = false; reset mode/dialog/toast }
 public function bt_devices_back()  { pairing -> add ; add -> list ; list -> close }
 ```
+
+**As implemented:** `open_bt_devices()` intentionally does NOT reset
+`bt_devices_mode` (re-entry while a pairing session is live keeps the pairing
+view visible; mode resets in `close_bt_devices()`), and `is_animating` carries
+the A16 mode-1 scanning-spinner term shown above.
 
 Navigation inside `BluetoothDevicesScreen` is pure Slint (no Rust):
 `Add Device` → mode 1 + `bt_add_device_clicked()`; `Cancel` (add) → mode 0 +
@@ -484,9 +500,14 @@ consistency with the sibling icons. BlueZ icon slug → asset mapping in
   overflow cue gated on `content_height > viewport_height` (property-level
   assertion, audited A13); delete dialog keyed by address (index changes
   between tap and confirm do not alter the pending delete, audited A2).
-- UI guard tests: `is_animating` true while open, `flickable.interactive` false
-  while the dialog is open (assertions on the generated window), and a grep
-  guard asserting the new file never reads `animation-tick()`.
+- UI guard tests: `is_animating` true while open/pairing/scanning/toasting
+  (assertions on the generated window); the dialog-scroll and cue gates are
+  **source-grep** assertions because the list `Flickable` and the cue live
+  inside the screen component and are unreachable from generated Rust
+  (`interactive: !root.delete_open`, `visible: flick.content_height >
+  flick.height;`, scrollbar rendered after the cue), plus a grep guard that the
+  new file never reads `animation-tick(`. Keep guard literals out of comments
+  in the guarded file so they cannot self-trip.
 - `tests/daemon_integration.rs`: extend the worker test with device commands
   drained through the queue; assert the pairing deadline expiry path with a
   short injected deadline (production constant stays unconditional; tests use a
@@ -528,7 +549,7 @@ consistency with the sibling icons. BlueZ icon slug → asset mapping in
 | `RemoveDevice` while the device streams audio | Disconnect-then-remove ordering in the worker; audio-manager volume path is untouched (`amp-volume` worker independent). |
 | Removing tab 2 breaks startup scripts | No caller passes `--tab` (verified: no systemd unit, script, or doc); indices 0,1,3,4,5 keep their meaning and `bt`/`bluetooth`/`2` open the new screen. |
 | Slint struct-array codegen friction | Fallback: single `[BtDeviceRow]` list plus a `mode` filter (still no fixed max). First compile in PR-3 proves it. |
-| Per-frame cost on BCM2837 | Ring at 30 fps only during pairing; row text updates deduped ≤ ~1/s (RSSI-only deltas suppressed in discovery mode, A14); scrollbar/gradient use `visible` not conditional `if`; `is_animating` narrowed to live animation sources (A9). |
+| Per-frame cost on BCM2837 | Ring at 30 fps only during pairing; row text updates deduped ≤ ~1/s (RSSI-only deltas suppressed in discovery mode, A14); scrollbar/gradient use `visible` not conditional `if`; `is_animating` narrowed to live animation sources (A9/A16). |
 | Overflow cue falsely signals scrollability on short lists (audited A1) | Cue gated on `content_height > viewport_height`; the spec's "35 % exposed" 4th-card state is unreachable with 88/12/392 and is documented as a deviation. |
 
 ## 13. Decisions taken (user-confirmed + audit resolutions)

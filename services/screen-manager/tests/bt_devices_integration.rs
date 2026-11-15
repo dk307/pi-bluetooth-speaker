@@ -14,12 +14,13 @@ use std::time::Duration;
 
 use screen_manager::daemon::{BT_PAIRING_TIMEOUT, BtMonitorState, BtSharedUpdate};
 use screen_manager::ui::{
-    AppShell, BtDeviceRow, BtDevicesController, BtDevicesUpdate, Framebuffer, MainWindow,
-    device_row, icon_slug, pairing_code_text, status_text, subtitle_text,
+    AppShell, BtDeviceRow, BtDevicesController, BtDevicesUpdate, BtLinkDetails, Framebuffer,
+    MainWindow, device_row, icon_slug, pairing_code_text, status_text, subtitle_text,
 };
 use slint::ComponentHandle;
 use slint::Model;
 use slint::platform::software_renderer::MinimalSoftwareWindow;
+use slint::platform::{PointerEventButton, WindowEvent};
 use speaker_bluetooth::{
     AdminAction, BluetoothDevice, BtAddress, BtDevice, DeviceCommand, DeviceCommandQueue,
     PairingStatus, SCREEN_AGENT_CAPABILITY, SCREEN_AGENT_PATH, TransportCommandQueue,
@@ -861,17 +862,57 @@ fn is_animating_tracks_pairing_and_toast() {
 
     w.set_bt_toast_visible(false);
     assert!(!w.get_is_animating());
+
+    // A16: the indeterminate scanning spinner (mode 1) is a live animation
+    // source too, so `is_animating` must cover it.
+    w.set_bt_devices_mode(1);
+    assert!(
+        !w.get_is_animating(),
+        "idle Add Device screen does not animate"
+    );
+    w.set_bt_scanning(true);
+    assert!(w.get_is_animating(), "scanning spinner animates");
+    w.set_bt_scanning(false);
+    assert!(!w.get_is_animating());
 }
 
 #[test]
 fn devices_screen_slint_avoids_perpetual_animation_tick() {
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/bluetooth_devices.slint"),
-    )
-    .expect("bluetooth_devices.slint must exist");
+    let source = screen_source();
     assert!(
         !source.contains("animation-tick("),
         "M-NO-PERPETUAL-ANIMATION-DRIVER: animation-tick() must not drive the screen"
+    );
+}
+
+fn screen_source() -> String {
+    std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/bluetooth_devices.slint"),
+    )
+    .expect("bluetooth_devices.slint must exist")
+}
+
+#[test]
+fn devices_screen_list_disables_panning_while_delete_dialog_open() {
+    let source = screen_source();
+    assert!(
+        source.contains("interactive: !root.delete_open"),
+        "modal delete dialog must disable list panning"
+    );
+}
+
+#[test]
+fn devices_screen_overflow_cue_gated_on_content_height() {
+    let source = screen_source();
+    let cue = source
+        .find("visible: flick.content_height > flick.height;")
+        .expect("fade cue must be gated on content overflow (audit A13)");
+    let scrollbar = source
+        .find("Rendered after the cue")
+        .expect("scrollbar must be rendered after the cue (audit A10)");
+    assert!(
+        scrollbar > cue,
+        "scrollbar must render above the fade cue (audit A10)"
     );
 }
 
@@ -1474,4 +1515,172 @@ fn live_pairing_user_cancellation_publishes_cancelled() {
     assert!(guard.seq.contains(&"request_default_agent".to_string()));
     drop(guard);
     clear_bus_env();
+}
+
+/// Dispatches a left-click at a logical window position so status-bar entry
+/// points are hit-tested through the real pointer pipeline.
+fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
+    let position = slint::LogicalPosition::new(x, y);
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+}
+
+#[test]
+fn open_bt_devices_captures_originating_tab_and_closes() {
+    let (shell, _window) = shell_with_window();
+    shell.set_tab(1);
+    shell.window().invoke_open_bt_devices();
+    assert!(shell.window().get_bt_devices_open());
+    assert_eq!(shell.window().get_previous_tab(), 1);
+    shell.window().invoke_close_bt_devices();
+    assert!(!shell.window().get_bt_devices_open());
+    assert_eq!(
+        shell.window().get_previous_tab(),
+        1,
+        "close keeps the return tab"
+    );
+}
+
+#[test]
+fn status_bar_taps_open_the_devices_screen() {
+    let (shell, window) = shell_with_window();
+
+    // Bluetooth logo (left).
+    click(&window, 100.0, 30.0);
+    assert!(
+        shell.window().get_bt_devices_open(),
+        "logo tap opens the screen"
+    );
+    assert_eq!(shell.window().get_previous_tab(), 0);
+    shell.window().invoke_close_bt_devices();
+    window.draw_if_needed(|_| {});
+
+    // Device name (center) from the player tab.
+    click(&window, 400.0, 30.0);
+    assert!(
+        shell.window().get_bt_devices_open(),
+        "device name tap opens the screen"
+    );
+    shell.window().invoke_close_bt_devices();
+    window.draw_if_needed(|_| {});
+
+    // Codec badge (right): the fixed-spec codec shows only the badge pill.
+    click(&window, 600.0, 30.0);
+    assert!(
+        shell.window().get_bt_devices_open(),
+        "codec badge tap opens the screen"
+    );
+    shell.window().invoke_close_bt_devices();
+    window.draw_if_needed(|_| {});
+
+    // Variable-spec codec: sample-rate/bit-depth pills shift the tap target.
+    shell.set_stream_codec("AAC");
+    shell.set_stream_sample_rate("48 kHz");
+    shell.set_stream_bit_depth("24-bit");
+    window.draw_if_needed(|_| {});
+    click(&window, 590.0, 30.0);
+    assert!(
+        shell.window().get_bt_devices_open(),
+        "bit-depth badge tap opens the screen"
+    );
+}
+
+#[test]
+fn volume_and_dim_controls_do_not_open_devices_screen() {
+    let (shell, window) = shell_with_window();
+
+    click(&window, 764.0, 30.0);
+    assert!(
+        !shell.window().get_bt_devices_open(),
+        "DIM must not open the screen"
+    );
+
+    click(&window, 690.0, 30.0);
+    assert!(
+        !shell.window().get_bt_devices_open(),
+        "volume must not open the screen"
+    );
+    assert!(
+        shell.is_volume_hud_active(),
+        "volume click must open volume HUD"
+    );
+}
+
+#[test]
+fn select_prefers_requested_connected_device() {
+    let (bt, mock) = BluetoothDevice::new_mocked();
+    let mut second = bt.link_snapshot().expect("snapshot").devices[0].clone();
+    second.address = BtAddress::new([1, 2, 3, 4, 5, 6]);
+    mock.add_device(second);
+
+    let snapshot = bt.link_snapshot().expect("snapshot");
+    let preferred = BtLinkDetails::select(&snapshot, Some(BtAddress::new([1, 2, 3, 4, 5, 6])));
+    assert_eq!(
+        preferred.device.expect("device").address,
+        BtAddress::new([1, 2, 3, 4, 5, 6])
+    );
+    assert!(preferred.pcm.is_none(), "no stream for the second device");
+
+    let fallback = BtLinkDetails::select(&snapshot, Some(BtAddress::new([9; 6])));
+    assert!(fallback.device.is_some(), "unknown preference falls back");
+}
+
+#[test]
+fn select_covers_active_device_and_adapter_name_fallbacks() {
+    let (bt, mock) = BluetoothDevice::new_mocked();
+    let mut snapshot = bt.link_snapshot().expect("snapshot");
+
+    // Default mock: connected phone plus aliased adapter.
+    let details = BtLinkDetails::select(&snapshot, None);
+    assert!(details.device.is_some());
+    assert!(details.pcm.is_some());
+    assert_eq!(details.adapter_name_text().as_str(), "RaspberryPi-DSP");
+
+    // An empty alias falls back to the adapter model name.
+    if let Some(ref mut adapter) = snapshot.adapter {
+        adapter.alias = "".into();
+        adapter.name = "hci0".into();
+    }
+    let no_alias = BtLinkDetails::select(&snapshot, None);
+    assert_eq!(no_alias.adapter_name_text().as_str(), "hci0");
+
+    // A disconnected snapshot clears the selection but keeps the adapter.
+    mock.clear_devices();
+    mock.clear_pcms();
+    let cleared = BtLinkDetails::select(&bt.link_snapshot().expect("snapshot"), None);
+    assert!(cleared.device.is_none());
+    assert!(cleared.pcm.is_none());
+    assert_eq!(cleared.adapter_name_text().as_str(), "RaspberryPi-DSP");
+
+    // A missing adapter renders the placeholder.
+    mock.set_adapter(None);
+    let absent = BtLinkDetails::select(&bt.link_snapshot().expect("snapshot"), None);
+    assert!(absent.adapter.is_none());
+    assert_eq!(absent.adapter_name_text().as_str(), "—");
+}
+
+#[test]
+fn marquee_rows_are_empty_off_the_player_tab() {
+    let (shell, _window) = shell_with_window();
+    shell.set_track_metadata(
+        "A Deliberately Long Track Title That Overflows The Marquee Viewport Width",
+        "Some Artist",
+        "Audiophile DSP Sink",
+    );
+    shell.set_marquee_compose_in_rust(true);
+
+    // The old tab-2 details screen is retired; any non-player tab must refuse
+    // to compose stale marquee geometry.
+    shell.set_tab(4);
+    assert!(
+        shell.marquee_row_specs().is_empty(),
+        "stale marquee geometry must not be composed over other tabs"
+    );
 }

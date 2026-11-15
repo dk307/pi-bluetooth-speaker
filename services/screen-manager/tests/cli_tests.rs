@@ -70,6 +70,7 @@ fn screen_manager_binary_executes() {
         assert!(status.success());
         assert!(stdout.contains("DietPi Touchscreen Appliance Console & Screen Manager Service"));
         assert!(stdout.contains("--preview"));
+        assert!(stdout.contains("--bt-devices"));
     }
 
     // Test version flags
@@ -77,6 +78,20 @@ fn screen_manager_binary_executes() {
         let (status, stdout, _) = run_cli(bin_path, &[flag]);
         assert!(status.success());
         assert!(stdout.contains(&format!("screen-manager {}", env!("CARGO_PKG_VERSION"))));
+    }
+
+    // Tab 2 is retired (plan A6): `--tab bt|bluetooth|2` and
+    // `-B/--bt-devices` all open the devices screen at startup and must
+    // parse cleanly in a headless preview run.
+    for args in [
+        &["-p", "0", "--tab", "bt"][..],
+        &["-p", "0", "--tab", "bluetooth"][..],
+        &["-p", "0", "--tab", "2"][..],
+        &["-p", "0", "-B"][..],
+        &["-p", "0", "--bt-devices"][..],
+    ] {
+        let (status, _, stderr) = run_cli(bin_path, args);
+        assert!(status.success(), "args {args:?} stderr: {stderr}");
     }
 
     // Test zero duration preview
@@ -93,6 +108,7 @@ fn screen_manager_binary_executes() {
         (&["--preview", "+5"][..], "sign prefixes are not accepted"),
         (&["--preview", "-5"][..], "sign prefixes are not accepted"),
         (&["--preview"][..], "missing value for --preview"),
+        (&["--tab", "invalid"][..], "invalid tab 'invalid'"),
         (&["--unknown-flag"][..], "unknown option '--unknown-flag'"),
     ] {
         let (status, _, stderr) = run_cli(bin_path, args);

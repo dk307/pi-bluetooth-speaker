@@ -72,6 +72,9 @@ pub struct CoreCliOptions {
     /// Optional override of the JSON configuration file path.
     pub config: Option<PathBuf>,
     /// Navigation dock tab to open on startup (0 to 5).
+    ///
+    /// Tab 2 is retired (plan A6): `--tab bt|bluetooth|2` and `-B/--bt-devices`
+    /// both resolve to opening the full-screen Bluetooth devices view.
     pub tab: Option<i32>,
 }
 
@@ -95,6 +98,7 @@ pub fn print_usage(bin_name: &str) {
     println!(
         "  -T, --tab <TAB>             Active UI tab on startup (0-5 or name: player, vu, bt, cd, dsp, settings)"
     );
+    println!("  -B, --bt-devices            Open the Bluetooth devices screen on startup");
     println!("  -p, --preview <SECS>        Render UI for SECS seconds (preview/testing mode)");
     println!("  -V, --version               Print version and exit");
     println!("  -h, --help                  Print this help text and exit");
@@ -119,6 +123,10 @@ pub fn parse_preview_secs(val: &str) -> Result<u64, String> {
 ///
 /// Accepts integer tab indices (0 to 5) or standard tab slug names:
 /// `player`, `vu` / `peppy`, `bluetooth`, `cd`, `dsp`, `settings`.
+///
+/// Tab `2` (`bt` / `bluetooth`) is retired as a dock tab: it resolves to
+/// index 2, which [`init_shell_with_config`] maps to opening the full-screen
+/// Bluetooth devices view (plan A6).
 ///
 /// # Errors
 /// Returns a descriptive error string if `val` is invalid.
@@ -158,6 +166,9 @@ where
                 let val = next_arg_value(&mut iter, "--tab")?;
                 opts.tab = Some(parse_tab_arg(&val)?);
             }
+            // `-B` is sugar for the retired tab index 2: both open the
+            // full-screen Bluetooth devices view (see `init_shell_with_config`).
+            "-B" | "--bt-devices" => opts.tab = Some(2),
             "-s" | "--screen" => {
                 let val = next_arg_value(&mut iter, "--screen")?;
                 match val.trim().to_ascii_lowercase().as_str() {
@@ -617,8 +628,13 @@ pub fn init_shell_with_config(
             }
         }
     };
-    if let Some(tb) = tab {
-        shell.set_tab(tb);
+    match tab {
+        // Tab 2 is retired (plan A6): `--tab bt|bluetooth|2` and
+        // `-B/--bt-devices` open the full-screen devices view instead of a
+        // dock tab, so `set_tab(2)` must never be applied.
+        Some(2) => shell.window().invoke_open_bt_devices(),
+        Some(tb) => shell.set_tab(tb),
+        None => {}
     }
     ShellInit {
         shell,
@@ -648,7 +664,6 @@ fn apply_initial_bt_state(shell: &AppShell, bt: &speaker_bluetooth::BluetoothDev
             if let Some(ref pcm) = details.pcm {
                 shell.apply_pcm_stream(pcm);
             }
-            shell.apply_bt_link_details(&details);
         }
         Err(e) => {
             tracing::warn!(error = %e, "Failed to query initial Bluetooth link snapshot");
@@ -668,8 +683,6 @@ pub struct BtSharedUpdate {
     pub playback: Option<speaker_bluetooth::BtPlaybackState>,
     /// Active PCM stream, if it changed since the last publish.
     pub pcm: Option<speaker_bluetooth::BlueAlsaPcm>,
-    /// Bluetooth connection details for the details screen, if they changed.
-    pub details: Option<crate::ui::BtLinkDetails>,
     /// Cover art delta: outer `Some` = cover state changed; inner`Some` = decoded
     /// pixel buffer to display, inner `None` = clear the displayed cover art.
     /// Carried as a `SharedPixelBuffer` (which is `Send + Sync`) rather than a
@@ -1131,8 +1144,8 @@ impl BtMonitorState {
         }
     }
 
-    /// Queries one lightweight link snapshot and stages PCM and connection-detail
-    /// changes into `update`.
+    /// Queries one lightweight link snapshot, stages PCM changes into `update`,
+    /// and refreshes the cached link details used to pick the active device row.
     ///
     /// Returns the snapshot on success so the caller can rebuild Devices-screen
     /// rows from the same query, or `None` on a transient D-Bus error (the last
@@ -1156,11 +1169,7 @@ impl BtMonitorState {
             self.last_pcms = Some(snapshot.pcms.clone());
         }
         let preferred = self.last_pb.as_ref().and_then(|pb| pb.device_address);
-        let details = crate::ui::BtLinkDetails::select(&snapshot, preferred);
-        if self.last_details.as_ref() != Some(&details) {
-            update.details = Some(details.clone());
-            self.last_details = Some(details);
-        }
+        self.last_details = Some(crate::ui::BtLinkDetails::select(&snapshot, preferred));
         Some(snapshot)
     }
 
@@ -1649,7 +1658,6 @@ impl BtMonitorState {
     pub fn commit_update(shared: &Mutex<BtSharedUpdate>, update: BtSharedUpdate) {
         if update.playback.is_some()
             || update.pcm.is_some()
-            || update.details.is_some()
             || update.cover.is_some()
             || update.amp_volume.is_some()
             || update.devices.is_some()
@@ -1666,9 +1674,6 @@ impl BtMonitorState {
             }
             if update.pcm.is_some() {
                 lock.pcm = update.pcm;
-            }
-            if update.details.is_some() {
-                lock.details = update.details;
             }
             if update.cover.is_some() {
                 lock.cover = update.cover;
@@ -2173,9 +2178,6 @@ fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpda
         }
         if let Some(pcm) = lock.pcm.take() {
             shell.apply_pcm_stream(&pcm);
-        }
-        if let Some(details) = lock.details.take() {
-            shell.apply_bt_link_details(&details);
         }
         if let Some(devices) = lock.devices.take() {
             shell.apply_bt_devices(devices);
