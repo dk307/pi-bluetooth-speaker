@@ -71,45 +71,48 @@ export component CodecHudOverlay inherits Rectangle {
         }
     }
 
-    // App bar header (60px) — title "Codec", close icon on the right
-    Rectangle {
-        height: 60px;
-        width: 100%;
-        OverlayAppBar {
-            width: 100%;
-            height: 100%;
-            title: "Codec";
-            trailing_icon: @image-url("../../../assets/icons/close.svg");
-            trailing_tooltip: "Close";
-            trailing_clicked => { root.dismiss_requested(); }
-        }
-    }
-
-    // Body — Volume HUD style: VerticalLayout with centered inner Rectangle
+    // Root layout: VerticalLayout with appbar first, then body (Volume HUD pattern)
     VerticalLayout {
-        padding-top: 18px;
-        padding-bottom: 18px;
-        padding-left: 24px;
-        padding-right: 24px;
-
-        // Outer transparent full-width rectangle (Volume HUD slider pattern)
+        // App bar header (60px) — title "Codec", close icon on the right
         Rectangle {
+            height: 60px;
             width: 100%;
-            height: 100%;
-            background: transparent;
+            OverlayAppBar {
+                width: 100%;
+                height: 100%;
+                title: "Codec";
+                trailing_icon: @image-url("../../../assets/icons/close.svg");
+                trailing_tooltip: "Close";
+                trailing_clicked => { root.dismiss_requested(); }
+            }
+        }
 
-            // Inner centered container (560px) — centered within outer via x formula
+        // Body content (fills remaining space) — Volume HUD pattern
+        VerticalLayout {
+            padding-top: 18px;
+            padding-bottom: 18px;
+            padding-left: 24px;
+            padding-right: 24px;
+
+            // Full-width transparent container (Volume HUD slider pattern)
             Rectangle {
-                width: 560px;
+                width: 100%;
                 height: 100%;
                 background: transparent;
-                x: (parent.width - self.width) / 2;
 
-                CodecRow { label: "CODEC"; row_y: 0px; value: root.connected ? root.codec : root.unknown; }
-                CodecRow { label: "SAMPLE RATE"; row_y: 46px; value: root.connected ? root.sample_rate : root.unknown; }
-                CodecRow { label: "BIT DEPTH"; row_y: 92px; value: root.connected ? root.bit_depth : root.unknown; }
-                CodecRow { label: "FORMAT"; row_y: 138px; value: root.connected ? root.stream_format : root.unknown; }
-                CodecRow { label: "LATENCY"; row_y: 184px; value: root.connected ? root.delay_text : root.unknown; }
+                // Inner centered container (560px) — centered via x formula
+                Rectangle {
+                    width: 560px;
+                    height: 100%;
+                    background: transparent;
+                    x: (parent.width - self.width) / 2;
+
+                    CodecRow { label: "CODEC"; row_y: 0px; value: root.connected ? root.codec : root.unknown; }
+                    CodecRow { label: "SAMPLE RATE"; row_y: 46px; value: root.connected ? root.sample_rate : root.unknown; }
+                    CodecRow { label: "BIT DEPTH"; row_y: 92px; value: root.connected ? root.bit_depth : root.unknown; }
+                    CodecRow { label: "FORMAT"; row_y: 138px; value: root.connected ? root.stream_format : root.unknown; }
+                    CodecRow { label: "LATENCY"; row_y: 184px; value: root.connected ? root.delay_text : root.unknown; }
+                }
             }
         }
     }
