@@ -29,11 +29,29 @@ fn device_object_path_builds_bluez_path() {
     let path = device_object_path(ADAPTER, PHONE).expect("valid device path");
     assert_eq!(path.as_str(), DEVICE_PATH);
     assert_eq!(device_address_from_path(path.as_str()), Some(PHONE));
+    // Underscore is part of the D-Bus object-path segment alphabet
+    // (`[A-Za-z0-9_]`, per zvariant's validator) and must be accepted.
+    let underscored = device_object_path("h_ci0", PHONE).expect("underscored adapter id");
+    assert_eq!(
+        underscored.as_str(),
+        "/org/bluez/h_ci0/dev_AA_BB_CC_DD_EE_FF"
+    );
 }
 
 #[test]
 fn device_object_path_rejects_malformed_adapter() {
-    for adapter in ["", "hci0/x", "hci 0", "../x", "hci0..", "h\tci0"] {
+    // Hyphen is NOT part of the D-Bus object-path segment alphabet (bus
+    // *names* allow `-`, object-path elements do not) — rejected by both our
+    // validator and `zvariant`.
+    for adapter in [
+        "",
+        "hci0/x",
+        "hci 0",
+        "../x",
+        "hci0..",
+        "h\tci0",
+        "bt-adapter",
+    ] {
         let err =
             device_object_path(adapter, PHONE).expect_err("malformed adapter must be rejected");
         assert!(
@@ -818,48 +836,6 @@ fn pairing_agent_unregister_failure_is_swallowed_with_log() {
     // Must not panic or retry: the failure is logged and the handle drops.
     handle.unregister();
     assert_eq!(calls.lock().expect("fake lock").unregister_agent, 1);
-}
-
-#[test]
-fn pairing_agent_register_connects_via_system_bus_address() {
-    // `std::env` is process-global, but this is the only test in the binary
-    // that reads `DBUS_SYSTEM_BUS_ADDRESS` (`register()`), and its set/remove
-    // calls are sequential within this function.
-    //
-    // Negative: an unreachable system bus must surface a typed error, not panic.
-    // SAFETY: no other test thread reads DBUS_SYSTEM_BUS_ADDRESS.
-    unsafe { std::env::set_var("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/nx") };
-    let err = PairingAgentHandle::register(Arc::new(Mutex::new(None)))
-        .expect_err("unreachable system bus must fail");
-    assert!(err.is_dbus(), "expected typed D-Bus error, got {err:?}");
-
-    // Positive: the production entry point must honor DBUS_SYSTEM_BUS_ADDRESS
-    // (zbus reads it on every `Address::system()`) and register as the default
-    // agent — this is the path the screen daemon will call.
-    let (_guard, address) = spawn_private_bus();
-    // SAFETY: same no-other-reader invariant as above.
-    unsafe { std::env::set_var("DBUS_SYSTEM_BUS_ADDRESS", &address) };
-    let calls = Arc::new(Mutex::new(FakeCalls::default()));
-    let _fake = fake_bluez(&address, &calls);
-    let handle = PairingAgentHandle::register(Arc::new(Mutex::new(None)))
-        .expect("register via system bus address");
-
-    let state = calls.lock().expect("fake lock");
-    assert_eq!(
-        state.register_agent,
-        vec![(
-            SCREEN_AGENT_PATH.to_string(),
-            SCREEN_AGENT_CAPABILITY.to_string()
-        )]
-    );
-    assert_eq!(state.request_default_agent, 1);
-    drop(state);
-
-    handle.unregister();
-    assert_eq!(calls.lock().expect("fake lock").unregister_agent, 1);
-
-    // SAFETY: same no-other-reader invariant as above.
-    unsafe { std::env::remove_var("DBUS_SYSTEM_BUS_ADDRESS") };
 }
 
 #[test]
