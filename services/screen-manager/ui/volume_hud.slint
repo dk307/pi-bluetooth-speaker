@@ -4,13 +4,28 @@ import { OverlayAppBar } from "screen_app_bar.slint";
 export component VolumeHudOverlay inherits Rectangle {
     width: 100%;
     height: 100%;
-    background: @linear-gradient(150deg, MaterialPalette.surface 0%, MaterialPalette.background 100%);
+    // Translucent panel: the blurred backdrop snapshot published by Rust shows
+    // through the overlay, so the panel itself must not be fully opaque.
+    background: @linear-gradient(150deg, MaterialPalette.surface.transparentize(0.25) 0%, MaterialPalette.background.transparentize(0.25) 100%);
     border-width: 1px;
     border-color: MaterialPalette.outline_variant;
     clip: true;
 
     in-out property <float> volume_value: 75.0;
     in-out property <bool> is_muted: false;
+
+    // True while the overlay owns the keyboard focus.
+    out property <bool> has-focus: focus_scope.has-focus;
+
+    // Transfers the keyboard focus to the overlay.
+    public function take_focus() {
+        focus_scope.focus();
+    }
+
+    // Releases the keyboard focus held by the overlay.
+    public function release_focus() {
+        focus_scope.clear-focus();
+    }
 
     // NaN-safe normalized volume ratio (0.0 .. 1.0)
     property <float> clamped_ratio: root.volume_value >= 0.0 ? Math.min(1.0, root.volume_value / 100.0) : 0.0;
@@ -32,6 +47,15 @@ export component VolumeHudOverlay inherits Rectangle {
         clicked => {
             root.dismiss_requested();
         }
+    }
+
+    // Focus scope owning the overlay. The overlay takes the keyboard focus
+    // while it is open; `focus-on-click` is disabled so the scope never
+    // swallows touches that are meant for the controls below it.
+    focus_scope := FocusScope {
+        width: 100%;
+        height: 100%;
+        focus-on-click: false;
     }
 
     // Main content column: header (60px) + body (fills remaining)

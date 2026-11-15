@@ -17,6 +17,7 @@ mod generated {
     slint::include_modules!();
 }
 
+pub(crate) mod backdrop;
 pub mod boot;
 pub(crate) mod framebuffer;
 pub mod input;
@@ -25,6 +26,10 @@ pub(crate) mod shell;
 pub(crate) mod theme;
 
 #[doc(inline)]
+pub use backdrop::{
+    BACKDROP_BLUR_RADIUS, BackdropAction, BackdropError, BlurredBackdrop, OVERLAY_TOP_INSET,
+    OverlayBackdropTracker, bgrx_to_rgba, blur_premultiplied_rgba, blur_region,
+};
 pub use boot::{BootCheckId, BootCheckStatus, BootCheckUpdate, BootProbe};
 #[doc(inline)]
 pub use framebuffer::{

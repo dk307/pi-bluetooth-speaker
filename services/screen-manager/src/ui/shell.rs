@@ -17,6 +17,7 @@ use crate::config::{
     DEFAULT_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT, MIN_VOLUME_STEP_PERCENT,
 };
 
+use super::backdrop::OVERLAY_TOP_INSET;
 use super::framebuffer::MarqueeRowSpec;
 use super::generated::{AppTheme, MainWindow, MarqueeCompose};
 use super::marquee::{MarqueeStripCache, MarqueeTypography, StripRequest};
@@ -280,6 +281,10 @@ impl AppShell {
             )),
         };
 
+        // One-shot seed, not runtime config: the blur pipeline crops at
+        // OVERLAY_TOP_INSET, so the overlay geometry in Slint must follow the
+        // same constant (the `60px` literal in appwindow.slint is preview-only).
+        shell.window.set_overlay_top_inset(OVERLAY_TOP_INSET as f32);
         shell.set_volume_hud_timeout_ms(DEFAULT_VOLUME_HUD_TIMEOUT_MS);
         shell.set_volume_hud_fade_ms(DEFAULT_VOLUME_HUD_FADE_MS);
         shell.setup_callbacks();
@@ -391,6 +396,24 @@ impl AppShell {
     /// Immediately begins dismissing (fading out) the codec information overlay.
     pub fn dismiss_codec_hud(&self) {
         self.window.invoke_dismiss_codec_hud();
+    }
+
+    /// Publishes the blurred snapshot that the overlay panels render behind
+    /// themselves, replacing the previous screen with a frosted backdrop.
+    pub fn set_overlay_backdrop(&self, backdrop: slint::Image) {
+        self.window.set_overlay_backdrop(backdrop);
+    }
+
+    /// Returns `true` while the Volume HUD overlay owns the keyboard focus.
+    #[must_use]
+    pub fn volume_hud_has_focus(&self) -> bool {
+        self.window.get_volume_hud_has_focus()
+    }
+
+    /// Returns `true` while the codec information overlay owns the keyboard focus.
+    #[must_use]
+    pub fn codec_hud_has_focus(&self) -> bool {
+        self.window.get_codec_hud_has_focus()
     }
 
     /// Returns the Codec HUD auto-dismiss timeout in milliseconds.

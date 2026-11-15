@@ -62,6 +62,17 @@ export component MainWindow inherits Window {
     animate codec_hud_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
     in-out property <bool> has_cover_art: false;
     in-out property <image> cover_image;
+
+    // Blurred snapshot of the screen that the overlays cover. Slint has no
+    // backdrop-blur primitive, so Rust captures the framebuffer shadow buffer
+    // when an overlay opens, blurs it and publishes the result here.
+    in-out property <image> overlay_backdrop;
+
+    // Height of the top status bar. Overlays only ever cover the viewport area
+    // below it, so every overlay layer is aligned on this single inset.
+    // Seeded from Rust's `OVERLAY_TOP_INSET` (backdrop.rs) by `AppShell::new`;
+    // this literal is only the design-preview fallback.
+    in-out property <length> overlay_top_inset: 60px;
     in-out property <float> left_peak_ratio: 0.0;
     in-out property <float> right_peak_ratio: 0.0;
     in-out property <bool> cd_enabled: false;
@@ -77,11 +88,13 @@ export component MainWindow inherits Window {
         root.volume_hud_elapsed_ms = 0;
         root.volume_hud_visible = true;
         root.codec_hud_visible = false;
+        root_stack.focus_volume_hud();
     }
 
     public function dismiss_volume_hud() {
         root.volume_hud_visible = false;
         root.volume_hud_elapsed_ms = 0;
+        root_stack.unfocus_volume_hud();
     }
 
     // Opens the codec information overlay. The Volume HUD and the codec overlay are
@@ -90,12 +103,19 @@ export component MainWindow inherits Window {
         root.codec_hud_elapsed_ms = 0;
         root.codec_hud_visible = true;
         root.volume_hud_visible = false;
+        root_stack.focus_codec_hud();
     }
 
     public function dismiss_codec_hud() {
         root.codec_hud_visible = false;
         root.codec_hud_elapsed_ms = 0;
+        root_stack.unfocus_codec_hud();
     }
+
+    // True while the Volume HUD overlay owns the keyboard focus.
+    out property <bool> volume_hud_has_focus: root_stack.volume_hud_has_focus;
+    // True while the codec information overlay owns the keyboard focus.
+    out property <bool> codec_hud_has_focus: root_stack.codec_hud_has_focus;
 
     Timer {
         interval: 50ms;
@@ -179,8 +199,9 @@ export component MainWindow inherits Window {
         }
     }
 
-    // Root stacking container: bg_column (bottom), hud_scrim (middle), volume_hud (top)
-    Rectangle {
+    // Root stacking container (bottom → top): bg_column, hud_scrim, hud_backdrop,
+    // volume_hud / codec_hud.
+    root_stack := Rectangle {
         // Background column (home AND screens). Overlay dimming is applied by the
         // hud_scrim layer below (single dimming mechanism).
         bg_column := VerticalLayout {
@@ -192,7 +213,7 @@ export component MainWindow inherits Window {
             // the empty "app bar" gap), conditional elements are removed from the item
             // tree entirely, so the viewport always starts right below this 60px slot.
             Rectangle {
-                height: 60px;
+                height: root.overlay_top_inset;
                 width: 100%;
 
                 if root.show_status_bar: status_bar := TopStatusBar {
@@ -286,22 +307,35 @@ export component MainWindow inherits Window {
             }
         }
 
-        // HUD scrim (middle layer) — covers only the viewport area below the
-        // 60px top-bar slot: an overlay overlays content, never the top bar.
+        // HUD scrim (above the background) — covers only the viewport area below
+        // the 60px top-bar slot: an overlay overlays content, never the top bar.
+        // It dims the screen while the blurred backdrop fades in.
         hud_scrim := Rectangle {
-            y: 60px;
+            y: root.overlay_top_inset;
             width: 100%;
-            height: parent.height - 60px;
+            height: parent.height - root.overlay_top_inset;
             background: #000000;
-            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) * 0.55;
+            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) * 0.25;
+            visible: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) > 0.01;
+        }
+
+        // Blurred backdrop (middle layer, above the scrim) — the frozen, blurred
+        // snapshot of the screen that the overlay is covering. Published by Rust
+        // when an overlay opens.
+        hud_backdrop := Image {
+            y: root.overlay_top_inset;
+            width: 100%;
+            height: parent.height - root.overlay_top_inset;
+            source: root.overlay_backdrop;
+            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity);
             visible: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) > 0.01;
         }
 
         // Volume HUD overlay (top layer) — same below-the-top-bar geometry.
         volume_hud := VolumeHudOverlay {
-            y: 60px;
+            y: root.overlay_top_inset;
             width: 100%;
-            height: parent.height - 60px;
+            height: parent.height - root.overlay_top_inset;
             visible: root.volume_hud_opacity > 0.01;
             opacity: root.volume_hud_opacity;
             volume_value <=> root.volume_value;
@@ -314,9 +348,9 @@ export component MainWindow inherits Window {
 
         // Codec information overlay (top layer) — same below-the-top-bar geometry.
         codec_hud := CodecHudOverlay {
-            y: 60px;
+            y: root.overlay_top_inset;
             width: 100%;
-            height: parent.height - 60px;
+            height: parent.height - root.overlay_top_inset;
             visible: root.codec_hud_opacity > 0.01;
             opacity: root.codec_hud_opacity;
             codec: root.stream_codec;
@@ -326,6 +360,32 @@ export component MainWindow inherits Window {
             delay_text: root.bt_delay_text;
             connected: root.bt_connected;
             dismiss_requested => { root.dismiss_codec_hud(); }
+        }
+
+        // True while the Volume HUD overlay owns the keyboard focus.
+        out property <bool> volume_hud_has_focus: volume_hud.has-focus;
+
+        // True while the codec information overlay owns the keyboard focus.
+        out property <bool> codec_hud_has_focus: codec_hud.has-focus;
+
+        // Transfers the keyboard focus to the Volume HUD overlay.
+        public function focus_volume_hud() {
+            volume_hud.take_focus();
+        }
+
+        // Releases the keyboard focus held by the Volume HUD overlay.
+        public function unfocus_volume_hud() {
+            volume_hud.release_focus();
+        }
+
+        // Transfers the keyboard focus to the codec information overlay.
+        public function focus_codec_hud() {
+            codec_hud.take_focus();
+        }
+
+        // Releases the keyboard focus held by the codec information overlay.
+        public function unfocus_codec_hud() {
+            codec_hud.release_focus();
         }
     }
 }

@@ -27,8 +27,9 @@ use crate::config::CoreConfig;
 use crate::ui::theme::ThemePreset;
 #[cfg(feature = "ui")]
 use crate::ui::{
-    AppShell, BootCheckLine, BootCheckStatus, BootCheckUpdate, BootProbe, FrameTiming, Framebuffer,
-    FramebufferError, MainWindow, SplashScreen,
+    AppShell, BACKDROP_BLUR_RADIUS, BackdropAction, BootCheckLine, BootCheckStatus,
+    BootCheckUpdate, BootProbe, FrameTiming, Framebuffer, FramebufferError, MainWindow,
+    OVERLAY_TOP_INSET, OverlayBackdropTracker, SplashScreen, blur_region,
 };
 #[cfg(feature = "ui")]
 use slint::ComponentHandle;
@@ -1420,6 +1421,7 @@ pub fn run_render_loop_with_devices(
 
     let mut loop_timing = FrameLoopTiming::default();
     let mut overlay_theme: Option<ThemePreset> = None;
+    let mut backdrop_tracker = OverlayBackdropTracker::new();
     let mut encoder_tracker = crate::ui::EncoderVolumeTracker::new();
     let mut encoder_warned = false;
     while duration.is_none_or(|d| start.elapsed() < d) {
@@ -1454,6 +1456,12 @@ pub fn run_render_loop_with_devices(
         }
 
         apply_shared_bt_state(shell, &shared_state);
+
+        // Capture the screen that an overlay is about to cover. This has to run
+        // before the frame is rendered: at this point the framebuffer shadow
+        // buffer still holds the clean scene, whereas after the render it would
+        // contain the overlay panel itself.
+        sync_overlay_backdrop(fb, shell, &mut backdrop_tracker);
 
         // No unconditional `request_redraw()` here: the marquee timers and real Slint
         // animations mark the window dirty themselves, so the loop idles when the UI is
@@ -1545,6 +1553,60 @@ fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpda
         }
         if let Some(amp) = lock.amp_volume.take() {
             shell.apply_amp_volume(&amp);
+        }
+    }
+}
+
+/// Keeps the blurred overlay backdrop in sync with the overlay visibility.
+///
+/// Slint has no backdrop-blur primitive, so the screen that an overlay covers is
+/// snapshotted from the framebuffer shadow buffer, blurred on the CPU and
+/// published back to the UI as an image that the overlay panel renders behind
+/// itself.
+///
+/// The snapshot is taken exactly once per "overlay is on screen" period: while an
+/// overlay is open the shadow buffer already contains the overlay panel and must
+/// not be re-captured, and once every overlay closed the next open starts from a
+/// clean scene again.
+#[cfg(feature = "ui")]
+pub fn sync_overlay_backdrop(
+    fb: &Framebuffer,
+    shell: &AppShell,
+    tracker: &mut OverlayBackdropTracker,
+) {
+    let overlay_active = shell.is_volume_hud_active() || shell.is_codec_hud_active();
+    match tracker.on_overlay_state_changed(overlay_active) {
+        BackdropAction::Keep => {}
+        BackdropAction::Clear => {
+            shell.set_overlay_backdrop(slint::Image::default());
+            tracing::debug!("Cleared overlay backdrop");
+        }
+        BackdropAction::Capture => {
+            let captured = blur_region(
+                fb.shadow_buffer(),
+                Framebuffer::DEFAULT_WIDTH,
+                Framebuffer::DEFAULT_HEIGHT,
+                OVERLAY_TOP_INSET,
+                BACKDROP_BLUR_RADIUS,
+            );
+            match captured {
+                Ok(blurred) => {
+                    let mut buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(
+                        blurred.width,
+                        blurred.height,
+                    );
+                    buffer.make_mut_bytes().copy_from_slice(&blurred.pixels);
+                    shell.set_overlay_backdrop(slint::Image::from_rgba8_premultiplied(buffer));
+                    tracing::info!(
+                        width = blurred.width,
+                        height = blurred.height,
+                        "Captured blurred overlay backdrop"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to capture the overlay backdrop");
+                }
+            }
         }
     }
 }

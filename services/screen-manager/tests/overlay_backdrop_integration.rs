@@ -231,6 +231,24 @@ fn backdrop_tracker_captures_once_per_overlay_period() {
 }
 
 #[test]
+fn the_slint_overlay_top_inset_is_seeded_from_the_rust_constant() {
+    let (shell, _window, _fb) = shell_with_window();
+
+    // Whole-pixel logical insets round-trip exactly through the `f32` getter.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "the seeded inset is a non-negative whole pixel count"
+    )]
+    let slint_inset_px = shell.window().get_overlay_top_inset() as u32;
+
+    assert_eq!(
+        slint_inset_px, OVERLAY_TOP_INSET,
+        "AppShell::new must seed the Slint inset from OVERLAY_TOP_INSET so the \
+         blur crop and the overlay geometry cannot drift apart"
+    );
+}
+
+#[test]
 fn the_overlay_backdrop_is_published_when_an_overlay_opens() {
     let (shell, window, mut fb) = shell_with_window();
     let mut tracker = OverlayBackdropTracker::new();

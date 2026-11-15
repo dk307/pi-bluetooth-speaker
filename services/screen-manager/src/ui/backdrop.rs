@@ -18,6 +18,9 @@ use super::framebuffer::Bgrx8888Pixel;
 
 /// Height of the top status bar, in pixels.
 ///
+/// Single source of truth for the overlay inset: [`AppShell::new`] seeds the
+/// Slint `overlay_top_inset` property from this constant at startup, so the
+/// `60px` literal in `appwindow.slint` is only a design-preview fallback.
 /// Overlays only ever cover the viewport area below the top bar, so the
 /// backdrop snapshot starts at this row.
 pub const OVERLAY_TOP_INSET: u32 = 60;
