@@ -819,6 +819,68 @@ fn discovery_callbacks_push_commands_in_order() {
 }
 
 #[test]
+fn toast_without_session_converges_optimistic_pairing_flip() {
+    let (shell, _window) = shell_with_window();
+    let w = shell.window();
+    // The optimistic flip exactly as on_bt_row_action performs it for a
+    // discovery row (mode 2 + spinner, before the worker has seen the command).
+    w.set_bt_devices_open(true);
+    w.set_bt_devices_mode(2);
+    w.set_bt_pair_device_name("Echo Dot".into());
+    w.set_bt_pair_spinning(true);
+
+    // Pre-session refusal (agent registration failure, no adapter, spawn
+    // failure) stages only a toast — it must still converge the view.
+    shell.apply_bt_devices(BtDevicesUpdate {
+        toast: Some("Operation failed".into()),
+        ..BtDevicesUpdate::default()
+    });
+    assert_eq!(w.get_bt_devices_mode(), 1, "refusal returns to Add Device");
+    assert!(!w.get_bt_pair_spinning(), "dead spinner must be cleared");
+    assert_eq!(w.get_bt_pair_code().as_str(), "");
+    assert!(w.get_bt_toast_visible(), "refusal is surfaced as a toast");
+
+    // A toast published alongside a LIVE session status must not kick the
+    // user out of the pairing view — the terminal transition owns the mode.
+    shell.apply_bt_devices(BtDevicesUpdate {
+        pairing: Some(PairingStatus::Connecting {
+            name: "Echo Dot".into(),
+        }),
+        toast: Some("Adapter not ready".into()),
+        ..BtDevicesUpdate::default()
+    });
+    assert_eq!(w.get_bt_devices_mode(), 2, "live session wins over toast");
+}
+
+#[test]
+fn close_stops_screen_started_scan() {
+    let (shell, _window) = shell_with_window();
+    let queue = DeviceCommandQueue::new();
+    shell.wire_bluetooth_devices(&queue);
+    let w = shell.window();
+
+    // Idle close: nothing to stop, no commands pushed.
+    w.set_bt_devices_open(true);
+    w.invoke_close_bt_devices();
+    assert!(!w.get_bt_devices_open());
+    assert!(
+        queue.drain().is_empty(),
+        "idle close must not touch discovery"
+    );
+
+    // Close while scanning: StopDiscovery then Refresh (same FIFO as Cancel).
+    w.set_bt_devices_open(true);
+    w.set_bt_scanning(true);
+    w.invoke_close_bt_devices();
+    assert!(!w.get_bt_devices_open());
+    assert_eq!(
+        queue.drain(),
+        vec![DeviceCommand::StopDiscovery, DeviceCommand::Refresh],
+        "closing mid-scan must stop the screen-started scan"
+    );
+}
+
+#[test]
 fn row_action_dispatches_connect_disconnect_and_pair() {
     let (shell, _window) = shell_with_window();
     let queue = DeviceCommandQueue::new();
@@ -992,6 +1054,78 @@ fn worker_publishes_rows_and_dedupes_unchanged_ticks() {
     )
     .expect("discovery stop publishes");
     assert!(!update.scanning);
+    assert!(!mock.discovering());
+    assert_eq!(mock.last_admin_action(), Some(AdminAction::StopDiscovery));
+}
+
+#[test]
+fn stop_discovery_is_scoped_to_screen_started_scans() {
+    let (bt, mock) = BluetoothDevice::new_mocked();
+    let shared = Mutex::new(BtSharedUpdate::default());
+    let transport = TransportCommandQueue::new();
+    let commands = DeviceCommandQueue::new();
+    let mut state = BtMonitorState::default();
+
+    // Warm tick caches the adapter id so the stop below never probes lazily.
+    assert!(
+        tick(
+            &mut state,
+            &bt,
+            &shared,
+            &transport,
+            &commands,
+            BT_PAIRING_TIMEOUT,
+        )
+        .is_some()
+    );
+
+    // Stop without a screen-started scan must not touch the adapter (the
+    // screen may close a scan it never started — e.g. close after reap).
+    commands.push(DeviceCommand::StopDiscovery);
+    assert!(
+        tick(
+            &mut state,
+            &bt,
+            &shared,
+            &transport,
+            &commands,
+            BT_PAIRING_TIMEOUT,
+        )
+        .is_none(),
+        "skipped stop publishes nothing"
+    );
+    assert_eq!(
+        mock.last_admin_action(),
+        None,
+        "adapter must not be called for a never-started scan"
+    );
+
+    // Start → stop still executes as before.
+    commands.push(DeviceCommand::StartDiscovery);
+    assert!(
+        tick(
+            &mut state,
+            &bt,
+            &shared,
+            &transport,
+            &commands,
+            BT_PAIRING_TIMEOUT,
+        )
+        .is_some()
+    );
+    assert!(mock.discovering());
+    commands.push(DeviceCommand::StopDiscovery);
+    assert!(
+        tick(
+            &mut state,
+            &bt,
+            &shared,
+            &transport,
+            &commands,
+            BT_PAIRING_TIMEOUT,
+        )
+        .is_some()
+    );
     assert!(!mock.discovering());
     assert_eq!(mock.last_admin_action(), Some(AdminAction::StopDiscovery));
 }

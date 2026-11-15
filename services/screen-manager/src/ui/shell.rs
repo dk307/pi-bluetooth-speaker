@@ -803,6 +803,16 @@ impl AppShell {
         }
 
         if let Some(text) = &update.toast {
+            // A refusal toast published WITHOUT a pairing session (agent
+            // registration failure, no adapter, pairing-thread spawn failure)
+            // must converge the optimistic pairing flip from on_bt_row_action;
+            // otherwise the screen sits on the pairing view with a dead
+            // spinner until manual back (review: error-path state desync).
+            if update.pairing.is_none() && w.get_bt_devices_mode() == 2 {
+                w.set_bt_devices_mode(1);
+                w.set_bt_pair_spinning(false);
+                w.set_bt_pair_code(String::new().into());
+            }
             w.set_bt_toast_text(text.to_string().into());
             w.set_bt_toast_visible(true);
         }

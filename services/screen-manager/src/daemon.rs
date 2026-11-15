@@ -977,8 +977,6 @@ struct PairingSession {
     deadline_at: Instant,
     /// User requested cancellation (`CancelPairing` / back navigation).
     cancel_requested: bool,
-    /// Deadline fired; a "Pairing timed out" toast was staged.
-    timed_out: bool,
     /// The agent's passkey for this device was already staged for display.
     code_published: bool,
     /// Terminal state once derived; drives reaping.
@@ -1280,10 +1278,19 @@ impl BtMonitorState {
                 Ok(()) => self.devices.discovery_from_screen = true,
                 Err(e) => self.stage_action_failure(&e),
             },
-            DeviceCommand::StopDiscovery => match bt.stop_discovery(&adapter) {
-                Ok(()) => self.devices.discovery_from_screen = false,
-                Err(e) => self.stage_action_failure(&e),
-            },
+            DeviceCommand::StopDiscovery => {
+                // Only stop scans this screen started: scopes RF scanning to
+                // the screen (pairing reap and explicit Cancel also clear the
+                // flag), and avoids error toasts for never-started scans.
+                if self.devices.discovery_from_screen {
+                    match bt.stop_discovery(&adapter) {
+                        Ok(()) => self.devices.discovery_from_screen = false,
+                        Err(e) => self.stage_action_failure(&e),
+                    }
+                } else {
+                    tracing::debug!("stop discovery skipped: not screen-started");
+                }
+            }
             DeviceCommand::Connect(addr) => {
                 let name = self.device_name(addr);
                 if let Err(e) = bt.connect_device(&adapter, addr) {
@@ -1393,7 +1400,6 @@ impl BtMonitorState {
             result: result_slot,
             deadline_at: Instant::now() + pairing_timeout,
             cancel_requested: false,
-            timed_out: false,
             code_published: false,
             terminal: None,
         });
@@ -1516,7 +1522,6 @@ impl BtMonitorState {
         } else if session.cancel_requested {
             PairingStatus::Cancelled
         } else if Instant::now() >= session.deadline_at {
-            session.timed_out = true;
             session.cancel_requested = true;
             if let Some(adapter) = self.resolve_adapter_id(bt)
                 && let Err(e) = bt.cancel_pairing(&adapter, session.addr)

@@ -199,10 +199,15 @@ trait BlueZDevice1 {
 ///
 /// # Errors
 /// Returns [`BtError::adapter_not_found`] when `adapter` is empty or contains
-/// characters that cannot form a D-Bus object-path segment: such an id can
-/// never resolve to a bus object.
+/// characters outside the D-Bus object-path segment alphabet
+/// (`[A-Za-z0-9_]`, matching `zvariant`'s validator): such an id can never
+/// resolve to a bus object.
 pub fn device_object_path(adapter: &str, addr: BtAddress) -> Result<OwnedObjectPath, BtError> {
-    if adapter.is_empty() || !adapter.chars().all(|c| c.is_ascii_alphanumeric()) {
+    if adapter.is_empty()
+        || !adapter
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
         return Err(BtError::adapter_not_found(adapter));
     }
     let raw = format!(
