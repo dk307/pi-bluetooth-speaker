@@ -7,6 +7,7 @@ import { MarqueeRasterizer } from "marquee_rasterizer.slint";
 import { MarqueeCompose } from "marquee_state.slint";
 import { ScreenAppBar } from "screen_app_bar.slint";
 import { VolumeHudOverlay } from "volume_hud.slint";
+import { BtDeviceRow } from "bluetooth_devices.slint";
 
 // Re-exported so slint-build generates the Rust global accessor for the composer bridge.
 export { MarqueeCompose }
@@ -17,7 +18,7 @@ import "../../../assets/fonts/Inter-SemiBold.ttf";
 import "../../../assets/fonts/Inter-Bold.ttf";
 import "../../../assets/fonts/Inter-ExtraBold.ttf";
 
-export { BootCheckLine, SplashScreen, MarqueeRasterizer, MaterialPalette, AppTheme }
+export { BootCheckLine, SplashScreen, MarqueeRasterizer, MaterialPalette, AppTheme, BtDeviceRow }
 
 export component MainWindow inherits Window {
     title: "DietPi Audiophile Console";
@@ -57,7 +58,10 @@ export component MainWindow inherits Window {
     in-out property <float> left_peak_ratio: 0.0;
     in-out property <float> right_peak_ratio: 0.0;
     in-out property <bool> cd_enabled: false;
-    out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01;
+    out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01
+        // The devices screen keeps frames coming while the pairing ring spins or a
+        // toast is visible, even on an otherwise idle tab (plan A9).
+        || (root.bt_devices_open && (root.bt_devices_mode == 2 || root.bt_toast_visible));
 
     // NEW: show_themes lifted to MainWindow for title switching in ScreenAppBar
     in-out property <bool> show_themes: false;
@@ -100,6 +104,27 @@ export component MainWindow inherits Window {
     // Tab to return to when the Bluetooth details screen is dismissed.
     in-out property <int> previous_tab: 0;
 
+    // Bluetooth devices screen (replaces the old tab-2 details screen): the Rust
+    // controller pushes rows/pairing/toast state here; navigation lives in Slint
+    // except pairing-terminal transitions (plan §5).
+    in-out property <bool> bt_devices_open: false;
+    // 0 = paired/active list, 1 = Add Device (discovery), 2 = Connecting/Pairing.
+    in-out property <int> bt_devices_mode: 0;
+    in-out property <[BtDeviceRow]> bt_device_rows: [];
+    in-out property <[BtDeviceRow]> bt_discovered_rows: [];
+    in-out property <bool> bt_scanning: false;
+    in-out property <string> bt_devices_subtitle: "Visible as \"Home Speaker\"";
+    in-out property <string> bt_pair_device_name: "";
+    in-out property <string> bt_pair_code: "";
+    in-out property <bool> bt_pair_spinning: false;
+    in-out property <bool> bt_delete_open: false;
+    in-out property <string> bt_delete_device_name: "";
+    // Address-keyed delete (plan A2): Rust resolves this to the BlueZ device
+    // path — row indices are never trusted across publishes.
+    in-out property <string> bt_delete_address: "";
+    in-out property <bool> bt_toast_visible: false;
+    in-out property <string> bt_toast_text: "";
+
     // Marquee text strips pre-rendered offscreen by `MarqueeStripRasterizer`; the images
     // are re-rasterized from Rust only when their text, color, or typography changes.
     in-out property <image> title_marquee_strip;
@@ -122,6 +147,16 @@ export component MainWindow inherits Window {
     callback select_theme(int);
     callback cycle_theme();
 
+    // Bluetooth devices screen actions, handled in Rust (DeviceCommandQueue pushes).
+    callback bt_add_device_clicked();
+    callback bt_cancel_scan_clicked();
+    // (row index, from_discovery) — Rust resolves the index to an address (A2).
+    callback bt_row_action(int, bool);
+    callback bt_row_delete(int);
+    callback bt_pair_cancel_clicked();
+    callback bt_delete_confirm_clicked();
+    callback bt_delete_cancel_clicked();
+
     // Opens the Bluetooth details tab from any screen; calling it again (or `Back`)
     // returns to the tab it was opened from.
     public function toggle_bluetooth_details() {
@@ -130,6 +165,34 @@ export component MainWindow inherits Window {
         } else {
             root.previous_tab = root.active_tab;
             root.active_tab = 2;
+        }
+    }
+
+    // Opens the Bluetooth devices screen from any entry point (status bar taps,
+    // Settings tile, CLI); remembers the tab to return to.
+    public function open_bt_devices() {
+        if (!root.bt_devices_open) {
+            root.previous_tab = root.active_tab;
+        }
+        root.bt_devices_open = true;
+    }
+
+    public function close_bt_devices() {
+        root.bt_devices_open = false;
+        root.bt_devices_mode = 0;
+        root.bt_delete_open = false;
+    }
+
+    // Back-navigation inside the screen: pairing → Add Device → list → close.
+    // Back during pairing cancels the pairing session via the Rust side.
+    public function bt_devices_back() {
+        if (root.bt_devices_mode == 2) {
+            root.bt_devices_mode = 1;
+            root.bt_pair_cancel_clicked();
+        } else if (root.bt_devices_mode == 1) {
+            root.bt_devices_mode = 0;
+        } else {
+            root.close_bt_devices();
         }
     }
 

@@ -1,0 +1,23 @@
+// Bluetooth devices screen: shared data model between the Rust worker and the
+// Slint views.
+//
+// The screen itself (device list / discovery / pairing views, delete dialog and
+// toast) mounts from `MainWindow` once `bt_devices_open` is set; this file only
+// owns the row model struct so codegen can produce the Rust-side `BtDeviceRow`
+// type consumed by the bt-monitor worker and the shell controller.
+
+/// One device row rendered by the device list and the discovery list.
+///
+/// `address` is the canonical MAC (keying actions and deletes — never the row
+/// index), `icon` carries an asset slug (`phone`, `laptop`, `tablet`, `headset`,
+/// `bluetooth`) resolved by the view, and `status` is one of `Active`, `Paired`,
+/// `Available`.
+export struct BtDeviceRow {
+    address: string,
+    name: string,
+    subtitle: string,
+    status: string,
+    icon: string,
+    connected: bool,
+    paired: bool,
+}

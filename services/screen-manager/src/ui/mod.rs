@@ -18,6 +18,7 @@ mod generated {
 }
 
 pub mod boot;
+pub(crate) mod bt_devices;
 pub(crate) mod framebuffer;
 pub mod input;
 pub(crate) mod marquee;
@@ -27,11 +28,16 @@ pub(crate) mod theme;
 #[doc(inline)]
 pub use boot::{BootCheckId, BootCheckStatus, BootCheckUpdate, BootProbe};
 #[doc(inline)]
+pub use bt_devices::{
+    BtDevicesController, BtDevicesUpdate, device_row, icon_slug, pairing_code_text, status_text,
+    subtitle_text,
+};
+#[doc(inline)]
 pub use framebuffer::{
     Bgrx8888Pixel, FrameTiming, Framebuffer, FramebufferError, FramebufferMockCtrl, MarqueeRowSpec,
 };
 #[doc(inline)]
-pub use generated::{AppTheme, BootCheckLine, MainWindow, SplashScreen};
+pub use generated::{AppTheme, BootCheckLine, BtDeviceRow, MainWindow, SplashScreen};
 #[doc(inline)]
 pub use input::{
     TouchAction, TouchCalibration, TouchDecoder, TouchError, TouchInputDevice, TouchMockCtrl,
