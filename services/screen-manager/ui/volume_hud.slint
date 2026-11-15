@@ -64,11 +64,11 @@ export component VolumeHudOverlay inherits Rectangle {
                 background: transparent;
 
                 Text {
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
+                    width: parent.width;
+                    height: parent.height;
                     text: root.is_muted ? "MUTE" : (Math.round(root.clamped_ratio * 100.0) + "%");
                     color: root.is_muted ? MaterialPalette.error : MaterialPalette.primary;
-                    font-size: 176px;
+                    font-size: 174px;
                     font-weight: 800;
                     horizontal-alignment: center;
                     vertical-alignment: center;
