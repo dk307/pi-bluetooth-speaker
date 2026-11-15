@@ -99,6 +99,7 @@ export component CodecHudOverlay inherits Rectangle {
                 width: 100%;
                 height: 100%;
                 background: transparent;
+                // Don't stretch vertically - let content sit at top
 
                 // Inner centered container (560px) — centered via x formula
                 Rectangle {
@@ -106,6 +107,7 @@ export component CodecHudOverlay inherits Rectangle {
                     height: 100%;
                     background: transparent;
                     x: (parent.width - self.width) / 2;
+                    vertical-stretch: 1;
 
                     CodecRow { label: "CODEC"; row_y: 0px; value: root.connected ? root.codec : root.unknown; }
                     CodecRow { label: "SAMPLE RATE"; row_y: 46px; value: root.connected ? root.sample_rate : root.unknown; }
