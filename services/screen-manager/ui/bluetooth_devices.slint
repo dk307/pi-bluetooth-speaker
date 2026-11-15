@@ -110,9 +110,11 @@ component BtThinScrollBar inherits Rectangle {
     }
 
     changed value => {
-        if !hide_timer.running {
-            hide_timer.running = true;
-        }
+        // Restart on every scroll event so the thumb hides 1500 ms after the
+        // LAST movement; skipping while running would fade the thumb mid-flick
+        // on a long list.
+        hide_timer.running = false;
+        hide_timer.running = true;
     }
 
     Rectangle {

@@ -177,7 +177,7 @@ functional gain (repo blast-radius rule).
   `bt_rssi_text`, `bt_battery_text`, `bt_stream_format`, `bt_delay_text`,
   `bt_adapter_name`, `bt_adapter_address` (91–99).
 - Replace `toggle_bluetooth_details()` with `open_bt_devices()` /
-  `close_bt_devices()` / `bt_devices_back()` (see §5).
+  `close_bt_devices()` (see §5; `bt_devices_back()` dropped as dead code).
 - Status bar `source_clicked` / `device_clicked` / `protocol_clicked` →
   `open_bt_devices()` (lines 175/178/179).
 - `app_bar_back()`: drop the `active_tab == 2` arm (the screen owns its own back
@@ -290,12 +290,18 @@ callback bt_row_delete(int);          // index resolved to row.address at tap ti
 callback bt_pair_cancel_clicked();    callback bt_delete_confirm_clicked();
 callback bt_delete_cancel_clicked();
 out property <bool> is_animating: ... || (root.bt_devices_open &&
-    (root.bt_devices_mode == 2 || (root.bt_devices_mode == 1 &&
-    root.bt_scanning) || root.bt_toast_visible));   // audited A9, extended A16
+    ((root.bt_devices_mode == 2 && root.bt_pair_spinning) ||
+    (root.bt_devices_mode == 1 && root.bt_scanning) || root.bt_toast_visible));
+                                   // audited A9, extended A16, ring-gated A17
 
 public function open_bt_devices()  { bt_devices_open = true; /* mode untouched */ }
-public function close_bt_devices() { bt_devices_open = false; reset mode/dialog/toast }
-public function bt_devices_back()  { pairing -> add ; add -> list ; list -> close }
+public function close_bt_devices() { bt_devices_open = false; reset mode/dialog/toast;
+    and pushes StopDiscovery+Refresh while bt_scanning (A18; the worker gates the
+    stop on discovery_from_screen so scans stay scoped to the screen) }
+// bt_devices_back() dropped as dead code (no callers); pairing/add Cancel
+// buttons and the header back already cover every transition it modeled.
+// Toast published with no pairing session resets mode 2 -> 1 + spinner
+// (converges the optimistic Pair flip; review Tier-1 fix).
 ```
 
 **As implemented:** `open_bt_devices()` intentionally does NOT reset

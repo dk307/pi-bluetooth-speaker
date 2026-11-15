@@ -915,8 +915,16 @@ fn is_animating_tracks_pairing_and_toast() {
     w.set_bt_devices_open(true);
     assert!(!w.get_is_animating(), "idle screen must not animate");
 
+    // Mode 2 without a live ring must not pin the render loop: the ring's
+    // frame timer only runs while bt_pair_spinning is set.
     w.set_bt_devices_mode(2);
+    assert!(
+        !w.get_is_animating(),
+        "pairing view without a spinning ring idles"
+    );
+    w.set_bt_pair_spinning(true);
     assert!(w.get_is_animating(), "pairing ring animates");
+    w.set_bt_pair_spinning(false);
 
     w.set_bt_devices_mode(0);
     w.set_bt_toast_visible(true);
@@ -952,6 +960,20 @@ fn screen_source() -> String {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/bluetooth_devices.slint"),
     )
     .expect("bluetooth_devices.slint must exist")
+}
+
+#[test]
+fn devices_screen_scrollbar_hides_after_last_scroll() {
+    let source = screen_source();
+    assert!(
+        !source.contains("if !hide_timer.running"),
+        "hide timer must restart on every scroll event so the thumb never \
+         fades mid-flick; hiding happens 1500 ms after the LAST movement"
+    );
+    assert!(
+        source.contains("hide_timer.running = false;"),
+        "scroll handler must reset the hide timer"
+    );
 }
 
 #[test]
