@@ -178,22 +178,15 @@ export component MainWindow inherits Window {
     }
 
     public function close_bt_devices() {
+        // Closing while Add Device is scanning must stop discovery: the worker
+        // stops screen-started discovery only on an explicit cancel, a pairing
+        // reap, or this stop request (review: RF power leak on close).
+        if (root.bt_scanning) {
+            root.bt_cancel_scan_clicked();
+        }
         root.bt_devices_open = false;
         root.bt_devices_mode = 0;
         root.bt_delete_open = false;
-    }
-
-    // Back-navigation inside the screen: pairing → Add Device → list → close.
-    // Back during pairing cancels the pairing session via the Rust side.
-    public function bt_devices_back() {
-        if (root.bt_devices_mode == 2) {
-            root.bt_devices_mode = 1;
-            root.bt_pair_cancel_clicked();
-        } else if (root.bt_devices_mode == 1) {
-            root.bt_devices_mode = 0;
-        } else {
-            root.close_bt_devices();
-        }
     }
 
     // NEW: Screen app bar back button handler
