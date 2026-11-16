@@ -63,7 +63,7 @@ export component VolumeHudOverlay inherits Rectangle {
                 vertical-stretch: 1;
                 background: transparent;
 
-                if !root.is_muted {
+                if !root.is_muted :
                     HorizontalLayout {
                         width: parent.width;
                         height: parent.height;
@@ -88,7 +88,7 @@ export component VolumeHudOverlay inherits Rectangle {
                             vertical-alignment: center;
                         }
                     }
-                } else {
+                if root.is_muted :
                     Text {
                         width: parent.width;
                         height: parent.height;
@@ -99,7 +99,6 @@ export component VolumeHudOverlay inherits Rectangle {
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
-                }
             }
 
             // 3. Interactive Horizontal Slider with Big Circular Thumb
