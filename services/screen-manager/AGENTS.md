@@ -110,6 +110,7 @@ Before designing types, writing modules, implementing error handling, or writing
 
 AI agents working on `screen-manager` **MUST** follow the repository-wide **First-Pass PR Quality, Code Simplification & Continuous Learning Protocol** defined canonically in [root `AGENTS.md` (§4)](../../AGENTS.md).
 
+* **Never Block the Render Thread on D-Bus (`M-NO-DBUS-ON-RENDER-THREAD`):** The KMS backend runs exactly one Slint event loop on one thread, so every millisecond spent in a blocking `zbus` call inside a render-thread callback (timer, `on_*` handler, `invoke_from_event_loop`) stalls the whole UI — splash updates, touch input, marquee animation and the preview deadline. Defer *every* blocking system-bus round trip (the BlueZ connect **and** the initial playback/link snapshot reads) to a dedicated worker thread and publish the results through a channel the render thread drains (`BtSharedUpdate` + `apply_shared_bt_state`). "Deferring" a blocking call to a timer that still runs on the render thread is **not** a deferral: the timer callback must not perform D-Bus I/O. The render thread may only apply already-fetched values; anything that needs `Send` data to cross the thread boundary (e.g. the transport command queue) is wired on the render thread behind an `AtomicBool` handshake raised by the worker.
 * **Service-Specific Gate Sequence:** Before every push, execute in order:
   1. `cargo fmt -p screen-manager -- --check`
   2. `cargo clippy -p screen-manager --all-targets -- -D warnings`

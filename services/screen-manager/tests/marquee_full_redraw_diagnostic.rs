@@ -7,8 +7,8 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use screen_manager::ui::{AppShell, Framebuffer, MainWindow, RgbaPremulPixel, ThemePreset};
-use slint::platform::software_renderer::{LineBufferProvider, TargetPixel};
+use screen_manager::ui::{AppShell, Framebuffer, MainWindow, ThemePreset};
+use slint::platform::software_renderer::{LineBufferProvider, PremultipliedRgbaColor, TargetPixel};
 
 const WIDTH: usize = Framebuffer::DEFAULT_WIDTH as usize;
 const HEIGHT: usize = Framebuffer::DEFAULT_HEIGHT as usize;
@@ -16,19 +16,19 @@ const FRAMES: usize = 700;
 
 /// Flat RGBA premultiplied scratch buffer exposing scanlines to the Slint renderer.
 struct ScratchBuffer {
-    pixels: Vec<RgbaPremulPixel>,
+    pixels: Vec<PremultipliedRgbaColor>,
 }
 
 impl ScratchBuffer {
     fn new() -> Self {
         Self {
-            pixels: vec![RgbaPremulPixel::background(); WIDTH * HEIGHT],
+            pixels: vec![PremultipliedRgbaColor::background(); WIDTH * HEIGHT],
         }
     }
 }
 
 impl LineBufferProvider for &mut ScratchBuffer {
-    type TargetPixel = RgbaPremulPixel;
+    type TargetPixel = PremultipliedRgbaColor;
 
     fn process_line(
         &mut self,
