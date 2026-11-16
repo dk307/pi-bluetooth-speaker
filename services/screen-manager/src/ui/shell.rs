@@ -396,8 +396,14 @@ impl AppShell {
 
     /// Publishes the blurred snapshot that the overlay panels render behind
     /// themselves, replacing the previous screen with a frosted backdrop.
+    ///
+    /// Publishing a non-empty image also marks the backdrop as available, which
+    /// weakens the HUD scrim (the blur provides the separation); publishing an
+    /// empty image (the release path) restores full scrim dimming.
     pub fn set_overlay_backdrop(&self, backdrop: slint::Image) {
+        let available = backdrop.size().width > 0;
         self.window.set_overlay_backdrop(backdrop);
+        self.window.set_overlay_backdrop_available(available);
     }
 
     /// Returns `true` while the Volume HUD overlay owns the keyboard focus.

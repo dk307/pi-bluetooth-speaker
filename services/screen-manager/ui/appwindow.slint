@@ -67,6 +67,11 @@ export component MainWindow inherits Window {
     // when an overlay opens, blurs it and publishes the result here.
     in-out property <image> overlay_backdrop;
 
+    // True while a non-empty blurred backdrop is published. The scrim strength
+    // keys off this: with a backdrop the blur provides the separation (0.25
+    // dimming), without one the scrim falls back to full 0.55 dimming.
+    in-out property <bool> overlay_backdrop_available: false;
+
     // Height of the top status bar. Overlays only ever cover the viewport area
     // below it, so every overlay layer is aligned on this single inset.
     // Seeded from Rust's `OVERLAY_TOP_INSET` (backdrop.rs) by `AppShell::new`;
@@ -316,15 +321,17 @@ export component MainWindow inherits Window {
 
         // HUD scrim (above the background) — covers only the viewport area below
         // the 60px top-bar slot: an overlay overlays content, never the top bar.
-        // The 0.25 dimming is intentionally softened from the pre-backdrop 0.55:
-        // the blurred backdrop now provides most of the visual separation and the
-        // scrim only adds a slight dimming while the backdrop fades in.
+        // The dimming adapts to backdrop availability: 0.25 when a blurred
+        // backdrop is published (the blur provides most of the separation),
+        // falling back to the pre-backdrop 0.55 when none is — e.g. on the KMS
+        // backend, where no CPU-readable scanout exists to blur.
         hud_scrim := Rectangle {
             y: root.overlay_top_inset;
             width: 100%;
             height: parent.height - root.overlay_top_inset;
             background: #000000;
-            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) * 0.25;
+            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity)
+                * (root.overlay_backdrop_available ? 0.25 : 0.55);
             visible: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) > 0.01;
         }
 

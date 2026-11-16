@@ -289,6 +289,10 @@ fn the_overlay_backdrop_is_published_when_an_overlay_opens() {
         u32::try_from(WIDTH).expect("width fits in u32"),
         "the published backdrop must survive an overlay hand-over"
     );
+    assert!(
+        shell.window().get_overlay_backdrop_available(),
+        "a published backdrop must mark the scrim as weakened"
+    );
 
     shell.dismiss_codec_hud();
     settle();
@@ -297,6 +301,10 @@ fn the_overlay_backdrop_is_published_when_an_overlay_opens() {
         shell.window().get_overlay_backdrop().size().width,
         0,
         "the backdrop must be released once every overlay closed"
+    );
+    assert!(
+        !shell.window().get_overlay_backdrop_available(),
+        "releasing the backdrop must restore full scrim dimming"
     );
 }
 
@@ -318,13 +326,14 @@ fn reopening_an_overlay_mid_fade_keeps_the_published_backdrop() {
     // dismissed again (without this tick the opacity is still at 0.0).
     let _ = render(&mut fb, &window);
 
-    // Dismiss and advance only part of the 200 ms fade: the panel is still
-    // rendered (opacity > 0.01), so the overlay must stay active.
+    // Stretch the fade to 60 s so the "mid-fade" state is deterministic: no
+    // wall-clock timing (or slow instrumented test runner) can complete the
+    // fade before the reopen assertions run.
+    shell.set_volume_hud_fade_ms(60_000);
+
+    // Dismiss: the panel is still rendered (opacity > 0.01), so the overlay
+    // must stay active.
     shell.dismiss_volume_hud();
-    for _ in 0..4 {
-        slint::platform::update_timers_and_animations();
-        std::thread::sleep(Duration::from_millis(10));
-    }
     assert!(
         shell.is_volume_hud_active(),
         "the fading panel must keep the overlay active during the fade"
@@ -340,9 +349,11 @@ fn reopening_an_overlay_mid_fade_keeps_the_published_backdrop() {
         "the frozen backdrop must survive a reopen during the fade"
     );
 
-    // Only after the fade completes with the overlay closed is the backdrop
+    // Collapse the fade to zero and let the overlay close for real: only
+    // after the fade completes with the overlay closed is the backdrop
     // released; the next open then captures a clean scene.
     shell.dismiss_volume_hud();
+    shell.set_volume_hud_fade_ms(0);
     settle();
     sync_overlay_backdrop(&fb, &shell, &mut tracker);
     assert_eq!(
