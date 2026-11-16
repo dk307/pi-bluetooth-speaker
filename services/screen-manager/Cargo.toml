@@ -20,7 +20,6 @@ config = { workspace = true }
 tempfile = { workspace = true }
 image = { workspace = true }
 libblur = { workspace = true, optional = true }
-memmap2 = { workspace = true, optional = true }
 libc = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
@@ -36,7 +35,7 @@ slint = { workspace = true, optional = true }
 
 [features]
 default = ["ui"]
-ui = ["dep:slint", "dep:slint-build", "dep:i-slint-core", "dep:memmap2", "dep:libblur"]
+ui = ["dep:slint", "dep:slint-build", "dep:i-slint-core", "dep:libblur"]
 simulator = ["ui", "slint/backend-winit"]
 test-util = []
 

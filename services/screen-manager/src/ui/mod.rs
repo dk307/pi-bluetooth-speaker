@@ -21,7 +21,6 @@ mod generated {
 pub(crate) mod backdrop;
 pub mod boot;
 pub(crate) mod framebuffer;
-pub(crate) mod marquee;
 pub mod runtime;
 pub(crate) mod shell;
 pub(crate) mod theme;
@@ -39,8 +38,6 @@ pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError, FramebufferM
 pub use generated::{
     AppTheme, BootCheckLine, MainWindow, MarqueeCompose, MaterialPalette, SplashScreen,
 };
-#[doc(inline)]
-pub use marquee::RgbaPremulPixel;
 #[doc(inline)]
 pub use shell::{AppShell, BtLinkDetails, EncoderVolumeTracker};
 #[doc(inline)]

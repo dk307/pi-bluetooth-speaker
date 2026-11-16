@@ -233,25 +233,16 @@ fn marquee_stays_native_compose_off_the_player_tab() {
         "Some Artist",
         "Audiophile DSP Sink",
     );
-    // The Rust-side marquee composer was removed in the KMS migration: native
-    // Slint composition must stay engaged (`compose_in_rust == false`) so no
-    // stale row geometry can ever be painted over other tabs. The marquee
-    // element itself is unmounted off tab 0 (`if root.active_tab == 0` in
-    // viewport.slint), which kills its animation timer too.
-    assert!(
-        !shell
-            .window()
-            .global::<MarqueeCompose>()
-            .get_compose_in_rust(),
-        "Rust-side marquee composition must stay disabled"
-    );
-
+    // The Rust-side marquee composer was removed in the KMS migration: the
+    // marquee scrolls natively in Slint, so the shared `MarqueeCompose` clock
+    // must keep advancing on the player tab and stay untouched when the tab
+    // is switched away (the marquee element is unmounted off tab 0 in
+    // viewport.slint, which kills its animation timer too).
+    let clock_before = shell.window().global::<MarqueeCompose>().get_clock();
     shell.set_tab(2);
-    assert!(
-        !shell
-            .window()
-            .global::<MarqueeCompose>()
-            .get_compose_in_rust(),
-        "switching tabs must never re-enable Rust-side marquee composition"
+    let clock_after = shell.window().global::<MarqueeCompose>().get_clock();
+    assert_eq!(
+        clock_before, clock_after,
+        "switching tabs must not advance the native marquee clock"
     );
 }

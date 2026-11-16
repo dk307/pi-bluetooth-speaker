@@ -2,29 +2,29 @@
 //! Host-side diagnostic: render one frame of the shell and dump raw RGBA to
 //! `<tmp>/host_render.raw` for offline band-structure analysis.
 
-use screen_manager::ui::{AppShell, Framebuffer, MainWindow, RgbaPremulPixel, ThemePreset};
+use screen_manager::ui::{AppShell, Framebuffer, MainWindow, ThemePreset};
 use slint::LogicalPosition;
 use slint::platform::software_renderer::LineBufferProvider;
-use slint::platform::software_renderer::TargetPixel;
+use slint::platform::software_renderer::{PremultipliedRgbaColor, TargetPixel};
 use slint::platform::{PointerEventButton, WindowEvent};
 
 const WIDTH: usize = Framebuffer::DEFAULT_WIDTH as usize;
 const HEIGHT: usize = Framebuffer::DEFAULT_HEIGHT as usize;
 
 struct ScratchBuffer {
-    pixels: Vec<RgbaPremulPixel>,
+    pixels: Vec<PremultipliedRgbaColor>,
 }
 
 impl ScratchBuffer {
     fn new() -> Self {
         Self {
-            pixels: vec![RgbaPremulPixel::background(); WIDTH * HEIGHT],
+            pixels: vec![PremultipliedRgbaColor::background(); WIDTH * HEIGHT],
         }
     }
 }
 
 impl LineBufferProvider for &mut ScratchBuffer {
-    type TargetPixel = RgbaPremulPixel;
+    type TargetPixel = PremultipliedRgbaColor;
 
     fn process_line(
         &mut self,
