@@ -212,7 +212,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    // Root stacking container (bottom → top): bg_column, hud_scrim, hud_backdrop,
+    // Root stacking container (bottom → top): bg_column, hud_backdrop, hud_scrim,
     // volume_hud / codec_hud.
     root_stack := Rectangle {
         // Background column (home AND screens). Overlay dimming is applied by the
@@ -319,7 +319,21 @@ export component MainWindow inherits Window {
             }
         }
 
-        // HUD scrim (above the background) — covers only the viewport area below
+        // Blurred backdrop — the frozen, blurred snapshot of the screen that the
+        // overlay is covering. It sits directly on the background, BELOW the
+        // scrim, so the scrim's 0.25 dimming renders on top of the blur. Published
+        // by Rust when an overlay opens. By design it is not refreshed while the
+        // overlay stays open: content changes underneath only appear after a reopen.
+        hud_backdrop := Image {
+            y: root.overlay_top_inset;
+            width: 100%;
+            height: parent.height - root.overlay_top_inset;
+            source: root.overlay_backdrop;
+            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity);
+            visible: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) > 0.01;
+        }
+
+        // HUD scrim (above the backdrop) — covers only the viewport area below
         // the 60px top-bar slot: an overlay overlays content, never the top bar.
         // The dimming adapts to backdrop availability: 0.25 when a blurred
         // backdrop is published (the blur provides most of the separation),
@@ -332,19 +346,6 @@ export component MainWindow inherits Window {
             background: #000000;
             opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity)
                 * (root.overlay_backdrop_available ? 0.25 : 0.55);
-            visible: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) > 0.01;
-        }
-
-        // Blurred backdrop (middle layer, above the scrim) — the frozen, blurred
-        // snapshot of the screen that the overlay is covering. Published by Rust
-        // when an overlay opens. By design it is not refreshed while the overlay
-        // stays open: content changes underneath only appear after a reopen.
-        hud_backdrop := Image {
-            y: root.overlay_top_inset;
-            width: 100%;
-            height: parent.height - root.overlay_top_inset;
-            source: root.overlay_backdrop;
-            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity);
             visible: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) > 0.01;
         }
 

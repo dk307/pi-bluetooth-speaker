@@ -1198,9 +1198,9 @@ pub fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtShared
 /// scrim-only dimming until it reopens.
 ///
 /// Scope note: the production KMS/FemtoVG backend exposes no CPU-readable
-/// scanout, so the runtime never calls this — there, overlays render with the
-/// softened scrim only. The harness (software renderer) provides the shadow
-/// buffer this function captures.
+/// scanout, so the runtime never calls this — there, `overlay_backdrop_available`
+/// stays false and overlays render with the full-strength 0.55 scrim. The
+/// harness (software renderer) provides the shadow buffer this function captures.
 #[cfg(feature = "ui")]
 pub fn sync_overlay_backdrop(
     fb: &Framebuffer,

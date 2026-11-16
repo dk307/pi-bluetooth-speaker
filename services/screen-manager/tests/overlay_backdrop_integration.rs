@@ -498,3 +498,54 @@ fn the_blurred_backdrop_is_rendered_behind_the_overlay() {
         "the blurred backdrop must not cover the top status bar"
     );
 }
+
+#[test]
+fn the_scrim_dims_the_published_backdrop() {
+    let (shell, window, mut fb) = shell_with_window();
+
+    shell.show_codec_hud();
+    settle();
+
+    // The scrim must stack ABOVE the published backdrop so its 0.25 dimming
+    // renders on top of the blur. Measure the per-channel brightness lift
+    // between a white and a black backdrop with everything else unchanged:
+    // the translucent panel (alpha 0.75) blends over a layer that the scrim
+    // has already dimmed to 0.75 of the backdrop, so the lift is
+    // 0.25 * 0.75 * 255 ≈ 48. If the backdrop were stacked above the scrim
+    // (the regression this guards), the opaque image would hide the scrim and
+    // the lift would be the full 0.25 * 255 ≈ 64 instead.
+    let w = u32::try_from(WIDTH).expect("width fits in u32");
+    let h = u32::try_from(HEIGHT - OVERLAY_TOP_INSET as usize).expect("height fits in u32");
+    let white = solid_image(w, h, [255, 255, 255, 255]);
+    let black = solid_image(w, h, [0, 0, 0, 255]);
+
+    shell.set_overlay_backdrop(white);
+    settle();
+    let with_white = render(&mut fb, &window);
+
+    shell.set_overlay_backdrop(black);
+    settle();
+    let with_black = render(&mut fb, &window);
+
+    // Sample a pixel inside the overlay panel but outside its centered column.
+    let index = 300 * WIDTH + 20;
+    let white_px = with_white[index];
+    let black_px = with_black[index];
+    assert_ne!(
+        white_px, black_px,
+        "the published backdrop must reach the framebuffer"
+    );
+
+    let lift = |a: u8, b: u8| i32::from(a) - i32::from(b);
+    for (channel, value) in [
+        ("red", lift(white_px.red, black_px.red)),
+        ("green", lift(white_px.green, black_px.green)),
+        ("blue", lift(white_px.blue, black_px.blue)),
+    ] {
+        assert!(
+            (42..=54).contains(&value),
+            "the 0.25 scrim must dim the backdrop above it: {channel} lift {value}, \
+             expected ~48 (a lift of ~64 means the backdrop hides the scrim)",
+        );
+    }
+}

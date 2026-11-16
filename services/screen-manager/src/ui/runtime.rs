@@ -305,8 +305,9 @@ impl Session {
         });
 
         // The KMS/FemtoVG backend exposes no CPU-readable scanout, so blurred
-        // overlay backdrops cannot be captured here: overlays degrade to the
-        // softened scrim. `daemon::sync_overlay_backdrop` stays harness-only.
+        // overlay backdrops cannot be captured here: `overlay_backdrop_available`
+        // stays false and overlays keep the full-strength 0.55 scrim.
+        // `daemon::sync_overlay_backdrop` stays harness-only.
         tracing::info!(
             "Overlay backdrop capture unavailable on the KMS backend; overlays use scrim dimming only"
         );
