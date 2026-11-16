@@ -60,7 +60,6 @@ tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 
 # Async Trait for Trait-based Dependency Injection / Mocks
 async-trait = "=0.1.86"
-memmap2 = "=0.9.12"
 thiserror = "=2.0.21"
 sd-notify = "=0.1.1"
 

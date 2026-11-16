@@ -1,5 +1,6 @@
 import { MaterialPalette } from "@material/material.slint";
 import { OverlayAppBar } from "screen_app_bar.slint";
+import "./fonts/InterTabular-Bold.ttf";
 
 export component VolumeHudOverlay inherits Rectangle {
     width: 100%;
@@ -63,16 +64,45 @@ export component VolumeHudOverlay inherits Rectangle {
                 vertical-stretch: 1;
                 background: transparent;
 
-                Text {
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    text: root.is_muted ? "MUTE" : (Math.round(root.clamped_ratio * 100.0) + "%");
-                    color: root.is_muted ? MaterialPalette.error : MaterialPalette.primary;
-                    font-size: 176px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
+                if !root.is_muted :
+                    HorizontalLayout {
+                        width: parent.width;
+                        height: parent.height;
+                        alignment: center;
+                        spacing: 4px;
+
+                        Text {
+                            text: Math.round(root.clamped_ratio * 100.0);
+                            color: MaterialPalette.primary;
+                            font-family: "Inter Tabular";
+                            font-weight: 700;
+                            font-size: 174px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "%";
+                            color: MaterialPalette.primary;
+                            font-family: "Inter Tabular";
+                            font-weight: 700;
+                            font-size: 87px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                if root.is_muted :
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "MUTE";
+                        color: MaterialPalette.error;
+                        font-family: "Inter Tabular";
+                        font-weight: 700;
+                        font-size: 174px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
             }
 
             // 3. Interactive Horizontal Slider with Big Circular Thumb

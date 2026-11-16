@@ -18,7 +18,7 @@
 //! via [`super::framebuffer::Framebuffer::init_platform`] BEFORE calling
 //! [`run`]; production relies on the lazily selected `backend-linuxkms`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,7 +29,7 @@ use slint::{ComponentHandle, Timer, TimerMode};
 use crate::config::CoreConfig;
 use crate::daemon::{self, BtSharedUpdate, ScreenTarget, ShellInit, report_display};
 use crate::ui::theme::ThemePreset;
-use crate::ui::{AppShell, BootCheckLine, BootCheckUpdate, BootProbe, MainWindow};
+use crate::ui::{BootCheckLine, BootCheckUpdate, BootProbe, MainWindow};
 
 /// Everything needed to start one UI session.
 pub struct RuntimeOptions<'a> {
@@ -165,6 +165,50 @@ impl BootDrain {
     }
 }
 
+/// Starts the boot-check drain timer.
+///
+/// The returned timer handle must be kept alive (dropping a [`Timer`] cancels
+/// it) and the returned drain state must be released with
+/// [`BootDrain::abandon_leftover`] when the event loop ends, so a still
+/// running boot-check worker is abandoned with a warning instead of leaking.
+///
+/// `apply` publishes each new check line; `settled` runs once when the checks
+/// settle (or the deadline expires). The timer stops itself at that point, so
+/// the 16 ms drain cadence never outlives the boot phase.
+fn start_boot_phase(
+    probe: BootProbe,
+    deadline: Duration,
+    apply: impl Fn(BootCheckLine) + 'static,
+    settled: impl FnOnce() + 'static,
+) -> (Rc<Timer>, Rc<RefCell<BootDrain>>) {
+    let (rx, checks) = spawn_boot_checks(probe);
+    let drain = Rc::new(RefCell::new(BootDrain {
+        rx,
+        checks_done: checks.is_none(),
+        checks,
+        started: Instant::now(),
+        deadline,
+    }));
+
+    let drain_state = Rc::clone(&drain);
+    let mut settled = Some(settled);
+    let timer = Rc::new(Timer::default());
+    let timer_weak = Rc::downgrade(&timer);
+    timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
+        let finished = drain_state.borrow_mut().poll(&mut |line| apply(line));
+        if let Some((checks, checks_done)) = finished {
+            daemon::finish_boot_worker(checks, checks_done);
+            if let Some(timer) = timer_weak.upgrade() {
+                timer.stop();
+            }
+            if let Some(settled) = settled.take() {
+                settled();
+            }
+        }
+    });
+    (timer, drain)
+}
+
 /// Standalone splash preview flow: boot checks drain into the single check
 /// line and the loop quits on settle or deadline.
 fn run_splash(probe: BootProbe, preview_secs: Option<u64>, theme: Option<ThemePreset>) {
@@ -172,81 +216,23 @@ fn run_splash(probe: BootProbe, preview_secs: Option<u64>, theme: Option<ThemePr
         return;
     };
     let weak_splash = splash.as_weak();
-    let (rx, checks) = spawn_boot_checks(probe);
-    let drain = Rc::new(RefCell::new(BootDrain {
-        rx,
-        checks_done: checks.is_none(),
-        checks,
-        started: Instant::now(),
-        deadline: preview_secs.map_or(daemon::MAX_SPLASH_WAIT, Duration::from_secs),
-    }));
-
-    let drain_state = Rc::clone(&drain);
-    let boot_timer = Timer::default();
-    boot_timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
-        let finished = drain_state.borrow_mut().poll(&mut |line| {
+    let deadline = preview_secs.map_or(daemon::MAX_SPLASH_WAIT, Duration::from_secs);
+    let (timer, drain) = start_boot_phase(
+        probe,
+        deadline,
+        move |line| {
             if let Some(splash) = weak_splash.upgrade() {
                 splash.set_current_check(line);
             }
-        });
-        if let Some((checks, checks_done)) = finished {
-            daemon::finish_boot_worker(checks, checks_done);
-            request_quit();
-        }
-    });
-    let _boot_timer = boot_timer;
+        },
+        request_quit,
+    );
+    let _timer = timer;
 
     tracing::info!(preview_secs = ?preview_secs, "Splash event loop starting");
     run_loop("Splash");
     drain.borrow_mut().abandon_leftover();
     tracing::info!("Splash event loop finished");
-}
-
-/// Delay before the deferred Bluetooth bootstrap runs: long enough for the
-/// first frame to paint (60 Hz ≈ 16.7 ms/frame) before any D-Bus work.
-const BT_BOOTSTRAP_DELAY: Duration = Duration::from_millis(50);
-
-/// Schedules the deferred Bluetooth bootstrap on a one-shot timer.
-///
-/// The timer fires once the event loop is running (and has painted the
-/// first frame), so the blocking `BlueZ` connect never delays window show.
-/// Public so integration tests can drive the bootstrap with an injected
-/// connection factory against the hermetic test platform (`M-TEST-UTIL`);
-/// production passes `BluetoothDevice::new_blocking`.
-///
-/// The returned [`Timer`] must be kept alive: dropping a `Timer` cancels it.
-#[must_use]
-pub fn schedule_bt_bootstrap(
-    connect: impl FnOnce() -> Result<speaker_bluetooth::BluetoothDevice, speaker_bluetooth::BtError>
-    + 'static,
-    shell: &Rc<AppShell>,
-    shared: &Arc<Mutex<BtSharedUpdate>>,
-    commands: &speaker_bluetooth::TransportCommandQueue,
-    device_commands: &speaker_bluetooth::DeviceCommandQueue,
-    running: &Arc<AtomicBool>,
-    worker_slot: &Rc<RefCell<Option<std::io::Result<std::thread::JoinHandle<()>>>>>,
-) -> Timer {
-    let mut connect = Some(connect);
-    let shell = Rc::clone(shell);
-    let shared = Arc::clone(shared);
-    let commands = commands.clone();
-    let device_commands = device_commands.clone();
-    let running = Arc::clone(running);
-    let worker_slot = Rc::clone(worker_slot);
-    let timer = Timer::default();
-    timer.start(TimerMode::SingleShot, BT_BOOTSTRAP_DELAY, move || {
-        if let Some(connect) = connect.take() {
-            *worker_slot.borrow_mut() = daemon::bootstrap_bluetooth(
-                connect,
-                &shell,
-                &shared,
-                &commands,
-                &device_commands,
-                &running,
-            );
-        }
-    });
-    timer
 }
 
 /// Background workers and periodic timers for one shell session.
@@ -256,8 +242,7 @@ pub fn schedule_bt_bootstrap(
 struct Session {
     bg_running: Arc<AtomicBool>,
     amp_worker: std::io::Result<std::thread::JoinHandle<()>>,
-    bt_worker: Rc<RefCell<Option<std::io::Result<std::thread::JoinHandle<()>>>>>,
-    _bt_bootstrap_timer: Option<Timer>,
+    bt_worker: Option<std::io::Result<std::thread::JoinHandle<()>>>,
     _sync_timer: Timer,
     _encoder_timer: Option<Timer>,
 }
@@ -268,9 +253,10 @@ impl Session {
     /// clones captured by those timers.
     ///
     /// Mocked sessions spawn the `bt-monitor` worker eagerly from the mock
-    /// device; live sessions schedule [`daemon::bootstrap_bluetooth`] on a
-    /// one-shot timer so the blocking `BlueZ` connect runs only after the
-    /// event loop has painted the first frame.
+    /// device; live sessions spawn the `bt-bootstrap` worker, which performs
+    /// the blocking `BlueZ` connect and the initial snapshot reads off the
+    /// render thread and publishes the results through the shared update
+    /// channel.
     fn start(init: ShellInit, mocked: bool) -> Self {
         let ShellInit {
             shell,
@@ -285,34 +271,46 @@ impl Session {
 
         let amp_worker =
             daemon::spawn_amp_volume_worker(&shared, &bg_running, &amp_commands, mocked);
-        let bt_worker = Rc::new(RefCell::new(None));
-        let bt_bootstrap_timer = if let Some(device) = bt.as_ref() {
-            *bt_worker.borrow_mut() = Some(daemon::spawn_bt_monitor_worker(
-                device,
-                &shared,
-                &commands,
-                &device_commands,
-                &bg_running,
-            ));
-            None
-        } else if !mocked {
-            Some(schedule_bt_bootstrap(
-                speaker_bluetooth::BluetoothDevice::new_blocking,
-                &shell,
-                &shared,
-                &commands,
-                &device_commands,
-                &bg_running,
-                &bt_worker,
-            ))
-        } else {
-            None
-        };
+        // Raised by the bootstrap worker once the `BlueZ` connect succeeded.
+        // The transport callbacks are wired on the render thread (the shell is
+        // not `Send`), so the sync timer watches this flag.
+        let bt_connected = Arc::new(AtomicBool::new(false));
+        let bt_worker = Some(bt.as_ref().map_or_else(
+            || {
+                daemon::spawn_bt_bootstrap_worker(
+                    speaker_bluetooth::BluetoothDevice::new_blocking,
+                    &shared,
+                    &commands,
+                    &device_commands,
+                    &bg_running,
+                    &bt_connected,
+                )
+            },
+            |device| {
+                    daemon::spawn_bt_monitor_worker(
+                        device,
+                        &shared,
+                        &commands,
+                        &device_commands,
+                        &bg_running,
+                    )
+                }
+        ));
 
         // Periodic reconciliation of worker-published Bluetooth/amp state.
         let sync_timer = Timer::default();
         let shell_sync = Rc::clone(&shell);
+        let commands_sync = commands.clone();
+        let connected_sync = Arc::clone(&bt_connected);
+        let transport_wired = Cell::new(false);
         sync_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
+            // Wire the transport once the live connect succeeded: before that
+            // a transport tap has no worker to execute it, so it must stay a
+            // no-op instead of flipping the optimistic UI state.
+            if !transport_wired.get() && connected_sync.load(Ordering::Acquire) {
+                transport_wired.set(true);
+                shell_sync.wire_bluetooth_transport(&commands_sync);
+            }
             daemon::apply_shared_bt_state(&shell_sync, &shared);
         });
 
@@ -350,7 +348,6 @@ impl Session {
             bg_running,
             amp_worker,
             bt_worker,
-            _bt_bootstrap_timer: bt_bootstrap_timer,
             _sync_timer: sync_timer,
             _encoder_timer: encoder_timer,
         }
@@ -361,8 +358,7 @@ impl Session {
     fn shutdown(self) {
         self.bg_running.store(false, Ordering::Relaxed);
         daemon::join_amp_volume_worker(self.amp_worker);
-        let bt_worker = self.bt_worker.borrow_mut().take();
-        match bt_worker {
+        match self.bt_worker {
             Some(Ok(handle)) => {
                 if let Err(panic) = handle.join() {
                     std::panic::resume_unwind(panic);
@@ -375,54 +371,85 @@ impl Session {
                     &err,
                 );
             }
-            // Bootstrap never ran (preview quit before its one-shot timer
-            // fired, or the BlueZ connect failed): no worker to join.
+            // The Bluetooth worker was never spawned (mocked session without a
+            // device): no worker to join.
             None => {}
         }
         tracing::info!("UI session workers stopped");
     }
 }
 
-/// Shows the shell window, erroring out before any worker is spawned.
-fn show_shell_window(init: &ShellInit) -> bool {
-    if let Err(err) = init.shell.window().show() {
-        report_display(
-            tracing::Level::ERROR,
-            "Failed to show UI Shell MainWindow",
-            &err,
-        );
-        return false;
-    }
-    true
-}
-
-/// Shell-only flow: main window, background workers, sync/encoder timers,
-/// optional preview quit.
-fn run_shell(preview_secs: Option<u64>, tab: Option<i32>, config: &CoreConfig, mocked: bool) {
-    let main_window = match MainWindow::new() {
-        Ok(win) => win,
+/// Creates the shell main window, reporting a failure to the display log.
+fn create_main_window() -> Option<MainWindow> {
+    match MainWindow::new() {
+        Ok(win) => Some(win),
         Err(err) => {
             report_display(
                 tracing::Level::ERROR,
                 "Failed to initialize UI Shell MainWindow",
                 &err,
             );
-            return;
+            None
         }
-    };
-    let init = daemon::init_shell_with_config(main_window, mocked, tab, config);
-    if !show_shell_window(&init) {
-        return;
     }
+}
+
+/// Initializes the shell for `main_window` and shows it.
+///
+/// Returns `None` when the window could not be shown: the caller must not
+/// spawn any worker in that case.
+fn init_and_show_shell(
+    main_window: MainWindow,
+    mocked: bool,
+    tab: Option<i32>,
+    config: &CoreConfig,
+) -> Option<ShellInit> {
+    let init = daemon::init_shell_with_config(main_window, mocked, tab, config);
+    if let Err(err) = init.shell.window().show() {
+        report_display(
+            tracing::Level::ERROR,
+            "Failed to show UI Shell MainWindow",
+            &err,
+        );
+        return None;
+    }
+    Some(init)
+}
+
+/// Runs the shell session (background workers + event loop) until the preview
+/// deadline expires or a quit is requested.
+///
+/// `after_loop` runs between the event loop returning and the workers being
+/// stopped, so a still-running boot-check worker can be abandoned first.
+fn run_shell_session(
+    init: ShellInit,
+    mocked: bool,
+    preview_secs: Option<u64>,
+    phase: &'static str,
+    after_loop: impl FnOnce(),
+) {
     let session = Session::start(init, mocked);
     if let Some(secs) = preview_secs {
         Timer::single_shot(Duration::from_secs(secs), request_quit);
     }
 
-    tracing::info!(preview_secs = ?preview_secs, "Shell event loop starting");
-    run_loop("Shell");
+    tracing::info!(preview_secs = ?preview_secs, phase, "event loop starting");
+    run_loop(phase);
+    after_loop();
     session.shutdown();
-    tracing::info!("Shell event loop finished");
+    tracing::info!(phase, "event loop finished");
+}
+
+/// Shell-only flow: main window, background workers, sync/encoder timers,
+/// optional preview quit.
+fn run_shell(preview_secs: Option<u64>, tab: Option<i32>, config: &CoreConfig, mocked: bool) {
+    let Some(main_window) = create_main_window() else {
+        return;
+    };
+    let Some(init) = init_and_show_shell(main_window, mocked, tab, config) else {
+        return;
+    };
+    run_shell_session(init, mocked, preview_secs, "Shell", || {});
 }
 
 /// Appliance flow: one `MainWindow` whose boot checks render as an in-window
@@ -435,64 +462,35 @@ fn run_appliance(
     config: &CoreConfig,
     mocked: bool,
 ) {
-    let main_window = match MainWindow::new() {
-        Ok(win) => win,
-        Err(err) => {
-            report_display(
-                tracing::Level::ERROR,
-                "Failed to initialize UI Shell MainWindow",
-                &err,
-            );
-            return;
-        }
+    let Some(main_window) = create_main_window() else {
+        return;
     };
     main_window.set_boot_splash_visible(true);
     let weak_window = main_window.as_weak();
 
-    let init = daemon::init_shell_with_config(main_window, mocked, tab, config);
-    if !show_shell_window(&init) {
+    let Some(init) = init_and_show_shell(main_window, mocked, tab, config) else {
         return;
-    }
+    };
 
-    let (rx, checks) = spawn_boot_checks(probe);
-    let drain = Rc::new(RefCell::new(BootDrain {
-        rx,
-        checks_done: checks.is_none(),
-        checks,
-        started: Instant::now(),
-        deadline: preview_secs.map_or(daemon::MAX_SPLASH_WAIT, Duration::from_secs),
-    }));
-
-    let drain_state = Rc::clone(&drain);
-    let boot_timer = Rc::new(Timer::default());
-    let timer_weak = Rc::downgrade(&boot_timer);
-    boot_timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
-        let finished = drain_state.borrow_mut().poll(&mut |line| {
-            if let Some(window) = weak_window.upgrade() {
+    let deadline = preview_secs.map_or(daemon::MAX_SPLASH_WAIT, Duration::from_secs);
+    let (apply_window, settle_window) = (weak_window.clone(), weak_window.clone());
+    let (_boot_timer, drain) = start_boot_phase(
+        probe,
+        deadline,
+        move |line| {
+            if let Some(window) = apply_window.upgrade() {
                 window.set_boot_current_check(line);
             }
-        });
-        if let Some((checks, checks_done)) = finished {
-            if let Some(window) = weak_window.upgrade() {
+        },
+        move || {
+            if let Some(window) = settle_window.upgrade() {
                 window.set_boot_splash_visible(false);
             }
-            daemon::finish_boot_worker(checks, checks_done);
-            if let Some(timer) = timer_weak.upgrade() {
-                timer.stop();
-            }
             tracing::info!("Boot checks settled; splash overlay hidden");
-        }
+        },
+    );
+
+    run_shell_session(init, mocked, preview_secs, "Appliance", || {
+        drain.borrow_mut().abandon_leftover();
     });
-    let _boot_timer = boot_timer;
-
-    let session = Session::start(init, mocked);
-    if let Some(secs) = preview_secs {
-        Timer::single_shot(Duration::from_secs(secs), request_quit);
-    }
-
-    tracing::info!(preview_secs = ?preview_secs, "Appliance event loop starting");
-    run_loop("Appliance");
-    drain.borrow_mut().abandon_leftover();
-    session.shutdown();
-    tracing::info!("Appliance event loop finished");
 }

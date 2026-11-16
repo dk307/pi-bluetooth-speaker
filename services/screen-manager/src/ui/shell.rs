@@ -956,20 +956,6 @@ impl AppShell {
                 tracing::debug!("Bluetooth delete dialog cancelled");
             }
         });
-
-        let win = self.window.as_weak();
-        let device_cmds = Rc::clone(&self.device_commands);
-        self.window.on_bt_pair_cancel_clicked(move || {
-            push_device_command(
-                &device_cmds,
-                speaker_bluetooth::DeviceCommand::CancelPairing,
-            );
-            if let Some(w) = win.upgrade() {
-                // Optimistic return to the Add Device list; a terminal status
-                // already in flight converges the mode on the next publish.
-                w.set_bt_devices_mode(1);
-            }
-        });
     }
 
     fn setup_navigation_callbacks(&self) {

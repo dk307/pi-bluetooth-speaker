@@ -5,19 +5,19 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "ui")]
 use screen_manager::daemon::{
-    BT_COMMAND_SETTLE, BT_KEEP_ALIVE, BT_PAIRING_TIMEOUT, BT_PLAYING_POLL, BtMonitorState,
-    BtSharedUpdate, COVER_DECODE_RETRY, CoverState, SettleKind, SettleWindow, ShellInit,
-    TARGET_COVER_SIZE, decode_cover_buffer, finish_boot_worker, init_shell, publish_playback_state,
-    report_display, run_app, run_ui_display,
+    decode_cover_buffer, finish_boot_worker, init_shell, publish_playback_state, report_display,
+    run_app, run_ui_display, BtMonitorState, BtSharedUpdate, CoverState, SettleKind, SettleWindow,
+    ShellInit, BT_COMMAND_SETTLE, BT_KEEP_ALIVE, BT_PAIRING_TIMEOUT, BT_PLAYING_POLL,
+    COVER_DECODE_RETRY, TARGET_COVER_SIZE,
 };
 use screen_manager::daemon::{
-    CoreCliOptions, ScreenTarget, headless_requested, parse_cli_args_from, parse_preview_secs,
-    parse_tab_arg, print_usage,
+    headless_requested, parse_cli_args_from, parse_preview_secs, parse_tab_arg, print_usage,
+    CoreCliOptions, ScreenTarget,
 };
 #[cfg(feature = "ui")]
-use screen_manager::ui::Framebuffer;
+use screen_manager::ui::runtime::{run as runtime_run, RuntimeOptions};
 #[cfg(feature = "ui")]
-use screen_manager::ui::runtime::{RuntimeOptions, run as runtime_run};
+use screen_manager::ui::Framebuffer;
 use speaker_common::diag::CliParse;
 #[cfg(feature = "ui")]
 use speaker_common::diag::ScopedTempDir;
@@ -26,6 +26,22 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "ui")]
 static ENV_GUARD: Mutex<()> = Mutex::new(());
+
+/// Polls `condition` until it holds or the deadline expires.
+///
+/// Used to await a worker-thread side effect (a published state delta) without
+/// sleeping for a fixed, flaky duration.
+#[cfg(feature = "ui")]
+fn wait_for(mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("condition not met within the 5 s deadline");
+}
 
 #[cfg(feature = "ui")]
 fn lock_env() -> std::sync::MutexGuard<'static, ()> {
@@ -38,26 +54,18 @@ fn lock_env() -> std::sync::MutexGuard<'static, ()> {
 fn parse_preview_secs_rejects_sign_prefixes_and_non_numeric() {
     assert_eq!(parse_preview_secs("0").unwrap(), 0);
     assert_eq!(parse_preview_secs("42").unwrap(), 42);
-    assert!(
-        parse_preview_secs("+5")
-            .unwrap_err()
-            .contains("sign prefixes")
-    );
-    assert!(
-        parse_preview_secs("-1")
-            .unwrap_err()
-            .contains("sign prefixes")
-    );
-    assert!(
-        parse_preview_secs("abc")
-            .unwrap_err()
-            .contains("invalid preview seconds")
-    );
-    assert!(
-        parse_preview_secs("")
-            .unwrap_err()
-            .contains("invalid preview seconds")
-    );
+    assert!(parse_preview_secs("+5")
+        .unwrap_err()
+        .contains("sign prefixes"));
+    assert!(parse_preview_secs("-1")
+        .unwrap_err()
+        .contains("sign prefixes"));
+    assert!(parse_preview_secs("abc")
+        .unwrap_err()
+        .contains("invalid preview seconds"));
+    assert!(parse_preview_secs("")
+        .unwrap_err()
+        .contains("invalid preview seconds"));
 }
 
 #[test]
@@ -82,16 +90,12 @@ fn parse_cli_args_config_flag() {
     let err = parse_cli_args_from(["-c".into()]).unwrap_err();
     assert!(err.contains("missing value"));
     assert!(!err.contains("Backtrace") && !err.contains("panicked"));
-    assert!(
-        parse_cli_args_from(["--marquee-fps".into(), "30".into()])
-            .unwrap_err()
-            .contains("unknown option")
-    );
-    assert!(
-        parse_cli_args_from(["--theme".into(), "peppy".into()])
-            .unwrap_err()
-            .contains("unknown option")
-    );
+    assert!(parse_cli_args_from(["--marquee-fps".into(), "30".into()])
+        .unwrap_err()
+        .contains("unknown option"));
+    assert!(parse_cli_args_from(["--theme".into(), "peppy".into()])
+        .unwrap_err()
+        .contains("unknown option"));
 }
 
 #[test]
@@ -129,11 +133,9 @@ fn parse_tab_arg_valid_and_invalid() {
     assert_eq!(parse_tab_arg("theme").unwrap(), 5);
 
     assert!(parse_tab_arg("6").unwrap_err().contains("invalid tab"));
-    assert!(
-        parse_tab_arg("invalid")
-            .unwrap_err()
-            .contains("invalid tab")
-    );
+    assert!(parse_tab_arg("invalid")
+        .unwrap_err()
+        .contains("invalid tab"));
 }
 
 #[cfg(feature = "ui")]
@@ -669,51 +671,24 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
 #[test]
 fn live_init_defers_bluez_connect_to_bootstrap() {
     use screen_manager::ui::MainWindow;
-    use std::sync::atomic::AtomicBool;
 
     let (fb, _ctrl) = Framebuffer::new_mocked();
     let _window = fb.init_platform().unwrap();
 
     // Live init must not touch the system bus: the blocking BlueZ connect
-    // is deferred to `bootstrap_bluetooth`, so `bt` stays `None` here and
-    // first paint can never be delayed by a slow D-Bus.
+    // runs on the `bt-bootstrap` worker, so `bt` stays `None` here and first
+    // paint can never be delayed by a slow D-Bus.
     let main_window = MainWindow::new().unwrap();
-    let ShellInit {
-        shell,
-        bt,
-        commands,
-        ..
-    } = init_shell(main_window, false, None, None, 60);
+    let ShellInit { bt, .. } = init_shell(main_window, false, None, None, 60);
     assert!(
         bt.is_none(),
         "live init must defer the blocking BlueZ connect"
     );
-
-    // Drive the deferred bootstrap with an injected mock connection: it
-    // must apply the initial state, wire transport callbacks and spawn a
-    // joinable `bt-monitor` worker — hermetically, no system bus.
-    let shell = std::rc::Rc::new(shell);
-    let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
-    let running = Arc::new(AtomicBool::new(true));
-    let (mock_bt, _mock_ctrl) = speaker_bluetooth::BluetoothDevice::new_mocked();
-    let worker = screen_manager::daemon::bootstrap_bluetooth(
-        || Ok(mock_bt),
-        &shell,
-        &shared,
-        &commands,
-        &speaker_bluetooth::DeviceCommandQueue::new(),
-        &running,
-    )
-    .expect("injected mock connect succeeds")
-    .expect("bt-monitor thread spawns");
-    assert!(shell.is_playing(), "initial playback state applied");
-    running.store(false, std::sync::atomic::Ordering::Relaxed);
-    worker.join().expect("bt-monitor worker exits cleanly");
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn bootstrap_bluetooth_reports_connect_failure_without_worker() {
+fn bootstrap_worker_publishes_state_without_touching_the_ui_thread() {
     use screen_manager::ui::MainWindow;
     use std::sync::atomic::AtomicBool;
 
@@ -727,77 +702,77 @@ fn bootstrap_bluetooth_reports_connect_failure_without_worker() {
     let shell = std::rc::Rc::new(shell);
     let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
     let running = Arc::new(AtomicBool::new(true));
+    let connected = Arc::new(AtomicBool::new(false));
 
-    // A failed connection is reported at WARN and yields no worker handle:
-    // the session simply runs without a `bt-monitor`, as before.
-    let worker = screen_manager::daemon::bootstrap_bluetooth(
-        || Err(speaker_bluetooth::BtError::dbus("no system bus")),
-        &shell,
+    // The injected mock connection stands in for the blocking system-bus
+    // connect: the worker runs it off the render thread and publishes the
+    // resulting state through the shared update channel.
+    let (mock_bt, _mock_ctrl) = speaker_bluetooth::BluetoothDevice::new_mocked();
+    let worker = screen_manager::daemon::spawn_bt_bootstrap_worker(
+        || Ok(mock_bt),
         &shared,
         &commands,
         &speaker_bluetooth::DeviceCommandQueue::new(),
         &running,
-    );
-    assert!(worker.is_none(), "connect failure must yield no worker");
+        &connected,
+    )
+    .expect("bt-bootstrap thread spawns");
+
+    // The connect succeeded and the monitor published the initial snapshot.
+    wait_for(|| connected.load(std::sync::atomic::Ordering::Relaxed));
+    wait_for(|| shared.lock().is_ok_and(|state| state.playback.is_some()));
+
+    // The render thread applies the published state to the shell.
+    screen_manager::daemon::apply_shared_bt_state(&shell, &shared);
+    assert!(shell.is_playing(), "published playback state applied");
+    assert!(connected.load(std::sync::atomic::Ordering::Relaxed));
+
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
+    worker.join().expect("bt-bootstrap worker exits cleanly");
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn scheduled_bootstrap_fires_after_loop_start() {
+fn bootstrap_worker_reports_connect_failure_without_publishing_state() {
     use screen_manager::ui::MainWindow;
-    use screen_manager::ui::runtime::schedule_bt_bootstrap;
     use std::sync::atomic::AtomicBool;
 
     let (fb, _ctrl) = Framebuffer::new_mocked();
     let _window = fb.init_platform().unwrap();
 
     let main_window = MainWindow::new().unwrap();
-    let ShellInit {
-        shell, commands, ..
-    } = init_shell(main_window, true, None, None, 60);
-    let shell = std::rc::Rc::new(shell);
+    let ShellInit { commands, .. } = init_shell(main_window, false, None, None, 60);
     let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
     let running = Arc::new(AtomicBool::new(true));
-    let worker_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let connected = Arc::new(AtomicBool::new(false));
 
-    // Schedule the bootstrap exactly as `Session::start` does for a live
-    // session, but with an injected mock connection (hermetic, no D-Bus).
-    let (mock_bt, _mock_ctrl) = speaker_bluetooth::BluetoothDevice::new_mocked();
-    let bootstrap = schedule_bt_bootstrap(
-        || Ok(mock_bt),
-        &shell,
+    // A failed connection is reported at WARN on the worker thread: no state
+    // is published and the connected flag stays down, so the UI never wires
+    // the transport callbacks.
+    let worker = screen_manager::daemon::spawn_bt_bootstrap_worker(
+        || Err(speaker_bluetooth::BtError::dbus("no system bus")),
         &shared,
         &commands,
         &speaker_bluetooth::DeviceCommandQueue::new(),
         &running,
-        &worker_slot,
+        &connected,
+    )
+    .expect("bt-bootstrap thread spawns");
+    worker.join().expect("bt-bootstrap worker exits cleanly");
+
+    assert!(
+        !connected.load(std::sync::atomic::Ordering::Relaxed),
+        "failed connect must not raise the connected flag"
     );
-
-    // Run a real event loop: the one-shot must fire only once the loop is
-    // pumping, then quit. A watchdog guards against a never-firing timer.
-    slint::Timer::single_shot(Duration::from_millis(2_000), || {
-        if let Err(err) = slint::quit_event_loop() {
-            tracing::error!(error = %err, "watchdog failed to quit event loop");
-        }
-    });
-    slint::Timer::single_shot(Duration::from_millis(100), || {
-        if let Err(err) = slint::quit_event_loop() {
-            tracing::error!(error = %err, "quit_event_loop failed");
-        }
-    });
-    slint::run_event_loop().expect("event loop runs to completion");
-    drop(bootstrap);
-
-    let worker = worker_slot
-        .borrow_mut()
-        .take()
-        .expect("scheduled bootstrap must spawn a bt-monitor worker");
-    assert!(shell.is_playing(), "bootstrap applied initial state");
-    running.store(false, std::sync::atomic::Ordering::Relaxed);
-    worker
-        .expect("bt-monitor thread spawns")
-        .join()
-        .expect("bt-monitor worker exits cleanly");
+    let state = shared.lock().expect("shared state lock");
+    assert!(
+        state.playback.is_none()
+            && state.pcm.is_none()
+            && state.cover.is_none()
+            && state.amp_volume.is_none()
+            && state.devices.is_none(),
+        "failed connect must not publish any state"
+    );
 }
 
 #[cfg(feature = "ui")]
