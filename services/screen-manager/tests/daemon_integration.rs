@@ -663,6 +663,138 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
 }
 
 #[cfg(feature = "ui")]
+#[test]
+fn live_init_defers_bluez_connect_to_bootstrap() {
+    use screen_manager::ui::MainWindow;
+    use std::sync::atomic::AtomicBool;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+
+    // Live init must not touch the system bus: the blocking BlueZ connect
+    // is deferred to `bootstrap_bluetooth`, so `bt` stays `None` here and
+    // first paint can never be delayed by a slow D-Bus.
+    let main_window = MainWindow::new().unwrap();
+    let ShellInit {
+        shell,
+        bt,
+        commands,
+        ..
+    } = init_shell(main_window, false, None, None, 60);
+    assert!(
+        bt.is_none(),
+        "live init must defer the blocking BlueZ connect"
+    );
+
+    // Drive the deferred bootstrap with an injected mock connection: it
+    // must apply the initial state, wire transport callbacks and spawn a
+    // joinable `bt-monitor` worker — hermetically, no system bus.
+    let shell = std::rc::Rc::new(shell);
+    let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
+    let running = Arc::new(AtomicBool::new(true));
+    let (mock_bt, _mock_ctrl) = speaker_bluetooth::BluetoothDevice::new_mocked();
+    let worker = screen_manager::daemon::bootstrap_bluetooth(
+        || Ok(mock_bt),
+        &shell,
+        &shared,
+        &commands,
+        &running,
+    )
+    .expect("injected mock connect succeeds")
+    .expect("bt-monitor thread spawns");
+    assert!(shell.is_playing(), "initial playback state applied");
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
+    worker.join().expect("bt-monitor worker exits cleanly");
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn bootstrap_bluetooth_reports_connect_failure_without_worker() {
+    use screen_manager::ui::MainWindow;
+    use std::sync::atomic::AtomicBool;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+
+    let main_window = MainWindow::new().unwrap();
+    let ShellInit {
+        shell, commands, ..
+    } = init_shell(main_window, false, None, None, 60);
+    let shell = std::rc::Rc::new(shell);
+    let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
+    let running = Arc::new(AtomicBool::new(true));
+
+    // A failed connection is reported at WARN and yields no worker handle:
+    // the session simply runs without a `bt-monitor`, as before.
+    let worker = screen_manager::daemon::bootstrap_bluetooth(
+        || Err(speaker_bluetooth::BtError::dbus("no system bus")),
+        &shell,
+        &shared,
+        &commands,
+        &running,
+    );
+    assert!(worker.is_none(), "connect failure must yield no worker");
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn scheduled_bootstrap_fires_after_loop_start() {
+    use screen_manager::ui::MainWindow;
+    use screen_manager::ui::runtime::schedule_bt_bootstrap;
+    use std::sync::atomic::AtomicBool;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+
+    let main_window = MainWindow::new().unwrap();
+    let ShellInit {
+        shell, commands, ..
+    } = init_shell(main_window, true, None, None, 60);
+    let shell = std::rc::Rc::new(shell);
+    let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
+    let running = Arc::new(AtomicBool::new(true));
+    let worker_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+
+    // Schedule the bootstrap exactly as `Session::start` does for a live
+    // session, but with an injected mock connection (hermetic, no D-Bus).
+    let (mock_bt, _mock_ctrl) = speaker_bluetooth::BluetoothDevice::new_mocked();
+    let bootstrap = schedule_bt_bootstrap(
+        || Ok(mock_bt),
+        &shell,
+        &shared,
+        &commands,
+        &running,
+        &worker_slot,
+    );
+
+    // Run a real event loop: the one-shot must fire only once the loop is
+    // pumping, then quit. A watchdog guards against a never-firing timer.
+    slint::Timer::single_shot(Duration::from_millis(2_000), || {
+        if let Err(err) = slint::quit_event_loop() {
+            tracing::error!(error = %err, "watchdog failed to quit event loop");
+        }
+    });
+    slint::Timer::single_shot(Duration::from_millis(100), || {
+        if let Err(err) = slint::quit_event_loop() {
+            tracing::error!(error = %err, "quit_event_loop failed");
+        }
+    });
+    slint::run_event_loop().expect("event loop runs to completion");
+    drop(bootstrap);
+
+    let worker = worker_slot
+        .borrow_mut()
+        .take()
+        .expect("scheduled bootstrap must spawn a bt-monitor worker");
+    assert!(shell.is_playing(), "bootstrap applied initial state");
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
+    worker
+        .expect("bt-monitor thread spawns")
+        .join()
+        .expect("bt-monitor worker exits cleanly");
+}
+
+#[cfg(feature = "ui")]
 fn sample_png(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let path = dir.join(name);
     image::DynamicImage::new_rgb8(64, 64)

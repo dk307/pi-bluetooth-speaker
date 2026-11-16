@@ -320,7 +320,9 @@ pub fn finish_boot_worker(checks: Option<std::thread::JoinHandle<()>>, checks_do
 pub struct ShellInit {
     /// Application shell bound to the Slint window.
     pub shell: AppShell,
-    /// Connected Bluetooth device handle, if D-Bus was reachable.
+    /// Connected Bluetooth device handle: always `Some` for mocked
+    /// sessions; `None` for live sessions, whose connect is deferred to
+    /// [`bootstrap_bluetooth`].
     pub bt: Option<speaker_bluetooth::BluetoothDevice>,
     /// Queue bridging render-thread transport callbacks to the `bt-monitor` worker.
     pub commands: speaker_bluetooth::TransportCommandQueue,
@@ -342,6 +344,10 @@ pub fn init_shell(
 }
 
 /// Initializes the UI shell applying all runtime parameters from [`CoreConfig`].
+///
+/// Never blocks on D-Bus: live sessions defer the `BlueZ` connect and the
+/// initial playback/link snapshots to [`bootstrap_bluetooth`], which runs
+/// from the event loop so first paint is never delayed.
 #[cfg(feature = "ui")]
 #[must_use]
 pub fn init_shell_with_config(
@@ -357,28 +363,17 @@ pub fn init_shell_with_config(
     // presence, so the queue is wired unconditionally.
     let amp_commands = crate::volume::AmpVolumeCommandQueue::new();
     shell.wire_amp_volume(&amp_commands);
-    let maybe_bt = if mocked_device {
+    // Mocked sessions initialize eagerly against an in-memory device (no
+    // system bus involved). Live sessions never connect here: the blocking
+    // `BlueZ` connect and the initial snapshots are deferred to
+    // `bootstrap_bluetooth`, scheduled by the event loop so first paint is
+    // never delayed by a slow system bus.
+    let maybe_bt = mocked_device.then(|| {
         let (mock_bt, _) = speaker_bluetooth::BluetoothDevice::new_mocked();
         apply_initial_bt_state(&shell, &mock_bt);
         shell.wire_bluetooth_transport(&commands);
-        Some(mock_bt)
-    } else {
-        match speaker_bluetooth::BluetoothDevice::new_blocking() {
-            Ok(bt) => {
-                apply_initial_bt_state(&shell, &bt);
-                shell.wire_bluetooth_transport(&commands);
-                Some(bt)
-            }
-            Err(e) => {
-                report_display(
-                    tracing::Level::WARN,
-                    "Failed to connect to Bluetooth D-Bus for UI transport",
-                    &e,
-                );
-                None
-            }
-        }
-    };
+        mock_bt
+    });
     if let Some(tb) = tab {
         shell.set_tab(tb);
     }
@@ -415,6 +410,43 @@ fn apply_initial_bt_state(shell: &AppShell, bt: &speaker_bluetooth::BluetoothDev
             tracing::warn!(error = %e, "Failed to query initial Bluetooth link snapshot");
         }
     }
+}
+
+/// Deferred Bluetooth bootstrap for live sessions: connect, apply, spawn.
+///
+/// Runs from a one-shot timer once the event loop has painted the first
+/// frame (see `Session::start`), so the blocking `BlueZ` connect and the
+/// initial playback/link snapshots never delay window show. The `connect`
+/// factory is injectable so integration tests exercise the
+/// apply/wire/spawn sequence against `new_mocked()` devices without
+/// touching the system bus ("Ensure Hermetic Tests").
+///
+/// Returns the `bt-monitor` worker handle for the session to join at
+/// shutdown, or `None` when the connection could not be established
+/// (already reported at WARN level).
+#[cfg(feature = "ui")]
+#[must_use]
+pub fn bootstrap_bluetooth(
+    connect: impl FnOnce() -> Result<speaker_bluetooth::BluetoothDevice, speaker_bluetooth::BtError>,
+    shell: &AppShell,
+    shared: &Arc<Mutex<BtSharedUpdate>>,
+    commands: &speaker_bluetooth::TransportCommandQueue,
+    running: &Arc<AtomicBool>,
+) -> Option<std::io::Result<std::thread::JoinHandle<()>>> {
+    let bt = match connect() {
+        Ok(bt) => bt,
+        Err(e) => {
+            report_display(
+                tracing::Level::WARN,
+                "Failed to connect to Bluetooth D-Bus for UI transport",
+                &e,
+            );
+            return None;
+        }
+    };
+    apply_initial_bt_state(shell, &bt);
+    shell.wire_bluetooth_transport(commands);
+    Some(spawn_bt_monitor_worker(&bt, shared, commands, running))
 }
 
 /// Worker-side snapshot of Bluetooth state published to the render thread.

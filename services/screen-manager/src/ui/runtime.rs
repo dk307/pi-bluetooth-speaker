@@ -29,7 +29,7 @@ use slint::{ComponentHandle, Timer, TimerMode};
 use crate::config::CoreConfig;
 use crate::daemon::{self, BtSharedUpdate, ScreenTarget, ShellInit, report_display};
 use crate::ui::theme::ThemePreset;
-use crate::ui::{BootCheckLine, BootCheckUpdate, BootProbe, MainWindow};
+use crate::ui::{AppShell, BootCheckLine, BootCheckUpdate, BootProbe, MainWindow};
 
 /// Everything needed to start one UI session.
 pub struct RuntimeOptions<'a> {
@@ -202,6 +202,45 @@ fn run_splash(probe: BootProbe, preview_secs: Option<u64>, theme: Option<ThemePr
     tracing::info!("Splash event loop finished");
 }
 
+/// Delay before the deferred Bluetooth bootstrap runs: long enough for the
+/// first frame to paint (60 Hz ≈ 16.7 ms/frame) before any D-Bus work.
+const BT_BOOTSTRAP_DELAY: Duration = Duration::from_millis(50);
+
+/// Schedules the deferred Bluetooth bootstrap on a one-shot timer.
+///
+/// The timer fires once the event loop is running (and has painted the
+/// first frame), so the blocking `BlueZ` connect never delays window show.
+/// Public so integration tests can drive the bootstrap with an injected
+/// connection factory against the hermetic test platform (`M-TEST-UTIL`);
+/// production passes `BluetoothDevice::new_blocking`.
+///
+/// The returned [`Timer`] must be kept alive: dropping a `Timer` cancels it.
+#[must_use]
+pub fn schedule_bt_bootstrap(
+    connect: impl FnOnce() -> Result<speaker_bluetooth::BluetoothDevice, speaker_bluetooth::BtError>
+    + 'static,
+    shell: &Rc<AppShell>,
+    shared: &Arc<Mutex<BtSharedUpdate>>,
+    commands: &speaker_bluetooth::TransportCommandQueue,
+    running: &Arc<AtomicBool>,
+    worker_slot: &Rc<RefCell<Option<std::io::Result<std::thread::JoinHandle<()>>>>>,
+) -> Timer {
+    let mut connect = Some(connect);
+    let shell = Rc::clone(shell);
+    let shared = Arc::clone(shared);
+    let commands = commands.clone();
+    let running = Arc::clone(running);
+    let worker_slot = Rc::clone(worker_slot);
+    let timer = Timer::default();
+    timer.start(TimerMode::SingleShot, BT_BOOTSTRAP_DELAY, move || {
+        if let Some(connect) = connect.take() {
+            *worker_slot.borrow_mut() =
+                daemon::bootstrap_bluetooth(connect, &shell, &shared, &commands, &running);
+        }
+    });
+    timer
+}
+
 /// Background workers and periodic timers for one shell session.
 ///
 /// Held alive across `run_event_loop()`; [`Session::shutdown`] stops the
@@ -209,7 +248,8 @@ fn run_splash(probe: BootProbe, preview_secs: Option<u64>, theme: Option<ThemePr
 struct Session {
     bg_running: Arc<AtomicBool>,
     amp_worker: std::io::Result<std::thread::JoinHandle<()>>,
-    bt_worker: Option<std::io::Result<std::thread::JoinHandle<()>>>,
+    bt_worker: Rc<RefCell<Option<std::io::Result<std::thread::JoinHandle<()>>>>>,
+    _bt_bootstrap_timer: Option<Timer>,
     _sync_timer: Timer,
     _encoder_timer: Option<Timer>,
 }
@@ -218,6 +258,11 @@ impl Session {
     /// Spawns the Bluetooth/amp workers and starts the state-sync and
     /// rotary-encoder timers. The `AppShell` stays alive through the `Rc`
     /// clones captured by those timers.
+    ///
+    /// Mocked sessions spawn the `bt-monitor` worker eagerly from the mock
+    /// device; live sessions schedule [`daemon::bootstrap_bluetooth`] on a
+    /// one-shot timer so the blocking `BlueZ` connect runs only after the
+    /// event loop has painted the first frame.
     fn start(init: ShellInit, mocked: bool) -> Self {
         let ShellInit {
             shell,
@@ -231,9 +276,27 @@ impl Session {
 
         let amp_worker =
             daemon::spawn_amp_volume_worker(&shared, &bg_running, &amp_commands, mocked);
-        let bt_worker = bt
-            .as_ref()
-            .map(|device| daemon::spawn_bt_monitor_worker(device, &shared, &commands, &bg_running));
+        let bt_worker = Rc::new(RefCell::new(None));
+        let bt_bootstrap_timer = if let Some(device) = bt.as_ref() {
+            *bt_worker.borrow_mut() = Some(daemon::spawn_bt_monitor_worker(
+                device,
+                &shared,
+                &commands,
+                &bg_running,
+            ));
+            None
+        } else if !mocked {
+            Some(schedule_bt_bootstrap(
+                speaker_bluetooth::BluetoothDevice::new_blocking,
+                &shell,
+                &shared,
+                &commands,
+                &bg_running,
+                &bt_worker,
+            ))
+        } else {
+            None
+        };
 
         // Periodic reconciliation of worker-published Bluetooth/amp state.
         let sync_timer = Timer::default();
@@ -276,6 +339,7 @@ impl Session {
             bg_running,
             amp_worker,
             bt_worker,
+            _bt_bootstrap_timer: bt_bootstrap_timer,
             _sync_timer: sync_timer,
             _encoder_timer: encoder_timer,
         }
@@ -286,21 +350,23 @@ impl Session {
     fn shutdown(self) {
         self.bg_running.store(false, Ordering::Relaxed);
         daemon::join_amp_volume_worker(self.amp_worker);
-        if let Some(worker) = self.bt_worker {
-            match worker {
-                Ok(handle) => {
-                    if let Err(panic) = handle.join() {
-                        std::panic::resume_unwind(panic);
-                    }
-                }
-                Err(err) => {
-                    report_display(
-                        tracing::Level::WARN,
-                        "bt-monitor thread could not be started",
-                        &err,
-                    );
+        let bt_worker = self.bt_worker.borrow_mut().take();
+        match bt_worker {
+            Some(Ok(handle)) => {
+                if let Err(panic) = handle.join() {
+                    std::panic::resume_unwind(panic);
                 }
             }
+            Some(Err(err)) => {
+                report_display(
+                    tracing::Level::WARN,
+                    "bt-monitor thread could not be started",
+                    &err,
+                );
+            }
+            // Bootstrap never ran (preview quit before its one-shot timer
+            // fired, or the BlueZ connect failed): no worker to join.
+            None => {}
         }
         tracing::info!("UI session workers stopped");
     }
