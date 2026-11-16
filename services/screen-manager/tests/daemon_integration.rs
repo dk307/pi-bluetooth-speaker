@@ -5,19 +5,19 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "ui")]
 use screen_manager::daemon::{
-    decode_cover_buffer, finish_boot_worker, init_shell, publish_playback_state, report_display,
-    run_app, run_ui_display, BtMonitorState, BtSharedUpdate, CoverState, SettleKind, SettleWindow,
-    ShellInit, BT_COMMAND_SETTLE, BT_KEEP_ALIVE, BT_PAIRING_TIMEOUT, BT_PLAYING_POLL,
-    COVER_DECODE_RETRY, TARGET_COVER_SIZE,
+    BT_COMMAND_SETTLE, BT_KEEP_ALIVE, BT_PAIRING_TIMEOUT, BT_PLAYING_POLL, BtMonitorState,
+    BtSharedUpdate, COVER_DECODE_RETRY, CoverState, SettleKind, SettleWindow, ShellInit,
+    TARGET_COVER_SIZE, decode_cover_buffer, finish_boot_worker, init_shell, publish_playback_state,
+    report_display, run_app, run_ui_display,
 };
 use screen_manager::daemon::{
-    headless_requested, parse_cli_args_from, parse_preview_secs, parse_tab_arg, print_usage,
-    CoreCliOptions, ScreenTarget,
+    CoreCliOptions, ScreenTarget, headless_requested, parse_cli_args_from, parse_preview_secs,
+    parse_tab_arg, print_usage,
 };
 #[cfg(feature = "ui")]
-use screen_manager::ui::runtime::{run as runtime_run, RuntimeOptions};
-#[cfg(feature = "ui")]
 use screen_manager::ui::Framebuffer;
+#[cfg(feature = "ui")]
+use screen_manager::ui::runtime::{RuntimeOptions, run as runtime_run};
 use speaker_common::diag::CliParse;
 #[cfg(feature = "ui")]
 use speaker_common::diag::ScopedTempDir;
@@ -54,18 +54,26 @@ fn lock_env() -> std::sync::MutexGuard<'static, ()> {
 fn parse_preview_secs_rejects_sign_prefixes_and_non_numeric() {
     assert_eq!(parse_preview_secs("0").unwrap(), 0);
     assert_eq!(parse_preview_secs("42").unwrap(), 42);
-    assert!(parse_preview_secs("+5")
-        .unwrap_err()
-        .contains("sign prefixes"));
-    assert!(parse_preview_secs("-1")
-        .unwrap_err()
-        .contains("sign prefixes"));
-    assert!(parse_preview_secs("abc")
-        .unwrap_err()
-        .contains("invalid preview seconds"));
-    assert!(parse_preview_secs("")
-        .unwrap_err()
-        .contains("invalid preview seconds"));
+    assert!(
+        parse_preview_secs("+5")
+            .unwrap_err()
+            .contains("sign prefixes")
+    );
+    assert!(
+        parse_preview_secs("-1")
+            .unwrap_err()
+            .contains("sign prefixes")
+    );
+    assert!(
+        parse_preview_secs("abc")
+            .unwrap_err()
+            .contains("invalid preview seconds")
+    );
+    assert!(
+        parse_preview_secs("")
+            .unwrap_err()
+            .contains("invalid preview seconds")
+    );
 }
 
 #[test]
@@ -90,12 +98,16 @@ fn parse_cli_args_config_flag() {
     let err = parse_cli_args_from(["-c".into()]).unwrap_err();
     assert!(err.contains("missing value"));
     assert!(!err.contains("Backtrace") && !err.contains("panicked"));
-    assert!(parse_cli_args_from(["--marquee-fps".into(), "30".into()])
-        .unwrap_err()
-        .contains("unknown option"));
-    assert!(parse_cli_args_from(["--theme".into(), "peppy".into()])
-        .unwrap_err()
-        .contains("unknown option"));
+    assert!(
+        parse_cli_args_from(["--marquee-fps".into(), "30".into()])
+            .unwrap_err()
+            .contains("unknown option")
+    );
+    assert!(
+        parse_cli_args_from(["--theme".into(), "peppy".into()])
+            .unwrap_err()
+            .contains("unknown option")
+    );
 }
 
 #[test]
@@ -133,9 +145,11 @@ fn parse_tab_arg_valid_and_invalid() {
     assert_eq!(parse_tab_arg("theme").unwrap(), 5);
 
     assert!(parse_tab_arg("6").unwrap_err().contains("invalid tab"));
-    assert!(parse_tab_arg("invalid")
-        .unwrap_err()
-        .contains("invalid tab"));
+    assert!(
+        parse_tab_arg("invalid")
+            .unwrap_err()
+            .contains("invalid tab")
+    );
 }
 
 #[cfg(feature = "ui")]

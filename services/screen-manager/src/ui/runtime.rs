@@ -287,14 +287,14 @@ impl Session {
                 )
             },
             |device| {
-                    daemon::spawn_bt_monitor_worker(
-                        device,
-                        &shared,
-                        &commands,
-                        &device_commands,
-                        &bg_running,
-                    )
-                }
+                daemon::spawn_bt_monitor_worker(
+                    device,
+                    &shared,
+                    &commands,
+                    &device_commands,
+                    &bg_running,
+                )
+            },
         ));
 
         // Periodic reconciliation of worker-published Bluetooth/amp state.
