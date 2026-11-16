@@ -222,6 +222,7 @@ pub fn schedule_bt_bootstrap(
     shell: &Rc<AppShell>,
     shared: &Arc<Mutex<BtSharedUpdate>>,
     commands: &speaker_bluetooth::TransportCommandQueue,
+    device_commands: &speaker_bluetooth::DeviceCommandQueue,
     running: &Arc<AtomicBool>,
     worker_slot: &Rc<RefCell<Option<std::io::Result<std::thread::JoinHandle<()>>>>>,
 ) -> Timer {
@@ -229,13 +230,20 @@ pub fn schedule_bt_bootstrap(
     let shell = Rc::clone(shell);
     let shared = Arc::clone(shared);
     let commands = commands.clone();
+    let device_commands = device_commands.clone();
     let running = Arc::clone(running);
     let worker_slot = Rc::clone(worker_slot);
     let timer = Timer::default();
     timer.start(TimerMode::SingleShot, BT_BOOTSTRAP_DELAY, move || {
         if let Some(connect) = connect.take() {
-            *worker_slot.borrow_mut() =
-                daemon::bootstrap_bluetooth(connect, &shell, &shared, &commands, &running);
+            *worker_slot.borrow_mut() = daemon::bootstrap_bluetooth(
+                connect,
+                &shell,
+                &shared,
+                &commands,
+                &device_commands,
+                &running,
+            );
         }
     });
     timer
@@ -269,6 +277,7 @@ impl Session {
             bt,
             commands,
             amp_commands,
+            device_commands,
         } = init;
         let shell = Rc::new(shell);
         let bg_running = Arc::new(AtomicBool::new(true));
@@ -282,6 +291,7 @@ impl Session {
                 device,
                 &shared,
                 &commands,
+                &device_commands,
                 &bg_running,
             ));
             None
@@ -291,6 +301,7 @@ impl Session {
                 &shell,
                 &shared,
                 &commands,
+                &device_commands,
                 &bg_running,
                 &bt_worker,
             ))

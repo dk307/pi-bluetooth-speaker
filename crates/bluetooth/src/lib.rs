@@ -4,6 +4,8 @@
 pub mod connection;
 pub mod cover_art;
 pub mod cover_service;
+pub mod device_admin;
+pub mod pairing_agent;
 pub mod reconciler;
 pub mod transport;
 
@@ -13,6 +15,17 @@ pub use connection::{
     BluetoothDevice, BluetoothDeviceMock, BluetoothHardwareInfo, BluetoothServices,
     BluetoothStatus, BluezSnapshot, BtAdapter, BtAddress, BtDevice, BtError, DEFAULT_BT_ADAPTER,
     LinkSnapshot, resolve_cover_art_with,
+};
+
+#[doc(inline)]
+pub use device_admin::{
+    AdminAction, DeviceCommand, DeviceCommandQueue, PairingStatus, device_action_message,
+    device_address_from_path, device_object_path,
+};
+
+#[doc(inline)]
+pub use pairing_agent::{
+    PairingAgentHandle, PairingCode, SCREEN_AGENT_CAPABILITY, SCREEN_AGENT_PATH,
 };
 
 #[doc(inline)]

@@ -3,36 +3,6 @@ import { AppTheme } from "app_theme.slint";
 import { NowPlayingView } from "now_playing.slint";
 import { SettingsView } from "settings_view.slint";
 
-// One label / value line in the Bluetooth details cards.
-component DetailRow inherits Rectangle {
-    in property <string> label;
-    in property <string> value;
-    height: 24px;
-
-    HorizontalLayout {
-        spacing: 8px;
-
-        Text {
-            text: root.label;
-            color: MaterialPalette.secondary;
-            font-size: 12px;
-            font-weight: 800;
-            vertical-alignment: center;
-            width: 76px;
-        }
-
-        Text {
-            text: root.value;
-            color: MaterialPalette.on_surface;
-            font-size: 14px;
-            font-weight: 600;
-            vertical-alignment: center;
-            overflow: elide;
-            horizontal-stretch: 1;
-        }
-    }
-}
-
 export component MainViewport inherits Rectangle {
     background: MaterialPalette.background;
 
@@ -58,18 +28,10 @@ export component MainViewport inherits Rectangle {
     in-out property <float> right_peak_ratio: 0.0;
     in-out property <string> track_or_device: "Waiting for Connection...";
     in property <string> stream_codec: "aptX-HD";
-    in property <bool> bt_connected: false;
-    in property <string> bt_device_address: "—";
-    in property <string> bt_link_text: "Waiting for connection";
-    in property <string> bt_rssi_text: "";
-    in property <string> bt_battery_text: "";
-    in property <string> bt_stream_format: "—";
-    in property <string> bt_delay_text: "—";
-    in property <string> bt_adapter_name: "—";
-    in property <string> bt_adapter_address: "—";
 
     callback settings_clicked();
     callback select_tab(int);
+    callback open_bluetooth_devices();
     callback toggle_play_pause();
     callback next_track();
     callback previous_track();
@@ -136,74 +98,6 @@ export component MainViewport inherits Rectangle {
         }
     }
 
-    // Tab 2: Bluetooth connection details (opened from the status bar or the dock)
-    if root.active_tab == 2 : VerticalLayout {
-        padding: 14px;
-        spacing: 12px;
-
-        HorizontalLayout {
-            spacing: 14px;
-
-            // Left card: connected source (org.bluez.Device1)
-            Rectangle {
-                horizontal-stretch: 1;
-                background: MaterialPalette.surface;
-                border-radius: 14px;
-                border-width: 1px;
-                border-color: MaterialPalette.outline_variant;
-
-                VerticalLayout {
-                    padding: 16px;
-                    spacing: 6px;
-
-                    Text {
-                        text: "CONNECTED SOURCE";
-                        color: MaterialPalette.primary;
-                        font-size: 13px;
-                        font-weight: 800;
-                    }
-                    DetailRow { label: "DEVICE"; value: root.track_or_device; }
-                    DetailRow { label: "ADDRESS"; value: root.bt_device_address; }
-                    DetailRow { label: "LINK"; value: root.bt_link_text; }
-                    DetailRow { label: "PROFILE"; value: "A2DP Sink • AVRCP"; }
-                    if root.bt_rssi_text != "" : DetailRow { label: "SIGNAL"; value: root.bt_rssi_text; }
-                    if root.bt_battery_text != "" : DetailRow { label: "BATTERY"; value: root.bt_battery_text; }
-                }
-            }
-
-            // Right card: audio stream (BlueALSA PCM) and local controller (org.bluez.Adapter1)
-            Rectangle {
-                horizontal-stretch: 1;
-                background: MaterialPalette.surface;
-                border-radius: 14px;
-                border-width: 1px;
-                border-color: MaterialPalette.outline_variant;
-
-                VerticalLayout {
-                    padding: 16px;
-                    spacing: 6px;
-
-                    Text {
-                        text: "AUDIO STREAM";
-                        color: MaterialPalette.primary;
-                        font-size: 13px;
-                        font-weight: 800;
-                    }
-                    DetailRow {
-                        label: "STATE";
-                        value: root.is_playing ? "STREAMING" : (root.bt_connected ? "CONNECTED" : "WAITING");
-                    }
-                    DetailRow { label: "CODEC"; value: root.stream_codec; }
-                    DetailRow { label: "FORMAT"; value: root.bt_stream_format; }
-                    DetailRow { label: "LATENCY"; value: root.bt_delay_text; }
-                    DetailRow { label: "VOLUME"; value: root.is_muted ? "Muted" : (Math.round(root.volume_value) + "%"); }
-                    DetailRow { label: "SPEAKER"; value: root.bt_adapter_name; }
-                    DetailRow { label: "ADAPTER"; value: root.bt_adapter_address; }
-                }
-            }
-        }
-    }
-
     // Tab 3: CD Player
     if root.active_tab == 3 : VerticalLayout {
         padding: 14px;
@@ -265,7 +159,7 @@ export component MainViewport inherits Rectangle {
         SettingsView {
             cd_enabled: root.cd_enabled;
             show_themes <=> root.show_themes;
-            bluetooth_clicked => { root.select_tab(2); }
+            bluetooth_clicked => { root.open_bluetooth_devices(); }
             vu_meter_clicked => { root.select_tab(1); }
             dsp_clicked => { root.select_tab(4); }
             cd_clicked => { root.select_tab(3); }

@@ -7,6 +7,7 @@ import { MarqueeCompose } from "marquee_state.slint";
 import { ScreenAppBar } from "screen_app_bar.slint";
 import { VolumeHudOverlay } from "volume_hud.slint";
 import { CodecHudOverlay } from "codec_hud.slint";
+import { BluetoothDevicesScreen, BtDeviceRow } from "bluetooth_devices.slint";
 
 // Re-exported so slint-build generates the Rust global accessor for the composer bridge.
 export { MarqueeCompose }
@@ -17,7 +18,7 @@ import "../../../assets/fonts/Inter-SemiBold.ttf";
 import "../../../assets/fonts/Inter-Bold.ttf";
 import "../../../assets/fonts/Inter-ExtraBold.ttf";
 
-export { BootCheckLine, SplashScreen, MaterialPalette, AppTheme }
+export { BootCheckLine, SplashScreen, MaterialPalette, AppTheme, BtDeviceRow }
 
 export component MainWindow inherits Window {
     title: "DietPi Audiophile Console";
@@ -64,7 +65,13 @@ export component MainWindow inherits Window {
     in-out property <float> left_peak_ratio: 0.0;
     in-out property <float> right_peak_ratio: 0.0;
     in-out property <bool> cd_enabled: false;
-    out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01;
+    out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01
+        // The devices screen keeps frames coming only while a live animation
+        // source runs: the pairing ring (mode 2 + spinning), the Add-Device
+        // scanning spinner (mode 1 + scanning), or a visible toast (plan A9/A16).
+        || (root.bt_devices_open && ((root.bt_devices_mode == 2 && root.bt_pair_spinning)
+            || (root.bt_devices_mode == 1 && root.bt_scanning)
+            || root.bt_toast_visible));
 
     // NEW: show_themes lifted to MainWindow for title switching in ScreenAppBar
     in-out property <bool> show_themes: false;
@@ -132,19 +139,37 @@ export component MainWindow inherits Window {
         }
     }
 
-    // Bluetooth details (Tab 2) text, pushed from the bt-monitor worker snapshot.
+    // Connected indicator for the status bar, derived from the latest
+    // devices rows in `apply_bt_devices` (the old tab-2 details props are
+    // retired with the details screen).
     in-out property <bool> bt_connected: false;
-    in-out property <string> bt_device_address: "—";
-    in-out property <string> bt_link_text: "Waiting for connection";
-    in-out property <string> bt_rssi_text: "";
-    in-out property <string> bt_battery_text: "";
+    // Codec-HUD stream summary and codec delay, pushed with each PCM stream
+    // delta by `apply_pcm_stream` (plan A19: values follow the active stream).
     in-out property <string> bt_stream_format: "—";
     in-out property <string> bt_delay_text: "—";
-    in-out property <string> bt_adapter_name: "—";
-    in-out property <string> bt_adapter_address: "—";
-    // Tab to return to when the Bluetooth details screen is dismissed.
+    // Tab to return to when the Bluetooth devices screen is dismissed.
     in-out property <int> previous_tab: 0;
 
+    // Bluetooth devices screen (replaces the old tab-2 details screen): the Rust
+    // controller pushes rows/pairing/toast state here; navigation lives in Slint
+    // except pairing-terminal transitions (plan §5).
+    in-out property <bool> bt_devices_open: false;
+    // 0 = paired/active list, 1 = Add Device (discovery), 2 = Connecting/Pairing.
+    in-out property <int> bt_devices_mode: 0;
+    in-out property <[BtDeviceRow]> bt_device_rows: [];
+    in-out property <[BtDeviceRow]> bt_discovered_rows: [];
+    in-out property <bool> bt_scanning: false;
+    in-out property <string> bt_devices_subtitle: "Visible as \"Home Speaker\"";
+    in-out property <string> bt_pair_device_name: "";
+    in-out property <string> bt_pair_code: "";
+    in-out property <bool> bt_pair_spinning: false;
+    in-out property <bool> bt_delete_open: false;
+    in-out property <string> bt_delete_device_name: "";
+    // Address-keyed delete (plan A2): Rust resolves this to the BlueZ device
+    // path — row indices are never trusted across publishes.
+    in-out property <string> bt_delete_address: "";
+    in-out property <bool> bt_toast_visible: false;
+    in-out property <string> bt_toast_text: "";
     // Single source of truth for the artist/album composite shown in the second marquee,
     // shared by the declarative binding and the Rust-side strip rasterizer.
     out property <string> artist_marquee_text:
@@ -164,22 +189,40 @@ export component MainWindow inherits Window {
     callback select_theme(int);
     callback cycle_theme();
 
-    // Opens the Bluetooth details tab from any screen; calling it again (or `Back`)
-    // returns to the tab it was opened from.
-    public function toggle_bluetooth_details() {
-        if (root.active_tab == 2) {
-            root.active_tab = root.previous_tab == 2 ? 0 : root.previous_tab;
-        } else {
+    // Bluetooth devices screen actions, handled in Rust (DeviceCommandQueue pushes).
+    callback bt_add_device_clicked();
+    callback bt_cancel_scan_clicked();
+    // (row index, from_discovery) — Rust resolves the index to an address (A2).
+    callback bt_row_action(int, bool);
+    callback bt_row_delete(int);
+    callback bt_pair_cancel_clicked();
+    callback bt_delete_confirm_clicked();
+    callback bt_delete_cancel_clicked();
+
+    // Opens the Bluetooth devices screen from any entry point (status bar taps,
+    // Settings tile, CLI); remembers the tab to return to.
+    public function open_bt_devices() {
+        if (!root.bt_devices_open) {
             root.previous_tab = root.active_tab;
-            root.active_tab = 2;
         }
+        root.bt_devices_open = true;
+    }
+
+    public function close_bt_devices() {
+        // Closing while Add Device is scanning must stop discovery: the worker
+        // stops screen-started discovery only on an explicit cancel, a pairing
+        // reap, or this stop request (review: RF power leak on close).
+        if (root.bt_scanning) {
+            root.bt_cancel_scan_clicked();
+        }
+        root.bt_devices_open = false;
+        root.bt_devices_mode = 0;
+        root.bt_delete_open = false;
     }
 
     // NEW: Screen app bar back button handler
     public function app_bar_back() {
-        if (root.active_tab == 2) {
-            root.toggle_bluetooth_details();
-        } else if (root.active_tab == 5 && root.show_themes) {
+        if (root.active_tab == 5 && root.show_themes) {
             root.show_themes = false;
         } else if (root.active_tab != 0) {
             // Tabs 1, 3, 4, and 5 (when not in themes): return to previous tab, falling back to Now Playing
@@ -215,10 +258,15 @@ export component MainWindow inherits Window {
                     is_muted: root.is_muted;
                     bt_connected: root.bt_connected;
                     source_clicked => {
-                        root.toggle_bluetooth_details();
+                        root.open_bt_devices();
                         root.source_clicked();
                     }
-                    device_clicked => { root.toggle_bluetooth_details(); }
+                    device_clicked => { root.open_bt_devices(); }
+                    // The codec badge keeps its codec-information overlay from
+                    // the KMS mainline (#62): the HUD reports the negotiated
+                    // stream (format/delay now fed by `apply_pcm_stream`),
+                    // while the devices screen opens from the logo, the device
+                    // name and the Settings grid.
                     protocol_clicked => { root.show_codec_hud(); }
                     night_mode_clicked => { root.night_mode_clicked(); }
                     volume_clicked => {
@@ -231,7 +279,6 @@ export component MainWindow inherits Window {
                     width: 100%;
                     height: 100%;
                     title: root.active_tab == 1 ? "VU Meter" :
-                           root.active_tab == 2 ? "Bluetooth" :
                            root.active_tab == 3 ? "CD Player" :
                            root.active_tab == 4 ? "DSP & Tone" :
                            root.active_tab == 5 ? (root.show_themes ? "Themes" : "Settings") : "";
@@ -262,15 +309,6 @@ export component MainWindow inherits Window {
                 right_peak_ratio: root.right_peak_ratio;
                 track_or_device: root.track_or_device;
                 stream_codec: root.stream_codec;
-                bt_connected: root.bt_connected;
-                bt_device_address: root.bt_device_address;
-                bt_link_text: root.bt_link_text;
-                bt_rssi_text: root.bt_rssi_text;
-                bt_battery_text: root.bt_battery_text;
-                bt_stream_format: root.bt_stream_format;
-                bt_delay_text: root.bt_delay_text;
-                bt_adapter_name: root.bt_adapter_name;
-                bt_adapter_address: root.bt_adapter_address;
                 artist_marquee_text: root.artist_marquee_text;
                 show_themes <=> root.show_themes;
 
@@ -287,10 +325,39 @@ export component MainWindow inherits Window {
                     root.previous_tab = root.active_tab;
                     root.active_tab = idx;
                 }
+                open_bluetooth_devices => { root.open_bt_devices(); }
                 volume_changed(val) => { root.volume_changed(val); }
                 select_theme(idx) => { root.select_theme(idx); }
                 cycle_theme => { root.cycle_theme(); }
             }
+        }
+
+        // Bluetooth devices screen: full-window overlay above the tab viewport
+        // and top bar (it carries its own 88px header), below the volume HUD.
+        if root.bt_devices_open: bluetooth_devices := BluetoothDevicesScreen {
+            width: 100%;
+            height: 100%;
+            bt_devices_open: root.bt_devices_open;
+            bt_devices_mode <=> root.bt_devices_mode;
+            bt_device_rows: root.bt_device_rows;
+            bt_discovered_rows: root.bt_discovered_rows;
+            bt_scanning: root.bt_scanning;
+            bt_devices_subtitle: root.bt_devices_subtitle;
+            bt_pair_device_name: root.bt_pair_device_name;
+            bt_pair_code: root.bt_pair_code;
+            bt_pair_spinning: root.bt_pair_spinning;
+            bt_delete_open: root.bt_delete_open;
+            bt_delete_device_name: root.bt_delete_device_name;
+            bt_toast_visible <=> root.bt_toast_visible;
+            bt_toast_text: root.bt_toast_text;
+            bt_add_device_clicked => { root.bt_add_device_clicked(); }
+            bt_cancel_scan_clicked => { root.bt_cancel_scan_clicked(); }
+            bt_row_action(r, d) => { root.bt_row_action(r, d); }
+            bt_row_delete(r) => { root.bt_row_delete(r); }
+            bt_pair_cancel_clicked => { root.bt_pair_cancel_clicked(); }
+            bt_delete_confirm_clicked => { root.bt_delete_confirm_clicked(); }
+            bt_delete_cancel_clicked => { root.bt_delete_cancel_clicked(); }
+            close_clicked => { root.close_bt_devices(); }
         }
 
         // HUD scrim (middle layer) — covers only the viewport area below the

@@ -10,7 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::fmt::{self, Debug, Formatter};
 use std::rc::Rc;
 
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Model};
 
 use crate::config::{
     CoreConfig, DEFAULT_VOLUME_HUD_FADE_MS, DEFAULT_VOLUME_HUD_TIMEOUT_MS,
@@ -100,13 +100,10 @@ impl EncoderVolumeTracker {
     }
 }
 
-/// Placeholder shown for details that are unknown or not applicable.
-const NO_DETAIL: &str = "—";
-
-/// Point-in-time Bluetooth connection details shown on the details screen.
+/// Point-in-time Bluetooth connection details selected from a link snapshot.
 ///
-/// Built off the render thread from a [`speaker_bluetooth::LinkSnapshot`] and applied
-/// by [`AppShell::apply_bt_link_details`]; `None` fields clear the matching text.
+/// Used by the worker to derive the active device for Devices-screen rows and,
+/// at startup, to seed the initial PCM stream state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BtLinkDetails {
     /// Connected remote device, if any.
@@ -147,72 +144,12 @@ impl BtLinkDetails {
         }
     }
 
-    fn address_text(&self) -> String {
-        self.device
-            .as_ref()
-            .map_or_else(|| NO_DETAIL.into(), |d| d.address.to_string())
-    }
-
-    fn link_text(&self) -> String {
-        let Some(device) = &self.device else {
-            return "Waiting for connection".into();
-        };
-        let mut parts = vec![if self.pcm.as_ref().is_some_and(|p| p.running) {
-            "Streaming"
-        } else {
-            "Connected"
-        }];
-        if device.paired {
-            parts.push("Paired");
-        }
-        if device.trusted {
-            parts.push("Trusted");
-        }
-        parts.join(" • ")
-    }
-
-    fn rssi_text(&self) -> String {
-        self.device
-            .as_ref()
-            .and_then(|d| d.rssi)
-            .map_or_else(String::new, |rssi| format!("{rssi} dBm"))
-    }
-
-    fn battery_text(&self) -> String {
-        self.device
-            .as_ref()
-            .and_then(|d| d.battery_percentage)
-            .map_or_else(String::new, |pct| format!("{pct}%"))
-    }
-
-    fn stream_format_text(&self) -> String {
-        let Some(pcm) = &self.pcm else {
-            return NO_DETAIL.into();
-        };
-        let rate = if pcm.sampling_rate % 1000 == 0 {
-            format!("{} kHz", pcm.sampling_rate / 1000)
-        } else {
-            format!("{:.1} kHz", f64::from(pcm.sampling_rate) / 1000.0)
-        };
-        let channels = match pcm.channels {
-            1 => "Mono".to_string(),
-            2 => "Stereo".to_string(),
-            n => format!("{n} ch"),
-        };
-        format!("{rate} • {} • {channels}", pcm_bit_depth(&pcm.format))
-    }
-
-    fn delay_text(&self) -> String {
-        self.pcm
-            .as_ref()
-            .and_then(|p| p.delay.as_deref())
-            .unwrap_or(NO_DETAIL)
-            .into()
-    }
-
-    fn adapter_name_text(&self) -> String {
+    /// Adapter display name: alias when set, otherwise the adapter model name;
+    /// `—` when no adapter was detected.
+    #[must_use]
+    pub fn adapter_name_text(&self) -> String {
         self.adapter.as_ref().map_or_else(
-            || NO_DETAIL.into(),
+            || "—".to_string(),
             |a| {
                 if a.alias.is_empty() {
                     a.name.to_string()
@@ -221,12 +158,6 @@ impl BtLinkDetails {
                 }
             },
         )
-    }
-
-    fn adapter_address_text(&self) -> String {
-        self.adapter
-            .as_ref()
-            .map_or_else(|| NO_DETAIL.into(), |a| a.address.to_string())
     }
 }
 
@@ -248,6 +179,8 @@ pub struct AppShell {
     volume_step_percent: Cell<u8>,
     transport_commands: Rc<RefCell<Option<speaker_bluetooth::TransportCommandQueue>>>,
     amp_commands: Rc<RefCell<Option<crate::volume::AmpVolumeCommandQueue>>>,
+    device_commands: Rc<RefCell<Option<speaker_bluetooth::DeviceCommandQueue>>>,
+    bt_devices: Rc<RefCell<crate::ui::BtDevicesController>>,
     last_toggle: Rc<Cell<std::time::Instant>>,
 }
 
@@ -260,6 +193,23 @@ impl Debug for AppShell {
     }
 }
 
+/// Pushes `command` onto the wired Bluetooth device command queue, logging at
+/// `debug` when no queue is wired (e.g. headless test shells).
+fn push_device_command(
+    queue: &Rc<RefCell<Option<speaker_bluetooth::DeviceCommandQueue>>>,
+    command: speaker_bluetooth::DeviceCommand,
+) {
+    match queue.borrow().as_ref() {
+        Some(commands) => commands.push(command),
+        None => {
+            tracing::debug!(
+                ?command,
+                "Bluetooth device command dropped (no device queue wired)"
+            );
+        }
+    }
+}
+
 impl AppShell {
     /// Initializes an [`AppShell`] controller wrapping a [`MainWindow`] component.
     #[must_use]
@@ -269,6 +219,8 @@ impl AppShell {
             volume_step_percent: Cell::new(DEFAULT_VOLUME_STEP_PERCENT),
             transport_commands: Rc::new(RefCell::new(None)),
             amp_commands: Rc::new(RefCell::new(None)),
+            device_commands: Rc::new(RefCell::new(None)),
+            bt_devices: Rc::new(RefCell::new(crate::ui::BtDevicesController::default())),
             last_toggle: Rc::new(Cell::new(
                 std::time::Instant::now()
                     .checked_sub(std::time::Duration::from_secs(1))
@@ -622,6 +574,26 @@ impl AppShell {
         if self.window.get_stream_bit_depth().as_str() != bit_depth {
             self.set_stream_bit_depth(bit_depth);
         }
+        // Codec-HUD summary line and codec delay follow the active stream
+        // (they used to come from the retired tab-2 details screen).
+        let rate = if pcm.sampling_rate.is_multiple_of(1000) {
+            format!("{} kHz", pcm.sampling_rate / 1000)
+        } else {
+            format!("{:.1} kHz", f64::from(pcm.sampling_rate) / 1000.0)
+        };
+        let channels = match pcm.channels {
+            1 => "Mono".to_string(),
+            2 => "Stereo".to_string(),
+            n => format!("{n} ch"),
+        };
+        let format_text = format!("{rate} • {bit_depth} • {channels}");
+        if self.window.get_bt_stream_format().as_str() != format_text {
+            self.window.set_bt_stream_format(format_text.into());
+        }
+        let delay_text = pcm.delay.as_deref().unwrap_or("—");
+        if self.window.get_bt_delay_text().as_str() != delay_text {
+            self.window.set_bt_delay_text(delay_text.into());
+        }
         // PCM volume/mute are stream metadata owned by the phone (BlueALSA);
         // the on-screen level and mute indicator exclusively reflect the amp
         // via `apply_amp_volume`, so they are intentionally not applied here.
@@ -727,49 +699,84 @@ impl AppShell {
         // explicit device-disconnect delta clears the displayed cover.
     }
 
-    /// Applies Bluetooth connection details to the details screen (change-guarded).
-    pub fn apply_bt_link_details(&self, details: &BtLinkDetails) {
+    /// Applies a Bluetooth devices screen update pushed by the `bt-monitor`
+    /// worker (change-guarded via [`crate::ui::BtDevicesController`]).
+    ///
+    /// Row/scanning state is full-state (replaced wholesale); alias, pairing
+    /// status, and toast text are one-shot deltas applied only when present.
+    pub fn apply_bt_devices(&self, update: crate::ui::BtDevicesUpdate) {
+        if !self.bt_devices.borrow_mut().accepts(&update) {
+            return;
+        }
         let w = &self.window;
-        let connected = details.device.is_some();
+
+        if let Some(alias) = &update.adapter_alias {
+            w.set_bt_devices_subtitle(format!("Visible as \"{alias}\"").into());
+        }
+        w.set_bt_scanning(update.scanning);
+        w.set_bt_device_rows(slint::ModelRc::new(slint::VecModel::from(update.rows)));
+        w.set_bt_discovered_rows(slint::ModelRc::new(slint::VecModel::from(
+            update.discovered,
+        )));
+
+        // Status-bar connected indicator: any device with an active BlueZ
+        // connection among the paired/connected rows (change-guarded; the
+        // old tab-2 details screen fed this from BtLinkDetails).
+        let connected = w.get_bt_device_rows().iter().any(|row| row.connected);
         if w.get_bt_connected() != connected {
             w.set_bt_connected(connected);
         }
-        macro_rules! guarded {
-            ($get:ident, $set:ident, $text:expr) => {
-                let text = $text;
-                if w.$get().as_str() != text.as_str() {
-                    w.$set(text.into());
+
+        // Terminal pairings clear the pairing code so a previous device's
+        // passkey can never linger on screen (stale-code lesson).
+        if let Some(pairing) = &update.pairing {
+            use speaker_bluetooth::PairingStatus;
+            match pairing {
+                PairingStatus::Connecting { name } => {
+                    w.set_bt_devices_mode(2);
+                    w.set_bt_pair_device_name(name.to_string().into());
+                    w.set_bt_pair_code(String::new().into());
+                    w.set_bt_pair_spinning(true);
                 }
-            };
+                PairingStatus::AwaitingConfirmation { name, passkey } => {
+                    w.set_bt_devices_mode(2);
+                    w.set_bt_pair_device_name(name.to_string().into());
+                    w.set_bt_pair_code(super::pairing_code_text(*passkey).into());
+                    w.set_bt_pair_spinning(true);
+                }
+                PairingStatus::Paired { .. } => {
+                    w.set_bt_devices_mode(0);
+                    w.set_bt_pair_spinning(false);
+                    w.set_bt_pair_code(String::new().into());
+                }
+                PairingStatus::Failed { message } => {
+                    tracing::info!(message = %message, "Bluetooth pairing failed");
+                    w.set_bt_devices_mode(1);
+                    w.set_bt_pair_spinning(false);
+                    w.set_bt_pair_code(String::new().into());
+                }
+                PairingStatus::TimedOut | PairingStatus::Cancelled => {
+                    w.set_bt_devices_mode(1);
+                    w.set_bt_pair_spinning(false);
+                    w.set_bt_pair_code(String::new().into());
+                }
+            }
         }
-        guarded!(
-            get_bt_device_address,
-            set_bt_device_address,
-            details.address_text()
-        );
-        guarded!(get_bt_link_text, set_bt_link_text, details.link_text());
-        guarded!(get_bt_rssi_text, set_bt_rssi_text, details.rssi_text());
-        guarded!(
-            get_bt_battery_text,
-            set_bt_battery_text,
-            details.battery_text()
-        );
-        guarded!(
-            get_bt_stream_format,
-            set_bt_stream_format,
-            details.stream_format_text()
-        );
-        guarded!(get_bt_delay_text, set_bt_delay_text, details.delay_text());
-        guarded!(
-            get_bt_adapter_name,
-            set_bt_adapter_name,
-            details.adapter_name_text()
-        );
-        guarded!(
-            get_bt_adapter_address,
-            set_bt_adapter_address,
-            details.adapter_address_text()
-        );
+
+        if let Some(text) = &update.toast {
+            // A refusal toast published WITHOUT a pairing session (agent
+            // registration failure, no adapter, pairing-thread spawn failure)
+            // must converge the optimistic pairing flip from on_bt_row_action;
+            // otherwise the screen sits on the pairing view with a dead
+            // spinner until manual back (review: error-path state desync).
+            if update.pairing.is_none() && w.get_bt_devices_mode() == 2 {
+                w.set_bt_devices_mode(1);
+                w.set_bt_pair_spinning(false);
+                w.set_bt_pair_code(String::new().into());
+            }
+            w.set_bt_toast_text(text.to_string().into());
+            w.set_bt_toast_visible(true);
+        }
     }
 
     /// Applies a theme preset to the UI shell.
@@ -800,9 +807,169 @@ impl AppShell {
         );
     }
 
+    /// Wires the Bluetooth devices screen callbacks to the `bt-monitor` worker
+    /// device command queue (pairing, discovery, connect/disconnect/remove).
+    pub fn wire_bluetooth_devices(&self, commands: &speaker_bluetooth::DeviceCommandQueue) {
+        *self.device_commands.borrow_mut() = Some(commands.clone());
+    }
+
     fn setup_callbacks(&self) {
         self.setup_navigation_callbacks();
+        self.setup_bt_devices_callbacks();
+        self.setup_bt_device_dialog_callbacks();
         self.setup_transport_callbacks();
+    }
+
+    /// Registers the Bluetooth Devices screen callbacks: device-queue
+    /// command pushes plus optimistic dialog/mode navigation.
+    fn setup_bt_devices_callbacks(&self) {
+        // Bluetooth devices screen actions → bt-monitor worker device queue.
+        let win = self.window.as_weak();
+        let device_cmds = Rc::clone(&self.device_commands);
+        self.window.on_bt_add_device_clicked(move || {
+            // Enter the discovery view immediately (plan §5): discovered rows
+            // render only in mode 1, so `+ Add Device` must flip the mode or
+            // the scan results stay invisible.
+            if let Some(w) = win.upgrade() {
+                w.set_bt_devices_mode(1);
+            }
+            push_device_command(
+                &device_cmds,
+                speaker_bluetooth::DeviceCommand::StartDiscovery,
+            );
+        });
+
+        let win = self.window.as_weak();
+        let device_cmds = Rc::clone(&self.device_commands);
+        self.window.on_bt_cancel_scan_clicked(move || {
+            // Cancel returns to the paired list; the worker skips the stop
+            // when this screen never started a scan.
+            if let Some(w) = win.upgrade() {
+                w.set_bt_devices_mode(0);
+            }
+            // Stop first, then refresh (FIFO) so the list settles on the
+            // devices found during this scan.
+            push_device_command(
+                &device_cmds,
+                speaker_bluetooth::DeviceCommand::StopDiscovery,
+            );
+            push_device_command(&device_cmds, speaker_bluetooth::DeviceCommand::Refresh);
+        });
+
+        let win = self.window.as_weak();
+        let device_cmds = Rc::clone(&self.device_commands);
+        self.window.on_bt_row_action(move |idx, from_discovery| {
+            let Some(w) = win.upgrade() else {
+                return;
+            };
+            let rows = if from_discovery {
+                w.get_bt_discovered_rows()
+            } else {
+                w.get_bt_device_rows()
+            };
+            let Some(row) = usize::try_from(idx).ok().and_then(|i| rows.row_data(i)) else {
+                tracing::debug!(idx, from_discovery, "Bluetooth row action index out of range");
+                return;
+            };
+            let addr = match speaker_bluetooth::BtAddress::parse_str(row.address.as_str()) {
+                Ok(addr) => addr,
+                Err(e) => {
+                    tracing::debug!(address = %row.address, error = %e, "Bluetooth row address unparseable");
+                    return;
+                }
+            };
+            let command = if from_discovery {
+                // Optimistic pairing view; the worker's Connecting status
+                // (or a refusal toast) converges it within a tick.
+                w.set_bt_devices_mode(2);
+                w.set_bt_pair_device_name(row.name.clone());
+                w.set_bt_pair_code(String::new().into());
+                w.set_bt_pair_spinning(true);
+                speaker_bluetooth::DeviceCommand::Pair(addr)
+            } else if row.connected {
+                speaker_bluetooth::DeviceCommand::Disconnect(addr)
+            } else {
+                speaker_bluetooth::DeviceCommand::Connect(addr)
+            };
+            push_device_command(&device_cmds, command);
+        });
+
+        let win = self.window.as_weak();
+        let device_cmds = Rc::clone(&self.device_commands);
+        self.window.on_bt_pair_cancel_clicked(move || {
+            push_device_command(
+                &device_cmds,
+                speaker_bluetooth::DeviceCommand::CancelPairing,
+            );
+            if let Some(w) = win.upgrade() {
+                // Optimistic return to the Add Device list; a terminal status
+                // already in flight converges the mode on the next publish.
+                w.set_bt_devices_mode(1);
+            }
+        });
+    }
+
+    /// Registers the Bluetooth delete-confirmation dialog callbacks:
+    /// index→address capture at trigger time (plan A2) plus confirm/cancel.
+    fn setup_bt_device_dialog_callbacks(&self) {
+        let win = self.window.as_weak();
+        self.window.on_bt_row_delete(move |idx| {
+            let Some(w) = win.upgrade() else {
+                return;
+            };
+            let rows = w.get_bt_device_rows();
+            let Some(row) = usize::try_from(idx).ok().and_then(|i| rows.row_data(i)) else {
+                tracing::debug!(idx, "Bluetooth delete row index out of range");
+                return;
+            };
+            // Resolve index → address at trigger time (plan A2): later
+            // publishes may reorder rows, but the dialog targets the device
+            // captured here.
+            w.set_bt_delete_address(row.address.clone());
+            w.set_bt_delete_device_name(row.name.clone());
+            w.set_bt_delete_open(true);
+        });
+
+        let win = self.window.as_weak();
+        let device_cmds = Rc::clone(&self.device_commands);
+        self.window.on_bt_delete_confirm_clicked(move || {
+            let Some(w) = win.upgrade() else {
+                return;
+            };
+            w.set_bt_delete_open(false);
+            let raw = w.get_bt_delete_address();
+            match speaker_bluetooth::BtAddress::parse_str(raw.as_str()) {
+                Ok(addr) => push_device_command(
+                    &device_cmds,
+                    speaker_bluetooth::DeviceCommand::Remove(addr),
+                ),
+                Err(e) => {
+                    tracing::warn!(address = %raw, error = %e, "Bluetooth delete confirm with invalid address");
+                }
+            }
+        });
+
+        let win = self.window.as_weak();
+        self.window.on_bt_delete_cancel_clicked(move || {
+            if let Some(w) = win.upgrade() {
+                w.set_bt_delete_open(false);
+                tracing::debug!("Bluetooth delete dialog cancelled");
+            }
+        });
+
+        let win = self.window.as_weak();
+        let device_cmds = Rc::clone(&self.device_commands);
+        self.window.on_bt_pair_cancel_clicked(move || {
+            push_device_command(
+                &device_cmds,
+                speaker_bluetooth::DeviceCommand::CancelPairing,
+            );
+            if let Some(w) = win.upgrade() {
+                // Optimistic return to the Add Device list; a terminal status
+                // already in flight converges the mode on the next publish.
+                w.set_bt_devices_mode(1);
+            }
+        });
     }
 
     fn setup_navigation_callbacks(&self) {
