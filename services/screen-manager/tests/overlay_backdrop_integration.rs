@@ -300,6 +300,58 @@ fn the_overlay_backdrop_is_published_when_an_overlay_opens() {
 }
 
 #[test]
+fn reopening_an_overlay_mid_fade_keeps_the_published_backdrop() {
+    let (shell, window, mut fb) = shell_with_window();
+    let mut tracker = OverlayBackdropTracker::new();
+
+    let _ = render(&mut fb, &window);
+    shell.show_volume_hud();
+    sync_overlay_backdrop(&fb, &shell, &mut tracker);
+    assert_eq!(
+        shell.window().get_overlay_backdrop().size().width,
+        u32::try_from(WIDTH).expect("width fits in u32"),
+        "the overlay open must publish a backdrop"
+    );
+
+    // Evaluate the fade-in so the panel is actually on screen before it is
+    // dismissed again (without this tick the opacity is still at 0.0).
+    let _ = render(&mut fb, &window);
+
+    // Dismiss and advance only part of the 200 ms fade: the panel is still
+    // rendered (opacity > 0.01), so the overlay must stay active.
+    shell.dismiss_volume_hud();
+    for _ in 0..4 {
+        slint::platform::update_timers_and_animations();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        shell.is_volume_hud_active(),
+        "the fading panel must keep the overlay active during the fade"
+    );
+
+    // Reopening inside the fade window must neither release the frozen
+    // backdrop nor re-capture a buffer that still contains the fading panel.
+    shell.show_volume_hud();
+    sync_overlay_backdrop(&fb, &shell, &mut tracker);
+    assert_eq!(
+        shell.window().get_overlay_backdrop().size().width,
+        u32::try_from(WIDTH).expect("width fits in u32"),
+        "the frozen backdrop must survive a reopen during the fade"
+    );
+
+    // Only after the fade completes with the overlay closed is the backdrop
+    // released; the next open then captures a clean scene.
+    shell.dismiss_volume_hud();
+    settle();
+    sync_overlay_backdrop(&fb, &shell, &mut tracker);
+    assert_eq!(
+        shell.window().get_overlay_backdrop().size().width,
+        0,
+        "the backdrop must be released once the fade completed"
+    );
+}
+
+#[test]
 fn the_volume_hud_takes_the_focus_when_it_opens() {
     let (shell, _window, _fb) = shell_with_window();
 
