@@ -21,9 +21,9 @@ use std::time::Instant;
 use crate::config::CoreConfig;
 #[cfg(feature = "ui")]
 use crate::ui::{
-    AppShell, BACKDROP_BLUR_RADIUS, BackdropAction, BootCheckLine, BootCheckStatus, BootCheckUpdate,
-    BootProbe, Framebuffer, MainWindow, OVERLAY_TOP_INSET, OverlayBackdropTracker, SplashScreen,
-    blur_region,
+    AppShell, BACKDROP_BLUR_RADIUS, BackdropAction, BootCheckLine, BootCheckStatus,
+    BootCheckUpdate, BootProbe, Framebuffer, MainWindow, OVERLAY_TOP_INSET, OverlayBackdropTracker,
+    SplashScreen, blur_region,
 };
 #[cfg(feature = "ui")]
 use slint::ComponentHandle;

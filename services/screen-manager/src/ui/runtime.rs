@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use slint::{ComponentHandle, Timer, TimerMode};
 
 use crate::config::CoreConfig;
-use crate::daemon::{self, report_display, BtSharedUpdate, ScreenTarget, ShellInit};
+use crate::daemon::{self, BtSharedUpdate, ScreenTarget, ShellInit, report_display};
 use crate::ui::theme::ThemePreset;
 use crate::ui::{AppShell, BootCheckLine, BootCheckUpdate, BootProbe, MainWindow};
 
@@ -218,7 +218,7 @@ const BT_BOOTSTRAP_DELAY: Duration = Duration::from_millis(50);
 #[must_use]
 pub fn schedule_bt_bootstrap(
     connect: impl FnOnce() -> Result<speaker_bluetooth::BluetoothDevice, speaker_bluetooth::BtError>
-        + 'static,
+    + 'static,
     shell: &Rc<AppShell>,
     shared: &Arc<Mutex<BtSharedUpdate>>,
     commands: &speaker_bluetooth::TransportCommandQueue,
