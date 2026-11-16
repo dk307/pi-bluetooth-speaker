@@ -49,7 +49,7 @@ fn dump_single_frame_for_layout_analysis() {
         .unwrap_or(0);
     let open_hud = std::env::var("RENDER_DUMP_HUD").ok().as_deref() == Some("1");
 
-    let mut fb = Framebuffer::new_mocked().0;
+    let fb = Framebuffer::new_mocked().0;
     let window = fb.init_platform().expect("platform init");
     let main_window = MainWindow::new().expect("MainWindow");
     let shell = AppShell::new(main_window);
@@ -83,7 +83,6 @@ fn dump_single_frame_for_layout_analysis() {
     }
 
     slint::platform::update_timers_and_animations();
-    fb.set_marquee_rows(shell.marquee_row_specs());
     let mut buffer = ScratchBuffer::new();
     window.draw_if_needed(|renderer| {
         renderer.render_by_line(&mut buffer);

@@ -75,7 +75,7 @@ libc = "=0.2.191"
 ctrlc = "=3.4.2"
 
 # UI Framework (Slint with Linux Framebuffer & KMS/DRM backends)
-slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "renderer-software", "software-renderer-systemfonts"] }
+slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-18", "renderer-femtovg", "renderer-software", "software-renderer-systemfonts", "backend-linuxkms", "backend-linuxkms-noseat"] }
 i-slint-core = { version = "=1.18.1", features = ["svg", "image-decoders", "image-default-formats"] }
 slint-build = "=1.18.1"
 

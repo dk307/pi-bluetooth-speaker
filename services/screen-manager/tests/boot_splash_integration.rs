@@ -67,6 +67,19 @@ fn splash_screen_renders_to_framebuffer() {
 
 #[cfg(feature = "ui")]
 #[test]
+fn splash_screen_applies_theme_preset() {
+    use screen_manager::ui::ThemePreset;
+
+    let (mut fb, window, splash) = splash_on_mocked_fb();
+    // `ThemePreset::apply_splash` pushes the Material schemes into the splash's
+    // own component tree (it shares no globals with the shell's MainWindow).
+    ThemePreset::Peppy.apply_splash(&splash);
+    fb.render_frame(&window).expect("Render frame failed");
+    assert_eq!(fb.render_count(), 2);
+}
+
+#[cfg(feature = "ui")]
+#[test]
 fn splash_screen_renders_check_line() {
     let (mut fb, window, splash) = splash_on_mocked_fb();
     assert_eq!(fb.render_count(), 1);

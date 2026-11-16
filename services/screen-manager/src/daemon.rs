@@ -4,15 +4,11 @@
 //! execution, and Slint framebuffer rendering coordination.
 
 // `PathBuf` backs the unconditionally compiled `-c/--config` CLI field;
-// `Path` is only referenced by the ui-gated framebuffer paths.
-#[cfg(feature = "ui")]
-use std::os::fd::RawFd;
+// `Path` is only referenced by the ui-gated DRM device probe.
 #[cfg(feature = "ui")]
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
-#[cfg(feature = "ui")]
-use std::rc::Rc;
 #[cfg(feature = "ui")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "ui")]
@@ -24,18 +20,11 @@ use std::time::Instant;
 #[cfg(feature = "ui")]
 use crate::config::CoreConfig;
 #[cfg(feature = "ui")]
-use crate::ui::theme::ThemePreset;
-#[cfg(feature = "ui")]
 use crate::ui::{
-    AppShell, BootCheckLine, BootCheckStatus, BootCheckUpdate, BootProbe, FrameTiming, Framebuffer,
-    FramebufferError, MainWindow, SplashScreen,
+    AppShell, BootCheckLine, BootCheckStatus, BootCheckUpdate, BootProbe, MainWindow, SplashScreen,
 };
 #[cfg(feature = "ui")]
 use slint::ComponentHandle;
-#[cfg(feature = "ui")]
-use slint::platform::WindowAdapter;
-#[cfg(feature = "ui")]
-use slint::platform::software_renderer::MinimalSoftwareWindow;
 use speaker_common::diag::{
     CliParse, DEFAULT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts,
 };
@@ -199,7 +188,7 @@ fn legacy_config(theme: Option<crate::ui::ThemePreset>, marquee_fps: u32) -> Cor
     }
 }
 
-/// Runs the UI display loop on the default `/dev/fb0` device path.
+/// Runs the UI display loop with a config built from legacy CLI parameters.
 #[cfg(feature = "ui")]
 pub fn run_ui_display(
     screen: ScreenTarget,
@@ -224,13 +213,18 @@ pub fn run_ui_display_with_config(
         tracing::info!("Headless mode requested via SPEAKER_CORE_HEADLESS=1");
         return;
     }
-    run_ui_display_on_path_with_config(
-        Path::new(Framebuffer::DEFAULT_FB_PATH),
+    if !Path::new("/dev/dri/card0").exists() {
+        tracing::info!("Headless/simulated environment (no /dev/dri/card0 detected)");
+        return;
+    }
+    crate::ui::runtime::run(crate::ui::runtime::RuntimeOptions {
         screen,
         preview_secs,
         tab,
         config,
-    );
+        probe: BootProbe::real(),
+        mocked: false,
+    });
 }
 
 /// Returns `true` only when the headless override is explicitly set to `"1"`
@@ -240,169 +234,30 @@ pub fn headless_requested() -> bool {
     std::env::var_os("SPEAKER_CORE_HEADLESS").is_some_and(|v| v == "1")
 }
 
-/// Runs the requested screen against a specific framebuffer device path.
+/// Applies one boot-check update by invoking `set` with the rendered check line.
+///
+/// The setter abstraction lets both the standalone [`SplashScreen`] preview and
+/// the [`MainWindow`] boot overlay consume the same update stream (the KMS
+/// backend allows only one window per process).
 #[cfg(feature = "ui")]
-pub fn run_ui_display_on_path(
-    fb_path: &Path,
-    screen: ScreenTarget,
-    preview_secs: Option<u64>,
-    theme: Option<crate::ui::ThemePreset>,
-    tab: Option<i32>,
-    marquee_fps: u32,
-) {
-    let config = legacy_config(theme, marquee_fps);
-    run_ui_display_on_path_with_config(fb_path, screen, preview_secs, tab, &config);
-}
-
-/// Runs the requested screen against a specific framebuffer device path using [`CoreConfig`].
-#[cfg(feature = "ui")]
-pub fn run_ui_display_on_path_with_config(
-    fb_path: &Path,
-    screen: ScreenTarget,
-    preview_secs: Option<u64>,
-    tab: Option<i32>,
-    config: &CoreConfig,
-) {
-    if !fb_path.exists() {
-        tracing::info!("Headless/simulated environment (no /dev/fb0 detected)");
-        return;
-    }
-
-    tracing::info!("Initializing Framebuffer /dev/fb0 (800x480 32bpp BGRX)");
-    let blank_path = (fb_path == Path::new(Framebuffer::DEFAULT_FB_PATH))
-        .then_some(Framebuffer::DEFAULT_BLANK_PATH);
-    let mut fb = match Framebuffer::open(fb_path, blank_path) {
-        Ok(fb) => fb,
-        Err(e) => {
-            report_display(tracing::Level::WARN, "Could not open /dev/fb0", &e);
-            return;
-        }
-    };
-
-    match screen {
-        ScreenTarget::Appliance => {
-            // Default appliance sequence: boot checks on the splash screen
-            // (no artificial minimum display time), then the main UI shell
-            // (now-playing) until stopped.
-            let splash_start = Instant::now();
-            run_splash_on(&mut fb, BootProbe::real(), preview_secs, config.theme);
-            let remaining_preview =
-                preview_secs.map(|p| p.saturating_sub(splash_start.elapsed().as_secs()));
-            run_shell_on_with_config(&mut fb, remaining_preview, tab, config);
-        }
-        ScreenTarget::Splash => {
-            run_splash_on(&mut fb, BootProbe::real(), preview_secs, config.theme);
-        }
-        ScreenTarget::Shell => {
-            run_shell_on_with_config(&mut fb, preview_secs, tab, config);
-        }
-    }
-}
-
-/// Unblanks the display (logging a warning on failure) and initializes the
-/// Slint software platform window on `fb`.
-#[cfg(feature = "ui")]
-fn unblank_and_init_platform(fb: &mut Framebuffer) -> Option<Rc<MinimalSoftwareWindow>> {
-    if let Err(e) = fb.unblank() {
-        report_display(tracing::Level::WARN, "Failed to unblank display", &e);
-    }
-    match fb.init_platform() {
-        Ok(win) => Some(win),
-        Err(e) => {
-            report_display(tracing::Level::ERROR, "Failed to initialize platform", &e);
-            None
-        }
-    }
-}
-
-/// Renders the initial frame of `window` to `fb`, logging the outcome and returning
-/// `true` on success or `false` if the framebuffer blit failed.
-#[cfg(feature = "ui")]
-fn render_initial_frame(
-    fb: &mut Framebuffer,
-    window: &Rc<MinimalSoftwareWindow>,
-    label: &str,
-) -> bool {
-    match fb.render_frame(window) {
-        Ok(true) => {
-            tracing::info!("{label} rendered to /dev/fb0 successfully");
-            true
-        }
-        Ok(false) => {
-            tracing::debug!("Screen buffer already current");
-            true
-        }
-        Err(e) => {
-            report_display(tracing::Level::ERROR, "Failed to render frame", &e);
-            false
-        }
-    }
-}
-
-/// Runs the common UI component lifecycle on an opened framebuffer backend.
-#[cfg(feature = "ui")]
-pub fn run_ui_lifecycle<C, F>(
-    fb: &mut Framebuffer,
-    label: &str,
-    preview_secs: Option<u64>,
-    setup: F,
-) where
-    F: FnOnce() -> Result<C, Box<dyn std::error::Error>>,
-{
-    let Some(window) = unblank_and_init_platform(fb) else {
-        return;
-    };
-
-    let _component = match setup() {
-        Ok(c) => c,
-        Err(e) => {
-            report_display(
-                tracing::Level::ERROR,
-                &format!("Failed to initialize {label}"),
-                e.as_ref(),
-            );
-            return;
-        }
-    };
-
-    if !render_initial_frame(fb, &window, label) {
-        return;
-    }
-
-    let start = Instant::now();
-    let duration = preview_secs.map(Duration::from_secs);
-    tracing::info!("Running UI render loop");
-
-    while duration.is_none_or(|d| start.elapsed() < d) {
-        slint::platform::update_timers_and_animations();
-        if let Err(e) = fb.render_frame(&window) {
-            report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(16));
-    }
-    tracing::info!("Render loop finished");
-}
-
-/// Applies one boot-check update to the splash screen's single check line.
-#[cfg(feature = "ui")]
-fn apply_check_update(splash: &SplashScreen, update: &BootCheckUpdate) {
+pub fn apply_check_update(set: &mut dyn FnMut(BootCheckLine), update: &BootCheckUpdate) {
     let line = BootCheckLine {
         text: slint::SharedString::from(&*update.text),
         running: update.status == BootCheckStatus::Running,
         ok: update.status == BootCheckStatus::Passed,
     };
-    splash.set_current_check(line);
+    set(line);
 }
 
 /// Hard upper bound for the splash when no `preview_secs` window is given, so
 /// a hung hardware probe (blocking D-Bus/I2C/sysfs call) can never stall the
 /// appliance boot indefinitely.
-const MAX_SPLASH_WAIT: Duration = Duration::from_secs(30);
+pub const MAX_SPLASH_WAIT: Duration = Duration::from_secs(30);
 
 /// Initializes and shows the [`SplashScreen`], applying an optional startup theme.
 #[cfg(feature = "ui")]
-fn init_splash_screen(theme: Option<crate::ui::ThemePreset>) -> Option<SplashScreen> {
+#[must_use]
+pub fn init_splash_screen(theme: Option<crate::ui::ThemePreset>) -> Option<SplashScreen> {
     let splash = match SplashScreen::new() {
         Ok(splash) => splash,
         Err(e) => {
@@ -428,52 +283,20 @@ fn init_splash_screen(theme: Option<crate::ui::ThemePreset>) -> Option<SplashScr
     Some(splash)
 }
 
-/// Drains all currently queued boot-check updates from `rx` into `splash`,
+/// Drains all currently queued boot-check updates from `rx` through `set`,
 /// returning `true` once the sender has disconnected (all checks settled).
 #[cfg(feature = "ui")]
-fn drain_boot_updates(
-    splash: &SplashScreen,
+pub fn drain_boot_updates(
+    set: &mut dyn FnMut(BootCheckLine),
     rx: &std::sync::mpsc::Receiver<BootCheckUpdate>,
 ) -> bool {
     loop {
         match rx.try_recv() {
-            Ok(update) => apply_check_update(splash, &update),
+            Ok(update) => apply_check_update(set, &update),
             Err(std::sync::mpsc::TryRecvError::Empty) => return false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => return true,
         }
     }
-}
-
-/// Pumps splash frames until all boot checks finish, `deadline` expires, or rendering fails.
-#[cfg(feature = "ui")]
-fn pump_splash_frames(
-    fb: &mut Framebuffer,
-    window: &Rc<MinimalSoftwareWindow>,
-    splash: &SplashScreen,
-    rx: &std::sync::mpsc::Receiver<BootCheckUpdate>,
-    deadline: Duration,
-    mut checks_done: bool,
-) -> bool {
-    if !render_initial_frame(fb, window, "Boot splash screen") {
-        return checks_done;
-    }
-
-    let start = Instant::now();
-    tracing::info!("Running UI render loop");
-
-    loop {
-        checks_done |= drain_boot_updates(splash, rx);
-        slint::platform::update_timers_and_animations();
-        if let Err(e) = fb.render_frame(window) {
-            report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
-            break;
-        }
-        if checks_done || start.elapsed() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(16));
-    }
-    checks_done
 }
 
 /// Joins the `boot-checks` worker when `checks_done` is true (re-raising any worker
@@ -491,61 +314,15 @@ pub fn finish_boot_worker(checks: Option<std::thread::JoinHandle<()>>, checks_do
     }
 }
 
-/// Runs the splash lifecycle against an opened framebuffer backend.
-///
-/// Boot checks run on a background thread; the render loop drains their
-/// updates into the single bottom check line and exits immediately once all
-/// checks have settled (no artificial minimum display time) or once the
-/// deadline expires, whichever comes first. `preview_secs` bounds the splash;
-/// without it `MAX_SPLASH_WAIT` applies. If the deadline expires with checks
-/// still running (a hung probe), the worker is abandoned with a warning so
-/// boot always proceeds; a worker panic is re-raised on the normal path only.
-///
-/// # Panics
-/// Re-raises a panic from the `boot-checks` worker when it finished normally.
-#[cfg(feature = "ui")]
-pub fn run_splash_on(
-    fb: &mut Framebuffer,
-    probe: BootProbe,
-    preview_secs: Option<u64>,
-    theme: Option<crate::ui::ThemePreset>,
-) {
-    let Some(window) = unblank_and_init_platform(fb) else {
-        return;
-    };
-    let Some(splash) = init_splash_screen(theme) else {
-        return;
-    };
-
-    let (tx, rx) = std::sync::mpsc::channel::<BootCheckUpdate>();
-    // Graceful degradation instead of a panic (M-PANIC-IS-STOP): if the worker
-    // thread cannot be spawned (resource exhaustion), boot checks are skipped
-    // with a warning and the appliance still boots into the shell.
-    let checks = match std::thread::Builder::new()
-        .name("boot-checks".into())
-        .spawn(move || probe.run(&mut |update| drop(tx.send(update))))
-    {
-        Ok(handle) => Some(handle),
-        Err(err) => {
-            tracing::warn!("Failed to spawn boot-checks worker, skipping checks: {err}");
-            None
-        }
-    };
-    // Hard upper bound: without a preview window the splash may still not
-    // wait forever on a hung hardware probe (blocking D-Bus/I2C calls).
-    let deadline = preview_secs.map_or(MAX_SPLASH_WAIT, Duration::from_secs);
-    let checks_done = pump_splash_frames(fb, &window, &splash, &rx, deadline, checks.is_none());
-    finish_boot_worker(checks, checks_done);
-    tracing::info!("Splash render loop finished");
-}
-
 /// Fully-initialized shell plus its Bluetooth transport wiring.
 #[cfg(feature = "ui")]
 #[derive(Debug)]
 pub struct ShellInit {
     /// Application shell bound to the Slint window.
     pub shell: AppShell,
-    /// Connected Bluetooth device handle, if D-Bus was reachable.
+    /// Connected Bluetooth device handle: always `Some` for mocked
+    /// sessions; `None` for live sessions, whose connect is deferred to
+    /// [`bootstrap_bluetooth`].
     pub bt: Option<speaker_bluetooth::BluetoothDevice>,
     /// Queue bridging render-thread transport callbacks to the `bt-monitor` worker.
     pub commands: speaker_bluetooth::TransportCommandQueue,
@@ -567,6 +344,10 @@ pub fn init_shell(
 }
 
 /// Initializes the UI shell applying all runtime parameters from [`CoreConfig`].
+///
+/// Never blocks on D-Bus: live sessions defer the `BlueZ` connect and the
+/// initial playback/link snapshots to [`bootstrap_bluetooth`], which runs
+/// from the event loop so first paint is never delayed.
 #[cfg(feature = "ui")]
 #[must_use]
 pub fn init_shell_with_config(
@@ -582,28 +363,17 @@ pub fn init_shell_with_config(
     // presence, so the queue is wired unconditionally.
     let amp_commands = crate::volume::AmpVolumeCommandQueue::new();
     shell.wire_amp_volume(&amp_commands);
-    let maybe_bt = if mocked_device {
+    // Mocked sessions initialize eagerly against an in-memory device (no
+    // system bus involved). Live sessions never connect here: the blocking
+    // `BlueZ` connect and the initial snapshots are deferred to
+    // `bootstrap_bluetooth`, scheduled by the event loop so first paint is
+    // never delayed by a slow system bus.
+    let maybe_bt = mocked_device.then(|| {
         let (mock_bt, _) = speaker_bluetooth::BluetoothDevice::new_mocked();
         apply_initial_bt_state(&shell, &mock_bt);
         shell.wire_bluetooth_transport(&commands);
-        Some(mock_bt)
-    } else {
-        match speaker_bluetooth::BluetoothDevice::new_blocking() {
-            Ok(bt) => {
-                apply_initial_bt_state(&shell, &bt);
-                shell.wire_bluetooth_transport(&commands);
-                Some(bt)
-            }
-            Err(e) => {
-                report_display(
-                    tracing::Level::WARN,
-                    "Failed to connect to Bluetooth D-Bus for UI transport",
-                    &e,
-                );
-                None
-            }
-        }
-    };
+        mock_bt
+    });
     if let Some(tb) = tab {
         shell.set_tab(tb);
     }
@@ -640,6 +410,43 @@ fn apply_initial_bt_state(shell: &AppShell, bt: &speaker_bluetooth::BluetoothDev
             tracing::warn!(error = %e, "Failed to query initial Bluetooth link snapshot");
         }
     }
+}
+
+/// Deferred Bluetooth bootstrap for live sessions: connect, apply, spawn.
+///
+/// Runs from a one-shot timer once the event loop has painted the first
+/// frame (see `Session::start`), so the blocking `BlueZ` connect and the
+/// initial playback/link snapshots never delay window show. The `connect`
+/// factory is injectable so integration tests exercise the
+/// apply/wire/spawn sequence against `new_mocked()` devices without
+/// touching the system bus ("Ensure Hermetic Tests").
+///
+/// Returns the `bt-monitor` worker handle for the session to join at
+/// shutdown, or `None` when the connection could not be established
+/// (already reported at WARN level).
+#[cfg(feature = "ui")]
+#[must_use]
+pub fn bootstrap_bluetooth(
+    connect: impl FnOnce() -> Result<speaker_bluetooth::BluetoothDevice, speaker_bluetooth::BtError>,
+    shell: &AppShell,
+    shared: &Arc<Mutex<BtSharedUpdate>>,
+    commands: &speaker_bluetooth::TransportCommandQueue,
+    running: &Arc<AtomicBool>,
+) -> Option<std::io::Result<std::thread::JoinHandle<()>>> {
+    let bt = match connect() {
+        Ok(bt) => bt,
+        Err(e) => {
+            report_display(
+                tracing::Level::WARN,
+                "Failed to connect to Bluetooth D-Bus for UI transport",
+                &e,
+            );
+            return None;
+        }
+    };
+    apply_initial_bt_state(shell, &bt);
+    shell.wire_bluetooth_transport(commands);
+    Some(spawn_bt_monitor_worker(&bt, shared, commands, running))
 }
 
 /// Worker-side snapshot of Bluetooth state published to the render thread.
@@ -1179,79 +986,13 @@ fn bt_monitor_loop(
     }
 }
 
+/// Polls the EC12 rotary encoder and applies volume/mute deltas to the shell,
+/// requesting a redraw when the encoder changed UI state.
 #[cfg(feature = "ui")]
-pub fn run_render_loop(
-    fb: &mut Framebuffer,
-    window: &Rc<MinimalSoftwareWindow>,
-    shell: &AppShell,
-    maybe_bt: Option<&speaker_bluetooth::BluetoothDevice>,
-    commands: &speaker_bluetooth::TransportCommandQueue,
-    amp_commands: &crate::volume::AmpVolumeCommandQueue,
-    preview_secs: Option<u64>,
-) {
-    let touch_dev = crate::ui::TouchInputDevice::auto_discover().ok();
-    let encoder_dev = fb
-        .is_hardware_panel()
-        .then(|| match speaker_hardware::EncoderDevice::new() {
-            Ok(enc) => Some(enc),
-            Err(e) => {
-                report_display(
-                    tracing::Level::WARN,
-                    "Failed to initialize EC12 rotary encoder for volume control",
-                    &e,
-                );
-                None
-            }
-        })
-        .flatten();
-    run_render_loop_with_devices(
-        fb,
-        window,
-        shell,
-        maybe_bt,
-        commands,
-        amp_commands,
-        preview_secs,
-        touch_dev,
-        encoder_dev.as_ref(),
-    );
-}
-
-/// Runs the UI render loop with explicit touch input device injection.
-#[cfg(feature = "ui")]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "explicit peripheral injection seam for hermetic touch integration testing"
-)]
-pub fn run_render_loop_with_input(
-    fb: &mut Framebuffer,
-    window: &Rc<MinimalSoftwareWindow>,
-    shell: &AppShell,
-    maybe_bt: Option<&speaker_bluetooth::BluetoothDevice>,
-    commands: &speaker_bluetooth::TransportCommandQueue,
-    amp_commands: &crate::volume::AmpVolumeCommandQueue,
-    preview_secs: Option<u64>,
-    touch_dev: Option<crate::ui::TouchInputDevice>,
-) {
-    run_render_loop_with_devices(
-        fb,
-        window,
-        shell,
-        maybe_bt,
-        commands,
-        amp_commands,
-        preview_secs,
-        touch_dev,
-        None,
-    );
-}
-
-#[cfg(feature = "ui")]
-fn poll_encoder_input(
+pub fn poll_encoder_input(
     encoder_dev: Option<&speaker_hardware::EncoderDevice>,
     encoder_tracker: &mut crate::ui::EncoderVolumeTracker,
     shell: &AppShell,
-    window: &Rc<MinimalSoftwareWindow>,
     encoder_warned: &mut bool,
 ) {
     let Some(enc) = encoder_dev else { return };
@@ -1259,7 +1000,7 @@ fn poll_encoder_input(
         Ok(changed) => {
             *encoder_warned = false;
             if changed {
-                window.window().request_redraw();
+                shell.window().window().request_redraw();
             }
         }
         Err(e) => {
@@ -1275,7 +1016,7 @@ fn poll_encoder_input(
 
 /// Joins the `amp-volume` worker, re-raising a worker panic (fail-fast).
 #[cfg(feature = "ui")]
-fn join_amp_volume_worker(amp_worker: std::io::Result<std::thread::JoinHandle<()>>) {
+pub fn join_amp_volume_worker(amp_worker: std::io::Result<std::thread::JoinHandle<()>>) {
     match amp_worker {
         Ok(handle) => {
             // Propagate a worker panic to this thread: a crashed amp-volume
@@ -1295,8 +1036,12 @@ fn join_amp_volume_worker(amp_worker: std::io::Result<std::thread::JoinHandle<()
 }
 
 /// Spawns the `bt-monitor` worker thread for a live Bluetooth device.
+///
+/// # Errors
+/// Returns the underlying thread-spawn I/O error when the OS refuses to
+/// create the `bt-monitor` worker thread.
 #[cfg(feature = "ui")]
-fn spawn_bt_monitor_worker(
+pub fn spawn_bt_monitor_worker(
     bt: &speaker_bluetooth::BluetoothDevice,
     shared: &Arc<Mutex<BtSharedUpdate>>,
     commands: &speaker_bluetooth::TransportCommandQueue,
@@ -1316,11 +1061,15 @@ fn spawn_bt_monitor_worker(
 /// The worker always runs: in mocked sessions (host tests, splash previews)
 /// against a mock client so nothing touches the host system bus; in live
 /// sessions against the real `audio-manager` D-Bus API. The choice is keyed on
-/// the framebuffer backend, not on Bluetooth availability: a live appliance
-/// whose Bluetooth D-Bus connection failed at startup must still drive the real
-/// amplifier, never a silent mock.
+/// the runtime's `mocked` flag, not on Bluetooth availability: a live
+/// appliance whose Bluetooth D-Bus connection failed at startup must still
+/// drive the real amplifier, never a silent mock.
+///
+/// # Errors
+/// Returns the underlying thread-spawn I/O error when the OS refuses to
+/// create the `amp-volume` worker thread.
 #[cfg(feature = "ui")]
-fn spawn_amp_volume_worker(
+pub fn spawn_amp_volume_worker(
     shared: &Arc<Mutex<BtSharedUpdate>>,
     running: &Arc<AtomicBool>,
     amp_commands: &crate::volume::AmpVolumeCommandQueue,
@@ -1375,146 +1124,9 @@ fn spawn_amp_volume_worker(
         })
 }
 
-/// Runs the UI render loop with explicit touch and rotary encoder device injection.
-#[cfg(feature = "ui")]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "explicit peripheral injection seam for hermetic touch + encoder integration testing"
-)]
-pub fn run_render_loop_with_devices(
-    fb: &mut Framebuffer,
-    window: &Rc<MinimalSoftwareWindow>,
-    shell: &AppShell,
-    maybe_bt: Option<&speaker_bluetooth::BluetoothDevice>,
-    commands: &speaker_bluetooth::TransportCommandQueue,
-    amp_commands: &crate::volume::AmpVolumeCommandQueue,
-    preview_secs: Option<u64>,
-    mut touch_dev: Option<crate::ui::TouchInputDevice>,
-    encoder_dev: Option<&speaker_hardware::EncoderDevice>,
-) {
-    let start = Instant::now();
-    let duration = preview_secs.map(Duration::from_secs);
-    tracing::info!("Running UI render loop");
-
-    let bg_running = Arc::new(AtomicBool::new(true));
-    let bg_running_worker = Arc::clone(&bg_running);
-    let shared_state: Arc<Mutex<BtSharedUpdate>> = Arc::new(Mutex::new(BtSharedUpdate::default()));
-    let shared_state_worker = Arc::clone(&shared_state);
-    let commands_worker = commands.clone();
-
-    let amp_worker = spawn_amp_volume_worker(
-        &shared_state,
-        &bg_running,
-        amp_commands,
-        !fb.is_hardware_panel(),
-    );
-
-    let bt_worker = maybe_bt.map(|bt| {
-        spawn_bt_monitor_worker(
-            bt,
-            &shared_state_worker,
-            &commands_worker,
-            &bg_running_worker,
-        )
-    });
-
-    let mut loop_timing = FrameLoopTiming::default();
-    let mut overlay_theme: Option<ThemePreset> = None;
-    let mut encoder_tracker = crate::ui::EncoderVolumeTracker::new();
-    let mut encoder_warned = false;
-    while duration.is_none_or(|d| start.elapsed() < d) {
-        let frame_start = Instant::now();
-
-        // Process and dispatch pending touch events directly on the UI render thread
-        if let Some(ref mut touch) = touch_dev {
-            match touch.dispatch_to_window(window) {
-                Ok(count) => {
-                    if count > 0 {
-                        window.window().request_redraw();
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Touch dispatch failed");
-                }
-            }
-        }
-
-        // Poll physical/mocked EC12 rotary encoder detents and switch presses
-        poll_encoder_input(
-            encoder_dev,
-            &mut encoder_tracker,
-            shell,
-            window,
-            &mut encoder_warned,
-        );
-
-        if let Err(e) = sync_marquee_overlay(fb, shell, window, &mut overlay_theme) {
-            report_display(tracing::Level::ERROR, "Marquee overlay sync failed", &e);
-            break;
-        }
-
-        apply_shared_bt_state(shell, &shared_state);
-
-        // No unconditional `request_redraw()` here: the marquee timers and real Slint
-        // animations mark the window dirty themselves, so the loop idles when the UI is
-        // static instead of burning a full render pass every 16.7 ms frame.
-        let is_animating = shell.window().get_is_animating();
-
-        slint::platform::update_timers_and_animations();
-        let did_render = match fb.render_frame(window) {
-            Ok(rendered) => rendered,
-            Err(e) => {
-                report_display(tracing::Level::ERROR, "Render loop frame failed", &e);
-                break;
-            }
-        };
-        if let Some(timing) = fb.last_frame_timing() {
-            loop_timing.record(&timing);
-        }
-
-        let has_animations = window.window().has_active_animations();
-        if did_render || has_animations || is_animating {
-            // Target precise 60 FPS (16,667 µs per frame) for buttery smooth, tear-free animations
-            const TARGET_FRAME_TIME: Duration = Duration::from_micros(16_667);
-            let elapsed = frame_start.elapsed();
-            if let Some(remaining) = TARGET_FRAME_TIME.checked_sub(elapsed) {
-                std::thread::sleep(remaining);
-            }
-        } else {
-            let touch_fd = touch_dev
-                .as_ref()
-                .and_then(crate::ui::TouchInputDevice::as_raw_fd);
-            idle_sleep(touch_fd);
-        }
-    }
-
-    loop_timing.report();
-    bg_running.store(false, Ordering::Relaxed);
-    join_amp_volume_worker(amp_worker);
-    if let Some(worker) = bt_worker {
-        // Propagate a worker panic to this thread: a crashed bt-monitor must fail
-        // the daemon (fail-fast) rather than leave playback state silently stale.
-        match worker {
-            Ok(handle) => {
-                if let Err(panic) = handle.join() {
-                    std::panic::resume_unwind(panic);
-                }
-            }
-            Err(e) => {
-                report_display(
-                    tracing::Level::WARN,
-                    "bt-monitor thread could not be started",
-                    &e,
-                );
-            }
-        }
-    }
-    tracing::info!("Render loop finished");
-}
-
 /// Applies queued Bluetooth playback/PCM/cover updates from the worker to the shell.
 #[cfg(feature = "ui")]
-fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpdate>>) {
+pub fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpdate>>) {
     // A poisoned guard is recovered so a panicked worker cannot permanently
     // freeze the UI; a busy lock is simply skipped until the next frame.
     let lock = match shared_state.try_lock() {
@@ -1547,228 +1159,6 @@ fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpda
             shell.apply_amp_volume(&amp);
         }
     }
-}
-
-/// Keeps the Rust-side marquee composer synchronized with the UI shell.
-///
-/// Captures a one-frame clean row background snapshot on first use and after every theme
-/// change (strips render nothing for that frame), then refreshes the per-iteration scroll
-/// specifications read from the shared `MarqueeCompose` global.
-///
-/// # Errors
-///
-/// Propagates [`FramebufferError`] from the capture render or region snapshots.
-#[cfg(feature = "ui")]
-fn sync_marquee_overlay(
-    fb: &mut Framebuffer,
-    shell: &AppShell,
-    window: &MinimalSoftwareWindow,
-    overlay_theme: &mut Option<ThemePreset>,
-) -> Result<(), FramebufferError> {
-    if shell.should_suppress_marquee() {
-        // Marquee rows exist on the Now Playing tab only and are suppressed while the
-        // Volume HUD overlay is visible; re-arming (capture redraw) happens when the
-        // Now Playing tab is unobstructed again.
-        fb.set_marquee_rows(Vec::new());
-        *overlay_theme = None;
-        return Ok(());
-    }
-    let theme = shell.current_theme();
-    if !fb.marquee_overlay_ready() || overlay_theme.as_ref() != Some(&theme) {
-        shell.set_marquee_strips_visible(false);
-        // The capture frame MUST repaint the whole window: with partial rendering the
-        // hidden strips leave no dirty region, so the shadow buffer would still hold
-        // previously composed strip pixels and they would be baked into the captured
-        // "background" (visible as ghost/double text under the strip).
-        // The composer must also be inert during the capture render: render_frame
-        // composes the still-installed (old) specs AFTER the full redraw, which would
-        // write the old strip straight back into the snapshot region.
-        fb.set_marquee_rows(Vec::new());
-        fb.render_frame_full_redraw(window)?;
-        let rects = shell.marquee_geometry();
-        let mut backgrounds = Vec::with_capacity(rects.len());
-        for (x, y, w, h) in &rects {
-            backgrounds.push(fb.capture_region(*x, *y, *w, *h)?);
-        }
-        // Composition must be enabled before the specs are built: the specs are gated on
-        // the compose flag, and rows must exist before their backgrounds are installed.
-        shell.set_marquee_compose_in_rust(true);
-        fb.set_marquee_rows(shell.marquee_row_specs());
-        fb.install_marquee_backgrounds(backgrounds);
-        shell.set_marquee_strips_visible(true);
-        *overlay_theme = Some(theme);
-    }
-    fb.set_marquee_rows(shell.marquee_row_specs());
-    Ok(())
-}
-
-/// Adaptive power-saving sleep when the UI is completely static (0% CPU at idle).
-///
-/// If a touch device file descriptor is present, polls it with a bounded timeout
-/// so physical touches wake the render loop immediately (<20 ms) rather than sleeping.
-#[cfg(feature = "ui")]
-pub fn idle_sleep(touch_fd: Option<RawFd>) {
-    let timeout = slint::platform::duration_until_next_timer_update()
-        .unwrap_or(Duration::from_millis(50))
-        .clamp(Duration::from_millis(10), Duration::from_millis(50));
-
-    let should_sleep = match touch_fd {
-        Some(fd) => {
-            let mut pfd = libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // SAFETY: poll with 1 descriptor and bounded timeout is safe.
-            let (ret, last_err) = unsafe {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "bounded 10..=50 ms fits in c_int"
-                )]
-                let r = libc::poll(&raw mut pfd, 1, timeout.as_millis() as libc::c_int);
-                let err = (r < 0).then(std::io::Error::last_os_error);
-                (r, err)
-            };
-            // Sleep on unrecoverable poll errors (ret < 0, excluding EINTR) or if hangup/error revents are signaled
-            // without readable data, preventing a 100% CPU busy-spin while preserving pending touch events and prompt EINTR retry.
-            // When poll times out (ret == 0), poll has already blocked for the full duration, avoiding double-sleep.
-            (ret < 0
-                && last_err.as_ref().and_then(std::io::Error::raw_os_error) != Some(libc::EINTR))
-                || ((pfd.revents & libc::POLLIN) == 0
-                    && (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0))
-        }
-        None => true,
-    };
-
-    if should_sleep {
-        std::thread::sleep(timeout);
-    }
-}
-
-/// Aggregated frame phase timings for render-loop CPU diagnostics.
-#[derive(Debug, Default)]
-#[cfg(feature = "ui")]
-struct FrameLoopTiming {
-    frames: u64,
-    rendered: u64,
-    draw_us: u64,
-    vsync_us: u64,
-    blit_us: u64,
-    compose_us: u64,
-    max_draw_us: u64,
-    dirty_px: u64,
-    max_dirty_px: u64,
-    max_dirty_box: (u32, u32, u32, u32),
-}
-
-#[cfg(feature = "ui")]
-impl FrameLoopTiming {
-    fn record(&mut self, timing: &FrameTiming) {
-        self.frames += 1;
-        let active = timing.draw_us > 0 || timing.blit_us > 0;
-        if !active {
-            return;
-        }
-        self.rendered += 1;
-        self.draw_us += timing.draw_us;
-        self.vsync_us += timing.vsync_us;
-        self.blit_us += timing.blit_us;
-        self.compose_us += timing.compose_us;
-        self.max_draw_us = self.max_draw_us.max(timing.draw_us);
-        self.dirty_px += timing.dirty_px;
-        if timing.dirty_px > self.max_dirty_px {
-            self.max_dirty_px = timing.dirty_px;
-            self.max_dirty_box = timing.dirty_box;
-        }
-        if self.rendered.is_multiple_of(600) {
-            self.report();
-        }
-    }
-
-    fn report(&self) {
-        let rendered = self.rendered.max(1);
-        let max_dirty_box = format!("{:?}", self.max_dirty_box);
-        tracing::debug!(
-            "Frame timing: {frames} loop iterations, {rendered} rendered | avg draw {draw} us, avg compose {compose} us, avg vsync {vsync} us (blocking), avg blit {blit} us, max draw {max_draw} us | avg dirty {dirty} px, max dirty {max_dirty} px at {max_dirty_box}",
-            frames = self.frames,
-            rendered = self.rendered,
-            draw = self.draw_us / rendered,
-            compose = self.compose_us / rendered,
-            vsync = self.vsync_us / rendered,
-            blit = self.blit_us / rendered,
-            max_draw = self.max_draw_us,
-            dirty = self.dirty_px / rendered,
-            max_dirty = self.max_dirty_px,
-            max_dirty_box = max_dirty_box,
-        );
-    }
-}
-
-/// Runs the UI Shell lifecycle against an opened framebuffer backend.
-#[cfg(feature = "ui")]
-pub fn run_shell_on(
-    fb: &mut Framebuffer,
-    preview_secs: Option<u64>,
-    theme: Option<crate::ui::ThemePreset>,
-    tab: Option<i32>,
-    marquee_fps: u32,
-) {
-    let config = legacy_config(theme, marquee_fps);
-    run_shell_on_with_config(fb, preview_secs, tab, &config);
-}
-
-/// Runs the UI Shell lifecycle applying the full [`CoreConfig`] parameters.
-#[cfg(feature = "ui")]
-pub fn run_shell_on_with_config(
-    fb: &mut Framebuffer,
-    preview_secs: Option<u64>,
-    tab: Option<i32>,
-    config: &CoreConfig,
-) {
-    let Some(window) = unblank_and_init_platform(fb) else {
-        return;
-    };
-
-    let main_window = match MainWindow::new() {
-        Ok(win) => win,
-        Err(e) => {
-            report_display(
-                tracing::Level::ERROR,
-                "Failed to initialize UI Shell MainWindow",
-                &e,
-            );
-            return;
-        }
-    };
-
-    let ShellInit {
-        shell,
-        bt,
-        commands,
-        amp_commands,
-    } = init_shell_with_config(main_window, !fb.is_hardware_panel(), tab, config);
-    if let Err(e) = shell.window().show() {
-        report_display(
-            tracing::Level::ERROR,
-            "Failed to show UI Shell MainWindow",
-            &e,
-        );
-        return;
-    }
-
-    if !render_initial_frame(fb, &window, "UI Shell") {
-        return;
-    }
-
-    run_render_loop(
-        fb,
-        &window,
-        &shell,
-        bt.as_ref(),
-        &commands,
-        &amp_commands,
-        preview_secs,
-    );
 }
 
 /// Executes the core appliance daemon with parsed options.
