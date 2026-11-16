@@ -2,13 +2,15 @@ import { MaterialPalette } from "@material/material.slint";
 import { MarqueeCompose } from "marquee_state.slint";
 import { MaterialStyleMetrics } from "@material/material.slint";
 
-// Scrolling marquee over a pre-rasterized text strip image.
+// Scrolling marquee over live text.
 //
-// The strip image is rendered offscreen (see `marquee_rasterizer.slint`) only when its
-// text, color, or typography changes; per-frame work here is a cheap pixel blit instead
-// of glyph shaping and rasterization. `strip` is empty until the first raster completes.
+// The KMS/FemtoVG migration removed the offscreen strip rasterizer: under
+// `backend-linuxkms` any secondary Slint component creates a real DRM/GL
+// window whose teardown crashed Mesa (SEGV in `driUnbindContext`). FemtoVG
+// caches glyph shapes in its atlas, so scrolling live `Text` costs a GPU blit
+// of the dirty marquee rows per frame instead of CPU glyph shaping.
 component MarqueeText inherits Rectangle {
-    in property <image> strip;
+    in property <string> text;
     // Shared marquee clock (ticks of the parent's single 16.65 ms timer) and the
     // configured marquee frame rate in ticks per second (60 = 1 px per tick, 30 =
     // 2 px every other tick). One shared timer guarantees title and artist scroll
@@ -16,51 +18,40 @@ component MarqueeText inherits Rectangle {
     // number of dirty events fed to the render loop.
     in property <int> clock_frame: 0;
     in property <int> marquee_fps: 60;
-    // When true, the strip images stay static (x = 0) and Rust composes the scrolled
-    // pixels directly into the framebuffer shadow buffer every animation tick, so the
-    // software renderer never dirties the marquee rows per frame.
-    in property <bool> compose_in_rust: false;
-    // During background capture the images keep their layout geometry but render
-    // nothing, so `capture_region` snapshots the clean row background.
-    in property <bool> strips_hidden: false;
-    // Minimum height floor to prevent zero-height geometry when strip is empty.
-    // Must stay in sync with the rasterization font size (MarqueeTypography::
-    // TITLE_FONT_SIZE_PX = 32 in src/ui/marquee.rs) — this default is the single
-    // Slint-side source of truth; instances inherit it and need not restate it.
+    // Minimum height floor to keep geometry deterministic while `text` is empty.
     in property <length> height_floor: 32px;
+    // Marquee typography: matches the former strip rasterizer (32 px / extra
+    // bold); the font family is inherited from the window (Inter).
+    property <length> font_size: 32px;
+    property <int> font_weight: 800;
+    property <color> font_color: MaterialPalette.on_background;
     clip: true;
-    height: Math.max(strip_item.preferred-height, root.height_floor);
+    height: Math.max(main_text.preferred-height, root.height_floor);
     horizontal-stretch: 1;
     preferred-width: 0px;
 
-    strip_item := Image {
-        x: root.compose_in_rust ? 0px : root.scroll_offset;
-        source: root.strip;
-        visible: !root.strips_hidden && !root.compose_in_rust;
+    main_text := Text {
+        x: root.scroll_offset;
+        text: root.text;
+        color: root.font_color;
+        font-size: root.font_size;
+        font-weight: root.font_weight;
+        wrap: no-wrap;
+        vertical-alignment: center;
     }
 
-    property <length> text_width: strip_item.width;
+    property <length> text_width: main_text.width;
     out property <bool> is_overflow: text_width > root.width;
-    out property <Point> viewport_origin: root.absolute-position;
-    out property <length> viewport_w: root.width;
-    out property <length> viewport_h: root.height;
-    // Current leftward scroll distance in whole physical px (0..cycle_px); 0 while the
-    // strip renders statically inside Slint (compose_in_rust == false).
-    out property <int> scroll_px: root.compose_in_rust && root.is_overflow ?
-        Math.max(0, Math.round(-root.scroll_offset / 1px)) : 0;
-    out property <int> cycle_px: Math.round(root.cycle_distance / 1px);
     property <length> gap: 80px;
     property <length> cycle_distance: text_width + gap;
 
     // Continuous seamless marquee: constant-speed leftward scroll with no stationary
     // pause. The offset derives from the shared integer frame clock: each clock tick
     // advances the scroll by `step_frames` physical px, so 60 fps = 1 px per 16.65 ms and
-    // 30 fps = 2 px per 33.3 ms at identical on-screen speed. Halving the effective frame
-    // rate halves the per-second software-renderer cost of scrolling the large
-    // pre-rasterized strips (~34k dirty px/frame). Reading `animation-tick()` was
-    // deliberately avoided:
-    // it permanently marks Slint's animation driver active, pinning the render loop at
-    // 60 fps (and ~60% CPU) even while the marquee is paused or the text does not overflow.
+    // 30 fps = 2 px per 33.3 ms at identical on-screen speed. Reading `animation-tick()`
+    // was deliberately avoided: it permanently marks Slint's animation driver active,
+    // pinning the render loop at 60 fps (and ~60% CPU) even while the marquee is paused
+    // or the text does not overflow.
     property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
     property <length> step: root.step_frames * 1px;
     property <int> cycle_frames: Math.max(1, Math.round(cycle_distance / root.step));
@@ -68,9 +59,6 @@ component MarqueeText inherits Rectangle {
     property <float> progress: scroll_frame * 1.0 / cycle_frames;
     property <length> scroll_offset: is_overflow ? (-cycle_distance * progress) : 0px;
 
-    // The wrap-around copy is only ever visible once the trailing gap of the first
-    // copy has entered the viewport's right edge; skipping it otherwise halves the
-    // per-frame image blit area.
     // Whether the wrap-around copy must be composited. Expressed in INTEGER frame
     // arithmetic on purpose: the previous float comparison
     // `scroll_offset + cycle_distance < width` flapped when f32 rounding made
@@ -83,12 +71,17 @@ component MarqueeText inherits Rectangle {
 
     // The wrap-around copy is only ever visible once the trailing gap of the first
     // copy has entered the viewport's right edge; skipping it otherwise halves the
-    // per-frame image blit area. The element stays in the item tree permanently and
+    // per-frame dirty area. The element stays in the item tree permanently and
     // only its `visible` flag toggles, so no item-tree destruction can occur.
-    Image {
-        x: root.compose_in_rust ? 0px : root.scroll_offset + root.cycle_distance;
-        source: root.strip;
-        visible: !root.strips_hidden && !root.compose_in_rust && root.wrap_visible;
+    Text {
+        x: root.scroll_offset + root.cycle_distance;
+        text: root.text;
+        color: root.font_color;
+        font-size: root.font_size;
+        font-weight: root.font_weight;
+        wrap: no-wrap;
+        vertical-alignment: center;
+        visible: root.wrap_visible;
     }
 }
 
@@ -212,8 +205,6 @@ export component NowPlayingView inherits Rectangle {
     in property <string> track_artist: "";
     in property <string> track_album: "";
     in property <string> artist_marquee_text;
-    in property <image> title_marquee_strip;
-    in property <image> artist_marquee_strip;
     in property <string> position_text: "00:00";
     in property <string> duration_text: "00:00";
     in property <int> duration_ms: 0;
@@ -227,31 +218,10 @@ export component NowPlayingView inherits Rectangle {
     // `step_frames` triggers, so both marquees scroll in lockstep and the render
     // loop receives exactly one dirty event per effective animation frame.
     in property <int> marquee_fps: MarqueeCompose.marquee_fps;
-    // See `MarqueeText.compose_in_rust`: set by Rust after the background snapshot exists.
-    in property <bool> marquee_compose_in_rust: MarqueeCompose.compose_in_rust;
     in-out property <int> marquee_clock <=> MarqueeCompose.clock;
     property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
     property <int> raw_tick: 0;
-    // Shadow properties that track the title marquee viewport geometry.
-    // Using `changed` on these root properties ensures the global is updated
-    // whenever the child component's layout changes (e.g., after initial layout
-    // or strip rasterization), not just when the strip image changes.
-    property <Point> _title_viewport_origin: title_marquee.viewport_origin;
-    property <length> _title_viewport_w: title_marquee.viewport_w;
-    property <length> _title_viewport_h: title_marquee.viewport_h;
     out property <bool> is_animating: title_marquee.is_overflow || root.is_playing;
-
-    // Publish composer state to the shared global consumed by the Rust render loop.
-    // Callback assignments (not declarative bindings) are the sanctioned way to write
-    // global properties from a component instance.
-    function publish_composer_state() {
-        MarqueeCompose.title_origin = title_marquee.viewport_origin;
-        MarqueeCompose.title_w = title_marquee.viewport_w;
-        MarqueeCompose.title_h = title_marquee.viewport_h;
-        MarqueeCompose.title_scroll_px = title_marquee.scroll_px;
-        MarqueeCompose.title_cycle_px = title_marquee.cycle_px;
-        MarqueeCompose.title_overflow = title_marquee.is_overflow;
-    }
 
     Timer {
         interval: 16.65ms;
@@ -261,33 +231,13 @@ export component NowPlayingView inherits Rectangle {
             if (Math.mod(root.raw_tick, root.step_frames) == 0) {
                 root.marquee_clock += 1;
             }
-            root.publish_composer_state();
         }
     }
 
-    init => {
-        root.publish_composer_state();
-    }
-
-    changed title_marquee_strip => {
+    // Restart the scroll when the title text changes so a new track begins at
+    // the leading edge instead of resuming the previous track's offset.
+    changed track_title => {
         root.marquee_clock = 0;
-        root.publish_composer_state();
-    }
-    changed artist_marquee_strip => {
-        root.marquee_clock = 0;
-        root.publish_composer_state();
-    }
-    // Ensure the composer global is updated when the title marquee viewport geometry
-    // changes (e.g., after initial layout or when strip rasterization completes).
-    // This prevents the Rust-side composer from reading stale/zero height values.
-    changed _title_viewport_origin => {
-        root.publish_composer_state();
-    }
-    changed _title_viewport_w => {
-        root.publish_composer_state();
-    }
-    changed _title_viewport_h => {
-        root.publish_composer_state();
     }
 
     callback toggle_play_pause();
@@ -377,11 +327,9 @@ export component NowPlayingView inherits Rectangle {
                 spacing: 16px;  // More distance between title and singer
 
                 title_marquee := MarqueeText {
-                    strip: root.title_marquee_strip;
+                    text: root.track_title;
                     clock_frame: root.marquee_clock;
                     marquee_fps: root.marquee_fps;
-                    compose_in_rust: root.marquee_compose_in_rust;
-                    strips_hidden: MarqueeCompose.capture_pending;
                 }
 
                 HorizontalLayout {

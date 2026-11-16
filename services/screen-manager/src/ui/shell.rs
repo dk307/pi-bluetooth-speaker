@@ -18,9 +18,7 @@ use crate::config::{
 };
 
 use super::backdrop::OVERLAY_TOP_INSET;
-use super::framebuffer::MarqueeRowSpec;
 use super::generated::{AppTheme, MainWindow, MarqueeCompose};
-use super::marquee::{MarqueeStripCache, MarqueeTypography, StripRequest};
 use super::theme::ThemePreset;
 
 /// Tracks cumulative [`speaker_hardware::EncoderStatus`] counters and translates
@@ -248,7 +246,6 @@ fn pcm_bit_depth(format: &str) -> &'static str {
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
-    strips: Rc<RefCell<MarqueeStripCache>>,
     volume_step_percent: Cell<u8>,
     transport_commands: Rc<RefCell<Option<speaker_bluetooth::TransportCommandQueue>>>,
     amp_commands: Rc<RefCell<Option<crate::volume::AmpVolumeCommandQueue>>>,
@@ -270,7 +267,6 @@ impl AppShell {
     pub fn new(window: MainWindow) -> Self {
         let shell = Self {
             window,
-            strips: Rc::new(RefCell::new(MarqueeStripCache::default())),
             volume_step_percent: Cell::new(DEFAULT_VOLUME_STEP_PERCENT),
             transport_commands: Rc::new(RefCell::new(None)),
             amp_commands: Rc::new(RefCell::new(None)),
@@ -485,10 +481,6 @@ impl AppShell {
         self.window.get_cd_enabled()
     }
 
-    /// Sets whether the optical CD player service and navigation entry are enabled.
-    ///
-    /// If disabled while the shell is currently on the CD Player tab (tab 3), the active tab
-    /// is automatically reset to the Now Playing player tab (tab 0) to prevent state desync.
     /// Sets the marquee scroll rate in fps (30 or 60) on the shared composer global.
     pub fn set_marquee_fps(&self, fps: u32) {
         self.window
@@ -496,107 +488,10 @@ impl AppShell {
             .set_marquee_fps(i32::try_from(fps).unwrap_or(i32::MAX));
     }
 
-    /// Toggles Rust-side marquee composition (strip images render statically in Slint).
-    pub fn set_marquee_compose_in_rust(&self, compose: bool) {
-        self.window
-            .global::<MarqueeCompose>()
-            .set_compose_in_rust(compose);
-    }
-
-    /// Suspends or resumes marquee strip rendering for the one-frame background capture
-    /// (`visible = false` keeps the strip layout geometry but renders nothing).
-    pub fn set_marquee_strips_visible(&self, visible: bool) {
-        self.window
-            .global::<MarqueeCompose>()
-            .set_capture_pending(!visible);
-    }
-
-    /// Marquee viewport rectangles `(x, y, width, height)` in framebuffer pixels, read
-    /// from the shared composer global (clamped to the fixed 800x480 panel).
-    #[must_use]
-    pub fn marquee_geometry(&self) -> Vec<(u32, u32, u32, u32)> {
-        let g = self.window.global::<MarqueeCompose>();
-        let px = |v: f32, max: f32| u32::try_from(v.round().clamp(0.0, max) as i64).unwrap_or(0);
-        let rect = |origin: slint::LogicalPosition, w: f32, h: f32| {
-            (
-                px(origin.x, 800.0),
-                px(origin.y, 480.0),
-                px(w, 800.0),
-                px(h, 480.0),
-            )
-        };
-        vec![rect(g.get_title_origin(), g.get_title_w(), g.get_title_h())]
-    }
-
-    /// Returns whether the raw marquee overlay should be suppressed
-    /// (e.g. when not on the Now Playing tab or when a HUD overlay is active).
-    #[must_use]
-    pub fn should_suppress_marquee(&self) -> bool {
-        self.current_tab() != 0 || self.is_volume_hud_active() || self.is_codec_hud_active()
-    }
-
-    /// Builds [`MarqueeRowSpec`]s for the Rust-side composer from the shared global and
-    /// the cached strip pixels; rows are omitted when the text does not overflow.
+    /// Sets whether the optical CD player service and navigation entry are enabled.
     ///
-    /// # Panics
-    ///
-    /// Panics if the strip-cache mutex was poisoned by a prior panic in this thread.
-    #[must_use]
-    pub fn marquee_row_specs(&self) -> Vec<MarqueeRowSpec> {
-        let g = self.window.global::<MarqueeCompose>();
-        // Suppress Rust-side marquee composition whenever the Now Playing tab is not
-        // visible or while the Volume HUD overlay covers the middle viewport.
-        if !g.get_compose_in_rust() || self.should_suppress_marquee() {
-            return Vec::new();
-        }
-        let px = |v: f32, max: f32| u32::try_from(v.round().clamp(0.0, max) as i64).unwrap_or(0);
-        let row = |origin: slint::LogicalPosition,
-                   w: f32,
-                   h: f32,
-                   scroll: i32,
-                   cycle: i32,
-                   overflow: bool,
-                   strip: Option<&super::marquee::MarqueeStrip>| {
-            let strip = strip.filter(|s| !s.is_empty())?;
-            // Non-overflow rows are composed too (Slint strips are hidden in compose
-            // mode): a single unscrolled tile with a cycle wider than the viewport so
-            // the tiling loop never draws a second copy inside the row.
-            let (scroll_px, cycle_px) = if overflow {
-                (
-                    u32::try_from(scroll).unwrap_or(0),
-                    u32::try_from(cycle).unwrap_or(0),
-                )
-            } else {
-                (0, px(w, 800.0) + 1)
-            };
-            Some(MarqueeRowSpec {
-                rect: (
-                    px(origin.x, 800.0),
-                    px(origin.y, 480.0),
-                    px(w, 800.0),
-                    px(h, 480.0),
-                ),
-                scroll_px,
-                cycle_px,
-                strip: strip.pixels_arc(),
-                strip_w: strip.width(),
-                strip_id: strip.strip_id(),
-            })
-        };
-        vec![row(
-            g.get_title_origin(),
-            g.get_title_w(),
-            g.get_title_h(),
-            g.get_title_scroll_px(),
-            g.get_title_cycle_px(),
-            g.get_title_overflow(),
-            self.strips.borrow().title(),
-        )]
-        .into_iter()
-        .flatten()
-        .collect()
-    }
-
+    /// If disabled while the shell is currently on the CD Player tab (tab 3), the active tab
+    /// is automatically reset to the Now Playing player tab (tab 0) to prevent state desync.
     pub fn set_cd_enabled(&self, enabled: bool) {
         self.window.set_cd_enabled(enabled);
         if !enabled && self.current_tab() == 3 {
@@ -640,7 +535,6 @@ impl AppShell {
         self.window.set_track_title(title.into());
         self.window.set_track_artist(artist.into());
         self.window.set_track_album(album.into());
-        self.refresh_marquee_strips();
     }
 
     /// Returns the current volume percentage (0.0–100.0).
@@ -807,7 +701,6 @@ impl AppShell {
     /// Applies state from a [`speaker_bluetooth::BtPlaybackState`] point-in-time snapshot.
     pub fn apply_bluetooth_playback(&self, playback: &speaker_bluetooth::BtPlaybackState) {
         Self::apply_playback_to_window(&self.window, playback);
-        self.refresh_marquee_strips();
     }
 
     fn apply_playback_to_window(w: &MainWindow, playback: &speaker_bluetooth::BtPlaybackState) {
@@ -905,44 +798,6 @@ impl AppShell {
     /// Applies a theme preset to the UI shell.
     pub fn apply_theme(&self, preset: ThemePreset) {
         preset.apply(&self.window);
-        self.refresh_marquee_strips();
-    }
-
-    /// Re-rasterizes the marquee strips when their text, color, or typography changed.
-    ///
-    /// Cached strips make this a no-op while metadata, theme, and typography are stable,
-    /// so repeated playback-state ticks perform no offscreen rasterization.
-    fn refresh_marquee_strips(&self) {
-        Self::refresh_marquee_strips_for(&self.window, &self.strips);
-    }
-
-    /// Free-function form of [`AppShell::refresh_marquee_strips`] callable from
-    /// Slint callbacks that only hold a weak window handle and the shared strip cache.
-    fn refresh_marquee_strips_for(w: &MainWindow, strips: &RefCell<MarqueeStripCache>) {
-        let preset = ThemePreset::from_index(w.global::<AppTheme>().get_active_preset());
-        // Use Material scheme's onBackground (equivalent to old text_primary)
-        let schemes = preset.material_schemes();
-        let text_primary = schemes.dark.onBackground;
-        let rgb = |color: slint::Color| (color.red(), color.green(), color.blue());
-
-        let title_request = StripRequest {
-            text: w.get_track_title().as_str().into(),
-            color: rgb(text_primary),
-            font_size_px: MarqueeTypography::TITLE_FONT_SIZE_PX,
-            font_weight: MarqueeTypography::TITLE_FONT_WEIGHT,
-            font_family: preset.font_family().into(),
-        };
-
-        let title_strip = {
-            let mut cache = strips.borrow_mut();
-            cache.rasterize_title(&title_request)
-        };
-        // Only touch the image properties when a strip actually re-rendered: setting an
-        // identical property value still fires Slint change notifications and forces
-        // (expensive) partial/full invalidations four times per second.
-        if let Some(strip) = title_strip {
-            w.set_title_marquee_strip(strip.image().clone());
-        }
     }
 
     /// Cycles to the next available theme preset in cyclic order.
@@ -986,23 +841,19 @@ impl AppShell {
         });
 
         let win = self.window.as_weak();
-        let strips = Rc::clone(&self.strips);
         self.window.on_select_theme(move |idx| {
             if let Some(w) = win.upgrade() {
                 let preset = ThemePreset::from_index(idx);
                 preset.apply(&w);
-                Self::refresh_marquee_strips_for(&w, &strips);
             }
         });
 
         let win = self.window.as_weak();
-        let strips = Rc::clone(&self.strips);
         self.window.on_cycle_theme(move || {
             if let Some(w) = win.upgrade() {
                 let current = ThemePreset::from_index(w.global::<AppTheme>().get_active_preset());
                 let next = current.next();
                 next.apply(&w);
-                Self::refresh_marquee_strips_for(&w, &strips);
             }
         });
 

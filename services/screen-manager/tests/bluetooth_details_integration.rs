@@ -2,7 +2,7 @@
 //! Integration tests for the Bluetooth details screen: status bar triggers, tab
 //! toggling, live connection details, and marquee isolation from non-Player tabs.
 
-use screen_manager::ui::{AppShell, BtLinkDetails, Framebuffer, MainWindow};
+use screen_manager::ui::{AppShell, BtLinkDetails, Framebuffer, MainWindow, MarqueeCompose};
 use slint::platform::{PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition};
 use speaker_bluetooth::{BluetoothDevice, BtAddress};
@@ -226,18 +226,32 @@ fn select_prefers_requested_connected_device() {
 }
 
 #[test]
-fn marquee_rows_are_empty_off_the_player_tab() {
+fn marquee_stays_native_compose_off_the_player_tab() {
     let (shell, _window) = shell_with_window();
     shell.set_track_metadata(
         "A Deliberately Long Track Title That Overflows The Marquee Viewport Width",
         "Some Artist",
         "Audiophile DSP Sink",
     );
-    shell.set_marquee_compose_in_rust(true);
+    // The Rust-side marquee composer was removed in the KMS migration: native
+    // Slint composition must stay engaged (`compose_in_rust == false`) so no
+    // stale row geometry can ever be painted over other tabs. The marquee
+    // element itself is unmounted off tab 0 (`if root.active_tab == 0` in
+    // viewport.slint), which kills its animation timer too.
+    assert!(
+        !shell
+            .window()
+            .global::<MarqueeCompose>()
+            .get_compose_in_rust(),
+        "Rust-side marquee composition must stay disabled"
+    );
 
     shell.set_tab(2);
     assert!(
-        shell.marquee_row_specs().is_empty(),
-        "stale marquee geometry must not be composed over other tabs"
+        !shell
+            .window()
+            .global::<MarqueeCompose>()
+            .get_compose_in_rust(),
+        "switching tabs must never re-enable Rust-side marquee composition"
     );
 }

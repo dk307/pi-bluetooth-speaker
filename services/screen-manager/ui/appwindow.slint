@@ -1,9 +1,8 @@
-import { BootCheckLine, SplashScreen } from "splash.slint";
+import { BootCheckLine, SplashContent, SplashScreen } from "splash.slint";
 import { AppTheme } from "app_theme.slint";
 import { MaterialPalette } from "@material/material.slint";
 import { TopStatusBar, CodecSpecs } from "status_bar.slint";
 import { MainViewport } from "viewport.slint";
-import { MarqueeRasterizer } from "marquee_rasterizer.slint";
 import { MarqueeCompose } from "marquee_state.slint";
 import { ScreenAppBar } from "screen_app_bar.slint";
 import { VolumeHudOverlay } from "volume_hud.slint";
@@ -18,7 +17,7 @@ import "../../../assets/fonts/Inter-SemiBold.ttf";
 import "../../../assets/fonts/Inter-Bold.ttf";
 import "../../../assets/fonts/Inter-ExtraBold.ttf";
 
-export { BootCheckLine, SplashScreen, MarqueeRasterizer, MaterialPalette, AppTheme }
+export { BootCheckLine, SplashScreen, MaterialPalette, AppTheme }
 
 export component MainWindow inherits Window {
     title: "DietPi Audiophile Console";
@@ -83,6 +82,18 @@ export component MainWindow inherits Window {
 
     // NEW: single source of truth for status bar visibility (Now Playing tab only)
     out property <bool> show_status_bar: root.active_tab == 0;
+
+    // Boot splash overlay state (Appliance boot phase): the KMS backend allows
+    // only one window per process, so boot checks render as an in-window
+    // overlay instead of a separate SplashScreen window. The overlay content
+    // is conditionally instantiated, so its equalizer Timer only runs while
+    // the boot phase is active.
+    in-out property <bool> boot_splash_visible: false;
+    in-out property <BootCheckLine> boot_current_check: {
+        text: "Starting system checks …",
+        running: true,
+        ok: false,
+    };
 
     public function show_volume_hud() {
         root.volume_hud_elapsed_ms = 0;
@@ -154,9 +165,6 @@ export component MainWindow inherits Window {
     // Tab to return to when the Bluetooth details screen is dismissed.
     in-out property <int> previous_tab: 0;
 
-    // Marquee text strips pre-rendered offscreen by `MarqueeStripRasterizer`; the images
-    // are re-rasterized from Rust only when their text, color, or typography changes.
-    in-out property <image> title_marquee_strip;
     // Single source of truth for the artist/album composite shown in the second marquee,
     // shared by the declarative binding and the Rust-side strip rasterizer.
     out property <string> artist_marquee_text:
@@ -284,7 +292,6 @@ export component MainWindow inherits Window {
                 bt_delay_text: root.bt_delay_text;
                 bt_adapter_name: root.bt_adapter_name;
                 bt_adapter_address: root.bt_adapter_address;
-                title_marquee_strip: root.title_marquee_strip;
                 artist_marquee_text: root.artist_marquee_text;
                 show_themes <=> root.show_themes;
 
@@ -389,6 +396,14 @@ export component MainWindow inherits Window {
         // Releases the keyboard focus held by the codec information overlay.
         public function unfocus_codec_hud() {
             codec_hud.release_focus();
+        }
+
+        // Boot splash overlay (top-most): full-window coverage during the
+        // Appliance boot phase; hidden (unmounted) for the shell lifetime.
+        if root.boot_splash_visible: boot_splash := SplashContent {
+            width: 100%;
+            height: 100%;
+            current_check: root.boot_current_check;
         }
     }
 }
