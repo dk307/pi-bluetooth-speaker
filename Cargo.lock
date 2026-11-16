@@ -4430,7 +4430,6 @@ dependencies = [
  "i-slint-core",
  "image",
  "libc",
- "memmap2",
  "screen-manager",
  "serde",
  "serde_json",
