@@ -1,8 +1,9 @@
 //! User interface components, views, and Slint declarative bindings.
 //!
 //! Exposes ahead-of-time (AOT) compiled Slint UI components including
-//! [`MainWindow`] and [`SplashScreen`], alongside the physical Linux
-//! framebuffer (`/dev/fb0`) display driver and the unified theme system.
+//! [`MainWindow`] and [`SplashScreen`], the offscreen framebuffer test
+//! harness, and the unified theme system. Production rendering goes through
+//! Slint's `backend-linuxkms` (see `docs/kms_femtovg_migration_plan.md`).
 
 #[expect(
     clippy::all,
@@ -19,28 +20,21 @@ mod generated {
 
 pub mod boot;
 pub(crate) mod framebuffer;
-pub mod input;
 pub(crate) mod marquee;
+pub mod runtime;
 pub(crate) mod shell;
 pub(crate) mod theme;
 
 #[doc(inline)]
 pub use boot::{BootCheckId, BootCheckStatus, BootCheckUpdate, BootProbe};
 #[doc(inline)]
-pub use framebuffer::{
-    Bgrx8888Pixel, FrameTiming, Framebuffer, FramebufferError, FramebufferMockCtrl, MarqueeRowSpec,
+pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError, FramebufferMockCtrl};
+#[doc(inline)]
+pub use generated::{
+    AppTheme, BootCheckLine, MainWindow, MarqueeCompose, MaterialPalette, SplashScreen,
 };
 #[doc(inline)]
-pub use generated::{AppTheme, BootCheckLine, MainWindow, MaterialPalette, SplashScreen};
-#[doc(inline)]
-pub use input::{
-    TouchAction, TouchCalibration, TouchDecoder, TouchError, TouchInputDevice, TouchMockCtrl,
-};
-#[doc(inline)]
-pub use marquee::{
-    MarqueeStrip, MarqueeStripCache, MarqueeStripRasterizer, MarqueeTypography, RgbaPremulPixel,
-    StripRequest,
-};
+pub use marquee::RgbaPremulPixel;
 #[doc(inline)]
 pub use shell::{AppShell, BtLinkDetails, EncoderVolumeTracker};
 #[doc(inline)]

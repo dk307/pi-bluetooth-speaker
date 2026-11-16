@@ -808,19 +808,14 @@ fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
         "worker publish must not pop up the Volume HUD"
     );
 
-    // Volume HUD user interaction still suppresses marquee scrolling; open it
+    // Volume HUD user interaction still covers the marquee area; open it
     // explicitly since PCM/worker publishes intentionally never auto-open it.
     shell.show_volume_hud();
     assert!(shell.is_volume_hud_visible());
-    shell.set_marquee_compose_in_rust(true);
     shell.set_track_metadata(
         "A Very Long Track Title That Overflows The Viewport Width",
         "Dire Straits",
         "Brothers in Arms",
-    );
-    assert!(
-        shell.marquee_row_specs().is_empty(),
-        "marquee row specs must be suppressed while Volume HUD is active"
     );
     shell.window().show().expect("show window");
     assert!(fb.render_frame(&window).expect("render Volume HUD frame"));

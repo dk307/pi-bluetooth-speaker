@@ -115,201 +115,73 @@ fn shell_frame_loop_has_no_persistent_full_window_redraws() {
     assert!(storm_free, "full-window redraw storm detected: {full:?}");
 }
 
-/// Drives the real shell in Rust-side marquee composition mode: after a one-frame
-/// background capture, scrolling must advance entirely in the framebuffer composer with
-/// the Slint renderer staying idle on marquee-tick frames.
+/// Native (Slint-side) marquee scrolling must advance through partial,
+/// row-scoped redraws: the shared `MarqueeCompose` clock keeps ticking and the
+/// renderer wakes with small dirty regions instead of full-window repaints.
+///
+/// The Rust-side composer was removed in the KMS migration, so marquee motion
+/// now legitimately lives in the Slint renderer — but it must stay bounded to
+/// the marquee rows (no full-window storms).
 #[test]
-fn shell_marquee_compose_mode_scrolls_without_slint_dirty() {
-    let mut fb = Framebuffer::new_mocked().0;
+fn native_marquee_scrolls_via_partial_redraws() {
+    use screen_manager::ui::MarqueeCompose;
+    use slint::ComponentHandle;
+
+    let fb = Framebuffer::new_mocked().0;
     let window = fb.init_platform().expect("platform init");
     let main_window = MainWindow::new().expect("MainWindow");
     let shell = AppShell::new(main_window);
     shell.apply_theme(ThemePreset::Peppy);
     shell.set_track_metadata(
-        "A Deliberately Long Track Title That Overflows The Marquee Viewport Width",
-        "Some Artist Name With A Very Long Suffix That Definitely Overflows The Viewport",
+        "A Deliberately Long Track Title That Overflows The Viewport Width",
+        "Some Artist Name",
         "Audiophile DSP Sink",
     );
     shell.set_playing(true);
     shell.set_tab(0);
 
-    // Capture cycle (mirrors `core_daemon::sync_marquee_overlay`): the capture
-    // frame must repaint the whole window or stale strip pixels would be baked
-    // into the captured background (ghost text).
-    shell.set_marquee_strips_visible(false);
-    fb.render_frame_full_redraw(&window)
-        .expect("capture render");
-    let rects = shell.marquee_geometry();
-    assert_eq!(rects.len(), 1);
-    assert!(
-        rects.iter().all(|&(_, _, w, h)| w > 0 && h > 0),
-        "marquee viewports must keep their layout geometry while hidden: {rects:?}"
-    );
-    let mut backgrounds = Vec::with_capacity(rects.len());
-    for &(x, y, w, h) in &rects {
-        backgrounds.push(fb.capture_region(x, y, w, h).expect("capture region"));
-    }
-    shell.set_marquee_compose_in_rust(true);
-    fb.set_marquee_rows(shell.marquee_row_specs());
-    fb.install_marquee_backgrounds(backgrounds);
-    shell.set_marquee_strips_visible(true);
-
-    let specs = shell.marquee_row_specs();
-    assert_eq!(specs.len(), 1, "the overflowing title row must compose");
-
-    let title_rect = rects[0];
-    let mut last_row: Option<Vec<u8>> = None;
-    let mut distinct_rows = 0;
-    let mut slint_drawn_frames = 0;
-    // 160 frames cover ~2.7 s of continuous, pause-free scrolling.
-    let frames = 160;
+    let clock_start = shell.window().global::<MarqueeCompose>().get_clock();
+    let mut partial_dirty_frames = 0usize;
+    let mut full_frames = 0usize;
+    let frames = 60;
     for _ in 0..frames {
         std::thread::sleep(std::time::Duration::from_micros(16_700));
         slint::platform::update_timers_and_animations();
-        fb.set_marquee_rows(shell.marquee_row_specs());
         let mut buffer = ScratchBuffer::new();
-        if window.draw_if_needed(|renderer| {
-            renderer.render_by_line(&mut buffer);
-        }) {
-            slint_drawn_frames += 1;
+        let mut dirty = (0_usize, 0_usize, 0_usize, 0_usize);
+        window.draw_if_needed(|renderer| {
+            let region = renderer.render_by_line(&mut buffer);
+            let origin = region.bounding_box_origin();
+            let size = region.bounding_box_size();
+            dirty = (
+                usize::try_from(origin.x).unwrap_or(0),
+                usize::try_from(origin.y).unwrap_or(0),
+                usize::try_from(size.width).unwrap_or(0),
+                usize::try_from(size.height).unwrap_or(0),
+            );
+        });
+        let (_x, _y, width, height) = dirty;
+        if width * height == 0 {
+            continue;
         }
-        let _composed_or_skipped = fb.render_frame(&window).expect("compose render");
-        let row = fb
-            .capture_region(title_rect.0, title_rect.1, title_rect.2, title_rect.3)
-            .expect("read composed row");
-        let row_bytes: Vec<u8> = row.iter().flat_map(|p| [p.red, p.green, p.blue]).collect();
-        if last_row.as_ref().is_some_and(|prev| *prev != row_bytes) {
-            distinct_rows += 1;
+        if width * height > (WIDTH * HEIGHT) / 2 {
+            full_frames += 1;
+        } else {
+            partial_dirty_frames += 1;
         }
-        last_row = Some(row_bytes);
     }
 
-    println!(
-        "slint_drawn_frames: {slint_drawn_frames}/{frames}, distinct composed rows: {distinct_rows}"
-    );
-    // Marquee motion must come from the composer, not from Slint redraws: only the
-    // ~180 ms wave indicator ticks may wake the Slint renderer.
+    let clock_end = shell.window().global::<MarqueeCompose>().get_clock();
     assert!(
-        slint_drawn_frames * 2 <= frames,
-        "Slint drew on {slint_drawn_frames}/{frames} frames; marquee motion leaked into the renderer"
-    );
-    // The composed row must actually scroll (content changes as the strip advances).
-    assert!(
-        distinct_rows >= 2,
-        "composed marquee row never changed; scroll composition is not advancing"
-    );
-}
-
-/// Non-overflowing titles must still be visible in compose mode: the Slint strip
-/// is hidden there, so the composer must install a static single-tile row
-/// (scroll 0, cycle wider than the viewport) for the populated row.
-#[test]
-fn shell_marquee_compose_mode_shows_non_overflow_rows() {
-    let (mut fb, _ctrl) = Framebuffer::new_mocked();
-    let window = fb.init_platform().expect("platform init");
-    let main_window = MainWindow::new().expect("MainWindow");
-    let shell = AppShell::new(main_window);
-    shell.apply_theme(ThemePreset::Peppy);
-    shell.set_track_metadata("Short", "Short", "Audiophile DSP Sink");
-    shell.set_playing(true);
-    shell.set_tab(0);
-
-    // Capture cycle (mirrors `core_daemon::sync_marquee_overlay`).
-    shell.set_marquee_strips_visible(false);
-    fb.render_frame_full_redraw(&window)
-        .expect("capture render");
-    let rects = shell.marquee_geometry();
-    let mut backgrounds = Vec::with_capacity(rects.len());
-    for &(x, y, w, h) in &rects {
-        backgrounds.push(fb.capture_region(x, y, w, h).expect("capture region"));
-    }
-    let title_background = backgrounds[0].clone();
-    shell.set_marquee_compose_in_rust(true);
-    fb.set_marquee_rows(shell.marquee_row_specs());
-    fb.install_marquee_backgrounds(backgrounds);
-    shell.set_marquee_strips_visible(true);
-
-    let specs = shell.marquee_row_specs();
-    assert_eq!(specs.len(), 1, "the populated row must compose");
-    let title = &specs[0];
-    assert_eq!(
-        title.scroll_px, 0,
-        "non-overflow row must not scroll: {title:?}"
+        clock_end > clock_start,
+        "marquee clock must advance: {clock_start} -> {clock_end}"
     );
     assert!(
-        title.cycle_px > title.rect.2,
-        "non-overflow cycle must exceed the viewport width: {title:?}"
+        partial_dirty_frames >= 10,
+        "expected partial marquee redraws, got {partial_dirty_frames} of {frames}"
     );
-
-    fb.render_frame(&window).expect("compose render");
-    // The non-overflow strip content must actually appear on screen: capture the
-    // title row and verify it is not the empty background.
-    let row = fb
-        .capture_region(title.rect.0, title.rect.1, title.rect.2, title.rect.3)
-        .expect("read composed row");
-    assert_ne!(
-        &*row, &*title_background,
-        "non-overflow strip was never composed onto the background"
+    assert!(
+        full_frames <= 5,
+        "marquee ticking must not storm full-window repaints: {full_frames} of {frames}"
     );
-}
-
-/// Re-capturing the marquee background after rows were already composed (e.g. a
-/// song change that alters the row geometry) must produce a CLEAN snapshot: the
-/// composer must be inert during the capture render, otherwise `render_frame`'s
-/// post-draw compose step writes the still-installed strip back into the region
-/// that is being captured (visible as a static ghost copy of the old text).
-#[test]
-fn shell_marquee_background_recapture_is_ghost_free() {
-    let (mut fb, _ctrl) = Framebuffer::new_mocked();
-    let window = fb.init_platform().expect("platform init");
-    let main_window = MainWindow::new().expect("MainWindow");
-    let shell = AppShell::new(main_window);
-    shell.apply_theme(ThemePreset::Peppy);
-    shell.set_track_metadata(
-        "A Deliberately Long Track Title That Overflows The Marquee Viewport Width",
-        "Some Artist Name With A Very Long Suffix That Definitely Overflows The Viewport",
-        "Audiophile DSP Sink",
-    );
-    shell.set_playing(true);
-    shell.set_tab(0);
-
-    // Reference: capture the pristine background before any composition ran.
-    shell.set_marquee_strips_visible(false);
-    fb.render_frame_full_redraw(&window)
-        .expect("pristine render");
-    let rects = shell.marquee_geometry();
-    let pristine: Vec<Box<[screen_manager::ui::Bgrx8888Pixel]>> = rects
-        .iter()
-        .map(|&(x, y, w, h)| fb.capture_region(x, y, w, h).expect("pristine capture"))
-        .collect();
-
-    // Bring the overlay up and let the composer run (this is the state a song
-    // change starts from: composed pixels in the shadow buffer).
-    shell.set_marquee_compose_in_rust(true);
-    fb.set_marquee_rows(shell.marquee_row_specs());
-    fb.install_marquee_backgrounds(pristine.clone());
-    shell.set_marquee_strips_visible(true);
-    for _ in 0..5 {
-        slint::platform::update_timers_and_animations();
-        fb.set_marquee_rows(shell.marquee_row_specs());
-        fb.render_frame(&window).expect("compose render");
-    }
-
-    // Simulate a song change: geometry churns, the render loop re-captures. The
-    // capture cycle must clear the rows so the composer cannot repaint the old
-    // strip into the snapshot region during the capture render.
-    shell.set_marquee_strips_visible(false);
-    fb.set_marquee_rows(Vec::new());
-    fb.render_frame_full_redraw(&window)
-        .expect("recapture render");
-    let recaptured: Vec<Box<[screen_manager::ui::Bgrx8888Pixel]>> = rects
-        .iter()
-        .map(|&(x, y, w, h)| fb.capture_region(x, y, w, h).expect("recapture"))
-        .collect();
-    for (i, (fresh, old)) in recaptured.iter().zip(pristine.iter()).enumerate() {
-        assert_eq!(
-            &**fresh, &**old,
-            "row {i}: recaptured background contains composed strip pixels (ghost)"
-        );
-    }
 }
