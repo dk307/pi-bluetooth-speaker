@@ -246,6 +246,7 @@ fn pcm_bit_depth(format: &str) -> &'static str {
 pub struct AppShell {
     window: MainWindow,
     volume_step_percent: Cell<u8>,
+    last_amp_volume: Cell<Option<crate::volume::AmpVolumeState>>,
     transport_commands: Rc<RefCell<Option<speaker_bluetooth::TransportCommandQueue>>>,
     amp_commands: Rc<RefCell<Option<crate::volume::AmpVolumeCommandQueue>>>,
     last_toggle: Rc<Cell<std::time::Instant>>,
@@ -267,6 +268,7 @@ impl AppShell {
         let shell = Self {
             window,
             volume_step_percent: Cell::new(DEFAULT_VOLUME_STEP_PERCENT),
+            last_amp_volume: Cell::new(None),
             transport_commands: Rc::new(RefCell::new(None)),
             amp_commands: Rc::new(RefCell::new(None)),
             last_toggle: Rc::new(Cell::new(
@@ -629,13 +631,21 @@ impl AppShell {
 
     /// Applies the authoritative amp level/mute snapshot published by the
     /// `amp-volume` worker to the volume slider and mute indicator.
+    ///
+    /// The initial snapshot synchronizes the UI silently. Later changes open or
+    /// refresh the Volume HUD, including changes originating outside the screen
+    /// (for example, a phone changing the amplifier volume).
     pub fn apply_amp_volume(&self, state: &crate::volume::AmpVolumeState) {
+        let previous = self.last_amp_volume.replace(Some(*state));
         let volume = f32::from(state.level);
         if (self.window.get_volume_value() - volume).abs() >= 0.5 {
             self.set_volume(volume);
         }
         if self.window.get_is_muted() != state.muted {
             self.window.set_is_muted(state.muted);
+        }
+        if previous.is_some_and(|previous| previous != *state) {
+            self.show_volume_hud();
         }
     }
 
