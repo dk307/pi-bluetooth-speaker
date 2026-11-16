@@ -30,6 +30,7 @@ pub use backdrop::{
     BACKDROP_BLUR_RADIUS, BackdropAction, BackdropError, BlurredBackdrop, OVERLAY_TOP_INSET,
     OverlayBackdropTracker, bgrx_to_rgba, blur_premultiplied_rgba, blur_region,
 };
+#[doc(inline)]
 pub use boot::{BootCheckId, BootCheckStatus, BootCheckUpdate, BootProbe};
 #[doc(inline)]
 pub use framebuffer::{

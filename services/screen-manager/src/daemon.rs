@@ -1567,8 +1567,10 @@ fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpda
 /// The snapshot is taken exactly once per "overlay is on screen" period: while an
 /// overlay is open the shadow buffer already contains the overlay panel and must
 /// not be re-captured, and once every overlay closed the next open starts from a
-/// clean scene again. A failed capture re-arms the tracker and is retried on
-/// subsequent poll iterations until it succeeds or every overlay closes.
+/// clean scene again. A failed capture is not retried while the overlay stays
+/// open — by then the render buffer contains the overlay itself, so a retry
+/// would bake the overlay into its own backdrop. The overlay degrades to
+/// scrim-only dimming until it reopens.
 #[cfg(feature = "ui")]
 pub fn sync_overlay_backdrop(
     fb: &Framebuffer,
@@ -1598,7 +1600,6 @@ pub fn sync_overlay_backdrop(
                     );
                     buffer.make_mut_bytes().copy_from_slice(&blurred.pixels);
                     shell.set_overlay_backdrop(slint::Image::from_rgba8_premultiplied(buffer));
-                    tracker.capture_succeeded();
                     tracing::info!(
                         width = blurred.width,
                         height = blurred.height,
@@ -1606,14 +1607,10 @@ pub fn sync_overlay_backdrop(
                     );
                 }
                 Err(e) => {
-                    if tracker.capture_failed() {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to capture the overlay backdrop; will retry while the overlay stays open"
-                        );
-                    } else {
-                        tracing::debug!(error = %e, "Overlay backdrop capture retry failed");
-                    }
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to capture the overlay backdrop; continuing with scrim only until the overlay reopens"
+                    );
                 }
             }
         }

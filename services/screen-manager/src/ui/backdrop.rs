@@ -85,8 +85,10 @@ pub fn blur_region(
 
     let width = frame_width;
     let height = frame_height - top_inset;
-    let row_offset = usize::try_from(top_inset).unwrap_or(usize::MAX)
-        * usize::try_from(frame_width).unwrap_or(usize::MAX);
+    // `u32 -> usize` is lossless on every supported target (`usize` is never
+    // narrower than 32 bits) and the geometry validation above bounds the
+    // product well below `frame.len()`.
+    let row_offset = top_inset as usize * frame_width as usize;
     let mut rgba = bgrx_to_rgba(&frame[row_offset..]);
     blur_premultiplied_rgba(&mut rgba, width, height, radius)?;
     Ok(BlurredBackdrop {
@@ -116,8 +118,8 @@ pub fn blur_premultiplied_rgba(
         &mut image,
         AnisotropicRadius::new(radius),
         ThreadingPolicy::Single,
-    )
-    .map_err(BackdropError::blur)
+    )?;
+    Ok(())
 }
 
 /// Action the renderer must take after an overlay state change.
@@ -139,60 +141,31 @@ pub enum BackdropAction {
 /// snapshot is intentionally frozen for the overlay period: content changes
 /// underneath are not re-captured until the overlay reopens.
 ///
-/// A failed capture attempt re-arms the tracker so the renderer retries on the
-/// next poll instead of leaving the overlay without a backdrop for its whole
-/// lifetime.
+/// A failed capture is never retried while the overlay stays open: after the
+/// opening frame the render buffer contains the overlay itself, so re-capturing
+/// would bake the overlay into its own backdrop. A failed capture therefore
+/// degrades to scrim-only dimming until the overlay reopens.
 #[derive(Debug, Default)]
 pub struct OverlayBackdropTracker {
     active: bool,
-    retry_pending: bool,
 }
 
 impl OverlayBackdropTracker {
     /// Creates a tracker in the "no overlay on screen" state.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            active: false,
-            retry_pending: false,
-        }
+        Self { active: false }
     }
 
     /// Reports the current overlay state and returns the action the renderer must take.
-    ///
-    /// A `Capture` action is returned when an overlay opens or when a previous
-    /// capture attempt failed while the overlay is still on screen, so a failed
-    /// capture retries on the next poll instead of being stranded.
     pub fn on_overlay_state_changed(&mut self, overlay_active: bool) -> BackdropAction {
-        let was_active = self.active;
+        let action = match (self.active, overlay_active) {
+            (false, true) => BackdropAction::Capture,
+            (true, false) => BackdropAction::Clear,
+            _ => BackdropAction::Keep,
+        };
         self.active = overlay_active;
-        if !overlay_active {
-            self.retry_pending = false;
-            return if was_active {
-                BackdropAction::Clear
-            } else {
-                BackdropAction::Keep
-            };
-        }
-        if !was_active || self.retry_pending {
-            return BackdropAction::Capture;
-        }
-        BackdropAction::Keep
-    }
-
-    /// Records a failed capture attempt so the next poll retries it.
-    ///
-    /// Returns `true` for the first failure of the current streak so callers
-    /// can log at `warn!` once and downgrade consecutive retries to `debug!`.
-    pub fn capture_failed(&mut self) -> bool {
-        let first_failure = !self.retry_pending;
-        self.retry_pending = true;
-        first_failure
-    }
-
-    /// Records a successful capture, ending the retry streak.
-    pub fn capture_succeeded(&mut self) {
-        self.retry_pending = false;
+        action
     }
 
     /// Returns `true` while an overlay is on screen.
@@ -283,5 +256,11 @@ impl std::error::Error for BackdropError {
             BackdropErrorKind::Blur { source } => Some(source),
             BackdropErrorKind::Geometry { .. } => None,
         }
+    }
+}
+
+impl From<BlurError> for BackdropError {
+    fn from(source: BlurError) -> Self {
+        Self::blur(source)
     }
 }

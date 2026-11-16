@@ -249,53 +249,6 @@ fn the_slint_overlay_top_inset_is_seeded_from_the_rust_constant() {
 }
 
 #[test]
-fn a_failed_capture_retries_on_the_next_poll_instead_of_stranding_the_overlay() {
-    let mut tracker = OverlayBackdropTracker::new();
-
-    assert_eq!(
-        tracker.on_overlay_state_changed(true),
-        BackdropAction::Capture
-    );
-    assert!(
-        tracker.capture_failed(),
-        "the first failure of a streak must be reported so it logs at warn level"
-    );
-    assert_eq!(
-        tracker.on_overlay_state_changed(true),
-        BackdropAction::Capture,
-        "a failed capture must retry on the next poll, not strand the overlay \
-         without a backdrop for its whole lifetime"
-    );
-    assert!(
-        !tracker.capture_failed(),
-        "consecutive failures stay in the same streak and downgrade to debug"
-    );
-    assert_eq!(
-        tracker.on_overlay_state_changed(true),
-        BackdropAction::Capture,
-        "the tracker keeps re-arming until a capture succeeds"
-    );
-
-    tracker.capture_succeeded();
-    assert_eq!(
-        tracker.on_overlay_state_changed(true),
-        BackdropAction::Keep,
-        "a successful capture must stop the retry loop"
-    );
-
-    assert_eq!(
-        tracker.on_overlay_state_changed(false),
-        BackdropAction::Clear
-    );
-    assert_eq!(
-        tracker.on_overlay_state_changed(true),
-        BackdropAction::Capture,
-        "closing the overlay discards the retry state so the next open \
-         captures a fresh scene"
-    );
-}
-
-#[test]
 fn the_overlay_backdrop_is_published_when_an_overlay_opens() {
     let (shell, window, mut fb) = shell_with_window();
     let mut tracker = OverlayBackdropTracker::new();
