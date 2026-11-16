@@ -380,7 +380,7 @@ dependencies = [
 
 [[package]]
 name = "audio-manager"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "alsa",
  "anyhow",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "bt-manager"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "async-trait",
  "bluer",
@@ -4422,7 +4422,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "screen-manager"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "config",
@@ -4836,7 +4836,7 @@ dependencies = [
 
 [[package]]
 name = "speaker-bluetooth"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "futures-util",
  "serde",
@@ -4851,7 +4851,7 @@ dependencies = [
 
 [[package]]
 name = "speaker-common"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "futures-util",
  "serde",
@@ -4865,7 +4865,7 @@ dependencies = [
 
 [[package]]
 name = "speaker-diagnostics"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4878,7 +4878,7 @@ dependencies = [
 
 [[package]]
 name = "speaker-dsp"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "futures-util",
  "serde",
@@ -4892,7 +4892,7 @@ dependencies = [
 
 [[package]]
 name = "speaker-hardware"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "bh1750-embedded",
@@ -4909,7 +4909,7 @@ dependencies = [
 
 [[package]]
 name = "speaker-title-breaker"
-version = "2.0.0"
+version = "2.1.0"
 
 [[package]]
 name = "spin_on"
