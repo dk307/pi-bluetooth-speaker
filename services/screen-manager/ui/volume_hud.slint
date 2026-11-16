@@ -1,5 +1,6 @@
 import { MaterialPalette } from "@material/material.slint";
 import { OverlayAppBar } from "screen_app_bar.slint";
+import "./fonts/InterTabular-Bold.ttf";
 
 export component VolumeHudOverlay inherits Rectangle {
     width: 100%;
@@ -73,8 +74,9 @@ export component VolumeHudOverlay inherits Rectangle {
                         Text {
                             text: Math.round(root.clamped_ratio * 100.0);
                             color: MaterialPalette.primary;
+                            font-family: "Inter Tabular";
+                            font-weight: 700;
                             font-size: 174px;
-                            font-weight: 800;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
@@ -82,8 +84,9 @@ export component VolumeHudOverlay inherits Rectangle {
                         Text {
                             text: "%";
                             color: MaterialPalette.primary;
+                            font-family: "Inter Tabular";
+                            font-weight: 700;
                             font-size: 87px;
-                            font-weight: 800;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
@@ -94,8 +97,9 @@ export component VolumeHudOverlay inherits Rectangle {
                         height: parent.height;
                         text: "MUTE";
                         color: MaterialPalette.error;
+                        font-family: "Inter Tabular";
+                        font-weight: 700;
                         font-size: 174px;
-                        font-weight: 800;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
