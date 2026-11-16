@@ -113,3 +113,8 @@ cargo build --target aarch64-unknown-linux-gnu --release --bins
 # Run interactive desktop simulator on workstation
 cargo run -p screen-manager --features simulator
 ```
+
+### Versioning and Releases
+
+Workspace versions are updated automatically from conventional commits by release-plz. See
+[the release process](docs/releasing.md) for the bump rules and tag workflow.
