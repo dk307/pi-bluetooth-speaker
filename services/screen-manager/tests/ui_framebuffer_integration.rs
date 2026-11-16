@@ -14,6 +14,12 @@ use screen_manager::ui::{Bgrx8888Pixel, Framebuffer, FramebufferError};
 use slint::platform::Platform as _;
 use slint::platform::software_renderer::{PremultipliedRgbaColor, TargetPixel};
 
+/// Serializes the two event-loop tests: the cross-thread invoke queue
+/// (`TEST_INVOKE_QUEUE`) is process-global while the loop quit flags are
+/// thread-local, so concurrent loop runs could steal each other's queued
+/// callbacks and flake the drain assertion.
+static EVENT_LOOP_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn bgrx_pixel_byte_layout_and_conversion() {
     let p = Bgrx8888Pixel::new(0x12, 0x34, 0x56);
@@ -212,6 +218,9 @@ fn capture_region_rejects_out_of_bounds() {
 /// invoke queue, and exit once `slint::quit_event_loop()` fires.
 #[test]
 fn test_event_loop_runs_timers_and_quits() {
+    let _guard = EVENT_LOOP_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (fb, _ctrl) = Framebuffer::new_mocked();
     let _window = fb.init_platform().unwrap();
 
@@ -246,6 +255,9 @@ fn test_event_loop_runs_timers_and_quits() {
 /// event-loop proxy) must also terminate the loop.
 #[test]
 fn test_event_loop_quits_via_direct_signal() {
+    let _guard = EVENT_LOOP_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (fb, _ctrl) = Framebuffer::new_mocked();
     let _window = fb.init_platform().unwrap();
 

@@ -201,6 +201,7 @@ stays for the software renderer/test harness.
 ```toml
 slint = { version = "=1.18.1", default-features = false,
           features = ["std",
+                      "compat-1-18",               # required when default-features = false
                       "renderer-femtovg",          # GPU renderer (default of kms factory chain)
                       "renderer-software",         # runtime fallback + offscreen test harness
                       "software-renderer-systemfonts",

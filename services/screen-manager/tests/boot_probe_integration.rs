@@ -2,8 +2,12 @@
 #![cfg(feature = "ui")]
 
 use screen_manager::ui::boot::{
-    BootCheckId, BootCheckStatus, BootCheckUpdate, BootProbe, ProbeFn, probe_display,
+    BootCheckId, BootCheckStatus, BootCheckUpdate, BootProbe, ProbeFn, probe_amp_with,
+    probe_bluetooth_with, probe_display, probe_dsp_with, probe_sensors_with,
 };
+use speaker_bluetooth::BluetoothDevice;
+use speaker_dsp::DspDevice;
+use speaker_hardware::{AmpDevice, LightSensor, SensorId, TempSensor, Temperature};
 
 fn collect(probes: [ProbeFn; 5]) -> Vec<BootCheckUpdate> {
     let mut updates = Vec::new();
@@ -28,28 +32,36 @@ fn check_id_labels_and_probe_debug_are_stable() {
     let debug = format!("{probe:?}");
     assert!(debug.contains("BootProbe"), "Debug output: {debug}");
     assert!(debug.contains("probe_count"), "Debug output: {debug}");
+}
 
-    // `BootProbe::real()` constructs the production five-probe set; running it
-    // must emit one Running row per check (probe bodies may fail on a host
-    // without appliance hardware — only the row structure is asserted).
-    let updates = {
-        let mut updates = Vec::new();
-        BootProbe::real().run(&mut |update| updates.push(update));
-        updates
-    };
-    assert_eq!(updates.len(), BootCheckId::ALL.len() * 2);
-    for (index, pair) in updates.chunks(2).enumerate() {
-        assert_eq!(pair[0].id as usize, index);
-        assert_eq!(pair[0].status, BootCheckStatus::Running);
-        assert_eq!(pair[1].id as usize, index);
-        assert!(
-            matches!(
-                pair[1].status,
-                BootCheckStatus::Passed | BootCheckStatus::Failed
-            ),
-            "settled row must be Passed or Failed"
-        );
-    }
+#[test]
+fn real_probe_bodies_run_hermetically_against_mocked_devices() {
+    // The production probe bodies (status formatting, fault/operational
+    // checks) run against mocked devices so this suite performs no live
+    // I2C, sysfs or D-Bus I/O ("Ensure Hermetic Tests").
+    let (amp, _amp_ctrl) = AmpDevice::new_mocked();
+    let amp_detail = probe_amp_with(&amp).expect("mocked amp reports no live faults");
+    assert!(amp_detail.contains("mode:"), "amp detail: {amp_detail}");
+
+    let (dsp, _dsp_ctrl) = DspDevice::new_mocked();
+    let dsp_detail = probe_dsp_with(&dsp).expect("mocked dsp operational");
+    assert!(dsp_detail.contains("load:"), "dsp detail: {dsp_detail}");
+
+    let (bt, _bt_ctrl) = BluetoothDevice::new_mocked();
+    let bt_detail = probe_bluetooth_with(&bt).expect("mocked adapter operational");
+    assert!(bt_detail.contains("connected"), "bt detail: {bt_detail}");
+
+    let (temp, temp_ctrl) = TempSensor::new_mocked();
+    temp_ctrl.set_temperature(
+        SensorId::parse("28-00000feedbee").expect("valid 1-wire id"),
+        Temperature::from_celsius(25.0).expect("valid temperature"),
+    );
+    let (light, _light_ctrl) = LightSensor::new_mocked();
+    let sensor_detail = probe_sensors_with(&temp, &light).expect("mocked sensors");
+    assert!(
+        sensor_detail.contains("°C"),
+        "sensor detail: {sensor_detail}"
+    );
 }
 
 #[test]
