@@ -63,15 +63,42 @@ export component VolumeHudOverlay inherits Rectangle {
                 vertical-stretch: 1;
                 background: transparent;
 
-                Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: root.is_muted ? "MUTE" : (Math.round(root.clamped_ratio * 100.0) + "%");
-                    color: root.is_muted ? MaterialPalette.error : MaterialPalette.primary;
-                    font-size: 174px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                if !root.is_muted {
+                    HorizontalLayout {
+                        width: parent.width;
+                        height: parent.height;
+                        alignment: center;
+                        spacing: 4px;
+
+                        Text {
+                            text: Math.round(root.clamped_ratio * 100.0);
+                            color: MaterialPalette.primary;
+                            font-size: 174px;
+                            font-weight: 800;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "%";
+                            color: MaterialPalette.primary;
+                            font-size: 87px;
+                            font-weight: 800;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                } else {
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "MUTE";
+                        color: MaterialPalette.error;
+                        font-size: 174px;
+                        font-weight: 800;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
             }
 
