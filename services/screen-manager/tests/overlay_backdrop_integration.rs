@@ -15,7 +15,8 @@ use screen_manager::ui::{
     OVERLAY_TOP_INSET, OverlayBackdropTracker, bgrx_to_rgba, blur_premultiplied_rgba, blur_region,
 };
 use slint::platform::software_renderer::MinimalSoftwareWindow;
-use slint::{ComponentHandle, SharedPixelBuffer};
+use slint::platform::{PointerEventButton, WindowEvent};
+use slint::{ComponentHandle, LogicalPosition, SharedPixelBuffer};
 
 /// Width of the appliance panel.
 const WIDTH: usize = Framebuffer::DEFAULT_WIDTH as usize;
@@ -348,6 +349,35 @@ fn reopening_an_overlay_mid_fade_keeps_the_published_backdrop() {
         shell.window().get_overlay_backdrop().size().width,
         0,
         "the backdrop must be released once the fade completed"
+    );
+}
+
+#[test]
+fn tapping_the_backdrop_dismisses_the_hud_through_the_focus_scope() {
+    let (shell, window, _fb) = shell_with_window();
+
+    shell.show_volume_hud();
+    assert!(shell.is_volume_hud_visible(), "the Volume HUD must be open");
+
+    // Tap the central readout area of the open HUD: the only touch handlers
+    // there are the full-viewport FocusScope and, below it, the backdrop
+    // TouchArea. With `focus-on-click: false` the scope must ignore the tap
+    // so it falls through and triggers the early dismissal.
+    let position = LogicalPosition::new(400.0, 220.0);
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+
+    assert!(
+        !shell.is_volume_hud_visible(),
+        "tapping the overlay backdrop must dismiss the HUD; a tap-swallowing \
+         FocusScope would break the early-dismiss interaction"
     );
 }
 
