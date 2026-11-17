@@ -42,8 +42,14 @@ pub const MAX_VOLUME_HUD_TIMEOUT_MS: u32 = 30_000;
 /// Production default Volume HUD fade-out duration in milliseconds (`200` ms).
 pub const DEFAULT_VOLUME_HUD_FADE_MS: u32 = 200;
 
+/// Minimum allowed Volume HUD fade-out duration in milliseconds (`0` ms).
+pub const MIN_VOLUME_HUD_FADE_MS: u32 = 0;
+
 /// Maximum allowed Volume HUD fade-out duration in milliseconds (`2_000` ms).
 pub const MAX_VOLUME_HUD_FADE_MS: u32 = 2_000;
+
+/// Stepper increment for the Volume HUD fade duration in milliseconds (`100` ms).
+pub const VOLUME_HUD_FADE_STEP_MS: u32 = 100;
 
 /// Production default Codec HUD auto-dismiss timeout in milliseconds (`30_000` ms).
 pub const DEFAULT_CODEC_HUD_TIMEOUT_MS: u32 = 30_000;
@@ -53,6 +59,12 @@ pub const MIN_CODEC_HUD_TIMEOUT_MS: u32 = 250;
 
 /// Maximum allowed Codec HUD auto-dismiss timeout in milliseconds (`300_000` ms = 5 min).
 pub const MAX_CODEC_HUD_TIMEOUT_MS: u32 = 300_000;
+
+/// Stepper increment for the Codec HUD timeout in milliseconds (`1_000` ms).
+///
+/// Deliberately distinct from [`MIN_CODEC_HUD_TIMEOUT_MS`]: the step grid is
+/// anchored at 250 + n*1000, not at the domain minimum.
+pub const CODEC_HUD_TIMEOUT_STEP_MS: u32 = 1_000;
 
 /// Allowed marquee scroll rates: 60 is the production default and 30 halves the
 /// render load by scrolling 2 px per 33.3 ms tick at identical on-screen speed.

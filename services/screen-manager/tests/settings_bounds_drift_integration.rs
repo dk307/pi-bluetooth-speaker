@@ -17,9 +17,10 @@
 //! substring.
 
 use screen_manager::config::{
-    MAX_CODEC_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
-    MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_VOLUME_HUD_TIMEOUT_MS,
-    MIN_VOLUME_STEP_PERCENT,
+    CODEC_HUD_TIMEOUT_STEP_MS, MAX_CODEC_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_FADE_MS,
+    MAX_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS,
+    MIN_VOLUME_HUD_FADE_MS, MIN_VOLUME_HUD_TIMEOUT_MS, MIN_VOLUME_STEP_PERCENT,
+    VOLUME_HUD_FADE_STEP_MS,
 };
 
 /// The Slint source of the Settings view, embedded at compile time.
@@ -60,15 +61,16 @@ fn stepper_bounds_match_rust_domains() {
         format!("root.volume_hud_timeout_ms - {MIN_VOLUME_HUD_TIMEOUT_MS}"),
         format!("root.volume_hud_timeout_ms + {MIN_VOLUME_HUD_TIMEOUT_MS}"),
         // Volume HUD Fade: 0..=2000, step ±100.
-        "root.volume_hud_fade_ms > 0".into(),
+        format!("root.volume_hud_fade_ms > {MIN_VOLUME_HUD_FADE_MS}"),
         format!("root.volume_hud_fade_ms < {MAX_VOLUME_HUD_FADE_MS}"),
-        "root.volume_hud_fade_ms - 100".into(),
-        "root.volume_hud_fade_ms + 100".into(),
-        // Codec HUD Timeout: 250..=300000, step ±1000 (NOT MIN — see PR #81 review).
+        format!("root.volume_hud_fade_ms - {VOLUME_HUD_FADE_STEP_MS}"),
+        format!("root.volume_hud_fade_ms + {VOLUME_HUD_FADE_STEP_MS}"),
+        // Codec HUD Timeout: 250..=300000, step ±1000 (NOT MIN — the grid is
+        // anchored at 250 + n*1000, see CODEC_HUD_TIMEOUT_STEP_MS docs).
         format!("root.codec_hud_timeout_ms > {MIN_CODEC_HUD_TIMEOUT_MS}"),
         format!("root.codec_hud_timeout_ms < {MAX_CODEC_HUD_TIMEOUT_MS}"),
-        "root.codec_hud_timeout_ms - 1000".into(),
-        "root.codec_hud_timeout_ms + 1000".into(),
+        format!("root.codec_hud_timeout_ms - {CODEC_HUD_TIMEOUT_STEP_MS}"),
+        format!("root.codec_hud_timeout_ms + {CODEC_HUD_TIMEOUT_STEP_MS}"),
     ];
     for needle in &cases {
         assert_bound_literal(needle);

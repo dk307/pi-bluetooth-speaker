@@ -16,8 +16,9 @@ use slint::ComponentHandle;
 use crate::config::{
     CodecHudTimeoutMs, CoreConfig, DEFAULT_MARQUEE_FPS, DEFAULT_VOLUME_STEP_PERCENT,
     MAX_CODEC_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
-    MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_VOLUME_HUD_TIMEOUT_MS,
-    MIN_VOLUME_STEP_PERCENT, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+    MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_VOLUME_HUD_FADE_MS,
+    MIN_VOLUME_HUD_TIMEOUT_MS, MIN_VOLUME_STEP_PERCENT, MarqueeFps, VolumeHudFadeMs,
+    VolumeHudTimeoutMs, VolumeStepPercent,
 };
 
 use super::generated::{AppTheme, MainWindow, MarqueeCompose};
@@ -332,7 +333,7 @@ impl AppShell {
     pub fn set_marquee_fps(&self, fps: MarqueeFps) {
         self.window
             .global::<MarqueeCompose>()
-            .set_marquee_fps(Self::slint_i32(fps.value()));
+            .set_marquee_fps(Self::slint_i32(fps.value(), "marquee_fps"));
     }
 
     /// Returns the Volume HUD auto-dismiss timeout.
@@ -347,8 +348,10 @@ impl AppShell {
     /// invariant by construction; the validated value is written to the Slint
     /// property verbatim.
     pub fn set_volume_hud_timeout_ms(&self, timeout_ms: VolumeHudTimeoutMs) {
-        self.window
-            .set_volume_hud_timeout_ms(Self::slint_i32(timeout_ms.value()));
+        self.window.set_volume_hud_timeout_ms(Self::slint_i32(
+            timeout_ms.value(),
+            "volume_hud_timeout_ms",
+        ));
     }
 
     /// Returns the Volume HUD fade-out duration.
@@ -364,7 +367,7 @@ impl AppShell {
     /// verbatim.
     pub fn set_volume_hud_fade_ms(&self, fade_ms: VolumeHudFadeMs) {
         self.window
-            .set_volume_hud_fade_ms(Self::slint_i32(fade_ms.value()));
+            .set_volume_hud_fade_ms(Self::slint_i32(fade_ms.value(), "volume_hud_fade_ms"));
     }
 
     /// Returns whether the Volume HUD overlay is currently in its active hold state.
@@ -436,7 +439,7 @@ impl AppShell {
     /// property verbatim.
     pub fn set_codec_hud_timeout_ms(&self, timeout_ms: CodecHudTimeoutMs) {
         self.window
-            .set_codec_hud_timeout_ms(Self::slint_i32(timeout_ms.value()));
+            .set_codec_hud_timeout_ms(Self::slint_i32(timeout_ms.value(), "codec_hud_timeout_ms"));
     }
 
     /// Binds the JSON path used by the live Screen Settings persistence.
@@ -606,17 +609,24 @@ impl AppShell {
 
     /// Converts a validated domain `u32` to the Slint `i32` property type.
     ///
-    /// Panics if the value exceeds `i32::MAX` — domain newtypes cap every
-    /// field far below that bound, so a failure here is a violated invariant
-    /// (M-PANIC-ON-BUG), not a recoverable condition.
-    fn slint_i32(value: u32) -> i32 {
-        i32::try_from(value).expect("domain value fits in i32")
+    /// `field` names the settings field for diagnostics. Panics if the value
+    /// exceeds `i32::MAX` — domain newtypes cap every field far below that
+    /// bound, so a failure here is a violated invariant (M-PANIC-ON-BUG),
+    /// not a recoverable condition.
+    fn slint_i32(value: u32, field: &str) -> i32 {
+        i32::try_from(value).unwrap_or_else(|_| panic!("{field} value {value} exceeds i32"))
     }
 
     /// Clamps a Slint `i32` milliseconds value into the given `u32` domain.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the clamped value exceeds `i32::MAX` — every HUD domain caps
+    /// far below that bound, so a failure here is a violated invariant
+    /// (M-PANIC-ON-BUG), not a recoverable condition.
     fn clamp_hud_ms(value: i32, min: u32, max: u32) -> i32 {
         let clamped = Self::slint_ms_to_u32(value).clamp(min, max);
-        i32::try_from(clamped).unwrap_or(i32::MAX)
+        i32::try_from(clamped).expect("clamped HUD value fits in i32")
     }
 
     /// Reads and clamps the Volume HUD fade duration window property into `0..=2000`.
@@ -1098,7 +1108,8 @@ impl AppShell {
         let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_set_volume_hud_fade_ms(move |ms| {
             if let Some(w) = win.upgrade() {
-                let clamped = Self::clamp_hud_ms(ms, 0, MAX_VOLUME_HUD_FADE_MS);
+                let clamped =
+                    Self::clamp_hud_ms(ms, MIN_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_FADE_MS);
                 w.set_volume_hud_fade_ms(clamped);
                 Self::persist_window_state(&w, &persist_tx);
             }
