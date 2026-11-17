@@ -114,7 +114,6 @@ export component Slider {
                     return;
                 }
                 root.set_value(root.length_to_value(self.mouse_x - track.x, track.width));
-                root.released(root.value);
             }
 
             pointer_event(event) => {

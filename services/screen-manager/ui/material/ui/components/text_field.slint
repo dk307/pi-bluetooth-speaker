@@ -15,12 +15,16 @@ export global VirtualKeyboard {
     in-out property <bool> visible: false;
     in-out property <string> label: "";
     in-out property <string> current_text: "";
+    out property <int> session_id: 0;
+    out property <bool> was_submitted: false;
     callback request_open(label: string, current_text: string);
     callback request_close();
     callback text_edited(text: string);
     callback text_accepted(text: string);
 
     public function open(field_label: string, text_value: string) {
+        self.session_id += 1;
+        self.was_submitted = false;
         self.label = field_label;
         self.current_text = text_value;
         self.visible = true;
@@ -28,6 +32,7 @@ export global VirtualKeyboard {
     }
 
     public function close() {
+        self.was_submitted = false;
         self.visible = false;
         self.request_close();
     }
@@ -43,6 +48,7 @@ export global VirtualKeyboard {
     }
 
     public function submit() {
+        self.was_submitted = true;
         self.visible = false;
         self.text_accepted(self.current_text);
     }
@@ -77,19 +83,22 @@ export component TextField {
     property <color> highlight: root.enabled && root.has_error ? MaterialPalette.error : root.has_focus ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
     property <string> vk_text: VirtualKeyboard.current_text;
     property <bool> vk_visible: VirtualKeyboard.visible;
-    property <bool> vk_session_active: false;
+    property <int> vk_session_id: 0;
+    property <bool> is_vk_owner: VirtualKeyboard.visible && root.vk_session_id > 0 && VirtualKeyboard.session_id == root.vk_session_id;
 
     changed vk_text => {
-        if root.vk_session_active && root.vk_visible && root.text != root.vk_text {
+        if root.is_vk_owner && root.text != root.vk_text {
             root.text = root.vk_text;
             root.edited(root.text);
         }
     }
 
     changed vk_visible => {
-        if !root.vk_visible && root.vk_session_active {
-            root.vk_session_active = false;
-            root.accepted(root.text);
+        if !root.vk_visible && root.vk_session_id > 0 && VirtualKeyboard.session_id == root.vk_session_id {
+            root.vk_session_id = 0;
+            if VirtualKeyboard.was_submitted {
+                root.accepted(root.text);
+            }
         }
     }
 
@@ -155,8 +164,8 @@ export component TextField {
 
                             changed has_focus => {
                                 if self.has_focus {
-                                    root.vk_session_active = true;
                                     VirtualKeyboard.open(root.label, self.text);
+                                    root.vk_session_id = VirtualKeyboard.session_id;
                                     root.focus_gained();
                                 } else {
                                     root.focus_lost();
