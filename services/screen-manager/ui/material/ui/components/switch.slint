@@ -43,7 +43,7 @@ export component Switch {
                 width: self.height;
                 height: root.height + MaterialStyleMetrics.size_8;
                 border_radius: self.height / 2;
-                has_hover: touch_area.has_hover;
+                has_hover: false;
                 has_focus: touch_area.has_focus;
                 pressed: touch_area.pressed;
                 enabled: root.enabled;
@@ -143,9 +143,6 @@ export component Switch {
             state_layer.background: indicator.background;
             indicator.height: background_layer.height - 2px;
             indicator.background: root.checked ? MaterialPalette.primary_container :  MaterialPalette.on_surface_variant;
-        }
-        hover when touch_area.has_hover: {
-            state_layer.background: indicator.background;
         }
     ]
 }

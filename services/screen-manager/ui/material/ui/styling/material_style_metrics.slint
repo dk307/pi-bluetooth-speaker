@@ -1,0 +1,95 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: MIT
+
+// Centralized touch scaling for the 800x480 touchscreen appliance.
+// When text increases by 30%, widget padding and heights only increase by ~15%
+// so controls do not overwhelm the 800x480 panel.
+export global TouchScale {
+    // Controlled by the "A — Slider — A" setting (1.0 to 1.35)
+    in-out property <float> font_scale: 1.15;
+    // NaN-safe clamped font scale in [1.0, 1.35]
+    out property <float> clamped_font_scale: self.font_scale >= 1.0 ? Math.min(1.35, self.font_scale) : 1.0;
+    // Damped widget scale: grows at 50% of the rate of font_scale
+    out property <float> widget_scale: 1.0 + (self.clamped_font_scale - 1.0) * 0.5;
+}
+
+// Patched for 800x480 appliance panel:
+// Base touch minimums bumped for 800x480 and multiplied by `TouchScale.widget_scale`.
+// Thin stroke/indicator tokens (`size_1`..`size_3`) stay fixed integer pixels.
+export global MaterialStyleMetrics {
+    // thin stroke / indicator sizes (kept fixed integer px to avoid fractional border softness)
+    out property <length> size_1: 1px;
+    out property <length> size_2: 2px;
+    out property <length> size_3: 3px;
+
+    // sizes scaled by damped widget_scale
+    out property <length> size_4: 4px * TouchScale.widget_scale;
+    out property <length> size_6: 6px * TouchScale.widget_scale;
+    out property <length> size_8: 8px * TouchScale.widget_scale;
+    out property <length> size_14: 14px * TouchScale.widget_scale;
+    out property <length> size_16: 16px * TouchScale.widget_scale;
+    out property <length> size_18: 18px * TouchScale.widget_scale;
+    out property <length> size_20: 20px * TouchScale.widget_scale;
+    out property <length> size_24: 24px * TouchScale.widget_scale;
+    out property <length> size_30: 28px * TouchScale.widget_scale;
+    out property <length> size_32: 38px * TouchScale.widget_scale; // Chips
+    out property <length> size_36: 36px * TouchScale.widget_scale;
+    out property <length> size_38: 38px * TouchScale.widget_scale;
+    out property <length> size_40: 46px * TouchScale.widget_scale; // Buttons
+    out property <length> size_48: 48px * TouchScale.widget_scale;
+    out property <length> size_49: 49px * TouchScale.widget_scale;
+    out property <length> size_52: 52px * TouchScale.widget_scale;
+    out property <length> size_56: 56px * TouchScale.widget_scale;
+    out property <length> size_64: 56px * TouchScale.widget_scale; // App bar
+    out property <length> size_72: 64px * TouchScale.widget_scale; // ListTile
+    out property <length> size_80: 72px * TouchScale.widget_scale;
+    out property <length> size_90: 80px * TouchScale.widget_scale;
+    out property <length> size_200: 160px * TouchScale.widget_scale;
+    out property <length> size_256: 200px * TouchScale.widget_scale;
+    out property <length> size_344: 280px * TouchScale.widget_scale;
+    out property <length> size_360: 300px * TouchScale.widget_scale;
+    out property <length> size_400: 400px;
+    out property <length> size_480: 480px;
+    out property <length> size_572: 480px;
+    out property <length> size_640: 520px;
+
+    // icon sizes scaled by damped widget_scale
+    out property <length> icon_size_18: 20px * TouchScale.widget_scale;
+    out property <length> icon_size_24: 24px * TouchScale.widget_scale;
+    out property <length> icon_size_36: 44px * TouchScale.widget_scale;
+    out property <length> icon_size_90: 56px * TouchScale.widget_scale;
+
+    // padding scaled by damped widget_scale
+    out property <length> padding_4: 4px * TouchScale.widget_scale;
+    out property <length> padding_6: 6px * TouchScale.widget_scale;
+    out property <length> padding_8: 8px * TouchScale.widget_scale;
+    out property <length> padding_10: 10px * TouchScale.widget_scale;
+    out property <length> padding_12: 12px * TouchScale.widget_scale;
+    out property <length> padding_14: 14px * TouchScale.widget_scale;
+    out property <length> padding_16: 14px * TouchScale.widget_scale;
+    out property <length> padding_20: 16px * TouchScale.widget_scale;
+    out property <length> padding_24: 20px * TouchScale.widget_scale;
+    out property <length> padding_28: 24px * TouchScale.widget_scale;
+    out property <length> padding_30: 24px * TouchScale.widget_scale;
+    out property <length> padding_44: 32px * TouchScale.widget_scale;
+    out property <length> padding_56: 40px * TouchScale.widget_scale;
+
+    // spacing scaled by damped widget_scale
+    out property <length> spacing_2: 2px * TouchScale.widget_scale;
+    out property <length> spacing_4: 4px * TouchScale.widget_scale;
+    out property <length> spacing_6: 6px * TouchScale.widget_scale;
+    out property <length> spacing_8: 8px * TouchScale.widget_scale;
+    out property <length> spacing_12: 12px * TouchScale.widget_scale;
+    out property <length> spacing_16: 14px * TouchScale.widget_scale;
+    out property <length> spacing_40: 24px * TouchScale.widget_scale;
+    out property <length> spacing_52: 32px * TouchScale.widget_scale;
+
+    // border_radius
+    out property <length> border_radius_2: 2px;
+    out property <length> border_radius_4: 4px;
+    out property <length> border_radius_8: 8px;
+    out property <length> border_radius_10: 10px;
+    out property <length> border_radius_12: 12px;
+    out property <length> border_radius_16: 16px;
+    out property <length> border_radius_28: 28px;
+}

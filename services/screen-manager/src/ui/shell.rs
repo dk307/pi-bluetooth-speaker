@@ -17,7 +17,7 @@ use crate::config::{
     DEFAULT_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT, MIN_VOLUME_STEP_PERCENT,
 };
 
-use super::generated::{AppTheme, MainWindow, MarqueeCompose};
+use super::generated::{AppTheme, MainWindow, MarqueeCompose, TouchScale};
 use super::theme::ThemePreset;
 
 /// Tracks cumulative [`speaker_hardware::EncoderStatus`] counters and translates
@@ -467,6 +467,37 @@ impl AppShell {
             .set_marquee_fps(i32::try_from(fps).unwrap_or(i32::MAX));
     }
 
+    /// Default touch font scale (`1.15`).
+    pub const DEFAULT_FONT_SCALE: f32 = 1.15;
+
+    /// Minimum allowed touch font scale (`1.0`).
+    pub const MIN_FONT_SCALE: f32 = 1.0;
+
+    /// Maximum allowed touch font scale (`1.35`).
+    pub const MAX_FONT_SCALE: f32 = 1.35;
+
+    /// Returns the active clamped touch font scale (`1.0..=1.35`).
+    #[must_use]
+    pub fn font_scale(&self) -> f32 {
+        self.window.global::<TouchScale>().get_clamped_font_scale()
+    }
+
+    /// Returns the active damped widget scale (`1.0 + (font_scale - 1.0) * 0.5`).
+    #[must_use]
+    pub fn widget_scale(&self) -> f32 {
+        self.window.global::<TouchScale>().get_widget_scale()
+    }
+
+    /// Sets the touch font scale (clamped to `1.0..=1.35`, defaulting to `1.15` on `NaN`).
+    pub fn set_font_scale(&self, scale: f32) {
+        let clamped = if scale.is_finite() {
+            scale.clamp(Self::MIN_FONT_SCALE, Self::MAX_FONT_SCALE)
+        } else {
+            Self::DEFAULT_FONT_SCALE
+        };
+        self.window.global::<TouchScale>().set_font_scale(clamped);
+    }
+
     /// Sets whether the optical CD player service and navigation entry are enabled.
     ///
     /// If disabled while the shell is currently on the CD Player tab (tab 3), the active tab
@@ -858,6 +889,19 @@ impl AppShell {
 
         self.window.on_night_mode_clicked(|| {
             tracing::info!("Night mode clicked");
+        });
+
+        let win = self.window.as_weak();
+        self.window.on_font_scale_changed(move |scale| {
+            if let Some(w) = win.upgrade() {
+                let clamped = if scale.is_finite() {
+                    scale.clamp(Self::MIN_FONT_SCALE, Self::MAX_FONT_SCALE)
+                } else {
+                    Self::DEFAULT_FONT_SCALE
+                };
+                w.global::<TouchScale>().set_font_scale(clamped);
+                tracing::debug!(font_scale = clamped, "Touch font scale updated");
+            }
         });
     }
 

@@ -53,7 +53,7 @@ export component ListTile {
             padding_bottom: self.padding_top;
             spacing: MaterialStyleMetrics.spacing_16;
 
-            if root.avatar_background != #00000000 ||  root.avatar_text != "" || (root.avatar_icon.width > 0 && root.avatar_icon.height > 0) : Rectangle {
+            if root.avatar_background != #00000000 || root.avatar_text != "" || (root.avatar_icon.width > 0 && root.avatar_icon.height > 0) : Rectangle {
                 width: self.height;
                 border_radius: self.height / 2;
                 background: root.avatar_background;
@@ -104,4 +104,3 @@ export component ListTile {
         }
     ]
 }
-

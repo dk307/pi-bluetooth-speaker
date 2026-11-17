@@ -9,6 +9,45 @@ import { MaterialText } from "./material_text.slint";
 import { IconButton } from "./icon_button.slint";
 import { Icon } from "./icon.slint";
 
+// Global controller for the 800x480 bottom-sheet virtual keyboard.
+// Triggered automatically whenever a `TextField`'s `TextInput` gains focus.
+export global VirtualKeyboard {
+    in-out property <bool> visible: false;
+    in-out property <string> label: "";
+    in-out property <string> current_text: "";
+    callback request_open(label: string, current_text: string);
+    callback request_close();
+    callback text_edited(text: string);
+    callback text_accepted(text: string);
+
+    public function open(field_label: string, text_value: string) {
+        self.label = field_label;
+        self.current_text = text_value;
+        self.visible = true;
+        self.request_open(field_label, text_value);
+    }
+
+    public function close() {
+        self.visible = false;
+        self.request_close();
+    }
+
+    public function push_key(ch: string) {
+        self.current_text = self.current_text + ch;
+        self.text_edited(self.current_text);
+    }
+
+    public function clear() {
+        self.current_text = "";
+        self.text_edited(self.current_text);
+    }
+
+    public function submit() {
+        self.visible = false;
+        self.text_accepted(self.current_text);
+    }
+}
+
 export component TextField {
     in property <string> label: placeholder_text;
     // Deprecated: this property was unintentionally made public. Use `label` instead.
@@ -27,6 +66,8 @@ export component TextField {
     callback trailing_icon_clicked();
     callback accepted(text: string);
     callback edited(text: string);
+    callback focus_gained();
+    callback focus_lost();
     callback key_pressed(event: KeyEvent) -> EventResult;
     callback key_released(event: KeyEvent) -> EventResult;
 
@@ -34,6 +75,23 @@ export component TextField {
     property <bool> has_trailing: root.trailing_icon.width > 0 && root.trailing_icon.height > 0;
     property <length> computed_x;
     property <color> highlight: root.enabled && root.has_error ? MaterialPalette.error : root.has_focus ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
+    property <string> vk_text: VirtualKeyboard.current_text;
+    property <bool> vk_visible: VirtualKeyboard.visible;
+    property <bool> vk_session_active: false;
+
+    changed vk_text => {
+        if root.vk_session_active && root.vk_visible && root.text != root.vk_text {
+            root.text = root.vk_text;
+            root.edited(root.text);
+        }
+    }
+
+    changed vk_visible => {
+        if !root.vk_visible && root.vk_session_active {
+            root.vk_session_active = false;
+            root.accepted(root.text);
+        }
+    }
 
     forward_focus: input;
     accessible-role: text-input;
@@ -41,6 +99,9 @@ export component TextField {
     accessible-value <=> text;
     accessible-placeholder-text: placeholder_text;
     accessible-action-set-value(v) => { text = v; edited(v); }
+
+    min_width: layout.min_width;
+    min_height: layout.min_height;
 
     layout := VerticalLayout {
         spacing: MaterialStyleMetrics.spacing_4;
@@ -74,11 +135,12 @@ export component TextField {
                     Rectangle {
                         horizontal_stretch: 1;
                         clip: true;
-                        min_height: input.min_height;
+                        min_height: input.min_height + text_label.min_height;
 
                         input := TextInput {
                             x: min(0px, max(parent.width - self.width - self.text_cursor_width, root.computed_x));
                             width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                            height: parent.height;
                             font_size: MaterialTypography.body_large.font_size;
                             font_weight: MaterialTypography.body_large.font_weight;
                             text_cursor_width: MaterialStyleMetrics.size_3;
@@ -88,8 +150,18 @@ export component TextField {
                             selection_background_color: MaterialPalette.primary.with_alpha(0.5);
                             selection_foreground_color: self.color;
                             enabled: root.enabled;
-                             // Disable TextInput's built-in accessibility support as the component takes care of that.
+                            // Disable TextInput's built-in accessibility support as the component takes care of that.
                             accessible-role: none;
+
+                            changed has_focus => {
+                                if self.has_focus {
+                                    root.vk_session_active = true;
+                                    VirtualKeyboard.open(root.label, self.text);
+                                    root.focus_gained();
+                                } else {
+                                    root.focus_lost();
+                                }
+                            }
 
                             cursor_position_changed(cursor_position) => {
                                 if cursor_position.x + root.computed_x < 0 {
@@ -104,6 +176,7 @@ export component TextField {
                             }
 
                             edited => {
+                                VirtualKeyboard.current_text = self.text;
                                 root.edited(self.text);
                             }
 
@@ -131,8 +204,8 @@ export component TextField {
                             ]
 
                             animate font_size, y {
-                                 duration: MaterialAnimations.standard_fast_duration;
-                                 easing: MaterialAnimations.standard_easing;
+                                duration: MaterialAnimations.standard_fast_duration;
+                                easing: MaterialAnimations.standard_easing;
                             }
                         }
                     }
@@ -155,8 +228,8 @@ export component TextField {
                 background: root.highlight;
 
                 animate height {
-                     duration: MaterialAnimations.standard_fast_duration;
-                     easing: MaterialAnimations.standard_easing;
+                    duration: MaterialAnimations.standard_fast_duration;
+                    easing: MaterialAnimations.standard_easing;
                 }
             }
         }
@@ -205,7 +278,7 @@ export component TextField {
             input.opacity: MaterialPalette.disable_opacity;
         }
         focused when input.has_focus : {
-            active_indicator.height: MaterialStyleMetrics.size_3;
+            active_indicator.height: MaterialStyleMetrics.size_2;
         }
     ]
 }

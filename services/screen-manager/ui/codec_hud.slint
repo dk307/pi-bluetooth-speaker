@@ -1,16 +1,20 @@
-import { MaterialPalette } from "@material/material.slint";
+import {
+    MaterialPalette,
+    MaterialStyleMetrics,
+    TouchScale,
+} from "@material/material.slint";
 import { OverlayAppBar } from "screen_app_bar.slint";
 
 // One label / value line in the codec information panel.
 //
 // The parent positions the row (x/y/width/height); the row only lays out its
-// two text columns relative to its own bounds.
+// two text columns relative to its own bounds and scales with `TouchScale`.
 component CodecRow inherits Rectangle {
     in property <string> label;
     in property <string> value;
 
     // Width of the uppercase caption column; the value column takes the rest.
-    property <length> label_width: 140px;
+    property <length> label_width: 140px * TouchScale.widget_scale;
 
     Text {
         x: 0;
@@ -19,19 +23,20 @@ component CodecRow inherits Rectangle {
         height: parent.height;
         text: parent.label;
         color: MaterialPalette.secondary;
-        font-size: 15px;
+        font-size: 15px * TouchScale.clamped_font_scale;
         font-weight: 800;
         vertical-alignment: center;
+        overflow: elide;
     }
 
     Text {
-        x: parent.label_width + 12px;
+        x: parent.label_width + 12px * TouchScale.widget_scale;
         y: 0;
         width: parent.width - self.x;
         height: parent.height;
         text: parent.value;
         color: MaterialPalette.on_surface;
-        font-size: 22px;
+        font-size: 22px * TouchScale.clamped_font_scale;
         font-weight: 700;
         vertical-alignment: center;
         overflow: elide;
@@ -67,10 +72,10 @@ export component CodecHudOverlay inherits Rectangle {
 
     // Shared geometry: header height and the label/value row grid. Every
     // position below is derived from these so the grid cannot drift apart.
-    property <length> bar_height: 60px;
-    property <length> row_height: 40px;
-    property <length> row_spacing: 6px;
-    property <length> column_width: 560px;
+    property <length> bar_height: MaterialStyleMetrics.size_64;
+    property <length> row_height: 36px * TouchScale.widget_scale;
+    property <length> row_spacing: 6px * TouchScale.widget_scale;
+    property <length> column_width: min(root.width - 48px, 560px * TouchScale.widget_scale);
     property <length> row_pitch: root.row_height + root.row_spacing;
 
     // Full-viewport backdrop touch catcher: prevents touches from leaking through to

@@ -1,10 +1,19 @@
-import { ElevatedCard, OutlinedCard, FilledButton, Icon, MaterialText, Horizontal, Vertical } from "@material/material.slint";
-import { MaterialPalette } from "@material/material.slint";
-import { MaterialTypography } from "@material/material.slint";
-import { MaterialStyleMetrics } from "@material/material.slint";
+import {
+    FilledButton,
+    MaterialPalette,
+    MaterialStyleMetrics,
+    MaterialText,
+    MaterialTypography,
+    OutlineButton,
+    OutlinedCard,
+    TouchScale,
+} from "@material/material.slint";
 import { AppTheme } from "app_theme.slint";
+import { FontSizeControl, TouchScaleShowcase } from "touch_scale_widgets.slint";
 
-// Theme preset card using Rectangle with Material styling (defined first for use in SettingsView)
+// Theme preset card using Rectangle with Material styling.
+// Unclamped height expands around the scaled `MaterialText` children while
+// `horizontal-stretch: 1` keeps all 5 cards fitting inside 800px.
 component ThemePresetCard inherits Rectangle {
     in property <int> index;
     in property <string> name;
@@ -14,28 +23,37 @@ component ThemePresetCard inherits Rectangle {
     in property <bool> selected;
     callback clicked();
 
-    width: 136px;
-    height: 54px;
+    horizontal-stretch: 1;
+    min-width: 118px;
+    min-height: max(54px * TouchScale.widget_scale, card_layout.min-height);
     border-radius: MaterialStyleMetrics.border_radius_10;
-    border-width: root.selected ? 2px : 0px;
-    border-color: root.primary_color;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? root.primary_color : MaterialPalette.outline_variant;
     background: root.selected ? transparent : MaterialPalette.surface;
 
-    VerticalLayout {
+    card_layout := VerticalLayout {
         alignment: center;
+        padding-left: MaterialStyleMetrics.padding_6;
+        padding-right: MaterialStyleMetrics.padding_6;
+        padding-top: MaterialStyleMetrics.padding_6;
+        padding-bottom: MaterialStyleMetrics.padding_6;
         spacing: MaterialStyleMetrics.spacing_2;
 
         MaterialText {
             text: root.name;
-            style: MaterialTypography.label_medium;  // 12px
+            style: MaterialTypography.label_medium;
             color: root.primary_color;
             horizontal-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
         }
         MaterialText {
             text: root.accent_name;
-            style: MaterialTypography.label_small;  // 11px
+            style: MaterialTypography.label_small;
             color: root.secondary_color;
             horizontal-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
         }
     }
 
@@ -44,21 +62,22 @@ component ThemePresetCard inherits Rectangle {
     }
 }
 
-// Android-style icon button for settings grid (custom component like TransportButton)
+// Android-style icon button for settings grid, scaled by `TouchScale.widget_scale`.
 component SettingsIconButton inherits Rectangle {
     in property <image> icon;
     in property <string> label;
     in property <bool> enabled: true;
 
-    width: 120px;
-    height: 120px;
-    border-radius: MaterialStyleMetrics.border_radius_16;  // 16px rounded
+    width: 120px * TouchScale.widget_scale;
+    min-height: max(120px * TouchScale.widget_scale, btn_layout.min-height);
+    border-radius: MaterialStyleMetrics.border_radius_16;
     background: root.enabled ? MaterialPalette.secondary_container : MaterialPalette.surface_container_highest;
     opacity: root.enabled ? (touch.pressed ? 0.8 : 1.0) : 0.6;
     animate opacity { duration: 80ms; easing: ease-out; }
 
-    VerticalLayout {
+    btn_layout := VerticalLayout {
         alignment: center;
+        padding: MaterialStyleMetrics.padding_8;
         spacing: MaterialStyleMetrics.spacing_12;
 
         HorizontalLayout {
@@ -66,7 +85,7 @@ component SettingsIconButton inherits Rectangle {
             Image {
                 source: root.icon;
                 colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
-                width: MaterialStyleMetrics.icon_size_36;  // 48px
+                width: MaterialStyleMetrics.icon_size_36;
                 height: MaterialStyleMetrics.icon_size_36;
                 image-fit: contain;
             }
@@ -74,9 +93,11 @@ component SettingsIconButton inherits Rectangle {
 
         MaterialText {
             text: root.label;
-            style: MaterialTypography.title_medium;  // 16px (+1 from title_small)
+            style: MaterialTypography.title_medium;
             color: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
             horizontal-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
         }
     }
 
@@ -93,6 +114,8 @@ component SettingsIconButton inherits Rectangle {
 export component SettingsView inherits VerticalLayout {
     in property <bool> cd_enabled: false;
     in-out property <bool> show_themes: false;
+    in-out property <bool> show_widget_preview: false;
+    in-out property <string> speaker_alias: "DietPi Speaker";
 
     callback bluetooth_clicked();
     callback vu_meter_clicked();
@@ -100,9 +123,10 @@ export component SettingsView inherits VerticalLayout {
     callback cd_clicked();
     callback select_theme(int);
     callback cycle_theme();
+    callback font_scale_changed(float);
 
-    padding: MaterialStyleMetrics.padding_16;  // 16px
-    spacing: MaterialStyleMetrics.spacing_16;
+    padding: root.show_widget_preview ? 0px : MaterialStyleMetrics.padding_16;
+    spacing: MaterialStyleMetrics.spacing_12;
 
     // View 1: Android-style icon button grid
     if !root.show_themes : VerticalLayout {
@@ -145,23 +169,24 @@ export component SettingsView inherits VerticalLayout {
         }
     }
 
-    // View 2: Theme Preferences Screen
-    if root.show_themes : OutlinedCard {
+    // View 2: Theme & Touch Scale Preferences Screen
+    if root.show_themes && !root.show_widget_preview : OutlinedCard {
         VerticalLayout {
             alignment: space-around;
             padding: MaterialStyleMetrics.padding_16;
             spacing: MaterialStyleMetrics.spacing_12;
 
             MaterialText {
-                text: "Select Global Appliance Palette:";
-                style: MaterialTypography.label_large;  // 14px
+                text: "Select Global Appliance Palette & Text Scale:";
+                style: MaterialTypography.label_large;
                 color: MaterialPalette.on_surface_variant;
                 horizontal-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
             }
 
             // 5 Theme preset buttons
             HorizontalLayout {
-                alignment: center;
                 spacing: MaterialStyleMetrics.spacing_8;
 
                 // 1. McIntosh Blue
@@ -220,16 +245,37 @@ export component SettingsView inherits VerticalLayout {
                 }
             }
 
-            // Cycle Theme Button
-            HorizontalLayout {
-                alignment: center;
-                FilledButton {
-                    text: "Cycle Next Theme";
-                    width: 220px;
-                    height: 48px;
-                    clicked => { root.cycle_theme(); }
+            // "A — Slider — A" FontSizeControl (1.0 to 1.35)
+            FontSizeControl {
+                font_scale_changed(val) => {
+                    root.font_scale_changed(val);
                 }
             }
+
+            // Action Buttons Row (unclamped heights)
+            HorizontalLayout {
+                alignment: center;
+                spacing: MaterialStyleMetrics.spacing_12;
+
+                FilledButton {
+                    text: "Cycle Next Theme";
+                    clicked => { root.cycle_theme(); }
+                }
+
+                OutlineButton {
+                    text: "Widget Scale Test";
+                    clicked => { root.show_widget_preview = true; }
+                }
+            }
+        }
+    }
+
+    // View 3: 800x480 Widget Scale Audit & Interactive Showcase
+    if root.show_themes && root.show_widget_preview : TouchScaleShowcase {
+        vertical-stretch: 1;
+        speaker_alias <=> root.speaker_alias;
+        font_scale_changed(val) => {
+            root.font_scale_changed(val);
         }
     }
 }

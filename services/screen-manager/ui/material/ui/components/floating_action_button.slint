@@ -21,6 +21,9 @@ export component FloatingActionButton {
 
     callback clicked <=> base.clicked;
 
+    min_width: base.min_width;
+    min_height: base.min_height;
+
     accessible-role: button;
     accessible-enabled: true;
     accessible-label: root.text == "" ? root.tooltip : root.text;
@@ -36,8 +39,10 @@ export component FloatingActionButton {
     }
 
     base := BaseButton {
+        width: 100%;
+        height: 100%;
         border_radius: elevation.border_radius;
-        color:  MaterialPalette.on_primary;
+        color: MaterialPalette.on_primary;
         button_vertical_padding: root.style == FABStyle.small ? MaterialStyleMetrics.padding_10 :
             root.style == FABStyle.standard ? MaterialStyleMetrics.padding_14 : MaterialStyleMetrics.padding_30;
         button_horizontal_padding: self.button_vertical_padding;
@@ -46,10 +51,4 @@ export component FloatingActionButton {
             root.style == FABStyle.standard ? MaterialStyleMetrics.size_56 : MaterialStyleMetrics.size_90;
         icon_size: root.style != FABStyle.large ? MaterialStyleMetrics.icon_size_24 : MaterialStyleMetrics.icon_size_36;
     }
-
-    states [
-        hover when base.has_hover : {
-            elevation.level: 4;
-        }
-    ]
 }

@@ -5,7 +5,7 @@ import { StateLayerArea } from "./state_layer.slint";
 import { MaterialText } from "./material_text.slint";
 import { Icon } from "./icon.slint";
 import { MaterialTypography } from "../styling/material_typography.slint";
-import { MaterialStyleMetrics } from "../styling/material_style_metrics.slint";
+import { MaterialStyleMetrics, TouchScale } from "../styling/material_style_metrics.slint";
 import { Avatar } from "./list.slint";
 
 export component BaseButton inherits StateLayerArea {
@@ -19,7 +19,7 @@ export component BaseButton inherits StateLayerArea {
     in property <length> button_padding_top: self.button_vertical_padding;
     in property <length> button_padding_bottom: self.button_vertical_padding;
     in property <length> spacing: MaterialStyleMetrics.spacing_8;
-    in property <length> min_layout_width: MaterialStyleMetrics.size_40;
+    in property <length> min_layout_width: 64px * TouchScale.widget_scale;
     in property <length> min_layout_height: MaterialStyleMetrics.size_40;
     in property <length> icon_size: MaterialStyleMetrics.icon_size_18;
     in property <image> avatar_icon;
@@ -63,7 +63,7 @@ export component BaseButton inherits StateLayerArea {
             style: MaterialTypography.label_large;
             color: root.color;
             opacity: root.enabled ? 100% : 38%;
-            overflow: clip;
+            overflow: elide;
             vertical_alignment: center;
         }
 

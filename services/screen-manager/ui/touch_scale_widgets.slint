@@ -1,0 +1,332 @@
+import {
+    ActionChip,
+    ElevatedButton,
+    FilledButton,
+    FilterChip,
+    ListTile,
+    MaterialPalette,
+    MaterialStyleMetrics,
+    MaterialText,
+    MaterialTypography,
+    OutlineButton,
+    SegmentedButton,
+    Slider,
+    TextButton,
+    TextField,
+    TouchScale,
+    VirtualKeyboard,
+} from "@material/material.slint";
+
+// "A — Slider — A" phone-style font scale control (1.0 to 1.35).
+// Binds directly to `TouchScale.font_scale` so typography (`font_scale`) and
+// damped widget metrics (`widget_scale`) update live across the 800x480 screen.
+export component FontSizeControl inherits Rectangle {
+    callback font_scale_changed(float);
+
+    min-height: max(MaterialStyleMetrics.size_40, row.min-height);
+    background: MaterialPalette.surface;
+    border-radius: MaterialStyleMetrics.border_radius_10;
+    border-width: 1px;
+    border-color: MaterialPalette.outline_variant;
+
+    row := HorizontalLayout {
+        padding-left: MaterialStyleMetrics.padding_16;
+        padding-right: MaterialStyleMetrics.padding_16;
+        padding-top: MaterialStyleMetrics.padding_6;
+        padding-bottom: MaterialStyleMetrics.padding_6;
+        spacing: MaterialStyleMetrics.spacing_12;
+        alignment: center;
+
+        MaterialText {
+            text: "Text Size";
+            style: MaterialTypography.label_large;
+            color: MaterialPalette.on_surface_variant;
+            vertical-alignment: center;
+            wrap: no-wrap;
+            overflow: elide;
+        }
+
+        // Small "A" anchor (fixed 14px reference)
+        Text {
+            text: "A";
+            font-size: 14px;
+            font-weight: 700;
+            color: MaterialPalette.on_surface_variant;
+            vertical-alignment: center;
+        }
+
+        scale_slider := Slider {
+            horizontal-stretch: 1;
+            minimum: 1.0;
+            maximum: 1.35;
+            value <=> TouchScale.font_scale;
+            value_changed(val) => {
+                root.font_scale_changed(val);
+            }
+        }
+
+        // Large "A" anchor (fixed 24px reference)
+        Text {
+            text: "A";
+            font-size: 24px;
+            font-weight: 800;
+            color: MaterialPalette.primary;
+            vertical-alignment: center;
+        }
+
+        // Live percentage badge (100% .. 135%)
+        Rectangle {
+            min-width: 58px * TouchScale.widget_scale;
+            height: 28px * TouchScale.widget_scale;
+            border-radius: self.height / 2;
+            background: MaterialPalette.secondary_container;
+
+            MaterialText {
+                width: 100%;
+                height: 100%;
+                text: Math.round(TouchScale.clamped_font_scale * 100.0) + "%";
+                style: MaterialTypography.label_medium_prominent;
+                color: MaterialPalette.on_secondary_container;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                wrap: no-wrap;
+            }
+        }
+    }
+}
+
+// Single key button inside the bottom-sheet virtual keyboard.
+component VirtualKeyButton inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+
+    horizontal-stretch: 1;
+    min-height: 34px * TouchScale.widget_scale;
+    border-radius: MaterialStyleMetrics.border_radius_8;
+    background: key_touch.pressed ? MaterialPalette.primary : MaterialPalette.surface_container_high;
+    border-width: 1px;
+    border-color: MaterialPalette.outline_variant;
+
+    MaterialText {
+        width: 100%;
+        height: 100%;
+        text: root.label;
+        style: MaterialTypography.label_large;
+        color: key_touch.pressed ? MaterialPalette.on_primary : MaterialPalette.on_surface;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: no-wrap;
+    }
+
+    key_touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Bottom-sheet virtual keyboard triggered automatically whenever any
+// `TextField`'s `TextInput` gains focus (`VirtualKeyboard.visible == true`).
+export component VirtualKeyboardSheet inherits Rectangle {
+    visible: VirtualKeyboard.visible;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+
+    // Scrim area above the bottom sheet: tapping outside dismisses the keyboard.
+    TouchArea {
+        width: 100%;
+        height: parent.height - sheet.height;
+        clicked => {
+            VirtualKeyboard.close();
+        }
+    }
+
+    sheet := Rectangle {
+        y: parent.height - self.height;
+        width: 100%;
+        height: max(188px * TouchScale.widget_scale, sheet_layout.min-height);
+        background: MaterialPalette.surface_container;
+        border-width: 1px;
+        border-color: MaterialPalette.outline_variant;
+
+        // Absorb touches on the sheet background so they don't fall through.
+        TouchArea {
+            width: 100%;
+            height: 100%;
+        }
+
+        sheet_layout := VerticalLayout {
+            padding: MaterialStyleMetrics.padding_8;
+            spacing: MaterialStyleMetrics.spacing_6;
+
+            // Top preview & action bar
+            HorizontalLayout {
+                spacing: MaterialStyleMetrics.spacing_8;
+                alignment: space-between;
+
+                MaterialText {
+                    text: (VirtualKeyboard.label != "" ? (VirtualKeyboard.label + ": ") : "") + VirtualKeyboard.current_text;
+                    style: MaterialTypography.title_medium;
+                    color: MaterialPalette.primary;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+
+                TextButton {
+                    text: "Clear";
+                    clicked => {
+                        VirtualKeyboard.clear();
+                    }
+                }
+
+                FilledButton {
+                    text: "Done";
+                    clicked => {
+                        VirtualKeyboard.submit();
+                    }
+                }
+            }
+
+            // Row 1: Q W E R T Y U I O P
+            HorizontalLayout {
+                spacing: MaterialStyleMetrics.spacing_4;
+                for k in ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"] : VirtualKeyButton {
+                    label: k;
+                    clicked => { VirtualKeyboard.push_key(k); }
+                }
+            }
+
+            // Row 2: A S D F G H J K L -
+            HorizontalLayout {
+                spacing: MaterialStyleMetrics.spacing_4;
+                for k in ["A", "S", "D", "F", "G", "H", "J", "K", "L", "-"] : VirtualKeyButton {
+                    label: k;
+                    clicked => { VirtualKeyboard.push_key(k); }
+                }
+            }
+
+            // Row 3: Z X C V B N M + Space
+            HorizontalLayout {
+                spacing: MaterialStyleMetrics.spacing_4;
+                for k in ["Z", "X", "C", "V", "B", "N", "M"] : VirtualKeyButton {
+                    label: k;
+                    clicked => { VirtualKeyboard.push_key(k); }
+                }
+                VirtualKeyButton {
+                    label: "Space";
+                    horizontal-stretch: 2;
+                    clicked => { VirtualKeyboard.push_key(" "); }
+                }
+            }
+        }
+    }
+}
+
+// 800x480 Widget Scale Audit & Interactive Showcase panel.
+// Exercises `FontSizeControl` (1.0 to 1.35) alongside one of each modified
+// Material 3 primitive (`FilledButton`, `OutlineButton`, `TextButton`,
+// `ElevatedButton`, `ActionChip`, `FilterChip`, `SegmentedButton`, `ListTile`,
+// and `TextField` hooked to `VirtualKeyboardSheet`) within the 420px viewport
+// below `ScreenAppBar`.
+export component TouchScaleShowcase inherits VerticalLayout {
+    in-out property <string> speaker_alias: "DietPi Speaker";
+    in-out property <bool> eq_chip_checked: true;
+    in-out property <int> gain_segment: 1;
+    callback font_scale_changed(float);
+
+    padding: MaterialStyleMetrics.padding_12;
+    spacing: MaterialStyleMetrics.spacing_8;
+
+    // Row 1: FontSizeControl + TextField (at top so virtual keyboard never covers it)
+    HorizontalLayout {
+        spacing: MaterialStyleMetrics.spacing_12;
+
+        FontSizeControl {
+            horizontal-stretch: 3;
+            font_scale_changed(val) => {
+                root.font_scale_changed(val);
+            }
+        }
+
+        alias_field := TextField {
+            horizontal-stretch: 2;
+            label: "Speaker Name";
+            text <=> root.speaker_alias;
+        }
+    }
+
+    // Row 2: Unclamped button primitives (single-line pill radius preserved)
+    HorizontalLayout {
+        spacing: MaterialStyleMetrics.spacing_8;
+
+        FilledButton {
+            horizontal-stretch: 1;
+            text: "Filled";
+            clicked => { TouchScale.font_scale = 1.15; root.font_scale_changed(1.15); }
+        }
+
+        OutlineButton {
+            horizontal-stretch: 1;
+            text: "Outline 1.0x";
+            clicked => { TouchScale.font_scale = 1.0; root.font_scale_changed(1.0); }
+        }
+
+        ElevatedButton {
+            horizontal-stretch: 1;
+            text: "Elevated 1.35x";
+            clicked => { TouchScale.font_scale = 1.35; root.font_scale_changed(1.35); }
+        }
+
+        TextButton {
+            horizontal-stretch: 1;
+            text: "Keyboard";
+            clicked => { VirtualKeyboard.open("Speaker Name", root.speaker_alias); }
+        }
+    }
+
+    // Row 3: Unclamped Chips + 3-item SegmentedButton (max 3 items per horizontal row rule)
+    HorizontalLayout {
+        spacing: MaterialStyleMetrics.spacing_8;
+        alignment: space-between;
+
+        ActionChip {
+            text: "Action Chip";
+        }
+
+        FilterChip {
+            text: "Loudness";
+            checked <=> root.eq_chip_checked;
+        }
+
+        SegmentedButton {
+            horizontal-stretch: 1;
+            current_index <=> root.gain_segment;
+            items: [
+                { text: "Low" },
+                { text: "Med" },
+                { text: "High" },
+            ];
+        }
+    }
+
+    // Row 4: Unclamped ListTile (expands around scaled primary & supporting MaterialText)
+    Rectangle {
+        background: MaterialPalette.surface;
+        border-radius: MaterialStyleMetrics.border_radius_10;
+        border-width: 1px;
+        border-color: MaterialPalette.outline_variant;
+        min-height: tile.min-height;
+
+        tile := ListTile {
+            width: 100%;
+            text: "Raspberry Pi Touch Scaling (" + Math.round(TouchScale.clamped_font_scale * 100.0) + "%)";
+            supporting_text: "Widget scale " + Math.round(TouchScale.widget_scale * 100.0) + "% • Alias: " + root.speaker_alias;
+            avatar_text: "M3";
+            avatar_background: MaterialPalette.primary_container;
+            avatar_foreground: MaterialPalette.on_primary_container;
+        }
+    }
+}
