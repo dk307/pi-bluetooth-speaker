@@ -23,10 +23,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The pinned 1.99.1 action revision has the toolchain version baked in and
+      # no longer accepts a `toolchain` input.
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@263313d2989f864a2b8613f97277288638e7d8f8 # 1.99.1
-        with:
-          toolchain: "1.99.1"
 
       - name: Create release for the merged release PR
         uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
@@ -50,10 +50,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The pinned 1.99.1 action revision has the toolchain version baked in and
+      # no longer accepts a `toolchain` input.
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@263313d2989f864a2b8613f97277288638e7d8f8 # 1.99.1
-        with:
-          toolchain: "1.99.1"
 
       - name: Open or update the next release PR
         uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148

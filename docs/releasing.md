@@ -19,6 +19,22 @@ per-package tags and releases, with `screen-manager` as the single release owner
 produces exactly one `vX.Y.Z` tag. `release_always = false` prevents an ordinary push from creating
 a release; only merging the release pull request can do so.
 
+## Repository setup
+
+The workflow needs the repository to allow `GITHUB_TOKEN` to create pull requests. In
+**Settings → Actions → General → Workflow permissions**, enable **Allow GitHub Actions to create and
+approve pull requests**. Without it, the `Prepare Next Release` job fails with HTTP 403 and the
+message `GitHub Actions is not permitted to create or approve pull requests`, even though the job
+declares `pull-requests: write`.
+
+The same setting is managed through the REST API:
+
+```bash
+gh api --method PUT repos/OWNER/REPO/actions/permissions/workflow \
+  -f default_workflow_permissions=read \
+  -F can_approve_pull_request_reviews=true
+```
+
 ## Commit types
 
 Release pull requests are created only for these conventional commit types:
