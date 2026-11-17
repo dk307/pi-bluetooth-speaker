@@ -31,6 +31,8 @@ struct StubCoverArtServer {
     descriptor_history: Arc<Mutex<Vec<bool>>>,
     /// Whether each received GET requested Single Response Mode (0x97).
     get_srm: Arc<Mutex<bool>>,
+    /// Optional properties XML response for `x-bt/img-properties` queries.
+    properties_xml: Option<String>,
 }
 
 impl obex_protocol::tokio::Handler for StubCoverArtServer {
@@ -73,11 +75,22 @@ impl obex_protocol::tokio::Handler for StubCoverArtServer {
             Header::Other { id, value } => *id == 0x71 && matches!(value, HeaderValue::Bytes(_)),
             _ => false,
         });
-        let outcome = self
-            .get_outcomes
-            .pop_front()
-            .unwrap_or_else(|| self.get_outcomes.back().cloned().expect("non-empty"))
-            .map(|body| Object::new([Header::Type("x-bt/img-img".to_string())], body));
+        let is_properties = mime.as_deref() == Some(MIME_IMAGE_PROPERTIES);
+        let outcome = if is_properties {
+            if let Some(xml) = &self.properties_xml {
+                Ok(Object::new(
+                    [Header::Type(MIME_IMAGE_PROPERTIES.to_string())],
+                    xml.as_bytes().to_vec(),
+                ))
+            } else {
+                Err(Response::new(ResponseCode::NotFound))
+            }
+        } else {
+            self.get_outcomes
+                .pop_front()
+                .unwrap_or_else(|| self.get_outcomes.back().cloned().expect("non-empty"))
+                .map(|body| Object::new([Header::Type("x-bt/img-img".to_string())], body))
+        };
         let (handle_slot, mime_slot, name_slot, descriptor_slot, srm_slot) = (
             Arc::clone(&self.get_handle),
             Arc::clone(&self.get_type),
@@ -156,6 +169,7 @@ fn new_retry_stub(get_outcomes: Vec<Result<Vec<u8>, Response>>) -> SharedStub {
         get_name: Arc::new(Mutex::new(None)),
         descriptor_history: Arc::new(Mutex::new(Vec::new())),
         get_srm: Arc::new(Mutex::new(false)),
+        properties_xml: None,
     }))
 }
 
@@ -928,4 +942,521 @@ fn bip_channel_for_builds_matching_transport_impl() {
     let _ = bip_channel_for(BipTransport::L2capPsm(4097));
     let l2cap = L2capBipChannel::new(4097);
     assert_eq!(l2cap.psm(), 4097);
+}
+
+#[test]
+fn bip_pixel_parse_fixed_and_range() {
+    assert_eq!(BipPixel::parse("200*200"), Some(BipPixel::Fixed(200, 200)));
+    assert_eq!(
+        BipPixel::parse(" 640*480 "),
+        Some(BipPixel::Fixed(640, 480))
+    );
+    assert_eq!(
+        BipPixel::parse("200*200-800*800"),
+        Some(BipPixel::Range {
+            min_w: 200,
+            min_h: 200,
+            max_w: 800,
+            max_h: 800,
+        })
+    );
+    // Aspect ratio preserved range: 200**-800*600 -> min_h = (200 * 600) / 800 = 150
+    assert_eq!(
+        BipPixel::parse("200**-800*600"),
+        Some(BipPixel::Range {
+            min_w: 200,
+            min_h: 150,
+            max_w: 800,
+            max_h: 600,
+        })
+    );
+    // Invalid / edge cases
+    assert_eq!(BipPixel::parse(""), None);
+    assert_eq!(BipPixel::parse("abc"), None);
+    assert_eq!(BipPixel::parse("0*200"), None);
+    assert_eq!(BipPixel::parse("200*0"), None);
+    assert_eq!(BipPixel::parse("200*-800*800"), None);
+    assert_eq!(BipPixel::parse("200**-0*0"), None);
+    assert_eq!(BipPixel::parse("0**-800*800"), None);
+
+    let fixed = BipPixel::Fixed(640, 480);
+    assert_eq!(fixed.max_dimensions(), (640, 480));
+    let range = BipPixel::Range {
+        min_w: 200,
+        min_h: 200,
+        max_w: 1024,
+        max_h: 768,
+    };
+    assert_eq!(range.max_dimensions(), (1024, 768));
+}
+
+#[test]
+fn bip_image_properties_parse_and_select() {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<image-properties version="1.0" handle="0000001">
+  <native encoding="JPEG" pixel="200*200" size="12345" />
+  <variant encoding="JPEG" pixel="640*480" />
+  <variant encoding="PNG" pixel="200*200" />
+  <attachment content-type="text/plain" name="test.txt" size="100"/>
+</image-properties>"#;
+
+    let props = BipImageProperties::parse(xml).expect("valid XML must parse");
+    assert_eq!(&*props.handle, "0000001");
+    assert_eq!(props.formats.len(), 3);
+    assert!(props.formats[0].is_native);
+    assert_eq!(&*props.formats[0].encoding, "JPEG");
+    assert_eq!(props.formats[0].pixel, BipPixel::Fixed(200, 200));
+    assert_eq!(props.formats[0].size, Some(12345));
+
+    assert!(!props.formats[1].is_native);
+    assert_eq!(&*props.formats[1].encoding, "JPEG");
+    assert_eq!(props.formats[1].pixel, BipPixel::Fixed(640, 480));
+
+    // Best format should select the 640x480 variant
+    assert_eq!(
+        select_best_format(&props, TARGET_COVER_MIN_DIMENSION),
+        FormatSelection::Descriptor {
+            width: 640,
+            height: 480
+        }
+    );
+}
+
+#[test]
+fn bip_select_best_format_native_and_aosp() {
+    // 1. Native is already high-res >= 360 -> NativeDefault
+    let props_high_native = BipImageProperties {
+        handle: "0000001".into(),
+        formats: vec![BipImageFormat {
+            encoding: "JPEG".into(),
+            pixel: BipPixel::Fixed(800, 800),
+            size: None,
+            is_native: true,
+        }],
+    };
+    assert_eq!(
+        select_best_format(&props_high_native, 360),
+        FormatSelection::NativeDefault
+    );
+
+    // 2. Only 200x200 available (standard AOSP) -> NativeDefault
+    let props_aosp = BipImageProperties {
+        handle: "0000001".into(),
+        formats: vec![
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(200, 200),
+                size: None,
+                is_native: true,
+            },
+            BipImageFormat {
+                encoding: "PNG".into(),
+                pixel: BipPixel::Fixed(200, 200),
+                size: None,
+                is_native: false,
+            },
+        ],
+    };
+    assert_eq!(
+        select_best_format(&props_aosp, 360),
+        FormatSelection::NativeDefault
+    );
+}
+
+#[test]
+fn bip_select_best_format_range_and_oversized() {
+    // 3. Range variant -> selected up to MAX_COVER_DIMENSION
+    let props_range = BipImageProperties {
+        handle: "0000001".into(),
+        formats: vec![
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(200, 200),
+                size: None,
+                is_native: true,
+            },
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Range {
+                    min_w: 200,
+                    min_h: 200,
+                    max_w: 800,
+                    max_h: 800,
+                },
+                size: None,
+                is_native: false,
+            },
+        ],
+    };
+    assert_eq!(
+        select_best_format(&props_range, 360),
+        FormatSelection::Descriptor {
+            width: 800,
+            height: 800
+        }
+    );
+
+    // 4. Oversized variant -> scaled down to MAX_COVER_DIMENSION (1280)
+    let props_huge = BipImageProperties {
+        handle: "0000001".into(),
+        formats: vec![
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(200, 200),
+                size: None,
+                is_native: true,
+            },
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(4000, 3000),
+                size: None,
+                is_native: false,
+            },
+        ],
+    };
+    assert_eq!(
+        select_best_format(&props_huge, 360),
+        FormatSelection::Descriptor {
+            width: 1280,
+            height: 960
+        }
+    );
+}
+
+#[test]
+fn bip_select_best_format_multiple_and_zero_w() {
+    // 5. Multiple variants: picks the larger variant
+    let props_multiple = BipImageProperties {
+        handle: "0000001".into(),
+        formats: vec![
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(200, 200),
+                size: None,
+                is_native: true,
+            },
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(400, 400),
+                size: None,
+                is_native: false,
+            },
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(800, 800),
+                size: None,
+                is_native: false,
+            },
+        ],
+    };
+    assert_eq!(
+        select_best_format(&props_multiple, 360),
+        FormatSelection::Descriptor {
+            width: 800,
+            height: 800
+        }
+    );
+
+    // 6. Range with max_w = 0 edge case
+    let props_zero_w = BipImageProperties {
+        handle: "0000001".into(),
+        formats: vec![
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(200, 200),
+                size: None,
+                is_native: true,
+            },
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Range {
+                    min_w: 0,
+                    min_h: 0,
+                    max_w: 0,
+                    max_h: 500,
+                },
+                size: None,
+                is_native: false,
+            },
+        ],
+    };
+    // target_w is 0 which does not exceed native 200, so falls back to NativeDefault
+    assert_eq!(
+        select_best_format(&props_zero_w, 360),
+        FormatSelection::NativeDefault
+    );
+}
+
+#[test]
+fn classify_obex_port_scenarios() {
+    assert_eq!(classify_obex_port(None), BipTransport::SdpRfcomm);
+    assert_eq!(classify_obex_port(Some(1)), BipTransport::RfcommChannel(1));
+    assert_eq!(
+        classify_obex_port(Some(30)),
+        BipTransport::RfcommChannel(30)
+    );
+    assert_eq!(classify_obex_port(Some(31)), BipTransport::L2capPsm(31));
+    assert_eq!(classify_obex_port(Some(4097)), BipTransport::L2capPsm(4097));
+}
+
+#[test]
+fn bip_image_properties_parse_malformed() {
+    assert_eq!(BipImageProperties::parse("not xml"), None);
+    assert_eq!(
+        BipImageProperties::parse("<image-properties></image-properties>"),
+        None
+    );
+    assert_eq!(
+        BipImageProperties::parse("<image-properties handle='0000001'></image-properties>"),
+        Some(BipImageProperties {
+            handle: "0000001".into(),
+            formats: Vec::new(),
+        })
+    );
+
+    // Skips malformed variant tags while preserving valid formats
+    let mixed_xml = r#"<image-properties handle="0000001">
+        <variant encoding="WEBP" />
+        <native encoding="JPEG" pixel="200*200" />
+        <variant encoding="JPEG" pixel="invalid" />
+        <variant encoding="JPEG" pixel="640*480" />
+    </image-properties>"#;
+    let mixed = BipImageProperties::parse(mixed_xml).expect("must parse valid tags");
+    assert_eq!(mixed.formats.len(), 2);
+    assert_eq!(mixed.formats[0].pixel, BipPixel::Fixed(200, 200));
+    assert_eq!(mixed.formats[1].pixel, BipPixel::Fixed(640, 480));
+}
+
+#[test]
+fn bip_select_best_format_non_jpeg_native_does_not_downgrade() {
+    let props = BipImageProperties {
+        handle: "0000001".into(),
+        formats: vec![
+            BipImageFormat {
+                encoding: "PNG".into(),
+                pixel: BipPixel::Fixed(800, 800),
+                size: None,
+                is_native: true,
+            },
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(640, 480),
+                size: None,
+                is_native: false,
+            },
+        ],
+    };
+    assert_eq!(
+        select_best_format(&props, 360),
+        FormatSelection::NativeDefault
+    );
+}
+
+#[test]
+fn bip_build_image_descriptor_xml_format() {
+    let xml_bytes = build_image_descriptor_xml(640, 480);
+    let xml_str = std::str::from_utf8(&xml_bytes).unwrap();
+    assert_eq!(
+        xml_str,
+        "<image-descriptor version=\"1.0\"><image encoding=\"JPEG\" pixel=\"640*480\"/></image-descriptor>"
+    );
+}
+
+struct CustomServingChannel(SharedStub);
+
+#[async_trait::async_trait]
+impl BipChannel for CustomServingChannel {
+    async fn open(&self, _address: &BtAddress) -> Result<BipStream, BipError> {
+        let (client, server) = duplex_pair();
+        let stub = Arc::clone(&self.0);
+        tokio::spawn(async move {
+            let mut inner = stub.lock().await;
+            let mut s =
+                Server::new(server, HandlerProxy(&mut inner)).with_single_response_mode(true);
+            let _ = s.run().await;
+        });
+        Ok(Box::new(client) as BipStream)
+    }
+}
+
+#[tokio::test]
+async fn persistent_session_negotiates_higher_resolution_variant() {
+    let xml = r#"<image-properties version="1.0" handle="0000001">
+  <native encoding="JPEG" pixel="200*200" />
+  <variant encoding="JPEG" pixel="640*480" />
+</image-properties>"#;
+
+    let high_res_body = body_bytes(4096, 0xEE);
+    let stub = new_stub(Ok(high_res_body.clone()));
+    stub.lock().await.properties_xml = Some(xml.to_string());
+
+    let stub_clone = Arc::clone(&stub);
+    let mut session = PersistentBipSession::with_channel_factory(move |_| {
+        Box::new(CustomServingChannel(Arc::clone(&stub_clone)))
+    });
+
+    let address = test_address();
+    let result = session
+        .fetch_image(
+            &address,
+            &BipTransport::SdpRfcomm,
+            BipImageType::Native,
+            "0000001",
+        )
+        .await
+        .expect("negotiation and fetch must succeed");
+
+    assert_eq!(result, high_res_body);
+    session.release();
+    let s = stub.lock().await;
+    // Properties query has no descriptor (false), image query has descriptor (true)
+    assert_eq!(*s.descriptor_history.lock().await, vec![false, true]);
+}
+
+#[tokio::test]
+async fn persistent_session_falls_back_to_native_when_variant_rejected() {
+    let xml = r#"<image-properties version="1.0" handle="0000001">
+  <native encoding="JPEG" pixel="200*200" />
+  <variant encoding="JPEG" pixel="640*480" />
+</image-properties>"#;
+
+    let native_body = body_bytes(1024, 0xAA);
+    // First outcome (with descriptor): 406 Not Acceptable (0x46). Second outcome (native): Ok(native_body)
+    let stub = new_retry_stub(vec![
+        Err(Response::new(ResponseCode::NotAcceptable)),
+        Ok(native_body.clone()),
+    ]);
+    stub.lock().await.properties_xml = Some(xml.to_string());
+
+    let stub_clone = Arc::clone(&stub);
+    let mut session = PersistentBipSession::with_channel_factory(move |_| {
+        Box::new(CustomServingChannel(Arc::clone(&stub_clone)))
+    });
+
+    let address = test_address();
+    let result = session
+        .fetch_image(
+            &address,
+            &BipTransport::SdpRfcomm,
+            BipImageType::Native,
+            "0000001",
+        )
+        .await
+        .expect("fallback to native must succeed");
+
+    assert_eq!(result, native_body);
+    session.release();
+    let s = stub.lock().await;
+    // Properties GET (false), variant GET (true), fallback native GET (false)
+    assert_eq!(*s.descriptor_history.lock().await, vec![false, true, false]);
+}
+
+#[tokio::test]
+async fn persistent_session_caches_unsupported_properties_across_fetches() {
+    let body_track1 = body_bytes(512, 0x11);
+    let body_track2 = body_bytes(512, 0x22);
+
+    // properties_xml is None, so any x-bt/img-properties query returns NotFound (404)
+    let stub = new_retry_stub(vec![Ok(body_track1.clone()), Ok(body_track2.clone())]);
+
+    let stub_clone = Arc::clone(&stub);
+    let mut session = PersistentBipSession::with_channel_factory(move |_| {
+        Box::new(CustomServingChannel(Arc::clone(&stub_clone)))
+    });
+
+    let address = test_address();
+
+    // First fetch: properties returns 404, falls back to native, sets properties_supported = false
+    let res1 = session
+        .fetch_image(
+            &address,
+            &BipTransport::SdpRfcomm,
+            BipImageType::Native,
+            "0000001",
+        )
+        .await
+        .expect("fetch 1 must fall back to native and succeed");
+    assert_eq!(res1, body_track1);
+
+    // Second fetch: properties_supported is false, so it immediately fetches native without query
+    let res2 = session
+        .fetch_image(
+            &address,
+            &BipTransport::SdpRfcomm,
+            BipImageType::Native,
+            "0000002",
+        )
+        .await
+        .expect("fetch 2 must skip properties query and succeed");
+    assert_eq!(res2, body_track2);
+
+    session.release();
+    let s = stub.lock().await;
+    // Exactly 3 requests total: [properties query (404), native fetch 1, native fetch 2]
+    // If caching failed, there would be 4 requests (properties query sent again before fetch 2).
+    assert_eq!(
+        *s.descriptor_history.lock().await,
+        vec![false, false, false]
+    );
+}
+
+#[tokio::test]
+async fn persistent_session_caches_rejected_variant_across_fetches() {
+    let xml = r#"<image-properties version="1.0" handle="0000001">
+  <native encoding="JPEG" pixel="200*200" />
+  <variant encoding="JPEG" pixel="640*480" />
+</image-properties>"#;
+
+    let body_track1 = body_bytes(512, 0xAA);
+    let body_track2 = body_bytes(512, 0xBB);
+
+    // Track 1: variant GET rejected (406), native fallback succeeds.
+    // Track 2: should go directly to native without repeating variant negotiation.
+    let stub = new_retry_stub(vec![
+        Err(Response::new(ResponseCode::NotAcceptable)),
+        Ok(body_track1.clone()),
+        Ok(body_track2.clone()),
+    ]);
+    stub.lock().await.properties_xml = Some(xml.to_string());
+
+    let stub_clone = Arc::clone(&stub);
+    let mut session = PersistentBipSession::with_channel_factory(move |_| {
+        Box::new(CustomServingChannel(Arc::clone(&stub_clone)))
+    });
+
+    let address = test_address();
+
+    // Fetch 1: requests variant, gets 406, falls back to native, sets variants_supported = false
+    let res1 = session
+        .fetch_image(
+            &address,
+            &BipTransport::SdpRfcomm,
+            BipImageType::Native,
+            "0000001",
+        )
+        .await
+        .expect("fallback to native must succeed");
+    assert_eq!(res1, body_track1);
+
+    // Fetch 2: variants_supported is false, skips variant negotiation and directly fetches native
+    let res2 = session
+        .fetch_image(
+            &address,
+            &BipTransport::SdpRfcomm,
+            BipImageType::Native,
+            "0000002",
+        )
+        .await
+        .expect("fetch 2 must skip variant query and succeed");
+    assert_eq!(res2, body_track2);
+
+    session.release();
+    let s = stub.lock().await;
+    // Exactly 4 requests total:
+    // Fetch 1: properties GET (false), variant GET (true, 406), fallback native GET (false)
+    // Fetch 2: native GET (false)
+    assert_eq!(
+        *s.descriptor_history.lock().await,
+        vec![false, true, false, false]
+    );
 }
