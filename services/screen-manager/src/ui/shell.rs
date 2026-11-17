@@ -250,6 +250,7 @@ fn pcm_bit_depth(format: &str) -> &'static str {
 pub struct AppShell {
     window: MainWindow,
     config_path: Rc<RefCell<Option<PathBuf>>>,
+    persist_tx: Rc<RefCell<Option<std::sync::mpsc::Sender<CoreConfig>>>>,
     last_amp_volume: Cell<Option<crate::volume::AmpVolumeState>>,
     transport_commands: Rc<RefCell<Option<speaker_bluetooth::TransportCommandQueue>>>,
     amp_commands: Rc<RefCell<Option<crate::volume::AmpVolumeCommandQueue>>>,
@@ -272,6 +273,7 @@ impl AppShell {
         let shell = Self {
             window,
             config_path: Rc::new(RefCell::new(None)),
+            persist_tx: Rc::new(RefCell::new(None)),
             last_amp_volume: Cell::new(None),
             transport_commands: Rc::new(RefCell::new(None)),
             amp_commands: Rc::new(RefCell::new(None)),
@@ -428,8 +430,35 @@ impl AppShell {
     }
 
     /// Binds the JSON path used by the live Screen Settings persistence.
+    ///
+    /// Spawns the single background persist worker: the render thread sends
+    /// config snapshots over an unbounded FIFO channel (non-blocking), and
+    /// the worker performs the blocking temp-file + fsync + rename writes.
+    /// FIFO ordering guarantees the last UI edit wins on disk.
     pub fn wire_config(&self, path: &Path) {
-        *self.config_path.borrow_mut() = Some(path.to_path_buf());
+        let path = path.to_path_buf();
+        *self.config_path.borrow_mut() = Some(path.clone());
+        let (tx, rx) = std::sync::mpsc::channel::<CoreConfig>();
+        let worker_path = path.clone();
+        let spawned = std::thread::Builder::new()
+            .name("screen-settings-persist".into())
+            .spawn(move || {
+                for config in rx {
+                    Self::persist_config(&config, &worker_path);
+                }
+            });
+        match spawned {
+            Ok(_) => {
+                *self.persist_tx.borrow_mut() = Some(tx);
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    path = %path.display(),
+                    "failed to spawn config persist worker; live settings not saved"
+                );
+            }
+        }
     }
 
     /// Builds a [`CoreConfig`] snapshot from the current shell state.
@@ -494,34 +523,27 @@ impl AppShell {
         }
     }
 
-    /// Persists the current window state to the wired config path after a UI edit.
+    /// Queues the current window state for background persistence after a UI edit.
     ///
     /// # Render-Thread Safety (`M-NO-DBUS-ON-RENDER-THREAD`)
     ///
     /// `CoreConfig::save` performs temp-file + fsync + rename on the SD card,
     /// which can stall the render thread for tens of milliseconds per click.
-    /// The config snapshot is cloned on the render thread (cheap), then the
-    /// blocking write is deferred to a background thread so HUD animations,
-    /// marquee, and touch input stay responsive.
-    fn persist_window_state(window: &MainWindow, config_path: &Rc<RefCell<Option<PathBuf>>>) {
-        let Some(path) = config_path.borrow().as_ref().cloned() else {
+    /// The config snapshot is built on the render thread (cheap) and sent over
+    /// an unbounded FIFO channel to the single persist worker spawned by
+    /// [`Self::wire_config`], keeping HUD animations, marquee, and touch input
+    /// responsive. FIFO ordering guarantees the last UI edit wins on disk.
+    fn persist_window_state(
+        window: &MainWindow,
+        persist_tx: &Rc<RefCell<Option<std::sync::mpsc::Sender<CoreConfig>>>>,
+    ) {
+        let Some(tx) = persist_tx.borrow().as_ref().cloned() else {
             tracing::warn!("Screen settings change not persisted: no config path is wired");
             return;
         };
         let config = Self::config_from_window(window);
-        let path_for_thread = path.clone();
-        let config_for_thread = config.clone();
-        let spawned = std::thread::Builder::new()
-            .name("screen-settings-persist".into())
-            .spawn(move || {
-                Self::persist_config(&config_for_thread, &path_for_thread);
-            });
-        if let Err(e) = spawned {
-            tracing::error!(
-                error = %e,
-                path = %path.display(),
-                "failed to spawn config persist thread; settings not saved"
-            );
+        if tx.send(config).is_err() {
+            tracing::warn!("Screen settings change not persisted: persist worker is gone");
         }
     }
 
@@ -972,28 +994,28 @@ impl AppShell {
         });
 
         let win = self.window.as_weak();
-        let config_path = Rc::clone(&self.config_path);
+        let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_select_theme(move |idx| {
             if let Some(w) = win.upgrade() {
                 let preset = ThemePreset::from_index(idx);
                 preset.apply(&w);
-                Self::persist_window_state(&w, &config_path);
+                Self::persist_window_state(&w, &persist_tx);
             }
         });
 
         let win = self.window.as_weak();
-        let config_path = Rc::clone(&self.config_path);
+        let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_cycle_theme(move || {
             if let Some(w) = win.upgrade() {
                 let current = ThemePreset::from_index(w.global::<AppTheme>().get_active_preset());
                 let next = current.next();
                 next.apply(&w);
-                Self::persist_window_state(&w, &config_path);
+                Self::persist_window_state(&w, &persist_tx);
             }
         });
 
         let win = self.window.as_weak();
-        let config_path = Rc::clone(&self.config_path);
+        let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_set_marquee_fps(move |fps| {
             if let Some(w) = win.upgrade() {
                 // Snap to the valid domain (30/60) before applying; the
@@ -1001,12 +1023,12 @@ impl AppShell {
                 // raw Slint i32 values so it must guard its own input.
                 let fps = if fps == 30 { 30 } else { 60 };
                 w.global::<MarqueeCompose>().set_marquee_fps(fps);
-                Self::persist_window_state(&w, &config_path);
+                Self::persist_window_state(&w, &persist_tx);
             }
         });
 
         let win = self.window.as_weak();
-        let config_path = Rc::clone(&self.config_path);
+        let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_set_volume_step_percent(move |step| {
             if let Some(w) = win.upgrade() {
                 let clamped = step.clamp(
@@ -1014,39 +1036,39 @@ impl AppShell {
                     i32::from(MAX_VOLUME_STEP_PERCENT),
                 );
                 w.set_volume_step_percent(clamped);
-                Self::persist_window_state(&w, &config_path);
+                Self::persist_window_state(&w, &persist_tx);
             }
         });
 
         let win = self.window.as_weak();
-        let config_path = Rc::clone(&self.config_path);
+        let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_set_volume_hud_timeout_ms(move |ms| {
             if let Some(w) = win.upgrade() {
                 let clamped =
                     Self::clamp_hud_ms(ms, MIN_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_TIMEOUT_MS);
                 w.set_volume_hud_timeout_ms(clamped);
-                Self::persist_window_state(&w, &config_path);
+                Self::persist_window_state(&w, &persist_tx);
             }
         });
 
         let win = self.window.as_weak();
-        let config_path = Rc::clone(&self.config_path);
+        let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_set_volume_hud_fade_ms(move |ms| {
             if let Some(w) = win.upgrade() {
                 let clamped = Self::clamp_hud_ms(ms, 0, MAX_VOLUME_HUD_FADE_MS);
                 w.set_volume_hud_fade_ms(clamped);
-                Self::persist_window_state(&w, &config_path);
+                Self::persist_window_state(&w, &persist_tx);
             }
         });
 
         let win = self.window.as_weak();
-        let config_path = Rc::clone(&self.config_path);
+        let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_set_codec_hud_timeout_ms(move |ms| {
             if let Some(w) = win.upgrade() {
                 let clamped =
                     Self::clamp_hud_ms(ms, MIN_CODEC_HUD_TIMEOUT_MS, MAX_CODEC_HUD_TIMEOUT_MS);
                 w.set_codec_hud_timeout_ms(clamped);
-                Self::persist_window_state(&w, &config_path);
+                Self::persist_window_state(&w, &persist_tx);
             }
         });
 

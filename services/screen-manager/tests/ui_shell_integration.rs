@@ -981,7 +981,7 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     // write to complete before asserting disk state.
     shell.window().invoke_set_volume_step_percent(999);
     assert_eq!(shell.window().get_volume_step_percent(), 25);
-    // Poll until the background persist thread finishes (timeout 2s).
+    // Poll until the background persist worker finishes the write.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let live = loop {
         if let Ok(c) = CoreConfig::load(&path)
