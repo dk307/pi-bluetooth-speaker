@@ -1,45 +1,48 @@
 import {
+    HorizontalDivider,
     MaterialPalette,
     MaterialStyleMetrics,
+    MaterialText,
+    MaterialTypography,
+    OutlinedCard,
     TouchScale,
 } from "@material/material.slint";
 import { OverlayAppBar } from "screen_app_bar.slint";
 
-// One label / value line in the codec information panel.
-//
-// The parent positions the row (x/y/width/height); the row only lays out its
-// two text columns relative to its own bounds and scales with `TouchScale`.
+// One Material 3 key/value row in the codec information card.
 component CodecRow inherits Rectangle {
     in property <string> label;
     in property <string> value;
 
-    // Width of the uppercase caption column; the value column takes the rest.
-    property <length> label_width: 140px * TouchScale.widget_scale;
+    min-height: max(36px * TouchScale.widget_scale, row_layout.min-height);
 
-    Text {
-        x: 0;
-        y: 0;
-        width: parent.label_width;
-        height: parent.height;
-        text: parent.label;
-        color: MaterialPalette.secondary;
-        font-size: 15px * TouchScale.clamped_font_scale;
-        font-weight: 800;
-        vertical-alignment: center;
-        overflow: elide;
-    }
+    row_layout := HorizontalLayout {
+        padding-left: MaterialStyleMetrics.padding_16;
+        padding-right: MaterialStyleMetrics.padding_16;
+        padding-top: MaterialStyleMetrics.padding_6;
+        padding-bottom: MaterialStyleMetrics.padding_6;
+        spacing: MaterialStyleMetrics.spacing_12;
 
-    Text {
-        x: parent.label_width + 12px * TouchScale.widget_scale;
-        y: 0;
-        width: parent.width - self.x;
-        height: parent.height;
-        text: parent.value;
-        color: MaterialPalette.on_surface;
-        font-size: 22px * TouchScale.clamped_font_scale;
-        font-weight: 700;
-        vertical-alignment: center;
-        overflow: elide;
+        MaterialText {
+            text: root.label;
+            style: MaterialTypography.label_large;
+            color: MaterialPalette.on_surface_variant;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+            width: 140px * TouchScale.widget_scale;
+        }
+
+        MaterialText {
+            text: root.value;
+            style: MaterialTypography.title_medium;
+            color: MaterialPalette.on_surface;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            overflow: elide;
+            wrap: no-wrap;
+            horizontal-stretch: 1;
+        }
     }
 }
 
@@ -70,14 +73,6 @@ export component CodecHudOverlay inherits Rectangle {
     // Value shown for a property that is not available (no active stream).
     property <string> unknown: "—";
 
-    // Shared geometry: header height and the label/value row grid. Every
-    // position below is derived from these so the grid cannot drift apart.
-    property <length> bar_height: MaterialStyleMetrics.size_64;
-    property <length> row_height: 36px * TouchScale.widget_scale;
-    property <length> row_spacing: 6px * TouchScale.widget_scale;
-    property <length> column_width: min(root.width - 48px, 560px * TouchScale.widget_scale);
-    property <length> row_pitch: root.row_height + root.row_spacing;
-
     // Full-viewport backdrop touch catcher: prevents touches from leaking through to
     // the underlying tab and allows tapping empty space to dismiss the panel early.
     backdrop_touch := TouchArea {
@@ -88,13 +83,10 @@ export component CodecHudOverlay inherits Rectangle {
         }
     }
 
-    // App bar header laid out at the top; the body fills the remaining space
-    // (Volume HUD structure — layouts own the header/body split, math centers
-    // the content block inside the body).
     VerticalLayout {
         // Header — title "Codec", close icon on the right.
         Rectangle {
-            height: root.bar_height;
+            height: MaterialStyleMetrics.size_64;
             OverlayAppBar {
                 width: 100%;
                 height: 100%;
@@ -105,52 +97,50 @@ export component CodecHudOverlay inherits Rectangle {
             }
         }
 
-        // Body — fills the space below the app bar.
-        Rectangle {
-            background: transparent;
+        // Body — centers the Material 3 OutlinedCard inside the remaining space.
+        VerticalLayout {
+            vertical-stretch: 1;
+            alignment: center;
+            padding-left: MaterialStyleMetrics.padding_24;
+            padding-right: MaterialStyleMetrics.padding_24;
+            padding-top: MaterialStyleMetrics.padding_16;
+            padding-bottom: MaterialStyleMetrics.padding_16;
 
-            // Label/value block centered in the body area.
-            Rectangle {
-                width: root.column_width;
-                height: 5 * root.row_height + 4 * root.row_spacing;
-                background: transparent;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
+            HorizontalLayout {
+                alignment: center;
 
-                CodecRow {
-                    y: 0 * root.row_pitch;
-                    width: 100%;
-                    height: root.row_height;
-                    label: "CODEC";
-                    value: root.connected ? root.codec : root.unknown;
-                }
-                CodecRow {
-                    y: 1 * root.row_pitch;
-                    width: 100%;
-                    height: root.row_height;
-                    label: "SAMPLE RATE";
-                    value: root.connected ? root.sample_rate : root.unknown;
-                }
-                CodecRow {
-                    y: 2 * root.row_pitch;
-                    width: 100%;
-                    height: root.row_height;
-                    label: "BIT DEPTH";
-                    value: root.connected ? root.bit_depth : root.unknown;
-                }
-                CodecRow {
-                    y: 3 * root.row_pitch;
-                    width: 100%;
-                    height: root.row_height;
-                    label: "FORMAT";
-                    value: root.connected ? root.stream_format : root.unknown;
-                }
-                CodecRow {
-                    y: 4 * root.row_pitch;
-                    width: 100%;
-                    height: root.row_height;
-                    label: "LATENCY";
-                    value: root.connected ? root.delay_text : root.unknown;
+                OutlinedCard {
+                    width: min(root.width - 2 * MaterialStyleMetrics.padding_24, 560px * TouchScale.widget_scale);
+
+                    VerticalLayout {
+                        padding-top: MaterialStyleMetrics.padding_8;
+                        padding-bottom: MaterialStyleMetrics.padding_8;
+
+                        CodecRow {
+                            label: "Codec";
+                            value: root.connected ? root.codec : root.unknown;
+                        }
+                        HorizontalDivider {}
+                        CodecRow {
+                            label: "Sample Rate";
+                            value: root.connected ? root.sample_rate : root.unknown;
+                        }
+                        HorizontalDivider {}
+                        CodecRow {
+                            label: "Bit Depth";
+                            value: root.connected ? root.bit_depth : root.unknown;
+                        }
+                        HorizontalDivider {}
+                        CodecRow {
+                            label: "Format";
+                            value: root.connected ? root.stream_format : root.unknown;
+                        }
+                        HorizontalDivider {}
+                        CodecRow {
+                            label: "Latency";
+                            value: root.connected ? root.delay_text : root.unknown;
+                        }
+                    }
                 }
             }
         }

@@ -35,43 +35,79 @@ export component FontSizeControl inherits Rectangle {
         padding-top: MaterialStyleMetrics.padding_4;
         padding-bottom: MaterialStyleMetrics.padding_4;
         spacing: MaterialStyleMetrics.spacing_12;
-        alignment: center;
 
         MaterialText {
             text: "Text Size";
-            style: MaterialTypography.label_large;
-            color: MaterialPalette.on_surface_variant;
+            style: MaterialTypography.body_large;
+            color: MaterialPalette.on_surface;
             vertical-alignment: center;
             wrap: no-wrap;
             overflow: elide;
         }
 
-        // Small "A" anchor (fixed 14px reference)
-        Text {
-            text: "A";
-            font-size: 14px;
-            font-weight: 700;
-            color: MaterialPalette.on_surface_variant;
-            vertical-alignment: center;
+        // Small "A" button (decreases font_scale by 0.05 like Android Display settings)
+        Rectangle {
+            width: MaterialStyleMetrics.size_36;
+            height: MaterialStyleMetrics.size_36;
+            border-radius: self.height / 2;
+            background: dec_touch.pressed ? MaterialPalette.surface_container_highest : transparent;
+
+            Text {
+                width: 100%;
+                height: 100%;
+                text: "A";
+                font-size: 14px;
+                font-weight: MaterialTypography.regular;
+                color: TouchScale.clamped_font_scale > 1.001 ? MaterialPalette.on_surface : MaterialPalette.on_surface_variant;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            dec_touch := TouchArea {
+                enabled: TouchScale.clamped_font_scale > 1.001;
+                clicked => {
+                    TouchScale.font_scale = max(1.0, Math.round((TouchScale.clamped_font_scale - 0.05) * 20.0) / 20.0);
+                    root.font_scale_changed(TouchScale.font_scale);
+                }
+            }
         }
 
         scale_slider := Slider {
             horizontal-stretch: 1;
             minimum: 1.0;
             maximum: 1.35;
+            stop_count: 7;
             value <=> TouchScale.font_scale;
             value_changed(val) => {
                 root.font_scale_changed(val);
             }
         }
 
-        // Large "A" anchor (fixed 24px reference)
-        Text {
-            text: "A";
-            font-size: 24px;
-            font-weight: 800;
-            color: MaterialPalette.primary;
-            vertical-alignment: center;
+        // Large "A" button (increases font_scale by 0.05 like Android Display settings)
+        Rectangle {
+            width: MaterialStyleMetrics.size_36;
+            height: MaterialStyleMetrics.size_36;
+            border-radius: self.height / 2;
+            background: inc_touch.pressed ? MaterialPalette.surface_container_highest : transparent;
+
+            Text {
+                width: 100%;
+                height: 100%;
+                text: "A";
+                font-size: 22px;
+                font-weight: MaterialTypography.medium;
+                color: TouchScale.clamped_font_scale < 1.349 ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            inc_touch := TouchArea {
+                enabled: TouchScale.clamped_font_scale < 1.349;
+                clicked => {
+                    TouchScale.font_scale = min(1.35, Math.round((TouchScale.clamped_font_scale + 0.05) * 20.0) / 20.0);
+                    root.font_scale_changed(TouchScale.font_scale);
+                }
+            }
         }
 
         // Live percentage badge (100% .. 135%)
@@ -85,7 +121,7 @@ export component FontSizeControl inherits Rectangle {
                 width: 100%;
                 height: 100%;
                 text: Math.round(TouchScale.clamped_font_scale * 100.0) + "%";
-                style: MaterialTypography.label_medium_prominent;
+                style: MaterialTypography.label_medium;
                 color: MaterialPalette.on_secondary_container;
                 horizontal-alignment: center;
                 vertical-alignment: center;

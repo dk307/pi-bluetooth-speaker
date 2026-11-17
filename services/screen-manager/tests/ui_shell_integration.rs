@@ -1179,3 +1179,78 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     shell.wire_config(std::path::Path::new("/nonexistent-dir/settings.json"));
     shell.window().invoke_set_volume_step_percent(2);
 }
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_font_size_slider_touch_interaction() {
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use slint::{ComponentHandle, LogicalPosition};
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+    shell.window().show().expect("Failed to show MainWindow");
+
+    shell.set_tab(5);
+    shell.window().set_show_themes(true);
+    shell.set_font_scale(1.15);
+    assert!(
+        fb.render_frame_full_redraw(&window)
+            .expect("render Screen Settings")
+    );
+
+    // First verify ThemePresetCard at (220, 100) receives taps inside Screen Settings
+    let theme_pos = LogicalPosition::new(220.0, 100.0);
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: theme_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: theme_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert_eq!(
+        shell.current_theme(),
+        screen_manager::ui::ThemePreset::MarantzAmber,
+        "tapping second ThemePresetCard inside ScrollView must switch theme"
+    );
+
+    // Tap the large "A" button (x ≈ 665px, y ≈ 165px) to step up by 0.05.
+    let inc_pos = LogicalPosition::new(665.0, 165.0);
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: inc_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: inc_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert!(
+        shell.font_scale() > 1.15,
+        "tapping large A button must increase font_scale (got {})",
+        shell.font_scale()
+    );
+
+    // Drag across the FontSizeControl slider track (x 250 -> x 600 at y=165) to verify sliding works.
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: LogicalPosition::new(250.0, 165.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(600.0, 165.0),
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: LogicalPosition::new(600.0, 165.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert!(
+        shell.font_scale() > 1.25,
+        "sliding FontSizeControl slider to the right must increase font_scale (got {})",
+        shell.font_scale()
+    );
+}

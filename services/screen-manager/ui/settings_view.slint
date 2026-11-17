@@ -3,6 +3,7 @@ import {
     MaterialStyleMetrics,
     MaterialText,
     MaterialTypography,
+    ScrollView,
     TouchScale,
 } from "@material/material.slint";
 import { AppTheme } from "app_theme.slint";
@@ -64,17 +65,14 @@ component SettingsStepperRow inherits Rectangle {
     callback decrease();
     callback increase();
 
-    min-height: max(MaterialStyleMetrics.size_36, row_layout.min-height);
+    min-height: max(MaterialStyleMetrics.size_40, row_layout.min-height);
 
     row_layout := HorizontalLayout {
         spacing: MaterialStyleMetrics.spacing_8;
 
         MaterialText {
             text: root.label;
-            style: {
-                font_size: MaterialTypography.body_large.font_size,
-                font_weight: 600,
-            };
+            style: MaterialTypography.body_large;
             color: MaterialPalette.on_surface;
             vertical-alignment: center;
             horizontal-alignment: left;
@@ -91,10 +89,7 @@ component SettingsStepperRow inherits Rectangle {
 
         MaterialText {
             text: root.value;
-            style: {
-                font_size: MaterialTypography.body_large.font_size,
-                font_weight: 700,
-            };
+            style: MaterialTypography.title_medium;
             color: MaterialPalette.primary;
             vertical-alignment: center;
             horizontal-alignment: center;
@@ -132,10 +127,7 @@ component FpsSegmented inherits Rectangle {
 
             MaterialText {
                 text: "30";
-                style: {
-                    font_size: MaterialTypography.label_large.font_size,
-                    font_weight: root.current_fps == 30 ? 700 : 600,
-                };
+                style: MaterialTypography.label_large;
                 color: root.current_fps == 30 ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -158,10 +150,7 @@ component FpsSegmented inherits Rectangle {
 
             MaterialText {
                 text: "60";
-                style: {
-                    font_size: MaterialTypography.label_large.font_size,
-                    font_weight: root.current_fps == 60 ? 700 : 600,
-                };
+                style: MaterialTypography.label_large;
                 color: root.current_fps == 60 ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -178,7 +167,7 @@ component FpsSegmented inherits Rectangle {
 // Advanced list row pairing the "Marquee FPS" label with the segmented
 // 30 / 60 rate selector on the right.
 component FpsSegmentedRow inherits Rectangle {
-    min-height: max(MaterialStyleMetrics.size_36, row_layout.min-height);
+    min-height: max(MaterialStyleMetrics.size_40, row_layout.min-height);
     callback set_marquee_fps(int);
 
     row_layout := HorizontalLayout {
@@ -186,10 +175,7 @@ component FpsSegmentedRow inherits Rectangle {
 
         MaterialText {
             text: "Marquee FPS";
-            style: {
-                font_size: MaterialTypography.body_large.font_size,
-                font_weight: 600,
-            };
+            style: MaterialTypography.body_large;
             color: MaterialPalette.on_surface;
             vertical-alignment: center;
             horizontal-alignment: left;
@@ -216,7 +202,7 @@ component ThemePresetCard inherits Rectangle {
 
     horizontal-stretch: 1;
     min-width: 118px;
-    min-height: max(50px * TouchScale.widget_scale, card_layout.min-height);
+    min-height: max(56px * TouchScale.widget_scale, card_layout.min-height);
     border-radius: MaterialStyleMetrics.border_radius_10;
     border-width: root.selected ? 2px : 1px;
     border-color: root.selected ? root.primary_color : MaterialPalette.outline_variant;
@@ -228,8 +214,8 @@ component ThemePresetCard inherits Rectangle {
         alignment: center;
         padding-left: MaterialStyleMetrics.padding_6;
         padding-right: MaterialStyleMetrics.padding_6;
-        padding-top: MaterialStyleMetrics.padding_4;
-        padding-bottom: MaterialStyleMetrics.padding_4;
+        padding-top: MaterialStyleMetrics.padding_6;
+        padding-bottom: MaterialStyleMetrics.padding_6;
         spacing: MaterialStyleMetrics.spacing_2;
 
         MaterialText {
@@ -268,29 +254,43 @@ component SettingsIconButton inherits Rectangle {
     opacity: root.enabled ? (touch.pressed ? 0.8 : 1.0) : 0.6;
     animate opacity { duration: 80ms; easing: ease-out; }
 
+    // Off-layout single-line probe so `is_multiline` depends only on `root.width`
+    // and `root.label` without creating a layout binding loop.
+    label_probe := Text {
+        x: 0;
+        y: 0;
+        visible: false;
+        text: root.label;
+        font-size: MaterialTypography.title_medium.font_size;
+        font-weight: MaterialTypography.title_medium.font_weight;
+        wrap: no-wrap;
+    }
+
+    property <bool> is_multiline: label_probe.preferred-width > root.width - 2 * MaterialStyleMetrics.padding_8;
+
     btn_layout := VerticalLayout {
         alignment: center;
         padding: MaterialStyleMetrics.padding_8;
-        spacing: MaterialStyleMetrics.spacing_12;
+        spacing: root.is_multiline ? MaterialStyleMetrics.spacing_8 : MaterialStyleMetrics.spacing_12;
 
         HorizontalLayout {
             alignment: center;
             Image {
                 source: root.icon;
                 colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
-                width: MaterialStyleMetrics.icon_size_36;
-                height: MaterialStyleMetrics.icon_size_36;
+                width: root.is_multiline ? 32px * TouchScale.widget_scale : MaterialStyleMetrics.icon_size_36;
+                height: self.width;
                 image-fit: contain;
             }
         }
 
-        MaterialText {
+        label_text := MaterialText {
             text: root.label;
             style: MaterialTypography.title_medium;
             color: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
             horizontal-alignment: center;
             overflow: elide;
-            wrap: no-wrap;
+            wrap: word-wrap;
         }
     }
 
@@ -371,13 +371,14 @@ export component SettingsView inherits VerticalLayout {
         }
     }
 
-    // View 2: Screen Settings — Material 3 settings list with Theme presets,
-    // Text Size slider, and live-persisted Advanced steppers.
+    // View 2: Screen Settings — Appearance (Theme presets + Text Size) pinned
+    // above the scrollable Advanced list so the Text Size slider receives
+    // uninterrupted horizontal drag gestures on the touchscreen.
     if root.show_themes && !root.show_widget_preview : VerticalLayout {
         vertical-stretch: 1;
-        spacing: MaterialStyleMetrics.spacing_4;
+        spacing: MaterialStyleMetrics.spacing_8;
 
-        // Section 1: Theme presets
+        // Section 1: Theme presets + Text Size (non-advanced appearance settings)
         HorizontalLayout {
             spacing: MaterialStyleMetrics.spacing_8;
 
@@ -427,73 +428,84 @@ export component SettingsView inherits VerticalLayout {
             }
         }
 
+        // Text Size ("A — Slider — A") setting, live-persisted to config.json.
+        FontSizeControl {
+            font_scale_changed(val) => { root.font_scale_changed(val); }
+        }
+
         // Section divider (M3: one divider between groups, none between rows).
         Rectangle {
             height: 1px;
             background: MaterialPalette.outline_variant;
         }
 
-        // Section 2 header: "Advanced".
-        MaterialText {
-            text: "Advanced";
-            style: {
-                font_size: MaterialTypography.title_large.font_size,
-                font_weight: 700,
-            };
-            color: MaterialPalette.on_surface;
-            vertical-alignment: center;
-        }
-
-        // Text Size ("A — Slider — A") setting, live-persisted to config.json.
-        FontSizeControl {
-            font_scale_changed(val) => { root.font_scale_changed(val); }
-        }
-
-        FpsSegmentedRow {
-            set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
-        }
-
-        // Stepper bounds mirror the Rust config domains (MIN_/MAX_* in
-        // crate::config); the Rust callbacks clamp off-grid steps as well.
-        SettingsStepperRow {
-            label: "Encoder Volume Step";
-            value: "\{root.volume_step_percent} %";
-            can_decrease: root.volume_step_percent > 1;
-            can_increase: root.volume_step_percent < 25;
-            decrease => { root.set_volume_step_percent(root.volume_step_percent - 1); }
-            increase => { root.set_volume_step_percent(root.volume_step_percent + 1); }
-        }
-
-        SettingsStepperRow {
-            label: "Volume HUD Timeout";
-            value: "\{root.volume_hud_timeout_ms} ms";
-            can_decrease: root.volume_hud_timeout_ms > 250;
-            can_increase: root.volume_hud_timeout_ms < 30000;
-            decrease => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms - 250); }
-            increase => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms + 250); }
-        }
-
-        SettingsStepperRow {
-            label: "Volume HUD Fade";
-            value: "\{root.volume_hud_fade_ms} ms";
-            can_decrease: root.volume_hud_fade_ms > 0;
-            can_increase: root.volume_hud_fade_ms < 2000;
-            decrease => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms - 100); }
-            increase => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms + 100); }
-        }
-
-        SettingsStepperRow {
-            label: "Codec HUD Timeout";
-            value: "\{root.codec_hud_timeout_ms} ms";
-            can_decrease: root.codec_hud_timeout_ms > 250;
-            can_increase: root.codec_hud_timeout_ms < 300000;
-            decrease => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms - 1000); }
-            increase => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms + 1000); }
-        }
-
-        // Stretch spacer keeps the settings list top-aligned in the viewport.
-        Rectangle {
+        // Section 2: Scrollable Advanced settings list
+        settings_scroll := ScrollView {
             vertical-stretch: 1;
+            horizontal_scrollbar_policy: ScrollBarPolicy.always_off;
+            content_width: settings_scroll.visible_width;
+            content_height: settings_list.min-height;
+
+            settings_list := VerticalLayout {
+                width: settings_scroll.visible_width;
+                height: max(settings_scroll.visible_height, self.min-height);
+                padding-right: MaterialStyleMetrics.padding_4;
+                spacing: MaterialStyleMetrics.spacing_8;
+
+                // Section 2 header: "Advanced".
+                MaterialText {
+                    text: "Advanced";
+                    style: MaterialTypography.title_medium;
+                    color: MaterialPalette.primary;
+                    vertical-alignment: center;
+                }
+
+                FpsSegmentedRow {
+                    set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
+                }
+
+                // Stepper bounds mirror the Rust config domains (MIN_/MAX_* in
+                // crate::config); the Rust callbacks clamp off-grid steps as well.
+                SettingsStepperRow {
+                    label: "Encoder Volume Step";
+                    value: "\{root.volume_step_percent} %";
+                    can_decrease: root.volume_step_percent > 1;
+                    can_increase: root.volume_step_percent < 25;
+                    decrease => { root.set_volume_step_percent(root.volume_step_percent - 1); }
+                    increase => { root.set_volume_step_percent(root.volume_step_percent + 1); }
+                }
+
+                SettingsStepperRow {
+                    label: "Volume HUD Timeout";
+                    value: "\{root.volume_hud_timeout_ms} ms";
+                    can_decrease: root.volume_hud_timeout_ms > 250;
+                    can_increase: root.volume_hud_timeout_ms < 30000;
+                    decrease => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms - 250); }
+                    increase => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms + 250); }
+                }
+
+                SettingsStepperRow {
+                    label: "Volume HUD Fade";
+                    value: "\{root.volume_hud_fade_ms} ms";
+                    can_decrease: root.volume_hud_fade_ms > 0;
+                    can_increase: root.volume_hud_fade_ms < 2000;
+                    decrease => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms - 100); }
+                    increase => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms + 100); }
+                }
+
+                SettingsStepperRow {
+                    label: "Codec HUD Timeout";
+                    value: "\{root.codec_hud_timeout_ms} ms";
+                    can_decrease: root.codec_hud_timeout_ms > 250;
+                    can_increase: root.codec_hud_timeout_ms < 300000;
+                    decrease => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms - 1000); }
+                    increase => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms + 1000); }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+            }
         }
     }
 

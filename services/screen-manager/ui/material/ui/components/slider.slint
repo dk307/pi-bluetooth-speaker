@@ -8,7 +8,7 @@ import { StateLayer } from "./state_layer.slint";
 export component Slider {
     in property <bool> enabled: true;
     in_out property <float> value;
-    in property <float> minimum;
+    in property <float> minimum: 0;
     in property <int> stop_count: 0;
     in property <float> maximum: 100;
 
@@ -17,13 +17,14 @@ export component Slider {
 
     property <float> steps: root.stop_count > 0 ? (root.maximum - root.minimum) / root.stop_count : 0;
 
+    min_width: 80px;
     min_height: MaterialStyleMetrics.size_40;
     accessible-role: slider;
     accessible-enabled: root.enabled;
     accessible-value: root.value;
     accessible-value-minimum: root.minimum;
     accessible-value-maximum: root.maximum;
-    accessible-value-step: min(steps, (root.maximum - root.minimum) / 100);
+    accessible-value-step: root.steps > 0 ? root.steps : (root.maximum - root.minimum) / 100;
     accessible-action-set-value(v) => {
         if v.is-float() {
             root.set_value(v.to-float());
@@ -35,79 +36,102 @@ export component Slider {
 
     focus_scope := FocusScope {
         touch_area := TouchArea {
+            width: 100%;
+            height: 100%;
+            enabled: root.enabled;
+
             track := Rectangle {
-                x: 0;
-                height: MaterialStyleMetrics.size_16;
+                x: MaterialStyleMetrics.size_8;
+                y: (parent.height - self.height) / 2;
+                width: max(1px, parent.width - MaterialStyleMetrics.size_16);
+                height: MaterialStyleMetrics.size_14;
                 background: MaterialPalette.surface_container_highest;
                 border_radius: self.height / 2;
+                clip: true;
 
+                // Active filled track
                 Rectangle {
                     x: 0;
-                    width: state_layer.x - MaterialStyleMetrics.size_6;
-                    border-top-left-radius: track.border_radius;
-                    border-bottom-left-radius: track.border_radius;
-                    border-top-right-radius: MaterialStyleMetrics.size_1;
-                    border-bottom-right-radius: MaterialStyleMetrics.size_1;
-                    background: thumb.background;
+                    y: 0;
+                    width: root.value_to_length(parent.width, root.value);
+                    height: parent.height;
+                    border_radius: self.height / 2;
+                    background: root.enabled ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
                 }
 
+                // Discrete stop dots (Android M3 stepped slider)
                 if root.stop_count > 1: Rectangle {
                     width: 100%;
                     height: 100%;
 
-                    for i in (root.maximum - root.minimum) / root.steps - 1: Rectangle {
-                        x: root.value_to_length(track.width, (i + 1) * root.steps) - self.width / 2;
+                    for i in root.stop_count - 1: Rectangle {
+                        property <length> dot_x: root.value_to_length(track.width, root.minimum + (i + 1) * root.steps);
+                        x: self.dot_x - self.width / 2;
+                        y: (parent.height - self.height) / 2;
                         height: MaterialStyleMetrics.size_4;
                         width: self.height;
                         border_radius: self.height / 2;
-                        background: MaterialPalette.outline;
+                        background: (root.minimum + (i + 1) * root.steps) <= root.value
+                            ? MaterialPalette.on_primary
+                            : MaterialPalette.outline;
                     }
                 }
             }
 
+            // Touch-friendly circular thumb + state halo
             state_layer := Rectangle {
-                x: root.value_to_length(track.width, root.value);
-                width: 0;
-                height: track.height + (MaterialStyleMetrics.size_14 * 2);
+                x: track.x + root.value_to_length(track.width, root.value) - self.width / 2;
+                y: (parent.height - self.height) / 2;
+                width: MaterialStyleMetrics.size_32;
+                height: self.width;
+
                 StateLayer {
-                    height: track.height + (MaterialStyleMetrics.size_16 * 2);
-                    width: thumb.width + (MaterialStyleMetrics.size_2 * 2);
+                    width: 100%;
+                    height: 100%;
                     border_radius: self.width / 2;
-                    pressed: touch_area.pressed || thumb_area.pressed;
+                    pressed: touch_area.pressed;
                     has_hover: false;
                     has_focus: focus_scope.has_focus;
                     enabled: root.enabled;
-                    background: thumb.background;
-                    display_background: touch_area.pressed || thumb_area.pressed || focus_scope.has_focus;
+                    background: MaterialPalette.primary;
+                    display_background: touch_area.pressed || focus_scope.has_focus;
+                }
 
-                    thumb_area := TouchArea {
-                        height: track.height + (MaterialStyleMetrics.size_14 * 2);
-                        width: self.height;
-                        thumb := Rectangle {
-                            width: MaterialStyleMetrics.size_4;
-                            border_radius: self.width / 2;
-                            background: MaterialPalette.primary;
-                        }
-
-                        moved => {
-                            root.set_value(root.length_to_value(state_layer.x + (self.mouse_x - self.pressed_x), track.width));
-                        }
-
-                        pointer_event(event) => {
-                            if event.kind == PointerEventKind.up {
-                                root.released(root.value);
-                            }
-                        }
-                    }
+                thumb := Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: MaterialStyleMetrics.size_20;
+                    height: self.width;
+                    border_radius: self.height / 2;
+                    background: root.enabled ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
+                    border_width: 2px;
+                    border_color: MaterialPalette.surface;
                 }
             }
 
+            clicked => {
+                if !root.enabled {
+                    return;
+                }
+                root.set_value(root.length_to_value(self.mouse_x - track.x, track.width));
+                root.released(root.value);
+            }
+
             pointer_event(event) => {
-                if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
-                    root.set_value(root.length_to_value(self.mouse_x, track.width));
+                if !root.enabled {
+                    return;
+                }
+                if event.kind == PointerEventKind.down {
+                    root.set_value(root.length_to_value(self.mouse_x - track.x, track.width));
                 }
                 if event.kind == PointerEventKind.up {
                     root.released(root.value);
+                }
+            }
+
+            moved => {
+                if self.pressed && root.enabled {
+                    root.set_value(root.length_to_value(self.mouse_x - track.x, track.width));
                 }
             }
         }
