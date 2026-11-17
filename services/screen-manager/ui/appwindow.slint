@@ -164,7 +164,6 @@ export component MainWindow inherits Window {
     callback night_mode_clicked();
     callback tab_selected(int);
     callback select_theme(int);
-    callback cycle_theme();
     callback set_marquee_fps(int);
     callback set_volume_step_percent(int);
     callback set_volume_hud_timeout_ms(int);
@@ -300,7 +299,6 @@ export component MainWindow inherits Window {
                 }
                 volume_changed(val) => { root.volume_changed(val); }
                 select_theme(idx) => { root.select_theme(idx); }
-                cycle_theme => { root.cycle_theme(); }
                 set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
                 set_volume_step_percent(step) => { root.set_volume_step_percent(step); }
                 set_volume_hud_timeout_ms(ms) => { root.set_volume_hud_timeout_ms(ms); }

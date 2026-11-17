@@ -250,8 +250,9 @@ fn ui_shell_callbacks_and_debug_formatting() {
     shell.window().invoke_select_theme(1);
     assert_eq!(shell.current_theme(), ThemePreset::MarantzAmber);
 
-    // Invoke cycle theme callback
-    shell.window().invoke_cycle_theme();
+    // Cycle theme via the programmatic API (the Slint cycle_theme callback
+    // chain was removed with the Cycle Next Theme button).
+    let _ = shell.cycle_theme();
     assert_eq!(shell.current_theme(), ThemePreset::CyberpunkNeon);
 }
 
@@ -581,7 +582,7 @@ fn ui_shell_now_playing_callbacks() {
     shell.window().invoke_next_track();
     shell.window().invoke_previous_track();
     shell.window().invoke_volume_changed(60.0);
-    shell.window().invoke_cycle_theme();
+    let _ = shell.cycle_theme();
     shell.window().invoke_source_clicked();
     shell.window().invoke_night_mode_clicked();
 

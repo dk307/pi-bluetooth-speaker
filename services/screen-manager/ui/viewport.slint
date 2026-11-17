@@ -80,7 +80,6 @@ export component MainViewport inherits Rectangle {
     callback toggle_mute();
     callback volume_changed(float);
     callback stream_pill_clicked();
-    callback cycle_theme();
     callback select_theme(int);
     callback set_marquee_fps(int);
     callback set_volume_step_percent(int);
@@ -283,7 +282,6 @@ export component MainViewport inherits Rectangle {
             dsp_clicked => { root.select_tab(4); }
             cd_clicked => { root.select_tab(3); }
             select_theme(idx) => { root.select_theme(idx); }
-            cycle_theme => { root.cycle_theme(); }
             set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
             set_volume_step_percent(step) => { root.set_volume_step_percent(step); }
             set_volume_hud_timeout_ms(ms) => { root.set_volume_hud_timeout_ms(ms); }

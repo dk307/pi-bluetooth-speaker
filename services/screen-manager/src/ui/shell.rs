@@ -444,7 +444,15 @@ impl AppShell {
             .name("screen-settings-persist".into())
             .spawn(move || {
                 for config in rx {
-                    Self::persist_config(&config, &worker_path);
+                    // M-PANIC-ON-BUG: a worker crash is a bug, not a
+                    // recoverable I/O hiccup — re-raise instead of silently
+                    // killing the worker and dropping queued snapshots.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Self::persist_config(&config, &worker_path);
+                    }));
+                    if let Err(p) = result {
+                        std::panic::resume_unwind(p);
+                    }
                 }
             });
         match spawned {
@@ -556,7 +564,7 @@ impl AppShell {
     /// Returns the window volume-step property clamped to `1..=25`.
     fn volume_step_percent_from_window(window: &MainWindow) -> u8 {
         u8::try_from(window.get_volume_step_percent())
-            .unwrap_or(MAX_VOLUME_STEP_PERCENT)
+            .unwrap_or(DEFAULT_VOLUME_STEP_PERCENT)
             .clamp(MIN_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT)
     }
 
@@ -1005,23 +1013,16 @@ impl AppShell {
 
         let win = self.window.as_weak();
         let persist_tx = Rc::clone(&self.persist_tx);
-        self.window.on_cycle_theme(move || {
-            if let Some(w) = win.upgrade() {
-                let current = ThemePreset::from_index(w.global::<AppTheme>().get_active_preset());
-                let next = current.next();
-                next.apply(&w);
-                Self::persist_window_state(&w, &persist_tx);
-            }
-        });
-
-        let win = self.window.as_weak();
-        let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_set_marquee_fps(move |fps| {
             if let Some(w) = win.upgrade() {
                 // Snap to the valid domain (30/60) before applying; the
                 // programmatic setter does the same, but the callback receives
                 // raw Slint i32 values so it must guard its own input.
-                let fps = if fps == 30 { 30 } else { 60 };
+                let fps = if fps == 30 {
+                    30
+                } else {
+                    i32::try_from(DEFAULT_MARQUEE_FPS).unwrap_or(i32::MAX)
+                };
                 w.global::<MarqueeCompose>().set_marquee_fps(fps);
                 Self::persist_window_state(&w, &persist_tx);
             }
