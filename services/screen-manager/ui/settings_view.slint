@@ -20,10 +20,10 @@ component StepButton inherits Rectangle {
     opacity: root.enabled && touch.pressed ? 0.8 : root.enabled ? 1.0 : 0.6;
     animate opacity { duration: 80ms; easing: ease-out; }
 
-    // "−" (remove) icon: always shown; canonical 24dp M3 icon.
-    // Explicit centering (like the original bar approach) avoids font‑baseline
-    // mismatch and image‑fit ambiguity between "−" and "+" glyphs.
-    Image {
+    // "−" (remove) icon: shown on decrease buttons only; canonical 24dp M3
+    // icon. Explicit centering avoids font-baseline mismatch and image-fit
+    // ambiguity between "−" and "+" glyphs.
+    if !root.plus : Image {
         source: @image-url("../../../assets/icons/remove.svg");
         colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
         width: 20px;
