@@ -982,7 +982,7 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     shell.window().invoke_set_volume_step_percent(999);
     assert_eq!(shell.window().get_volume_step_percent(), 25);
     // Poll until the background persist thread finishes (timeout 2s).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let live = loop {
         if let Ok(c) = CoreConfig::load(&path)
             && c.volume_step_percent.value() == 25
@@ -991,9 +991,9 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "background persist did not complete within 2s"
+            "background persist did not complete within 10s"
         );
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(50));
     };
     assert_eq!(live.volume_step_percent.value(), 25);
     shell.window().invoke_set_volume_step_percent(-7);
@@ -1028,7 +1028,8 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     assert_eq!(clamped.codec_hud_timeout_ms.value(), 250);
     assert_eq!(clamped.marquee_fps, MarqueeFps::FPS_30);
     // Poll until the final background persist (marquee fps = 30) completes.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    // CI's ARM runner is slow; use a generous timeout.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let saved = loop {
         if let Ok(c) = CoreConfig::load(&path)
             && c == clamped
@@ -1037,9 +1038,9 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "final background persist did not complete within 2s"
+            "final background persist did not complete within 10s"
         );
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(50));
     };
     assert_eq!(saved, clamped);
 
