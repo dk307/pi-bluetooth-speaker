@@ -354,6 +354,7 @@ export component MainWindow inherits Window {
             y: root.overlay_top_inset;
             width: 100%;
             height: parent.height - root.overlay_top_inset;
+            overlay_backdrop_available: root.overlay_backdrop_available;
             visible: root.volume_hud_opacity > 0.01;
             opacity: root.volume_hud_opacity;
             volume_value <=> root.volume_value;
@@ -369,6 +370,7 @@ export component MainWindow inherits Window {
             y: root.overlay_top_inset;
             width: 100%;
             height: parent.height - root.overlay_top_inset;
+            overlay_backdrop_available: root.overlay_backdrop_available;
             visible: root.codec_hud_opacity > 0.01;
             opacity: root.codec_hud_opacity;
             codec: root.stream_codec;

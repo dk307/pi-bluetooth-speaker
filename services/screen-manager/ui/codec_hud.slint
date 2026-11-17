@@ -47,8 +47,13 @@ export component CodecHudOverlay inherits Rectangle {
     width: 100%;
     height: 100%;
     // Translucent panel: the blurred backdrop snapshot published by Rust shows
-    // through the overlay, so the panel itself must not be fully opaque.
-    background: @linear-gradient(150deg, MaterialPalette.surface.transparentize(0.25) 0%, MaterialPalette.background.transparentize(0.25) 100%);
+    // through the overlay, so the panel itself must not be fully opaque. When no
+    // backdrop is available (e.g. the KMS backend, where nothing can be captured)
+    // the panel falls back to the original opaque gradient — otherwise sharp
+    // live content would ghost through the translucency.
+    background: root.overlay_backdrop_available
+        ? @linear-gradient(150deg, MaterialPalette.surface.transparentize(0.25) 0%, MaterialPalette.background.transparentize(0.25) 100%)
+        : @linear-gradient(150deg, MaterialPalette.surface 0%, MaterialPalette.background 100%);
     border-width: 1px;
     border-color: MaterialPalette.outline_variant;
     clip: true;
@@ -61,6 +66,9 @@ export component CodecHudOverlay inherits Rectangle {
     in property <string> delay_text: "";
     // False while no Bluetooth device is connected (no stream to report).
     in property <bool> connected: false;
+    // Mirrors `MainWindow.overlay_backdrop_available`; keys the panel
+    // translucency off the same signal as the window-level scrim.
+    in property <bool> overlay_backdrop_available: false;
 
     callback dismiss_requested();
 

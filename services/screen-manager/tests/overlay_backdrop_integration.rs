@@ -549,3 +549,49 @@ fn the_scrim_dims_the_published_backdrop() {
         );
     }
 }
+
+#[test]
+fn the_panel_is_opaque_when_no_backdrop_is_published() {
+    let (shell, window, mut fb) = shell_with_window();
+    let overlay_top = OVERLAY_TOP_INSET as usize;
+
+    // KMS fallback: no backdrop is ever published, so the panels must render
+    // fully opaque. Switch the tab underneath each open HUD and compare the
+    // whole overlay region: with an opaque panel nothing of the live scene
+    // bleeds through, so every pixel at or below the top bar must be identical
+    // between the two scenes. A translucent panel would let the dimmed live
+    // content ghost through (the regression this guards).
+    for open in [AppShell::show_volume_hud, AppShell::show_codec_hud] {
+        open(&shell);
+        settle();
+        let tab_now_playing = render(&mut fb, &window);
+
+        shell.window().set_active_tab(5);
+        settle();
+        let tab_settings = render(&mut fb, &window);
+
+        // Positive control: the tab switch really changed the scene above the
+        // overlay area (status bar vs app bar), so the comparison below is
+        // meaningful.
+        assert_ne!(
+            tab_now_playing[..overlay_top * WIDTH],
+            tab_settings[..overlay_top * WIDTH],
+            "the tab switch must change the top bar for this test to be meaningful"
+        );
+
+        let ghost = tab_now_playing
+            .iter()
+            .zip(tab_settings.iter())
+            .enumerate()
+            .skip(overlay_top * WIDTH)
+            .find(|(_, (a, b))| a != b);
+        assert!(
+            ghost.is_none(),
+            "live content must not ghost through the panel when no backdrop is \
+             published: first differing pixel at {:?}",
+            ghost.map(|(i, _)| i)
+        );
+
+        shell.window().set_active_tab(0);
+    }
+}
