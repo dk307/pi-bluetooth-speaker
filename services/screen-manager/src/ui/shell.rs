@@ -313,8 +313,8 @@ impl AppShell {
 
     /// Sets the volume step percentage per rotary encoder detent.
     ///
-    /// Values outside `1..=25` are clamped; use [`VolumeStepPercent::try_from`]
-    /// to reject them at the call site instead.
+    /// The [`VolumeStepPercent`] parameter guarantees the `1..=25` invariant by
+    /// construction; the validated value is written to the Slint property verbatim.
     pub fn set_volume_step_percent(&self, step: VolumeStepPercent) {
         self.window.set_volume_step_percent(i32::from(step.value()));
     }
@@ -327,12 +327,12 @@ impl AppShell {
 
     /// Sets the marquee scroll rate in fps (`30` or `60`) on the shared composer global.
     ///
-    /// Values outside `30`/`60` snap to the default rate; use
-    /// [`MarqueeFps::try_from`] to reject them at the call site instead.
+    /// The [`MarqueeFps`] parameter guarantees the `30`/`60` invariant by
+    /// construction; the validated value is written to the Slint property verbatim.
     pub fn set_marquee_fps(&self, fps: MarqueeFps) {
         self.window
             .global::<MarqueeCompose>()
-            .set_marquee_fps(i32::try_from(fps.value()).unwrap_or(i32::MAX));
+            .set_marquee_fps(Self::slint_i32(fps.value()));
     }
 
     /// Returns the Volume HUD auto-dismiss timeout.
@@ -343,11 +343,12 @@ impl AppShell {
 
     /// Sets the Volume HUD auto-dismiss timeout.
     ///
-    /// Values outside `250..=30000` are clamped; use
-    /// [`VolumeHudTimeoutMs::try_from`] to reject them at the call site instead.
+    /// The [`VolumeHudTimeoutMs`] parameter guarantees the `250..=30000`
+    /// invariant by construction; the validated value is written to the Slint
+    /// property verbatim.
     pub fn set_volume_hud_timeout_ms(&self, timeout_ms: VolumeHudTimeoutMs) {
         self.window
-            .set_volume_hud_timeout_ms(i32::try_from(timeout_ms.value()).unwrap_or(i32::MAX));
+            .set_volume_hud_timeout_ms(Self::slint_i32(timeout_ms.value()));
     }
 
     /// Returns the Volume HUD fade-out duration.
@@ -358,11 +359,12 @@ impl AppShell {
 
     /// Sets the Volume HUD fade-out duration.
     ///
-    /// Values above `2000` are clamped; use [`VolumeHudFadeMs::try_from`] to
-    /// reject them at the call site instead.
+    /// The [`VolumeHudFadeMs`] parameter guarantees the `0..=2000` invariant
+    /// by construction; the validated value is written to the Slint property
+    /// verbatim.
     pub fn set_volume_hud_fade_ms(&self, fade_ms: VolumeHudFadeMs) {
         self.window
-            .set_volume_hud_fade_ms(i32::try_from(fade_ms.value()).unwrap_or(i32::MAX));
+            .set_volume_hud_fade_ms(Self::slint_i32(fade_ms.value()));
     }
 
     /// Returns whether the Volume HUD overlay is currently in its active hold state.
@@ -429,11 +431,12 @@ impl AppShell {
 
     /// Sets the Codec HUD auto-dismiss timeout.
     ///
-    /// Values outside `250..=300000` are clamped; use
-    /// [`CodecHudTimeoutMs::try_from`] to reject them at the call site instead.
+    /// The [`CodecHudTimeoutMs`] parameter guarantees the `250..=300000`
+    /// invariant by construction; the validated value is written to the Slint
+    /// property verbatim.
     pub fn set_codec_hud_timeout_ms(&self, timeout_ms: CodecHudTimeoutMs) {
         self.window
-            .set_codec_hud_timeout_ms(i32::try_from(timeout_ms.value()).unwrap_or(i32::MAX));
+            .set_codec_hud_timeout_ms(Self::slint_i32(timeout_ms.value()));
     }
 
     /// Binds the JSON path used by the live Screen Settings persistence.
@@ -494,15 +497,10 @@ impl AppShell {
     /// Returns [`crate::config::ConfigError`] when no config path is wired or
     /// the atomic JSON write fails.
     pub fn save_current_config(&self) -> Result<(), crate::config::ConfigError> {
-        let path = self.wired_config_path().ok_or_else(|| {
+        let path = self.config_path.borrow().clone().ok_or_else(|| {
             crate::config::ConfigError::invalid("Screen Settings are not wired to a config path")
         })?;
         Self::persist_config(&self.current_config(), &path)
-    }
-
-    /// Returns the wired config path, if one has been set via [`Self::wire_config`].
-    fn wired_config_path(&self) -> Option<PathBuf> {
-        self.config_path.borrow().clone()
     }
 
     /// Snapshot builder shared by live persistence and the public getter.
@@ -604,6 +602,15 @@ impl AppShell {
     /// Converts a Slint `i32` timeout to `u32` (negative values clamp to `0`).
     fn slint_ms_to_u32(value: i32) -> u32 {
         u32::try_from(value.max(0)).unwrap_or_default()
+    }
+
+    /// Converts a validated domain `u32` to the Slint `i32` property type.
+    ///
+    /// Panics if the value exceeds `i32::MAX` — domain newtypes cap every
+    /// field far below that bound, so a failure here is a violated invariant
+    /// (M-PANIC-ON-BUG), not a recoverable condition.
+    fn slint_i32(value: u32) -> i32 {
+        i32::try_from(value).expect("domain value fits in i32")
     }
 
     /// Clamps a Slint `i32` milliseconds value into the given `u32` domain.

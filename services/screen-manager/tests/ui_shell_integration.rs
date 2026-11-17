@@ -1001,8 +1001,8 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     // write to complete before asserting disk state.
     shell.window().invoke_set_volume_step_percent(999);
     assert_eq!(shell.window().get_volume_step_percent(), 25);
-    let live = wait_until_persisted(&path, |c| c.volume_step_percent.value() == 25);
-    assert_eq!(live.volume_step_percent.value(), 25);
+    // The predicate returning proves the value; keep the binding for intent.
+    let _live = wait_until_persisted(&path, |c| c.volume_step_percent.value() == 25);
     shell.window().invoke_set_volume_step_percent(-7);
     assert_eq!(shell.window().get_volume_step_percent(), 1);
 
@@ -1027,15 +1027,15 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     shell.window().invoke_set_marquee_fps(30);
     assert_eq!(shell.marquee_fps().value(), 30);
 
-    // The clamped state is exactly what live persistence wrote to disk.
+    // The clamped state is exactly what live persistence wrote to disk; the
+    // predicate returning proves the match.
     let clamped = shell.current_config();
     assert_eq!(clamped.volume_step_percent.value(), 1);
     assert_eq!(clamped.volume_hud_timeout_ms.value(), 250);
     assert_eq!(clamped.volume_hud_fade_ms.value(), 0);
     assert_eq!(clamped.codec_hud_timeout_ms.value(), 250);
     assert_eq!(clamped.marquee_fps, MarqueeFps::FPS_30);
-    let saved = wait_until_persisted(&path, |c| c == &clamped);
-    assert_eq!(saved, clamped);
+    let _saved = wait_until_persisted(&path, |c| c == &clamped);
 
     // Persisting to an unwritable path logs an error instead of panicking.
     shell.wire_config(std::path::Path::new("/nonexistent-dir/settings.json"));
