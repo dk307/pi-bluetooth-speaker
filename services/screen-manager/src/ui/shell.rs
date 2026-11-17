@@ -14,11 +14,12 @@ use std::rc::Rc;
 use slint::ComponentHandle;
 
 use crate::config::{
-    CodecHudTimeoutMs, CoreConfig, DEFAULT_CODEC_HUD_TIMEOUT_MS, DEFAULT_MARQUEE_FPS,
+    CodecHudTimeoutMs, CoreConfig, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
+    VolumeStepPercent, DEFAULT_CODEC_HUD_TIMEOUT_MS, DEFAULT_MARQUEE_FPS,
     DEFAULT_VOLUME_HUD_FADE_MS, DEFAULT_VOLUME_HUD_TIMEOUT_MS, DEFAULT_VOLUME_STEP_PERCENT,
     MAX_CODEC_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
     MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_VOLUME_HUD_TIMEOUT_MS,
-    MIN_VOLUME_STEP_PERCENT, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+    MIN_VOLUME_STEP_PERCENT,
 };
 
 use super::generated::{AppTheme, MainWindow, MarqueeCompose};
@@ -495,13 +496,34 @@ impl AppShell {
     }
 
     /// Persists the current window state to the wired config path after a UI edit.
+    ///
+    /// # Render-Thread Safety (`M-NO-DBUS-ON-RENDER-THREAD`)
+    ///
+    /// `CoreConfig::save` performs temp-file + fsync + rename on the SD card,
+    /// which can stall the render thread for tens of milliseconds per click.
+    /// The config snapshot is cloned on the render thread (cheap), then the
+    /// blocking write is deferred to a background thread so HUD animations,
+    /// marquee, and touch input stay responsive.
     fn persist_window_state(window: &MainWindow, config_path: &Rc<RefCell<Option<PathBuf>>>) {
         let Some(path) = config_path.borrow().as_ref().cloned() else {
             tracing::warn!("Screen settings change not persisted: no config path is wired");
             return;
         };
         let config = Self::config_from_window(window);
-        Self::persist_config(&config, &path);
+        let path_for_thread = path.clone();
+        let config_for_thread = config.clone();
+        let spawned = std::thread::Builder::new()
+            .name("screen-settings-persist".into())
+            .spawn(move || {
+                Self::persist_config(&config_for_thread, &path_for_thread);
+            });
+        if let Err(e) = spawned {
+            tracing::error!(
+                error = %e,
+                path = %path.display(),
+                "failed to spawn config persist thread; settings not saved"
+            );
+        }
     }
 
     /// Returns the composer-global marquee rate clamped to `30`/`60`.
@@ -975,6 +997,9 @@ impl AppShell {
         let config_path = Rc::clone(&self.config_path);
         self.window.on_set_marquee_fps(move |fps| {
             if let Some(w) = win.upgrade() {
+                // Snap to the valid domain (30/60) before applying; the
+                // programmatic setter does the same, but the callback receives
+                // raw Slint i32 values so it must guard its own input.
                 let fps = if fps == 30 { 30 } else { 60 };
                 w.global::<MarqueeCompose>().set_marquee_fps(fps);
                 Self::persist_window_state(&w, &config_path);

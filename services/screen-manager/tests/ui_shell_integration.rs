@@ -976,10 +976,23 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     assert_eq!(reloaded, cfg);
 
     // UI callbacks clamp out-of-range values into the config domains and
-    // persist each change immediately (no Save step).
+    // persist each change immediately (no Save step). Persistence runs on a
+    // background thread to avoid blocking the render thread; wait for the
+    // write to complete before asserting disk state.
     shell.window().invoke_set_volume_step_percent(999);
     assert_eq!(shell.window().get_volume_step_percent(), 25);
-    let live = CoreConfig::load(&path).expect("live save after step change");
+    // Poll until the background persist thread finishes (timeout 2s).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let live = loop {
+        if let Ok(c) = CoreConfig::load(&path)
+            && c.volume_step_percent.value() == 25 {
+            break c;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("background persist did not complete within 2s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
     assert_eq!(live.volume_step_percent.value(), 25);
     shell.window().invoke_set_volume_step_percent(-7);
     assert_eq!(shell.window().get_volume_step_percent(), 1);
@@ -1012,7 +1025,18 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     assert_eq!(clamped.volume_hud_fade_ms.value(), 0);
     assert_eq!(clamped.codec_hud_timeout_ms.value(), 250);
     assert_eq!(clamped.marquee_fps, MarqueeFps::FPS_30);
-    let saved = CoreConfig::load(&path).expect("reload after live persistence");
+    // Poll until the final background persist (marquee fps = 30) completes.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let saved = loop {
+        if let Ok(c) = CoreConfig::load(&path)
+            && c == clamped {
+            break c;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("final background persist did not complete within 2s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
     assert_eq!(saved, clamped);
 
     // Persisting to an unwritable path logs an error instead of panicking.
