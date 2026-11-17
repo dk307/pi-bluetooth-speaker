@@ -3,7 +3,7 @@
 **Document:** `kms_femtovg_migration_plan.md`
 **Target Hardware:** Raspberry Pi 3 Model B (BCM2837, `aarch64`, DietPi / Debian 13 Trixie)
 **Language & Runtime:** Rust 2024 Edition (rustc 1.99.1 pinned, `rust-toolchain.toml`)
-**GUI Framework:** Slint `=1.18.1` — **`backend-linuxkms` (noseat) + `renderer-femtovg` (GPU OpenGL ES 2.0)**
+**GUI Framework:** Slint `=1.19.0` — **`backend-linuxkms` (noseat) + `renderer-femtovg` (GPU OpenGL ES 2.0)**
 **Display:** Freenove 4.3" MIPI DSI 800x480 (`vc4-kms-dsi-7inch`, connector `card0-DSI-1`)
 **Input:** libinput (touch, via udev `seat0`) + EC12 rotary encoder (gpiod, polled by `slint::Timer`)
 **Status:** **Plan — not yet implemented**
@@ -199,7 +199,7 @@ stays for the software renderer/test harness.
 **Workspace `Cargo.toml`** (single source of truth):
 
 ```toml
-slint = { version = "=1.18.1", default-features = false,
+slint = { version = "=1.19.0", default-features = false,
           features = ["std",
                       "compat-1-18",               # required when default-features = false
                       "renderer-femtovg",          # GPU renderer (default of kms factory chain)
