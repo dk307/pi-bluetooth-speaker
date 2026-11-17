@@ -87,7 +87,6 @@ export component MainViewport inherits Rectangle {
     callback set_volume_hud_timeout_ms(int);
     callback set_volume_hud_fade_ms(int);
     callback set_codec_hud_timeout_ms(int);
-    callback save_settings();
 
     // Tab 0: Now Playing
     if root.active_tab == 0 : VerticalLayout {
@@ -290,7 +289,6 @@ export component MainViewport inherits Rectangle {
             set_volume_hud_timeout_ms(ms) => { root.set_volume_hud_timeout_ms(ms); }
             set_volume_hud_fade_ms(ms) => { root.set_volume_hud_fade_ms(ms); }
             set_codec_hud_timeout_ms(ms) => { root.set_codec_hud_timeout_ms(ms); }
-            save_settings => { root.save_settings(); }
         }
     }
 }

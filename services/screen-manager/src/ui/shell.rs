@@ -427,7 +427,7 @@ impl AppShell {
             .set_codec_hud_timeout_ms(i32::try_from(timeout_ms).unwrap_or(i32::MAX));
     }
 
-    /// Binds the JSON path used by the Screen Settings save action.
+    /// Binds the JSON path used by the live Screen Settings persistence.
     pub fn wire_config(&self, path: &Path) {
         *self.config_path.borrow_mut() = Some(path.to_path_buf());
     }
@@ -450,7 +450,7 @@ impl AppShell {
         self.current_config().save(&path)
     }
 
-    /// Snapshot builder shared by the save action and public getter.
+    /// Snapshot builder shared by live persistence and the public getter.
     fn config_from_window(window: &MainWindow) -> CoreConfig {
         CoreConfig {
             theme: Some(ThemePreset::from_index(
@@ -492,6 +492,16 @@ impl AppShell {
                 "failed to save screen settings"
             ),
         }
+    }
+
+    /// Persists the current window state to the wired config path after a UI edit.
+    fn persist_window_state(window: &MainWindow, config_path: &Rc<RefCell<Option<PathBuf>>>) {
+        let Some(path) = config_path.borrow().as_ref().cloned() else {
+            tracing::warn!("Screen settings change not persisted: no config path is wired");
+            return;
+        };
+        let config = Self::config_from_window(window);
+        Self::persist_config(&config, &path);
     }
 
     /// Returns the composer-global marquee rate clamped to `30`/`60`.
@@ -941,31 +951,38 @@ impl AppShell {
         });
 
         let win = self.window.as_weak();
+        let config_path = Rc::clone(&self.config_path);
         self.window.on_select_theme(move |idx| {
             if let Some(w) = win.upgrade() {
                 let preset = ThemePreset::from_index(idx);
                 preset.apply(&w);
+                Self::persist_window_state(&w, &config_path);
             }
         });
 
         let win = self.window.as_weak();
+        let config_path = Rc::clone(&self.config_path);
         self.window.on_cycle_theme(move || {
             if let Some(w) = win.upgrade() {
                 let current = ThemePreset::from_index(w.global::<AppTheme>().get_active_preset());
                 let next = current.next();
                 next.apply(&w);
+                Self::persist_window_state(&w, &config_path);
             }
         });
 
         let win = self.window.as_weak();
+        let config_path = Rc::clone(&self.config_path);
         self.window.on_set_marquee_fps(move |fps| {
             if let Some(w) = win.upgrade() {
                 let fps = if fps == 30 { 30 } else { 60 };
                 w.global::<MarqueeCompose>().set_marquee_fps(fps);
+                Self::persist_window_state(&w, &config_path);
             }
         });
 
         let win = self.window.as_weak();
+        let config_path = Rc::clone(&self.config_path);
         self.window.on_set_volume_step_percent(move |step| {
             if let Some(w) = win.upgrade() {
                 let clamped = step.clamp(
@@ -973,47 +990,40 @@ impl AppShell {
                     i32::from(MAX_VOLUME_STEP_PERCENT),
                 );
                 w.set_volume_step_percent(clamped);
-            }
-        });
-
-        let win = self.window.as_weak();
-        self.window.on_set_volume_hud_timeout_ms(move |ms| {
-            if let Some(w) = win.upgrade() {
-                let clamped =
-                    Self::clamp_hud_ms(ms, MIN_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_TIMEOUT_MS);
-                w.set_volume_hud_timeout_ms(clamped);
-            }
-        });
-
-        let win = self.window.as_weak();
-        self.window.on_set_volume_hud_fade_ms(move |ms| {
-            if let Some(w) = win.upgrade() {
-                let clamped = Self::clamp_hud_ms(ms, 0, MAX_VOLUME_HUD_FADE_MS);
-                w.set_volume_hud_fade_ms(clamped);
-            }
-        });
-
-        let win = self.window.as_weak();
-        self.window.on_set_codec_hud_timeout_ms(move |ms| {
-            if let Some(w) = win.upgrade() {
-                let clamped =
-                    Self::clamp_hud_ms(ms, MIN_CODEC_HUD_TIMEOUT_MS, MAX_CODEC_HUD_TIMEOUT_MS);
-                w.set_codec_hud_timeout_ms(clamped);
+                Self::persist_window_state(&w, &config_path);
             }
         });
 
         let win = self.window.as_weak();
         let config_path = Rc::clone(&self.config_path);
-        self.window.on_save_settings(move || {
-            let Some(w) = win.upgrade() else {
-                return;
-            };
-            let config = Self::config_from_window(&w);
-            let Some(path) = config_path.borrow().as_ref().cloned() else {
-                tracing::warn!("Screen settings save ignored: no config path is wired");
-                return;
-            };
-            Self::persist_config(&config, &path);
+        self.window.on_set_volume_hud_timeout_ms(move |ms| {
+            if let Some(w) = win.upgrade() {
+                let clamped =
+                    Self::clamp_hud_ms(ms, MIN_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_TIMEOUT_MS);
+                w.set_volume_hud_timeout_ms(clamped);
+                Self::persist_window_state(&w, &config_path);
+            }
+        });
+
+        let win = self.window.as_weak();
+        let config_path = Rc::clone(&self.config_path);
+        self.window.on_set_volume_hud_fade_ms(move |ms| {
+            if let Some(w) = win.upgrade() {
+                let clamped = Self::clamp_hud_ms(ms, 0, MAX_VOLUME_HUD_FADE_MS);
+                w.set_volume_hud_fade_ms(clamped);
+                Self::persist_window_state(&w, &config_path);
+            }
+        });
+
+        let win = self.window.as_weak();
+        let config_path = Rc::clone(&self.config_path);
+        self.window.on_set_codec_hud_timeout_ms(move |ms| {
+            if let Some(w) = win.upgrade() {
+                let clamped =
+                    Self::clamp_hud_ms(ms, MIN_CODEC_HUD_TIMEOUT_MS, MAX_CODEC_HUD_TIMEOUT_MS);
+                w.set_codec_hud_timeout_ms(clamped);
+                Self::persist_window_state(&w, &config_path);
+            }
         });
 
         self.window.on_volume_clicked(|| {

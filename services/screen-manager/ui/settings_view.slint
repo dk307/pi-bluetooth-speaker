@@ -1,5 +1,4 @@
-import { ElevatedCard, OutlinedCard, FilledButton, Icon, MaterialText, Horizontal, Vertical } from "@material/material.slint";
-import { MaterialPalette } from "@material/material.slint";
+import { MaterialText, MaterialPalette } from "@material/material.slint";
 import { MaterialTypography } from "@material/material.slint";
 import { MaterialStyleMetrics } from "@material/material.slint";
 import { AppTheme } from "app_theme.slint";
@@ -7,8 +6,10 @@ import { MarqueeCompose } from "marquee_state.slint";
 
 // Compact +/− button used by the Advanced settings rows (Material 3 tonal
 // icon-button look; 40px keeps the 44px row rhythm inside the 420px viewport).
+// The minus/plus signs are drawn as centered bars instead of text glyphs:
+// "−" and "+" sit on different font baselines, so glyph text never aligns.
 component StepButton inherits Rectangle {
-    in property <string> symbol;
+    in property <bool> plus;
     callback clicked();
 
     width: MaterialStyleMetrics.size_40;
@@ -18,13 +19,22 @@ component StepButton inherits Rectangle {
     opacity: touch.pressed ? 0.8 : 1.0;
     animate opacity { duration: 80ms; easing: ease-out; }
 
-    Text {
-        text: root.symbol;
-        font-size: 22px;
-        font-weight: 700;
-        color: MaterialPalette.on_secondary_container;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    // Horizontal bar shared by both the − and + signs.
+    Rectangle {
+        width: 16px;
+        height: 2px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: MaterialPalette.on_secondary_container;
+    }
+
+    // Vertical bar completes the + sign (absent on the − button).
+    if root.plus : Rectangle {
+        width: 2px;
+        height: 16px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: MaterialPalette.on_secondary_container;
     }
 
     touch := TouchArea {
@@ -57,7 +67,7 @@ component SettingsStepperRow inherits Rectangle {
         }
 
         StepButton {
-            symbol: "−";
+            plus: false;
             clicked => { root.decrease(); }
         }
 
@@ -73,7 +83,7 @@ component SettingsStepperRow inherits Rectangle {
         }
 
         StepButton {
-            symbol: "+";
+            plus: true;
             clicked => { root.increase(); }
         }
     }
@@ -270,7 +280,6 @@ export component SettingsView inherits VerticalLayout {
     callback set_volume_hud_timeout_ms(int);
     callback set_volume_hud_fade_ms(int);
     callback set_codec_hud_timeout_ms(int);
-    callback save_settings();
 
     padding: MaterialStyleMetrics.padding_16;  // 16px
     spacing: MaterialStyleMetrics.spacing_8;
@@ -383,11 +392,11 @@ export component SettingsView inherits VerticalLayout {
         // Section 2 header: "Advanced".
         Text {
             text: "Advanced";
-            font-size: 14px;
-            font-weight: 600;
-            color: MaterialPalette.on_surface_variant;
+            font-size: 18px;
+            font-weight: 700;
+            color: MaterialPalette.on_surface;
             vertical-alignment: center;
-            height: 18px;
+            height: 22px;
         }
 
         FpsSegmentedRow {
@@ -422,15 +431,11 @@ export component SettingsView inherits VerticalLayout {
             increase => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms + 1000); }
         }
 
-        // Stretch spacer keeps the Save action pinned to the bottom edge.
+        // Stretch spacer keeps the settings list top-aligned in the viewport.
+        // Changes apply live (each edit persists immediately), so there is no
+        // Save action on this screen.
         Rectangle {
             vertical-stretch: 1;
-        }
-
-        FilledButton {
-            text: "Save Settings";
-            height: 48px;
-            clicked => { root.save_settings(); }
         }
     }
 }

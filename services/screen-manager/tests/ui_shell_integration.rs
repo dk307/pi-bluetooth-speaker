@@ -975,9 +975,12 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     let reloaded = CoreConfig::load(&path).expect("reload");
     assert_eq!(reloaded, cfg);
 
-    // UI callbacks clamp out-of-range values into the config domains.
+    // UI callbacks clamp out-of-range values into the config domains and
+    // persist each change immediately (no Save step).
     shell.window().invoke_set_volume_step_percent(999);
     assert_eq!(shell.window().get_volume_step_percent(), 25);
+    let live = CoreConfig::load(&path).expect("live save after step change");
+    assert_eq!(live.volume_step_percent.value(), 25);
     shell.window().invoke_set_volume_step_percent(-7);
     assert_eq!(shell.window().get_volume_step_percent(), 1);
 
@@ -1002,20 +1005,17 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     shell.window().invoke_set_marquee_fps(30);
     assert_eq!(shell.marquee_fps(), 30);
 
-    // The clamped state is exactly what a snapshot/save would persist.
+    // The clamped state is exactly what live persistence wrote to disk.
     let clamped = shell.current_config();
     assert_eq!(clamped.volume_step_percent.value(), 1);
     assert_eq!(clamped.volume_hud_timeout_ms.value(), 250);
     assert_eq!(clamped.volume_hud_fade_ms.value(), 0);
     assert_eq!(clamped.codec_hud_timeout_ms.value(), 250);
     assert_eq!(clamped.marquee_fps, MarqueeFps::FPS_30);
-
-    // The UI save callback persists the clamped state without panicking.
-    shell.window().invoke_save_settings();
-    let saved = CoreConfig::load(&path).expect("reload after callback save");
+    let saved = CoreConfig::load(&path).expect("reload after live persistence");
     assert_eq!(saved, clamped);
 
-    // Saving to an unwritable path logs an error instead of panicking.
+    // Persisting to an unwritable path logs an error instead of panicking.
     shell.wire_config(std::path::Path::new("/nonexistent-dir/settings.json"));
-    shell.window().invoke_save_settings();
+    shell.window().invoke_set_volume_step_percent(2);
 }
