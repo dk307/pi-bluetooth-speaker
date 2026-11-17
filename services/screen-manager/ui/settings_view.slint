@@ -3,6 +3,115 @@ import { MaterialPalette } from "@material/material.slint";
 import { MaterialTypography } from "@material/material.slint";
 import { MaterialStyleMetrics } from "@material/material.slint";
 import { AppTheme } from "app_theme.slint";
+import { MarqueeCompose } from "marquee_state.slint";
+
+// Compact +/− button used by every numeric Screen Settings row.
+component StepButton inherits Rectangle {
+    in property <string> symbol;
+    callback clicked();
+
+    width: 40px;
+    height: 40px;
+    border-radius: MaterialStyleMetrics.border_radius_10;
+    background: MaterialPalette.secondary_container;
+    opacity: touch.pressed ? 0.8 : 1.0;
+    animate opacity { duration: 80ms; easing: ease-out; }
+
+    Text {
+        text: root.symbol;
+        font-size: 20px;
+        font-weight: 700;
+        color: MaterialPalette.on_secondary_container;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// One label / value / +/- line in the numeric settings card.
+component SettingsStepper inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    callback decrease();
+    callback increase();
+
+    spacing: 8px;
+
+    Rectangle {
+        horizontal-stretch: 3;
+        height: 40px;
+        border-radius: MaterialStyleMetrics.border_radius_10;
+        background: MaterialPalette.surface_container_lowest;
+
+        Text {
+            text: root.label;
+            font-size: 13px;
+            font-weight: 600;
+            color: MaterialPalette.on_surface;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    Rectangle {
+        horizontal-stretch: 2;
+        height: 40px;
+        border-radius: MaterialStyleMetrics.border_radius_10;
+        background: MaterialPalette.surface_container_high;
+
+        Text {
+            text: root.value;
+            font-size: 14px;
+            font-weight: 700;
+            color: MaterialPalette.primary;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    StepButton {
+        symbol: "−";
+        clicked => { root.decrease(); }
+    }
+
+    StepButton {
+        symbol: "+";
+        clicked => { root.increase(); }
+    }
+}
+
+// Compact selectable option card used for the two allowed marquee rates.
+component ChoiceCard inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+
+    horizontal-stretch: 1;
+    height: 40px;
+    border-radius: MaterialStyleMetrics.border_radius_10;
+    border-width: root.selected ? 2px : 0px;
+    border-color: MaterialPalette.primary;
+    background: root.selected ? MaterialPalette.primary_container : MaterialPalette.surface_container_lowest;
+    opacity: touch.pressed ? 0.8 : 1.0;
+    animate opacity { duration: 80ms; easing: ease-out; }
+
+    Text {
+        text: root.label;
+        font-size: 13px;
+        font-weight: 700;
+        color: root.selected ? MaterialPalette.on_primary_container : MaterialPalette.on_surface;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
 
 // Theme preset card using Rectangle with Material styling (defined first for use in SettingsView)
 component ThemePresetCard inherits Rectangle {
@@ -93,6 +202,10 @@ component SettingsIconButton inherits Rectangle {
 export component SettingsView inherits VerticalLayout {
     in property <bool> cd_enabled: false;
     in-out property <bool> show_themes: false;
+    in property <int> volume_step_percent: 2;
+    in property <int> volume_hud_timeout_ms: 4000;
+    in property <int> volume_hud_fade_ms: 200;
+    in property <int> codec_hud_timeout_ms: 30000;
 
     callback bluetooth_clicked();
     callback vu_meter_clicked();
@@ -100,9 +213,15 @@ export component SettingsView inherits VerticalLayout {
     callback cd_clicked();
     callback select_theme(int);
     callback cycle_theme();
+    callback set_marquee_fps(int);
+    callback set_volume_step_percent(int);
+    callback set_volume_hud_timeout_ms(int);
+    callback set_volume_hud_fade_ms(int);
+    callback set_codec_hud_timeout_ms(int);
+    callback save_settings();
 
     padding: MaterialStyleMetrics.padding_16;  // 16px
-    spacing: MaterialStyleMetrics.spacing_16;
+    spacing: MaterialStyleMetrics.spacing_8;
 
     // View 1: Android-style icon button grid
     if !root.show_themes : VerticalLayout {
@@ -133,7 +252,7 @@ export component SettingsView inherits VerticalLayout {
 
             SettingsIconButton {
                 icon: @image-url("../../../assets/icons/config.svg");
-                label: "Themes";
+                label: "Screen Settings";
                 clicked => { root.show_themes = true; }
             }
 
@@ -145,26 +264,31 @@ export component SettingsView inherits VerticalLayout {
         }
     }
 
-    // View 2: Theme Preferences Screen
+    // View 2: Screen Settings (theme, marquee, HUDs, and encoder volume)
     if root.show_themes : OutlinedCard {
         VerticalLayout {
-            alignment: space-around;
-            padding: MaterialStyleMetrics.padding_16;
-            spacing: MaterialStyleMetrics.spacing_12;
+            alignment: space-between;
+            padding: MaterialStyleMetrics.padding_12;
+            spacing: MaterialStyleMetrics.spacing_6;
 
             MaterialText {
-                text: "Select Global Appliance Palette:";
+                text: "Screen Settings";
+                style: MaterialTypography.title_medium;  // 16px
+                color: MaterialPalette.primary;
+                horizontal-alignment: center;
+            }
+
+            MaterialText {
+                text: "Theme Preset";
                 style: MaterialTypography.label_large;  // 14px
                 color: MaterialPalette.on_surface_variant;
                 horizontal-alignment: center;
             }
 
-            // 5 Theme preset buttons
             HorizontalLayout {
                 alignment: center;
-                spacing: MaterialStyleMetrics.spacing_8;
+                spacing: MaterialStyleMetrics.spacing_4;
 
-                // 1. McIntosh Blue
                 ThemePresetCard {
                     index: 0;
                     name: "1. McIntosh";
@@ -175,7 +299,6 @@ export component SettingsView inherits VerticalLayout {
                     clicked => { root.select_theme(0); }
                 }
 
-                // 2. Marantz Amber
                 ThemePresetCard {
                     index: 1;
                     name: "2. Marantz";
@@ -186,7 +309,6 @@ export component SettingsView inherits VerticalLayout {
                     clicked => { root.select_theme(1); }
                 }
 
-                // 3. Cyberpunk Neon
                 ThemePresetCard {
                     index: 2;
                     name: "3. Cyberpunk";
@@ -197,7 +319,6 @@ export component SettingsView inherits VerticalLayout {
                     clicked => { root.select_theme(2); }
                 }
 
-                // 4. Studio Dark
                 ThemePresetCard {
                     index: 3;
                     name: "4. Studio Dark";
@@ -208,7 +329,6 @@ export component SettingsView inherits VerticalLayout {
                     clicked => { root.select_theme(3); }
                 }
 
-                // 5. PeppyMeter Gold
                 ThemePresetCard {
                     index: 4;
                     name: "5. PeppyMeter";
@@ -218,16 +338,95 @@ export component SettingsView inherits VerticalLayout {
                     selected: AppTheme.active_preset == 4;
                     clicked => { root.select_theme(4); }
                 }
+
+                StepButton {
+                    symbol: "↻";
+                    clicked => { root.cycle_theme(); }
+                }
             }
 
-            // Cycle Theme Button
+            MaterialText {
+                text: "Marquee & Encoder";
+                style: MaterialTypography.label_large;  // 14px
+                color: MaterialPalette.on_surface_variant;
+                horizontal-alignment: center;
+            }
+
+            HorizontalLayout {
+                spacing: MaterialStyleMetrics.spacing_8;
+
+                Rectangle {
+                    horizontal-stretch: 3;
+                    height: 40px;
+                    border-radius: MaterialStyleMetrics.border_radius_10;
+                    background: MaterialPalette.surface_container_lowest;
+
+                    Text {
+                        text: "Marquee FPS";
+                        font-size: 13px;
+                        font-weight: 600;
+                        color: MaterialPalette.on_surface;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                ChoiceCard {
+                    label: "30";
+                    selected: MarqueeCompose.marquee_fps == 30;
+                    clicked => { root.set_marquee_fps(30); }
+                }
+
+                ChoiceCard {
+                    label: "60";
+                    selected: MarqueeCompose.marquee_fps == 60;
+                    clicked => { root.set_marquee_fps(60); }
+                }
+            }
+
+            SettingsStepper {
+                label: "Encoder Volume Step";
+                value: "\{root.volume_step_percent} %";
+                decrease => { root.set_volume_step_percent(root.volume_step_percent - 1); }
+                increase => { root.set_volume_step_percent(root.volume_step_percent + 1); }
+            }
+
+            MaterialText {
+                text: "Overlay Timings";
+                style: MaterialTypography.label_large;  // 14px
+                color: MaterialPalette.on_surface_variant;
+                horizontal-alignment: center;
+            }
+
+            SettingsStepper {
+                label: "Volume HUD Timeout";
+                value: "\{root.volume_hud_timeout_ms} ms";
+                decrease => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms - 250); }
+                increase => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms + 250); }
+            }
+
+            SettingsStepper {
+                label: "Volume HUD Fade";
+                value: "\{root.volume_hud_fade_ms} ms";
+                decrease => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms - 100); }
+                increase => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms + 100); }
+            }
+
+            SettingsStepper {
+                label: "Codec HUD Timeout";
+                value: "\{root.codec_hud_timeout_ms} ms";
+                decrease => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms - 1000); }
+                increase => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms + 1000); }
+            }
+
             HorizontalLayout {
                 alignment: center;
+
                 FilledButton {
-                    text: "Cycle Next Theme";
+                    text: "Save Settings";
                     width: 220px;
                     height: 48px;
-                    clicked => { root.cycle_theme(); }
+                    clicked => { root.save_settings(); }
                 }
             }
         }

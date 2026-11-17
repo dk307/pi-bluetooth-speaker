@@ -931,3 +931,91 @@ fn ui_shell_rotary_encoder_volume_and_mute_integration() {
     assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
     assert!(shell.is_volume_hud_visible());
 }
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_screen_settings_save_round_trip_and_clamping() {
+    use screen_manager::config::{
+        CodecHudTimeoutMs, CoreConfig, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
+        VolumeStepPercent,
+    };
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use speaker_common::diag::ScopedTempDir;
+
+    let _window = Framebuffer::new_mocked()
+        .0
+        .init_platform()
+        .expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    // Saving without a wired config path must fail cleanly, never panic.
+    assert!(shell.save_current_config().unwrap_err().is_invalid_value());
+
+    // Wire a temp JSON path and apply a non-default configuration.
+    let dir = ScopedTempDir::new("screen-settings");
+    let path = dir.path().join("settings.json");
+    shell.wire_config(&path);
+
+    let cfg = CoreConfig {
+        theme: Some(screen_manager::ui::ThemePreset::CyberpunkNeon),
+        marquee_fps: MarqueeFps::FPS_30,
+        volume_step_percent: VolumeStepPercent::new(7),
+        volume_hud_timeout_ms: VolumeHudTimeoutMs::new(5_250),
+        volume_hud_fade_ms: VolumeHudFadeMs::new(650),
+        codec_hud_timeout_ms: CodecHudTimeoutMs::new(45_000),
+    };
+    shell.apply_config(&cfg);
+
+    // The window-backed snapshot must mirror the applied config exactly.
+    assert_eq!(shell.current_config(), cfg);
+
+    // Saving persists to the wired path and reloads identically.
+    shell.save_current_config().expect("save must succeed");
+    let reloaded = CoreConfig::load(&path).expect("reload");
+    assert_eq!(reloaded, cfg);
+
+    // UI callbacks clamp out-of-range values into the config domains.
+    shell.window().invoke_set_volume_step_percent(999);
+    assert_eq!(shell.window().get_volume_step_percent(), 25);
+    shell.window().invoke_set_volume_step_percent(-7);
+    assert_eq!(shell.window().get_volume_step_percent(), 1);
+
+    shell.window().invoke_set_volume_hud_timeout_ms(99_999);
+    assert_eq!(shell.window().get_volume_hud_timeout_ms(), 30_000);
+    shell.window().invoke_set_volume_hud_timeout_ms(0);
+    assert_eq!(shell.window().get_volume_hud_timeout_ms(), 250);
+
+    shell.window().invoke_set_volume_hud_fade_ms(9_999);
+    assert_eq!(shell.window().get_volume_hud_fade_ms(), 2_000);
+    shell.window().invoke_set_volume_hud_fade_ms(-1);
+    assert_eq!(shell.window().get_volume_hud_fade_ms(), 0);
+
+    shell.window().invoke_set_codec_hud_timeout_ms(999_999);
+    assert_eq!(shell.window().get_codec_hud_timeout_ms(), 300_000);
+    shell.window().invoke_set_codec_hud_timeout_ms(0);
+    assert_eq!(shell.window().get_codec_hud_timeout_ms(), 250);
+
+    // Marquee fps accepts only 30/60; anything else snaps to the 60 default.
+    shell.window().invoke_set_marquee_fps(45);
+    assert_eq!(shell.marquee_fps(), 60);
+    shell.window().invoke_set_marquee_fps(30);
+    assert_eq!(shell.marquee_fps(), 30);
+
+    // The clamped state is exactly what a snapshot/save would persist.
+    let clamped = shell.current_config();
+    assert_eq!(clamped.volume_step_percent.value(), 1);
+    assert_eq!(clamped.volume_hud_timeout_ms.value(), 250);
+    assert_eq!(clamped.volume_hud_fade_ms.value(), 0);
+    assert_eq!(clamped.codec_hud_timeout_ms.value(), 250);
+    assert_eq!(clamped.marquee_fps, MarqueeFps::FPS_30);
+
+    // The UI save callback persists the clamped state without panicking.
+    shell.window().invoke_save_settings();
+    let saved = CoreConfig::load(&path).expect("reload after callback save");
+    assert_eq!(saved, clamped);
+
+    // Saving to an unwritable path logs an error instead of panicking.
+    shell.wire_config(std::path::Path::new("/nonexistent-dir/settings.json"));
+    shell.window().invoke_save_settings();
+}
