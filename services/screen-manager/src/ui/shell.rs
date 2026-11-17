@@ -8,13 +8,18 @@
 
 use std::cell::{Cell, RefCell};
 use std::fmt::{self, Debug, Formatter};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use slint::ComponentHandle;
 
 use crate::config::{
-    CoreConfig, DEFAULT_VOLUME_HUD_FADE_MS, DEFAULT_VOLUME_HUD_TIMEOUT_MS,
-    DEFAULT_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT, MIN_VOLUME_STEP_PERCENT,
+    CodecHudTimeoutMs, CoreConfig, DEFAULT_CODEC_HUD_TIMEOUT_MS, DEFAULT_FONT_SCALE,
+    DEFAULT_MARQUEE_FPS, DEFAULT_VOLUME_HUD_FADE_MS, DEFAULT_VOLUME_HUD_TIMEOUT_MS,
+    DEFAULT_VOLUME_STEP_PERCENT, FontScale, MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE,
+    MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_STEP_PERCENT,
+    MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE, MIN_VOLUME_HUD_TIMEOUT_MS, MIN_VOLUME_STEP_PERCENT,
+    MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
 };
 
 use super::generated::{AppTheme, MainWindow, MarqueeCompose, TouchScale};
@@ -245,7 +250,8 @@ fn pcm_bit_depth(format: &str) -> &'static str {
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
-    volume_step_percent: Cell<u8>,
+    config_path: Rc<RefCell<Option<PathBuf>>>,
+    persist_tx: Rc<RefCell<Option<std::sync::mpsc::Sender<CoreConfig>>>>,
     last_amp_volume: Cell<Option<crate::volume::AmpVolumeState>>,
     transport_commands: Rc<RefCell<Option<speaker_bluetooth::TransportCommandQueue>>>,
     amp_commands: Rc<RefCell<Option<crate::volume::AmpVolumeCommandQueue>>>,
@@ -267,7 +273,8 @@ impl AppShell {
     pub fn new(window: MainWindow) -> Self {
         let shell = Self {
             window,
-            volume_step_percent: Cell::new(DEFAULT_VOLUME_STEP_PERCENT),
+            config_path: Rc::new(RefCell::new(None)),
+            persist_tx: Rc::new(RefCell::new(None)),
             last_amp_volume: Cell::new(None),
             transport_commands: Rc::new(RefCell::new(None)),
             amp_commands: Rc::new(RefCell::new(None)),
@@ -278,8 +285,10 @@ impl AppShell {
             )),
         };
 
+        shell.set_volume_step_percent(DEFAULT_VOLUME_STEP_PERCENT);
         shell.set_volume_hud_timeout_ms(DEFAULT_VOLUME_HUD_TIMEOUT_MS);
         shell.set_volume_hud_fade_ms(DEFAULT_VOLUME_HUD_FADE_MS);
+        shell.set_codec_hud_timeout_ms(DEFAULT_CODEC_HUD_TIMEOUT_MS);
         shell.setup_callbacks();
         shell.apply_theme(ThemePreset::default());
         shell
@@ -293,6 +302,7 @@ impl AppShell {
         self.set_volume_hud_timeout_ms(config.volume_hud_timeout_ms.value());
         self.set_volume_hud_fade_ms(config.volume_hud_fade_ms.value());
         self.set_codec_hud_timeout_ms(config.codec_hud_timeout_ms.value());
+        self.set_font_scale(config.font_scale.value());
         if let Some(theme) = config.theme {
             self.apply_theme(theme);
         }
@@ -301,13 +311,30 @@ impl AppShell {
     /// Returns the configured volume step percentage per rotary encoder detent (`1..=25`).
     #[must_use]
     pub fn volume_step_percent(&self) -> u8 {
-        self.volume_step_percent.get()
+        u8::try_from(self.window.get_volume_step_percent())
+            .unwrap_or(DEFAULT_VOLUME_STEP_PERCENT)
+            .clamp(MIN_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT)
     }
 
     /// Sets the volume step percentage per rotary encoder detent (clamped to `1..=25`).
     pub fn set_volume_step_percent(&self, step: u8) {
-        self.volume_step_percent
-            .set(step.clamp(MIN_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT));
+        let step = step.clamp(MIN_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT);
+        self.window.set_volume_step_percent(i32::from(step));
+    }
+
+    /// Returns the selected marquee scroll rate in fps (`30` or `60`).
+    #[must_use]
+    pub fn marquee_fps(&self) -> u32 {
+        u32::try_from(self.window.global::<MarqueeCompose>().get_marquee_fps())
+            .unwrap_or(DEFAULT_MARQUEE_FPS)
+    }
+
+    /// Sets the marquee scroll rate in fps (`30` or `60`) on the shared composer global.
+    pub fn set_marquee_fps(&self, fps: u32) {
+        let fps = if fps == 30 { 30 } else { DEFAULT_MARQUEE_FPS };
+        self.window
+            .global::<MarqueeCompose>()
+            .set_marquee_fps(i32::try_from(fps).unwrap_or(i32::MAX));
     }
 
     /// Returns the Volume HUD auto-dismiss timeout in milliseconds.
@@ -394,13 +421,171 @@ impl AppShell {
     /// Returns the Codec HUD auto-dismiss timeout in milliseconds.
     #[must_use]
     pub fn codec_hud_timeout_ms(&self) -> u32 {
-        u32::try_from(self.window.get_codec_hud_timeout_ms()).unwrap_or(30_000)
+        u32::try_from(self.window.get_codec_hud_timeout_ms())
+            .unwrap_or(DEFAULT_CODEC_HUD_TIMEOUT_MS)
     }
 
     /// Sets the Codec HUD auto-dismiss timeout in milliseconds.
     pub fn set_codec_hud_timeout_ms(&self, timeout_ms: u32) {
         self.window
             .set_codec_hud_timeout_ms(i32::try_from(timeout_ms).unwrap_or(i32::MAX));
+    }
+
+    /// Binds the JSON path used by the live Screen Settings persistence.
+    ///
+    /// Spawns the single background persist worker: the render thread sends
+    /// config snapshots over an unbounded FIFO channel (non-blocking), and
+    /// the worker performs the blocking temp-file + fsync + rename writes.
+    /// FIFO ordering guarantees the last UI edit wins on disk.
+    pub fn wire_config(&self, path: &Path) {
+        let path = path.to_path_buf();
+        *self.config_path.borrow_mut() = Some(path.clone());
+        let (tx, rx) = std::sync::mpsc::channel::<CoreConfig>();
+        let worker_path = path.clone();
+        let spawned = std::thread::Builder::new()
+            .name("screen-settings-persist".into())
+            .spawn(move || {
+                for config in rx {
+                    // M-PANIC-ON-BUG: a worker crash is a bug, not a
+                    // recoverable I/O hiccup — re-raise instead of silently
+                    // killing the worker and dropping queued snapshots.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Self::persist_config(&config, &worker_path);
+                    }));
+                    if let Err(p) = result {
+                        std::panic::resume_unwind(p);
+                    }
+                }
+            });
+        match spawned {
+            Ok(_) => {
+                *self.persist_tx.borrow_mut() = Some(tx);
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    path = %path.display(),
+                    "failed to spawn config persist worker; live settings not saved"
+                );
+            }
+        }
+    }
+
+    /// Builds a [`CoreConfig`] snapshot from the current shell state.
+    #[must_use]
+    pub fn current_config(&self) -> CoreConfig {
+        Self::config_from_window(&self.window)
+    }
+
+    /// Saves the current shell state as JSON to the wired config path.
+    ///
+    /// # Errors
+    /// Returns [`crate::config::ConfigError`] when no config path is wired or
+    /// the atomic JSON write fails.
+    pub fn save_current_config(&self) -> Result<(), crate::config::ConfigError> {
+        let path = self.config_path.borrow().as_ref().cloned().ok_or_else(|| {
+            crate::config::ConfigError::invalid("Screen Settings are not wired to a config path")
+        })?;
+        self.current_config().save(&path)
+    }
+
+    /// Snapshot builder shared by live persistence and the public getter.
+    fn config_from_window(window: &MainWindow) -> CoreConfig {
+        CoreConfig {
+            theme: Some(ThemePreset::from_index(
+                window.global::<AppTheme>().get_active_preset(),
+            )),
+            marquee_fps: MarqueeFps::try_from(Self::marquee_fps_from_window(window))
+                .unwrap_or_default(),
+            volume_step_percent: VolumeStepPercent::new(Self::volume_step_percent_from_window(
+                window,
+            )),
+            volume_hud_timeout_ms: VolumeHudTimeoutMs::new(
+                Self::slint_ms_to_u32(window.get_volume_hud_timeout_ms())
+                    .clamp(MIN_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_TIMEOUT_MS),
+            ),
+            volume_hud_fade_ms: VolumeHudFadeMs::new(Self::hud_fade_from_window(window)),
+            codec_hud_timeout_ms: CodecHudTimeoutMs::new(
+                Self::slint_ms_to_u32(window.get_codec_hud_timeout_ms())
+                    .clamp(MIN_CODEC_HUD_TIMEOUT_MS, MAX_CODEC_HUD_TIMEOUT_MS),
+            ),
+            font_scale: FontScale::try_from(window.global::<TouchScale>().get_clamped_font_scale())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Saves a config snapshot to `path`, logging the outcome with structured fields.
+    fn persist_config(config: &CoreConfig, path: &Path) {
+        match config.save(path) {
+            Ok(()) => tracing::info!(
+                path = %path.display(),
+                theme = config.theme.map_or_else(|| "default", |t| t.slug()),
+                marquee_fps = config.marquee_fps.value(),
+                volume_step_percent = config.volume_step_percent.value(),
+                volume_hud_timeout_ms = config.volume_hud_timeout_ms.value(),
+                volume_hud_fade_ms = config.volume_hud_fade_ms.value(),
+                codec_hud_timeout_ms = config.codec_hud_timeout_ms.value(),
+                "Screen settings saved"
+            ),
+            Err(e) => tracing::error!(
+                error = %e,
+                path = %path.display(),
+                "failed to save screen settings"
+            ),
+        }
+    }
+
+    /// Queues the current window state for background persistence after a UI edit.
+    ///
+    /// # Render-Thread Safety (`M-NO-DBUS-ON-RENDER-THREAD`)
+    ///
+    /// `CoreConfig::save` performs temp-file + fsync + rename on the SD card,
+    /// which can stall the render thread for tens of milliseconds per click.
+    /// The config snapshot is built on the render thread (cheap) and sent over
+    /// an unbounded FIFO channel to the single persist worker spawned by
+    /// [`Self::wire_config`], keeping HUD animations, marquee, and touch input
+    /// responsive. FIFO ordering guarantees the last UI edit wins on disk.
+    fn persist_window_state(
+        window: &MainWindow,
+        persist_tx: &Rc<RefCell<Option<std::sync::mpsc::Sender<CoreConfig>>>>,
+    ) {
+        let Some(tx) = persist_tx.borrow().as_ref().cloned() else {
+            tracing::warn!("Screen settings change not persisted: no config path is wired");
+            return;
+        };
+        let config = Self::config_from_window(window);
+        if tx.send(config).is_err() {
+            tracing::warn!("Screen settings change not persisted: persist worker is gone");
+        }
+    }
+
+    /// Returns the composer-global marquee rate clamped to `30`/`60`.
+    fn marquee_fps_from_window(window: &MainWindow) -> u32 {
+        u32::try_from(window.global::<MarqueeCompose>().get_marquee_fps())
+            .unwrap_or(DEFAULT_MARQUEE_FPS)
+    }
+
+    /// Returns the window volume-step property clamped to `1..=25`.
+    fn volume_step_percent_from_window(window: &MainWindow) -> u8 {
+        u8::try_from(window.get_volume_step_percent())
+            .unwrap_or(DEFAULT_VOLUME_STEP_PERCENT)
+            .clamp(MIN_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT)
+    }
+
+    /// Converts a Slint `i32` timeout to `u32` (negative values clamp to `0`).
+    fn slint_ms_to_u32(value: i32) -> u32 {
+        u32::try_from(value.max(0)).unwrap_or_default()
+    }
+
+    /// Clamps a Slint `i32` milliseconds value into the given `u32` domain.
+    fn clamp_hud_ms(value: i32, min: u32, max: u32) -> i32 {
+        let clamped = Self::slint_ms_to_u32(value).clamp(min, max);
+        i32::try_from(clamped).unwrap_or(i32::MAX)
+    }
+
+    /// Reads and clamps the Volume HUD fade duration window property.
+    fn hud_fade_from_window(window: &MainWindow) -> u32 {
+        Self::slint_ms_to_u32(window.get_volume_hud_fade_ms()).clamp(0, MAX_VOLUME_HUD_FADE_MS)
     }
 
     /// Adjusts volume by `detents * volume_step_percent`, unmutes, opens/refreshes the
@@ -460,21 +645,14 @@ impl AppShell {
         self.window.get_cd_enabled()
     }
 
-    /// Sets the marquee scroll rate in fps (30 or 60) on the shared composer global.
-    pub fn set_marquee_fps(&self, fps: u32) {
-        self.window
-            .global::<MarqueeCompose>()
-            .set_marquee_fps(i32::try_from(fps).unwrap_or(i32::MAX));
-    }
-
     /// Default touch font scale (`1.15`).
-    pub const DEFAULT_FONT_SCALE: f32 = 1.15;
+    pub const DEFAULT_FONT_SCALE: f32 = DEFAULT_FONT_SCALE;
 
     /// Minimum allowed touch font scale (`1.0`).
-    pub const MIN_FONT_SCALE: f32 = 1.0;
+    pub const MIN_FONT_SCALE: f32 = MIN_FONT_SCALE;
 
     /// Maximum allowed touch font scale (`1.35`).
-    pub const MAX_FONT_SCALE: f32 = 1.35;
+    pub const MAX_FONT_SCALE: f32 = MAX_FONT_SCALE;
 
     /// Returns the active clamped touch font scale (`1.0..=1.35`).
     #[must_use]
@@ -497,7 +675,6 @@ impl AppShell {
         };
         self.window.global::<TouchScale>().set_font_scale(clamped);
     }
-
     /// Sets whether the optical CD player service and navigation entry are enabled.
     ///
     /// If disabled while the shell is currently on the CD Player tab (tab 3), the active tab
@@ -859,19 +1036,74 @@ impl AppShell {
         });
 
         let win = self.window.as_weak();
+        let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_select_theme(move |idx| {
             if let Some(w) = win.upgrade() {
                 let preset = ThemePreset::from_index(idx);
                 preset.apply(&w);
+                Self::persist_window_state(&w, &persist_tx);
             }
         });
 
         let win = self.window.as_weak();
-        self.window.on_cycle_theme(move || {
+        let persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_set_marquee_fps(move |fps| {
             if let Some(w) = win.upgrade() {
-                let current = ThemePreset::from_index(w.global::<AppTheme>().get_active_preset());
-                let next = current.next();
-                next.apply(&w);
+                // Snap to the valid domain (30/60) before applying; the
+                // programmatic setter does the same, but the callback receives
+                // raw Slint i32 values so it must guard its own input.
+                let fps = if fps == 30 {
+                    30
+                } else {
+                    i32::try_from(DEFAULT_MARQUEE_FPS).unwrap_or(i32::MAX)
+                };
+                w.global::<MarqueeCompose>().set_marquee_fps(fps);
+                Self::persist_window_state(&w, &persist_tx);
+            }
+        });
+
+        let win = self.window.as_weak();
+        let persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_set_volume_step_percent(move |step| {
+            if let Some(w) = win.upgrade() {
+                let clamped = step.clamp(
+                    i32::from(MIN_VOLUME_STEP_PERCENT),
+                    i32::from(MAX_VOLUME_STEP_PERCENT),
+                );
+                w.set_volume_step_percent(clamped);
+                Self::persist_window_state(&w, &persist_tx);
+            }
+        });
+
+        let win = self.window.as_weak();
+        let persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_set_volume_hud_timeout_ms(move |ms| {
+            if let Some(w) = win.upgrade() {
+                let clamped =
+                    Self::clamp_hud_ms(ms, MIN_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_TIMEOUT_MS);
+                w.set_volume_hud_timeout_ms(clamped);
+                Self::persist_window_state(&w, &persist_tx);
+            }
+        });
+
+        let win = self.window.as_weak();
+        let persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_set_volume_hud_fade_ms(move |ms| {
+            if let Some(w) = win.upgrade() {
+                let clamped = Self::clamp_hud_ms(ms, 0, MAX_VOLUME_HUD_FADE_MS);
+                w.set_volume_hud_fade_ms(clamped);
+                Self::persist_window_state(&w, &persist_tx);
+            }
+        });
+
+        let win = self.window.as_weak();
+        let persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_set_codec_hud_timeout_ms(move |ms| {
+            if let Some(w) = win.upgrade() {
+                let clamped =
+                    Self::clamp_hud_ms(ms, MIN_CODEC_HUD_TIMEOUT_MS, MAX_CODEC_HUD_TIMEOUT_MS);
+                w.set_codec_hud_timeout_ms(clamped);
+                Self::persist_window_state(&w, &persist_tx);
             }
         });
 
@@ -892,6 +1124,7 @@ impl AppShell {
         });
 
         let win = self.window.as_weak();
+        let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_font_scale_changed(move |scale| {
             if let Some(w) = win.upgrade() {
                 let clamped = if scale.is_finite() {
@@ -900,6 +1133,7 @@ impl AppShell {
                     Self::DEFAULT_FONT_SCALE
                 };
                 w.global::<TouchScale>().set_font_scale(clamped);
+                Self::persist_window_state(&w, &persist_tx);
                 tracing::debug!(font_scale = clamped, "Touch font scale updated");
             }
         });

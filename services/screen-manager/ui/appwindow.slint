@@ -63,6 +63,8 @@ export component MainWindow inherits Window {
     in-out property <bool> codec_hud_visible: false;
     in-out property <int> codec_hud_timeout_ms: 30000;
     in-out property <int> codec_hud_elapsed_ms: 0;
+    // Rotary encoder step per detent; Screen Settings edits and persists it.
+    in-out property <int> volume_step_percent: 2;
     out property <float> codec_hud_opacity: root.codec_hud_visible ? 1.0 : 0.0;
     animate codec_hud_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
     in-out property <bool> has_cover_art: false;
@@ -173,6 +175,11 @@ export component MainWindow inherits Window {
     callback select_theme(int);
     callback cycle_theme();
     callback font_scale_changed(float);
+    callback set_marquee_fps(int);
+    callback set_volume_step_percent(int);
+    callback set_volume_hud_timeout_ms(int);
+    callback set_volume_hud_fade_ms(int);
+    callback set_codec_hud_timeout_ms(int);
 
     // Opens the Bluetooth details tab from any screen; calling it again (or `Back`)
     // returns to the tab it was opened from.
@@ -246,7 +253,7 @@ export component MainWindow inherits Window {
                            root.active_tab == 2 ? "Bluetooth" :
                            root.active_tab == 3 ? "CD Player" :
                            root.active_tab == 4 ? "DSP & Tone" :
-                           root.active_tab == 5 ? (root.show_widget_preview ? "Touch Scale Test" : (root.show_themes ? "Themes" : "Settings")) : "";
+                           root.active_tab == 5 ? (root.show_widget_preview ? "Touch Scale Test" : (root.show_themes ? "Screen Settings" : "Settings")) : "";
                     trailing_icon: @image-url("../../../assets/icons/back.svg");
                     trailing_clicked => { root.app_bar_back(); }
                 }
@@ -274,6 +281,10 @@ export component MainWindow inherits Window {
                 right_peak_ratio: root.right_peak_ratio;
                 track_or_device: root.track_or_device;
                 stream_codec: root.stream_codec;
+                volume_step_percent: root.volume_step_percent;
+                volume_hud_timeout_ms: root.volume_hud_timeout_ms;
+                volume_hud_fade_ms: root.volume_hud_fade_ms;
+                codec_hud_timeout_ms: root.codec_hud_timeout_ms;
                 bt_connected: root.bt_connected;
                 bt_device_address: root.bt_device_address;
                 bt_link_text: root.bt_link_text;
@@ -305,6 +316,11 @@ export component MainWindow inherits Window {
                 select_theme(idx) => { root.select_theme(idx); }
                 cycle_theme => { root.cycle_theme(); }
                 font_scale_changed(val) => { root.font_scale_changed(val); }
+                set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
+                set_volume_step_percent(step) => { root.set_volume_step_percent(step); }
+                set_volume_hud_timeout_ms(ms) => { root.set_volume_hud_timeout_ms(ms); }
+                set_volume_hud_fade_ms(ms) => { root.set_volume_hud_fade_ms(ms); }
+                set_codec_hud_timeout_ms(ms) => { root.set_codec_hud_timeout_ms(ms); }
             }
         }
 

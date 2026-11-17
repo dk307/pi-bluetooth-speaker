@@ -250,8 +250,9 @@ fn ui_shell_callbacks_and_debug_formatting() {
     shell.window().invoke_select_theme(1);
     assert_eq!(shell.current_theme(), ThemePreset::MarantzAmber);
 
-    // Invoke cycle theme callback
-    shell.window().invoke_cycle_theme();
+    // Cycle theme via the programmatic API (the Slint cycle_theme callback
+    // chain was removed with the Cycle Next Theme button).
+    let _ = shell.cycle_theme();
     assert_eq!(shell.current_theme(), ThemePreset::CyberpunkNeon);
 }
 
@@ -581,7 +582,7 @@ fn ui_shell_now_playing_callbacks() {
     shell.window().invoke_next_track();
     shell.window().invoke_previous_track();
     shell.window().invoke_volume_changed(60.0);
-    shell.window().invoke_cycle_theme();
+    let _ = shell.cycle_theme();
     shell.window().invoke_source_clicked();
     shell.window().invoke_night_mode_clicked();
 
@@ -763,6 +764,7 @@ fn ui_shell_volume_hud_config_and_amp_auto_popup() {
         volume_hud_timeout_ms: VolumeHudTimeoutMs::new(1_500),
         volume_hud_fade_ms: VolumeHudFadeMs::new(150),
         codec_hud_timeout_ms: CodecHudTimeoutMs::new(10_000),
+        ..CoreConfig::default()
     };
     shell.apply_config(&cfg);
     assert_eq!(shell.current_theme(), ThemePreset::MarantzAmber);
@@ -1058,4 +1060,122 @@ fn ui_shell_touch_scale_and_virtual_keyboard_integration() {
 
     shell.window().invoke_app_bar_back();
     assert_eq!(shell.current_tab(), 0);
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_screen_settings_save_round_trip_and_clamping() {
+    use screen_manager::config::{
+        CodecHudTimeoutMs, CoreConfig, FontScale, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
+        VolumeStepPercent,
+    };
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use speaker_common::diag::ScopedTempDir;
+
+    let _window = Framebuffer::new_mocked()
+        .0
+        .init_platform()
+        .expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    // Saving without a wired config path must fail cleanly, never panic.
+    assert!(shell.save_current_config().unwrap_err().is_invalid_value());
+
+    // Wire a temp JSON path and apply a non-default configuration.
+    let dir = ScopedTempDir::new("screen-settings");
+    let path = dir.path().join("settings.json");
+    shell.wire_config(&path);
+
+    let cfg = CoreConfig {
+        theme: Some(screen_manager::ui::ThemePreset::CyberpunkNeon),
+        marquee_fps: MarqueeFps::FPS_30,
+        volume_step_percent: VolumeStepPercent::new(7),
+        volume_hud_timeout_ms: VolumeHudTimeoutMs::new(5_250),
+        volume_hud_fade_ms: VolumeHudFadeMs::new(650),
+        codec_hud_timeout_ms: CodecHudTimeoutMs::new(45_000),
+        font_scale: FontScale::from_percent(125),
+    };
+    shell.apply_config(&cfg);
+
+    // The window-backed snapshot must mirror the applied config exactly.
+    assert_eq!(shell.current_config(), cfg);
+
+    // Saving persists to the wired path and reloads identically.
+    shell.save_current_config().expect("save must succeed");
+    let reloaded = CoreConfig::load(&path).expect("reload");
+    assert_eq!(reloaded, cfg);
+
+    // UI callbacks clamp out-of-range values into the config domains and
+    // persist each change immediately (no Save step). Persistence runs on a
+    // background thread to avoid blocking the render thread; wait for the
+    // write to complete before asserting disk state.
+    shell.window().invoke_set_volume_step_percent(999);
+    assert_eq!(shell.window().get_volume_step_percent(), 25);
+    // Poll until the background persist worker finishes the write.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let live = loop {
+        if let Ok(c) = CoreConfig::load(&path)
+            && c.volume_step_percent.value() == 25
+        {
+            break c;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background persist did not complete within 10s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(live.volume_step_percent.value(), 25);
+    shell.window().invoke_set_volume_step_percent(-7);
+    assert_eq!(shell.window().get_volume_step_percent(), 1);
+
+    shell.window().invoke_set_volume_hud_timeout_ms(99_999);
+    assert_eq!(shell.window().get_volume_hud_timeout_ms(), 30_000);
+    shell.window().invoke_set_volume_hud_timeout_ms(0);
+    assert_eq!(shell.window().get_volume_hud_timeout_ms(), 250);
+
+    shell.window().invoke_set_volume_hud_fade_ms(9_999);
+    assert_eq!(shell.window().get_volume_hud_fade_ms(), 2_000);
+    shell.window().invoke_set_volume_hud_fade_ms(-1);
+    assert_eq!(shell.window().get_volume_hud_fade_ms(), 0);
+
+    shell.window().invoke_set_codec_hud_timeout_ms(999_999);
+    assert_eq!(shell.window().get_codec_hud_timeout_ms(), 300_000);
+    shell.window().invoke_set_codec_hud_timeout_ms(0);
+    assert_eq!(shell.window().get_codec_hud_timeout_ms(), 250);
+
+    // Marquee fps accepts only 30/60; anything else snaps to the 60 default.
+    shell.window().invoke_set_marquee_fps(45);
+    assert_eq!(shell.marquee_fps(), 60);
+    shell.window().invoke_set_marquee_fps(30);
+    assert_eq!(shell.marquee_fps(), 30);
+
+    // The clamped state is exactly what live persistence wrote to disk.
+    let clamped = shell.current_config();
+    assert_eq!(clamped.volume_step_percent.value(), 1);
+    assert_eq!(clamped.volume_hud_timeout_ms.value(), 250);
+    assert_eq!(clamped.volume_hud_fade_ms.value(), 0);
+    assert_eq!(clamped.codec_hud_timeout_ms.value(), 250);
+    assert_eq!(clamped.marquee_fps, MarqueeFps::FPS_30);
+    // Poll until the final background persist (marquee fps = 30) completes.
+    // CI's ARM runner is slow; use a generous timeout.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let saved = loop {
+        if let Ok(c) = CoreConfig::load(&path)
+            && c == clamped
+        {
+            break c;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "final background persist did not complete within 10s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(saved, clamped);
+
+    // Persisting to an unwritable path logs an error instead of panicking.
+    shell.wire_config(std::path::Path::new("/nonexistent-dir/settings.json"));
+    shell.window().invoke_set_volume_step_percent(2);
 }

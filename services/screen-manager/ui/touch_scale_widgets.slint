@@ -23,7 +23,7 @@ import {
 export component FontSizeControl inherits Rectangle {
     callback font_scale_changed(float);
 
-    min-height: max(MaterialStyleMetrics.size_40, row.min-height);
+    min-height: max(MaterialStyleMetrics.size_36, row.min-height);
     background: MaterialPalette.surface;
     border-radius: MaterialStyleMetrics.border_radius_10;
     border-width: 1px;
@@ -32,8 +32,8 @@ export component FontSizeControl inherits Rectangle {
     row := HorizontalLayout {
         padding-left: MaterialStyleMetrics.padding_16;
         padding-right: MaterialStyleMetrics.padding_16;
-        padding-top: MaterialStyleMetrics.padding_6;
-        padding-bottom: MaterialStyleMetrics.padding_6;
+        padding-top: MaterialStyleMetrics.padding_4;
+        padding-bottom: MaterialStyleMetrics.padding_4;
         spacing: MaterialStyleMetrics.spacing_12;
         alignment: center;
 

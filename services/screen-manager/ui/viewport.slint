@@ -82,6 +82,10 @@ export component MainViewport inherits Rectangle {
     in property <string> bt_delay_text: "—";
     in property <string> bt_adapter_name: "—";
     in property <string> bt_adapter_address: "—";
+    in property <int> volume_step_percent: 2;
+    in property <int> volume_hud_timeout_ms: 4000;
+    in property <int> volume_hud_fade_ms: 200;
+    in property <int> codec_hud_timeout_ms: 30000;
 
     callback settings_clicked();
     callback select_tab(int);
@@ -91,9 +95,14 @@ export component MainViewport inherits Rectangle {
     callback toggle_mute();
     callback volume_changed(float);
     callback stream_pill_clicked();
-    callback cycle_theme();
     callback select_theme(int);
+    callback cycle_theme();
     callback font_scale_changed(float);
+    callback set_marquee_fps(int);
+    callback set_volume_step_percent(int);
+    callback set_volume_hud_timeout_ms(int);
+    callback set_volume_hud_fade_ms(int);
+    callback set_codec_hud_timeout_ms(int);
 
     // Tab 0: Now Playing
     if root.active_tab == 0 : VerticalLayout {
@@ -289,6 +298,10 @@ export component MainViewport inherits Rectangle {
             show_themes <=> root.show_themes;
             show_widget_preview <=> root.show_widget_preview;
             speaker_alias <=> root.speaker_alias;
+            volume_step_percent: root.volume_step_percent;
+            volume_hud_timeout_ms: root.volume_hud_timeout_ms;
+            volume_hud_fade_ms: root.volume_hud_fade_ms;
+            codec_hud_timeout_ms: root.codec_hud_timeout_ms;
             bluetooth_clicked => { root.select_tab(2); }
             vu_meter_clicked => { root.select_tab(1); }
             dsp_clicked => { root.select_tab(4); }
@@ -296,6 +309,11 @@ export component MainViewport inherits Rectangle {
             select_theme(idx) => { root.select_theme(idx); }
             cycle_theme => { root.cycle_theme(); }
             font_scale_changed(val) => { root.font_scale_changed(val); }
+            set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
+            set_volume_step_percent(step) => { root.set_volume_step_percent(step); }
+            set_volume_hud_timeout_ms(ms) => { root.set_volume_hud_timeout_ms(ms); }
+            set_volume_hud_fade_ms(ms) => { root.set_volume_hud_fade_ms(ms); }
+            set_codec_hud_timeout_ms(ms) => { root.set_codec_hud_timeout_ms(ms); }
         }
     }
 }

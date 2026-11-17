@@ -198,16 +198,20 @@ pub fn run_ui_display(
     marquee_fps: u32,
 ) {
     let config = legacy_config(theme, marquee_fps);
-    run_ui_display_with_config(screen, preview_secs, tab, &config);
+    run_ui_display_with_config(screen, preview_secs, tab, &config, None);
 }
 
 /// Runs the requested screen applying the full [`CoreConfig`] parameters.
+///
+/// `config_path` is wired into the shell so the Screen Settings save action
+/// persists the current state back to the active JSON configuration file.
 #[cfg(feature = "ui")]
 pub fn run_ui_display_with_config(
     screen: ScreenTarget,
     preview_secs: Option<u64>,
     tab: Option<i32>,
     config: &CoreConfig,
+    config_path: Option<&Path>,
 ) {
     if headless_requested() {
         tracing::info!("Headless mode requested via SPEAKER_CORE_HEADLESS=1");
@@ -222,6 +226,7 @@ pub fn run_ui_display_with_config(
         preview_secs,
         tab,
         config,
+        config_path,
         probe: BootProbe::real(),
         mocked: false,
     });
@@ -1202,7 +1207,13 @@ pub fn run_app(opts: &CoreCliOptions) -> ExitCode {
                 if let Some(t) = cfg.theme {
                     tracing::info!("Configured startup theme: {t}");
                 }
-                run_ui_display_with_config(opts.screen, opts.preview_secs, opts.tab, &cfg);
+                run_ui_display_with_config(
+                    opts.screen,
+                    opts.preview_secs,
+                    opts.tab,
+                    &cfg,
+                    Some(path.as_path()),
+                );
             }
             Err(e) => {
                 tracing::error!(error = %e, "failed to load config {}", path.display());
