@@ -48,11 +48,21 @@ fn dump_single_frame_for_layout_analysis() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     let open_hud = std::env::var("RENDER_DUMP_HUD").ok().as_deref() == Some("1");
+    let show_themes = std::env::var("RENDER_DUMP_THEMES").ok().as_deref() == Some("1");
+    let at_min = std::env::var("RENDER_DUMP_AT_MIN").ok().as_deref() == Some("1");
 
     let fb = Framebuffer::new_mocked().0;
     let window = fb.init_platform().expect("platform init");
     let main_window = MainWindow::new().expect("MainWindow");
+    if show_themes {
+        main_window.set_show_themes(true);
+    }
     let shell = AppShell::new(main_window);
+    if at_min {
+        // Park the fade stepper on its lower bound (0) so the row's minus
+        // button renders in its disabled state.
+        shell.window().set_volume_hud_fade_ms(0);
+    }
     shell.apply_theme(ThemePreset::Peppy);
     shell.set_track_metadata(
         "Test Track Title",

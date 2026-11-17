@@ -6,47 +6,59 @@ import { MarqueeCompose } from "marquee_state.slint";
 
 // Compact +/− button used by the Advanced settings rows (Material 3 tonal
 // icon-button look; 40px keeps the 44px row rhythm inside the 420px viewport).
-// The minus/plus signs are drawn as centered bars instead of text glyphs:
-// "−" and "+" sit on different font baselines, so glyph text never aligns.
+// Uses real Material SVG icons so −/+ glyphs align (font-baseline mismatch
+// between "−" and "+" never aligns with text rendering).
 component StepButton inherits Rectangle {
     in property <bool> plus;
-    callback clicked();
+    in property <bool> enabled: true;
+    callback clicked;
 
     width: MaterialStyleMetrics.size_40;
     height: MaterialStyleMetrics.size_40;
     border-radius: self.width / 2;
-    background: MaterialPalette.secondary_container;
-    opacity: touch.pressed ? 0.8 : 1.0;
+    background: root.enabled ? MaterialPalette.secondary_container : MaterialPalette.surface_container_highest;
+    opacity: root.enabled && touch.pressed ? 0.8 : root.enabled ? 1.0 : 0.6;
     animate opacity { duration: 80ms; easing: ease-out; }
 
-    // Horizontal bar shared by both the − and + signs.
-    Rectangle {
-        width: 16px;
-        height: 2px;
+    // "−" (remove) icon: always shown; canonical 24dp M3 icon.
+    // Explicit centering (like the original bar approach) avoids font‑baseline
+    // mismatch and image‑fit ambiguity between "−" and "+" glyphs.
+    Image {
+        source: @image-url("../../../assets/icons/remove.svg");
+        colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
+        width: 20px;
+        height: 20px;
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        background: MaterialPalette.on_secondary_container;
+        image-fit: contain;
     }
 
-    // Vertical bar completes the + sign (absent on the − button).
-    if root.plus : Rectangle {
-        width: 2px;
-        height: 16px;
+    // "+" icon: only shown when plus is true; canonical 24dp M3 icon.
+    if root.plus : Image {
+        source: @image-url("../../../assets/icons/add.svg");
+        colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
+        width: 20px;
+        height: 20px;
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        background: MaterialPalette.on_secondary_container;
+        image-fit: contain;
     }
 
     touch := TouchArea {
+        enabled: root.enabled;
         clicked => { root.clicked(); }
     }
 }
 
 // One Material 3 list row for a numeric Advanced setting: label text on the
-// left (title-medium, 16px), a −/+ stepper control on the right.
+// left (title-medium, 16px), a −/+ stepper control on the right. The
+// can_decrease / can_increase states reflect whether the value is at its
+// min/max bound, dimming and ignoring the respective button.
 component SettingsStepperRow inherits Rectangle {
     in property <string> label;
     in property <string> value;
+    in property <bool> can_decrease: true;
+    in property <bool> can_increase: true;
     callback decrease();
     callback increase();
 
@@ -68,9 +80,14 @@ component SettingsStepperRow inherits Rectangle {
 
         StepButton {
             plus: false;
+            enabled: root.can_decrease;
             clicked => { root.decrease(); }
         }
 
+        // Fixed width keeps the −/value/+ group identical on every row:
+        // the label alone absorbs the leftover row width, so the minus
+        // buttons line up in one column instead of drifting with the
+        // label text length.
         Text {
             text: root.value;
             font-size: 16px;
@@ -78,12 +95,13 @@ component SettingsStepperRow inherits Rectangle {
             color: MaterialPalette.primary;
             vertical-alignment: center;
             horizontal-alignment: center;
-            horizontal-stretch: 1;
-            min-width: 96px;
+            width: 96px;
+            overflow: elide;
         }
 
         StepButton {
             plus: true;
+            enabled: root.can_increase;
             clicked => { root.increase(); }
         }
     }
@@ -403,9 +421,13 @@ export component SettingsView inherits VerticalLayout {
             set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
         }
 
+        // Stepper bounds mirror the Rust config domains (MIN_/MAX_* in
+        // crate::config); the Rust callbacks clamp off-grid steps as well.
         SettingsStepperRow {
             label: "Encoder Volume Step";
             value: "\{root.volume_step_percent} %";
+            can_decrease: root.volume_step_percent > 1;
+            can_increase: root.volume_step_percent < 25;
             decrease => { root.set_volume_step_percent(root.volume_step_percent - 1); }
             increase => { root.set_volume_step_percent(root.volume_step_percent + 1); }
         }
@@ -413,6 +435,8 @@ export component SettingsView inherits VerticalLayout {
         SettingsStepperRow {
             label: "Volume HUD Timeout";
             value: "\{root.volume_hud_timeout_ms} ms";
+            can_decrease: root.volume_hud_timeout_ms > 250;
+            can_increase: root.volume_hud_timeout_ms < 30000;
             decrease => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms - 250); }
             increase => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms + 250); }
         }
@@ -420,6 +444,8 @@ export component SettingsView inherits VerticalLayout {
         SettingsStepperRow {
             label: "Volume HUD Fade";
             value: "\{root.volume_hud_fade_ms} ms";
+            can_decrease: root.volume_hud_fade_ms > 0;
+            can_increase: root.volume_hud_fade_ms < 2000;
             decrease => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms - 100); }
             increase => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms + 100); }
         }
@@ -427,6 +453,8 @@ export component SettingsView inherits VerticalLayout {
         SettingsStepperRow {
             label: "Codec HUD Timeout";
             value: "\{root.codec_hud_timeout_ms} ms";
+            can_decrease: root.codec_hud_timeout_ms > 250;
+            can_increase: root.codec_hud_timeout_ms < 300000;
             decrease => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms - 1000); }
             increase => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms + 1000); }
         }
