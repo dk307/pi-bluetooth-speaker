@@ -8,9 +8,13 @@ import { ScreenAppBar } from "screen_app_bar.slint";
 import { VolumeHudOverlay } from "volume_hud.slint";
 import { CodecHudOverlay } from "codec_hud.slint";
 import { BluetoothDevicesScreen, BtDeviceRow } from "bluetooth_devices.slint";
+import { MaterialTypography } from "@material/material.slint";
 
 // Re-exported so slint-build generates the Rust global accessor for the composer bridge.
 export { MarqueeCompose }
+// Re-exported so slint-build generates the Rust global accessor for the
+// Settings font-scale control (`AppShell::apply_font_scale_percent`).
+export { MaterialTypography }
 
 import "../../../assets/fonts/Inter-Regular.ttf";
 import "../../../assets/fonts/Inter-Medium.ttf";
@@ -188,6 +192,11 @@ export component MainWindow inherits Window {
     callback tab_selected(int);
     callback select_theme(int);
     callback cycle_theme();
+    // Settings text-size cycler: Rust scales the Material typography global and
+    // pushes the new percentage label back through `text_size_label`.
+    callback font_scale_clicked();
+    // Current font-scale percentage label (e.g. "100%"), owned by Rust.
+    in-out property <string> text_size_label: "100%";
 
     // Bluetooth devices screen actions, handled in Rust (DeviceCommandQueue pushes).
     callback bt_add_device_clicked();
@@ -329,11 +338,14 @@ export component MainWindow inherits Window {
                 volume_changed(val) => { root.volume_changed(val); }
                 select_theme(idx) => { root.select_theme(idx); }
                 cycle_theme => { root.cycle_theme(); }
+                text_size_label: root.text_size_label;
+                font_scale_clicked => { root.font_scale_clicked(); }
             }
         }
 
         // Bluetooth devices screen: full-window overlay above the tab viewport
-        // and top bar (it carries its own 88px header), below the volume HUD.
+        // and top bar (it carries its own standard overlay app bar), below the
+        // volume HUD.
         if root.bt_devices_open: bluetooth_devices := BluetoothDevicesScreen {
             width: 100%;
             height: 100%;

@@ -720,10 +720,11 @@ fn bootstrap_worker_publishes_state_without_touching_the_ui_thread() {
 
     // The injected mock connection stands in for the blocking system-bus
     // connect: the worker runs it off the render thread and publishes the
-    // resulting state through the shared update channel.
+    // resulting state through the shared update channel. Cloned (not moved)
+    // because the retry loop may invoke the factory more than once.
     let (mock_bt, _mock_ctrl) = speaker_bluetooth::BluetoothDevice::new_mocked();
     let worker = screen_manager::daemon::spawn_bt_bootstrap_worker(
-        || Ok(mock_bt),
+        move || Ok(mock_bt.clone()),
         &shared,
         &commands,
         &speaker_bluetooth::DeviceCommandQueue::new(),
@@ -747,7 +748,51 @@ fn bootstrap_worker_publishes_state_without_touching_the_ui_thread() {
 
 #[cfg(feature = "ui")]
 #[test]
-fn bootstrap_worker_reports_connect_failure_without_publishing_state() {
+fn apply_initial_bt_state_leaves_shell_at_defaults_when_no_playback_snapshot() {
+    use screen_manager::ui::MainWindow;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    let main_window = MainWindow::new().unwrap();
+    let ShellInit { shell, .. } = init_shell(main_window, false, None, None, 60);
+
+    // A mock with no playback snapshot (the `Ok(None)` arm): the shell keeps
+    // its placeholder defaults instead of flashing empty state.
+    let (bt, mock_ctrl) = speaker_bluetooth::BluetoothDevice::new_mocked();
+    mock_ctrl.set_playback(None);
+    screen_manager::daemon::apply_initial_bt_state(&shell, &bt);
+    assert_eq!(
+        shell.window().get_track_title().as_str(),
+        "Waiting for Bluetooth Connection..."
+    );
+    assert!(!shell.is_playing());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn apply_initial_bt_state_survives_query_faults() {
+    use screen_manager::ui::MainWindow;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    let main_window = MainWindow::new().unwrap();
+    let ShellInit { shell, .. } = init_shell(main_window, false, None, None, 60);
+
+    // Faulted mock: playback query AND link snapshot both fail — the shell
+    // must stay at its defaults (best-effort logging, never a panic).
+    let (bt, mock_ctrl) = speaker_bluetooth::BluetoothDevice::new_mocked();
+    mock_ctrl.set_fault(Some("injected bus failure".into()));
+    screen_manager::daemon::apply_initial_bt_state(&shell, &bt);
+    assert_eq!(
+        shell.window().get_track_title().as_str(),
+        "Waiting for Bluetooth Connection..."
+    );
+    assert!(!shell.is_playing());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn bootstrap_worker_retries_failed_connect_and_publishes_toast() {
     use screen_manager::ui::MainWindow;
     use std::sync::atomic::AtomicBool;
 
@@ -759,19 +804,35 @@ fn bootstrap_worker_reports_connect_failure_without_publishing_state() {
     let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
     let running = Arc::new(AtomicBool::new(true));
     let connected = Arc::new(AtomicBool::new(false));
+    let device_commands = speaker_bluetooth::DeviceCommandQueue::new();
 
-    // A failed connection is reported at WARN on the worker thread: no state
-    // is published and the connected flag stays down, so the UI never wires
-    // the transport callbacks.
-    let worker = screen_manager::daemon::spawn_bt_bootstrap_worker(
+    // A failed connection must not orphan the devices command queue: the
+    // worker retries with a short test-injected backoff, drains commands
+    // queued while the bus is down, and publishes a toast so the screen can
+    // surface the failure instead of silently doing nothing.
+    device_commands.push(speaker_bluetooth::DeviceCommand::Refresh);
+    let worker = screen_manager::daemon::spawn_bt_bootstrap_worker_with_retry(
         || Err(speaker_bluetooth::BtError::dbus("no system bus")),
         &shared,
         &commands,
-        &speaker_bluetooth::DeviceCommandQueue::new(),
+        &device_commands,
         &running,
         &connected,
+        Duration::from_millis(25),
     )
     .expect("bt-bootstrap thread spawns");
+
+    // The failure toast is published through the shared update channel.
+    wait_for(|| {
+        shared.lock().is_ok_and(|state| {
+            state
+                .devices
+                .as_ref()
+                .is_some_and(|update| update.toast.is_some())
+        })
+    });
+
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
     worker.join().expect("bt-bootstrap worker exits cleanly");
 
     assert!(
@@ -783,9 +844,8 @@ fn bootstrap_worker_reports_connect_failure_without_publishing_state() {
         state.playback.is_none()
             && state.pcm.is_none()
             && state.cover.is_none()
-            && state.amp_volume.is_none()
-            && state.devices.is_none(),
-        "failed connect must not publish any state"
+            && state.amp_volume.is_none(),
+        "failed connect must not publish playback/link state"
     );
 }
 

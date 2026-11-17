@@ -793,11 +793,19 @@ fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
         volume_hud_timeout_ms: VolumeHudTimeoutMs::new(1_500),
         volume_hud_fade_ms: VolumeHudFadeMs::new(150),
         codec_hud_timeout_ms: CodecHudTimeoutMs::new(10_000),
+        font_scale_percent: screen_manager::config::FontScalePercent::new(125),
     };
     shell.apply_config(&cfg);
     assert_eq!(shell.current_theme(), ThemePreset::MarantzAmber);
     assert_eq!(shell.volume_step_percent(), 4);
     assert_eq!(shell.volume_hud_timeout_ms(), 1_500);
+    assert_eq!(shell.volume_hud_fade_ms(), 150);
+    assert_eq!(
+        shell.font_scale_percent(),
+        125,
+        "the config font scale lands on the Material typography global"
+    );
+    assert_eq!(shell.window().get_text_size_label().as_str(), "125%");
     assert_eq!(shell.volume_hud_fade_ms(), 150);
 
     // Reset step to 2% per user default

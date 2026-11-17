@@ -93,6 +93,8 @@ component SettingsIconButton inherits Rectangle {
 export component SettingsView inherits VerticalLayout {
     in property <bool> cd_enabled: false;
     in-out property <bool> show_themes: false;
+    // Current font-scale percentage label (e.g. "100%"), owned by Rust.
+    in property <string> text_size_label: "100%";
 
     callback bluetooth_clicked();
     callback vu_meter_clicked();
@@ -100,6 +102,7 @@ export component SettingsView inherits VerticalLayout {
     callback cd_clicked();
     callback select_theme(int);
     callback cycle_theme();
+    callback font_scale_clicked();
 
     padding: MaterialStyleMetrics.padding_16;  // 16px
     spacing: MaterialStyleMetrics.spacing_16;
@@ -135,6 +138,12 @@ export component SettingsView inherits VerticalLayout {
                 icon: @image-url("../../../assets/icons/config.svg");
                 label: "Themes";
                 clicked => { root.show_themes = true; }
+            }
+
+            SettingsIconButton {
+                icon: @image-url("../../../assets/icons/text_size.svg");
+                label: "Text " + root.text_size_label;
+                clicked => { root.font_scale_clicked(); }
             }
 
             if root.cd_enabled : SettingsIconButton {

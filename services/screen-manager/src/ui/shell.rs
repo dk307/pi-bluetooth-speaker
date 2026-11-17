@@ -13,11 +13,12 @@ use std::rc::Rc;
 use slint::{ComponentHandle, Model};
 
 use crate::config::{
-    CoreConfig, DEFAULT_VOLUME_HUD_FADE_MS, DEFAULT_VOLUME_HUD_TIMEOUT_MS,
-    DEFAULT_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT, MIN_VOLUME_STEP_PERCENT,
+    CoreConfig, DEFAULT_FONT_SCALE_PERCENT, DEFAULT_VOLUME_HUD_FADE_MS,
+    DEFAULT_VOLUME_HUD_TIMEOUT_MS, DEFAULT_VOLUME_STEP_PERCENT, MAX_FONT_SCALE_PERCENT,
+    MAX_VOLUME_STEP_PERCENT, MIN_FONT_SCALE_PERCENT, MIN_VOLUME_STEP_PERCENT,
 };
 
-use super::generated::{AppTheme, MainWindow, MarqueeCompose};
+use super::generated::{AppTheme, MainWindow, MarqueeCompose, MaterialTypography};
 use super::theme::ThemePreset;
 
 /// Tracks cumulative [`speaker_hardware::EncoderStatus`] counters and translates
@@ -243,6 +244,7 @@ impl AppShell {
         self.set_volume_hud_timeout_ms(config.volume_hud_timeout_ms.value());
         self.set_volume_hud_fade_ms(config.volume_hud_fade_ms.value());
         self.set_codec_hud_timeout_ms(config.codec_hud_timeout_ms.value());
+        self.apply_font_scale_percent(config.font_scale_percent.value());
         if let Some(theme) = config.theme {
             self.apply_theme(theme);
         }
@@ -792,6 +794,66 @@ impl AppShell {
         next
     }
 
+    /// Font-scale presets cycled by the Settings text-size control (percent).
+    ///
+    /// Phone-style steps: 75% (compact) through 150% (extra large), with 100%
+    /// as the production default.
+    pub const FONT_SCALE_PRESETS: [u8; 4] = [75, 100, 125, 150];
+
+    /// Returns the live font scale from the Material typography global.
+    ///
+    /// The Slint global is the single source of truth (no Rust shadow cell):
+    /// the Settings label and the cycler both derive from it.
+    #[must_use]
+    pub fn font_scale_percent(&self) -> u8 {
+        let scale = self.window.global::<MaterialTypography>().get_font_scale();
+        // Guard NaN per the appliance float-binding rule; clamp then round.
+        if !scale.is_finite() {
+            return DEFAULT_FONT_SCALE_PERCENT;
+        }
+        // The clamped percent is a whole number in 75..=200, exactly
+        // representable — the cast cannot lose the sign.
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "value is clamped to MIN..=MAX (75..=200) on the previous line"
+        )]
+        let percent = ((scale * 100.0).round() as i32).clamp(
+            i32::from(MIN_FONT_SCALE_PERCENT),
+            i32::from(MAX_FONT_SCALE_PERCENT),
+        ) as u8;
+        percent
+    }
+
+    /// Applies the user font scale (percent) to the Material typography global.
+    ///
+    /// Every `MaterialTypography` style multiplies its base size by this knob,
+    /// so all `MaterialText` and Material button labels scale together — the
+    /// appliance equivalent of a phone's system font-size setting.
+    pub fn apply_font_scale_percent(&self, percent: u8) {
+        let percent = percent.clamp(MIN_FONT_SCALE_PERCENT, MAX_FONT_SCALE_PERCENT);
+        let scale = f32::from(percent) / 100.0;
+        self.window
+            .global::<MaterialTypography>()
+            .set_font_scale(scale);
+        self.window
+            .set_text_size_label(format!("{percent}%").into());
+    }
+
+    /// Cycles the font scale to the next preset (wrapping) and applies it.
+    ///
+    /// Returns the new percentage so callers (Settings label) can reflect it.
+    #[must_use]
+    pub fn cycle_font_scale(&self) -> u8 {
+        let current = self.font_scale_percent();
+        let next = Self::FONT_SCALE_PRESETS
+            .iter()
+            .copied()
+            .find(|preset| *preset > current)
+            .unwrap_or(Self::FONT_SCALE_PRESETS[0]);
+        self.apply_font_scale_percent(next);
+        next
+    }
+
     /// Wires the UI shell transport callbacks to the `bt-monitor` worker command queue.
     ///
     /// Every callback applies an optimistic local UI update and pushes a
@@ -878,7 +940,7 @@ impl AppShell {
                     return;
                 }
             };
-            let command = if from_discovery {
+            let command = if from_discovery && !row.paired {
                 // Optimistic pairing view; the worker's Connecting status
                 // (or a refusal toast) converges it within a tick.
                 w.set_bt_devices_mode(2);
@@ -889,6 +951,8 @@ impl AppShell {
             } else if row.connected {
                 speaker_bluetooth::DeviceCommand::Disconnect(addr)
             } else {
+                // Includes already-paired devices seen in discovery: connect
+                // without re-pairing (phone-style discovery list).
                 speaker_bluetooth::DeviceCommand::Connect(addr)
             };
             push_device_command(&device_cmds, command);
@@ -984,6 +1048,15 @@ impl AppShell {
                 let current = ThemePreset::from_index(w.global::<AppTheme>().get_active_preset());
                 let next = current.next();
                 next.apply(&w);
+            }
+        });
+
+        let win = self.window.as_weak();
+        self.window.on_font_scale_clicked(move || {
+            if let Some(w) = win.upgrade() {
+                let shell = AppShell::new(w);
+                let next = shell.cycle_font_scale();
+                tracing::info!(font_scale_percent = next, "User font scale changed");
             }
         });
 

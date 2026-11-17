@@ -40,6 +40,9 @@ export component MainViewport inherits Rectangle {
     callback stream_pill_clicked();
     callback cycle_theme();
     callback select_theme(int);
+    // Font-scale label + cycler, owned by Rust (Settings text-size control).
+    in property <string> text_size_label: "100%";
+    callback font_scale_clicked();
 
     // Tab 0: Now Playing
     if root.active_tab == 0 : VerticalLayout {
@@ -165,6 +168,8 @@ export component MainViewport inherits Rectangle {
             cd_clicked => { root.select_tab(3); }
             select_theme(idx) => { root.select_theme(idx); }
             cycle_theme => { root.cycle_theme(); }
+            text_size_label: root.text_size_label;
+            font_scale_clicked => { root.font_scale_clicked(); }
         }
     }
 }

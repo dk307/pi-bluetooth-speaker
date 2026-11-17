@@ -10,6 +10,7 @@
 // deprecated animation-tick perpetual driver must never appear here.
 
 import { FilledButton, OutlineButton, TonalButton, MaterialPalette, MaterialStyleMetrics, MaterialText, MaterialTypography } from "@material/material.slint";
+import { OverlayAppBar } from "screen_app_bar.slint";
 
 // One row of the paired/active device list or of the discovery list.
 // `address` keys every action and deletion in Rust — never an index: rows can
@@ -26,7 +27,6 @@ export struct BtDeviceRow {
 
 // Fixed design tokens for the 800x480 appliance panel (plan §5).
 global BtMetrics {
-    in property <length> header_height: 88px;
     in property <length> card_radius: 20px;
     in property <length> card_gap: 12px;
     in property <length> card_height: 88px;
@@ -243,25 +243,27 @@ component BtDeviceCard inherits Rectangle {
             spacing: 2px;
             MaterialText {
                 text: root.device.name;
-                style: MaterialTypography.title_medium;
+                style: MaterialTypography.headline_small;
                 color: root.device.connected ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
             }
             MaterialText {
                 text: root.device.subtitle;
-                style: MaterialTypography.body_small;
+                style: MaterialTypography.body_large;
                 color: root.device.connected ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
                 opacity: 0.85;
             }
         }
 
-        if !root.from_discovery : MaterialText {
+        // Status text: paired rows (list or discovery) show Paired/Active.
+        if !root.from_discovery || root.device.paired : MaterialText {
             text: root.device.status;
-            style: MaterialTypography.body_small;
+            style: MaterialTypography.body_medium;
             color: root.device.status == "Active" ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
             width: self.preferred-width;
         }
 
-        if root.from_discovery : FilledButton {
+        // Pair: unpaired discovery rows (phone-style flow).
+        if root.from_discovery && !root.device.paired : FilledButton {
             text: "Pair";
             height: BtMetrics.pill_height_small;
             width: self.preferred-width;
@@ -270,7 +272,8 @@ component BtDeviceCard inherits Rectangle {
             }
         }
 
-        if !root.from_discovery && root.device.connected : OutlineButton {
+        // Disconnect: connected rows (paired list or discovery).
+        if root.device.connected : OutlineButton {
             text: "Disconnect";
             height: BtMetrics.pill_height_small;
             width: self.preferred-width;
@@ -279,7 +282,8 @@ component BtDeviceCard inherits Rectangle {
             }
         }
 
-        if !root.from_discovery && !root.device.connected : TonalButton {
+        // Connect: not connected, and not an unpaired discovery row.
+        if !root.device.connected && !(root.from_discovery && !root.device.paired) : TonalButton {
             text: root.make_active ? "Make Active" : "Connect";
             height: BtMetrics.pill_height_small;
             width: self.preferred-width;
@@ -298,107 +302,13 @@ component BtDeviceCard inherits Rectangle {
     }
 }
 
-// Fixed 88px app bar. Mode 0 = list chrome (back, title, live adapter subtitle,
-// "+ Add Device" filled pill); mode 1 = discovery chrome ("Add Device",
-// scanning subtitle with spinner, outlined Cancel).
-component BtScreenHeader inherits Rectangle {
-    in property <int> mode;
-    in property <string> subtitle;
-    in property <bool> scanning;
-    in property <int> frame;
-    callback add_pressed();
-    callback cancel_pressed();
-    callback close_pressed();
-
-    height: BtMetrics.header_height;
-    background: MaterialPalette.surface;
-
-    HorizontalLayout {
-        padding-left: BtMetrics.list_padding_h;
-        padding-right: BtMetrics.list_padding_h;
-        spacing: 12px;
-        alignment: space-between;
-        cross-axis-alignment: center;
-
-        HorizontalLayout {
-            spacing: 12px;
-            alignment: start;
-            cross-axis-alignment: center;
-
-            if root.mode == 0 : BtIconButton {
-                source: @image-url("../../../assets/icons/back.svg");
-                tint: MaterialPalette.on_surface;
-                clicked => {
-                    root.close_pressed();
-                }
-            }
-
-            VerticalLayout {
-                alignment: center;
-                spacing: 2px;
-
-                if root.mode == 0 : MaterialText {
-                    text: "Bluetooth Devices";
-                    style: MaterialTypography.headline_large;
-                    color: MaterialPalette.on_surface;
-                }
-
-                if root.mode == 0 : MaterialText {
-                    text: root.subtitle;
-                    style: MaterialTypography.body_small;
-                    color: MaterialPalette.on_surface_variant;
-                }
-
-                if root.mode == 1 : MaterialText {
-                    text: "Add Device";
-                    style: MaterialTypography.headline_large;
-                    color: MaterialPalette.on_surface;
-                }
-
-                if root.mode == 1 : HorizontalLayout {
-                    spacing: 6px;
-                    alignment: start;
-                    cross-axis-alignment: center;
-                    BtProgressRing {
-                        width: 16px;
-                        height: 16px;
-                        stroke_width: 2px;
-                        frame: root.frame;
-                        visible: root.scanning;
-                    }
-                    MaterialText {
-                        text: "Scanning for nearby devices...";
-                        style: MaterialTypography.body_small;
-                        color: MaterialPalette.on_surface_variant;
-                    }
-                }
-            }
-        }
-
-        if root.mode == 0 : FilledButton {
-            text: "+ Add Device";
-            height: BtMetrics.pill_height;
-            clicked => {
-                root.add_pressed();
-            }
-        }
-
-        if root.mode == 1 : OutlineButton {
-            text: "Cancel";
-            height: BtMetrics.pill_height;
-            clicked => {
-                root.cancel_pressed();
-            }
-        }
-    }
-}
-
 // Scrollable card list (392px viewport). The bottom fade cue renders only when
 // content actually overflows (audit A1/A13) and the scrollbar thumb renders
 // above the cue (audit A10). Modal dialog disables panning via `interactive`.
 component BtDevicesList inherits Rectangle {
     in property <[BtDeviceRow]> rows;
     in property <bool> from_discovery: false;
+    in property <bool> scanning: false;
     in property <bool> delete_open: false;
     callback action(int, bool);
     callback remove(int);
@@ -430,7 +340,7 @@ component BtDevicesList inherits Rectangle {
                 for row[i] in root.rows : BtDeviceCard {
                     device: row;
                     from_discovery: root.from_discovery;
-                    make_active: i > 0 && root.rows[0].connected;
+                    make_active: !root.from_discovery && i > 0 && root.rows[0].connected;
                     activate => {
                         root.action(i, root.from_discovery);
                     }
@@ -439,6 +349,30 @@ component BtDevicesList inherits Rectangle {
                     }
                 }
             }
+        }
+    }
+
+    // Empty state (phone-style guidance, never a blank screen): discovery tells
+    // the user what to look for; the paired list points at Add Device.
+    if root.rows.length == 0 : VerticalLayout {
+        alignment: center;
+        spacing: 8px;
+        MaterialText {
+            text: root.from_discovery ?
+                (root.scanning ? "Searching for nearby devices..." : "No devices found") :
+                "No paired devices yet";
+            style: MaterialTypography.body_large;
+            color: MaterialPalette.on_surface_variant;
+            horizontal-alignment: center;
+        }
+        MaterialText {
+            text: root.from_discovery ?
+                "Make sure the device is in pairing mode and nearby." :
+                "Add a device to get started.";
+            style: MaterialTypography.body_medium;
+            color: MaterialPalette.on_surface_variant;
+            opacity: 0.8;
+            horizontal-alignment: center;
         }
     }
 
@@ -514,7 +448,7 @@ component BtPairingView inherits Rectangle {
 
         MaterialText {
             text: "Keep the device nearby while pairing completes.";
-            style: MaterialTypography.body_medium;
+            style: MaterialTypography.body_large;
             color: MaterialPalette.on_surface_variant;
         }
     }
@@ -577,7 +511,7 @@ component BtDeleteDialog inherits Rectangle {
                 }
                 MaterialText {
                     text: "This removes the paired device from the speaker.";
-                    style: MaterialTypography.body_medium;
+                    style: MaterialTypography.body_large;
                     color: MaterialPalette.on_surface_variant;
                 }
                 HorizontalLayout {
@@ -627,7 +561,7 @@ component BtToast inherits Rectangle {
                     cross-axis-alignment: center;
                     MaterialText {
                         text: root.text;
-                        style: MaterialTypography.body_medium;
+                        style: MaterialTypography.body_large;
                         color: MaterialPalette.on_surface;
                     }
                 }
@@ -703,25 +637,80 @@ export component BluetoothDevicesScreen inherits Rectangle {
     }
 
     if root.bt_devices_mode != 2 : VerticalLayout {
-        BtScreenHeader {
-            mode: root.bt_devices_mode;
-            subtitle: root.bt_devices_subtitle;
-            scanning: root.bt_scanning;
-            frame: root.bt_anim_frame;
-            add_pressed => {
+        // Standard overlay chrome (same app bar family as the Settings screens):
+        // centered title, Add Device action icon next to the trailing Close.
+        OverlayAppBar {
+            title: root.bt_devices_mode == 1 ? "Add Device" : "Bluetooth Devices";
+            has_action: root.bt_devices_mode == 0;
+            action_icon: @image-url("../../../assets/icons/add.svg");
+            action_tooltip: "Add Device";
+            action_clicked => {
                 root.bt_add_device_clicked();
             }
-            cancel_pressed => {
-                root.bt_cancel_scan_clicked();
-            }
-            close_pressed => {
+            trailing_icon: @image-url("../../../assets/icons/close.svg");
+            trailing_tooltip: "Close";
+            trailing_clicked => {
                 root.close_clicked();
+            }
+        }
+
+        // Sub-header strip: mode 0 = live adapter subtitle; mode 1 = scanning
+        // status with spinner and a quick Cancel (stop discovery without
+        // closing the screen).
+        if root.bt_devices_mode == 0 : Rectangle {
+            height: 40px;
+            background: MaterialPalette.surface;
+            MaterialText {
+                x: BtMetrics.list_padding_h;
+                y: (parent.height - self.height) / 2;
+                text: root.bt_devices_subtitle;
+                style: MaterialTypography.body_medium;
+                color: MaterialPalette.on_surface_variant;
+            }
+        }
+
+        if root.bt_devices_mode == 1 : Rectangle {
+            height: 40px;
+            background: MaterialPalette.surface;
+            HorizontalLayout {
+                padding-left: BtMetrics.list_padding_h;
+                padding-right: BtMetrics.list_padding_h;
+                spacing: 8px;
+                alignment: space-between;
+                cross-axis-alignment: center;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    cross-axis-alignment: center;
+                    BtProgressRing {
+                        width: 16px;
+                        height: 16px;
+                        stroke_width: 2px;
+                        frame: root.bt_anim_frame;
+                        visible: root.bt_scanning;
+                    }
+                    MaterialText {
+                        text: root.bt_scanning ? "Scanning for nearby devices..." : "Discovery stopped";
+                        style: MaterialTypography.body_medium;
+                        color: MaterialPalette.on_surface_variant;
+                    }
+                }
+
+                if root.bt_scanning : OutlineButton {
+                    text: "Cancel";
+                    height: BtMetrics.pill_height_small;
+                    clicked => {
+                        root.bt_cancel_scan_clicked();
+                    }
+                }
             }
         }
 
         BtDevicesList {
             rows: root.bt_devices_mode == 1 ? root.bt_discovered_rows : root.bt_device_rows;
             from_discovery: root.bt_devices_mode == 1;
+            scanning: root.bt_scanning;
             delete_open: root.bt_delete_open;
             action(idx, from_discovery) => {
                 root.bt_row_action(idx, from_discovery);

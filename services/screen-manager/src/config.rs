@@ -48,6 +48,13 @@ pub const MAX_VOLUME_HUD_FADE_MS: u32 = 2_000;
 /// Production default Codec HUD auto-dismiss timeout in milliseconds (`30_000` ms).
 pub const DEFAULT_CODEC_HUD_TIMEOUT_MS: u32 = 30_000;
 
+/// Minimum user font scale in percent (75%).
+pub const MIN_FONT_SCALE_PERCENT: u8 = 75;
+/// Maximum user font scale in percent (200%).
+pub const MAX_FONT_SCALE_PERCENT: u8 = 200;
+/// Production default font scale in percent (100%).
+pub const DEFAULT_FONT_SCALE_PERCENT: u8 = 100;
+
 /// Minimum allowed Codec HUD auto-dismiss timeout in milliseconds (`250` ms).
 pub const MIN_CODEC_HUD_TIMEOUT_MS: u32 = 250;
 
@@ -124,6 +131,10 @@ const _: () = {
             && (DEFAULT_VOLUME_HUD_TIMEOUT_MS <= MAX_VOLUME_HUD_TIMEOUT_MS)
     );
     assert!(DEFAULT_VOLUME_HUD_FADE_MS <= MAX_VOLUME_HUD_FADE_MS);
+    assert!(
+        (MIN_FONT_SCALE_PERCENT <= DEFAULT_FONT_SCALE_PERCENT)
+            && (DEFAULT_FONT_SCALE_PERCENT <= MAX_FONT_SCALE_PERCENT)
+    );
 };
 
 /// Strongly typed rotary encoder volume step percentage (`1..=25`).
@@ -178,6 +189,67 @@ impl TryFrom<u8> for VolumeStepPercent {
 impl From<VolumeStepPercent> for u8 {
     fn from(step: VolumeStepPercent) -> Self {
         step.0
+    }
+}
+
+/// Strongly typed user font scale in percent (`75..=200`, default `100`).
+///
+/// Phone-style system-wide font scaling: the Settings text-size control cycles
+/// presets within this range and the shell applies the percentage to the
+/// Material typography global, so every `MaterialText` scales together. An
+/// invalid percentage cannot inhabit the type, so no post-deserialization
+/// validation pass is required. Serializes transparently as its raw `u8`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub struct FontScalePercent(u8);
+
+impl FontScalePercent {
+    /// Production default scale (`100%`).
+    pub const DEFAULT: Self = Self::new(DEFAULT_FONT_SCALE_PERCENT);
+
+    /// Const constructor validated against `75..=200`.
+    ///
+    /// # Panics
+    /// Panics if `percent` is not in the range `75..=200`.
+    #[must_use]
+    pub const fn new(percent: u8) -> Self {
+        assert!(
+            percent >= MIN_FONT_SCALE_PERCENT && percent <= MAX_FONT_SCALE_PERCENT,
+            "font_scale_percent out of range 75..=200"
+        );
+        Self(percent)
+    }
+
+    /// Returns the raw percentage (`75..=200`).
+    #[must_use]
+    pub const fn value(self) -> u8 {
+        self.0
+    }
+}
+
+impl Default for FontScalePercent {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl TryFrom<u8> for FontScalePercent {
+    type Error = ConfigError;
+
+    fn try_from(percent: u8) -> Result<Self, Self::Error> {
+        if (MIN_FONT_SCALE_PERCENT..=MAX_FONT_SCALE_PERCENT).contains(&percent) {
+            Ok(Self::new(percent))
+        } else {
+            Err(ConfigError::invalid(format!(
+                "invalid font_scale_percent '{percent}': expected {MIN_FONT_SCALE_PERCENT}..={MAX_FONT_SCALE_PERCENT}"
+            )))
+        }
+    }
+}
+
+impl From<FontScalePercent> for u8 {
+    fn from(scale: FontScalePercent) -> Self {
+        scale.0
     }
 }
 
@@ -368,6 +440,9 @@ pub struct CoreConfig {
     pub volume_hud_fade_ms: VolumeHudFadeMs,
     /// Codec HUD auto-dismiss timeout in milliseconds (`250..=300000`, default `30000`).
     pub codec_hud_timeout_ms: CodecHudTimeoutMs,
+    /// User font scale in percent (`75..=200`, default `100`), applied to the
+    /// Material typography global like a phone's system font-size setting.
+    pub font_scale_percent: FontScalePercent,
 }
 
 impl CoreConfig {

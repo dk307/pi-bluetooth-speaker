@@ -419,7 +419,12 @@ pub fn init_shell_with_config(
 }
 
 #[cfg(feature = "ui")]
-fn apply_initial_bt_state(shell: &AppShell, bt: &speaker_bluetooth::BluetoothDevice) {
+/// Applies the initial playback/link snapshots to `shell` (best-effort).
+///
+/// Query failures are logged at WARN and leave the shell at its defaults —
+/// never a panic or a blank flash (called from [`init_shell`] for mocked
+/// sessions; tests inject mocked or faulted devices directly).
+pub fn apply_initial_bt_state(shell: &AppShell, bt: &speaker_bluetooth::BluetoothDevice) {
     let preferred = match bt.playback_state() {
         Ok(Some(pb)) => {
             shell.apply_bluetooth_playback(&pb);
@@ -461,12 +466,16 @@ fn apply_initial_bt_state(shell: &AppShell, bt: &speaker_bluetooth::BluetoothDev
 /// worker against `new_mocked()` devices without touching the system bus
 /// ("Ensure Hermetic Tests").
 ///
+/// A failed connect is retried with [`BT_BOOTSTRAP_RETRY`] backoff (see
+/// [`spawn_bt_bootstrap_worker_with_retry`]) rather than abandoning the
+/// `device_commands` queue forever.
+///
 /// # Errors
 /// Returns the underlying thread-spawn I/O error when the OS refuses to
 /// create the worker thread.
 #[cfg(feature = "ui")]
 pub fn spawn_bt_bootstrap_worker(
-    connect: impl FnOnce() -> Result<speaker_bluetooth::BluetoothDevice, speaker_bluetooth::BtError>
+    connect: impl Fn() -> Result<speaker_bluetooth::BluetoothDevice, speaker_bluetooth::BtError>
     + Send
     + 'static,
     shared: &Arc<Mutex<BtSharedUpdate>>,
@@ -474,6 +483,50 @@ pub fn spawn_bt_bootstrap_worker(
     device_commands: &speaker_bluetooth::DeviceCommandQueue,
     running: &Arc<AtomicBool>,
     connected: &Arc<AtomicBool>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    spawn_bt_bootstrap_worker_with_retry(
+        connect,
+        shared,
+        commands,
+        device_commands,
+        running,
+        connected,
+        BT_BOOTSTRAP_RETRY,
+    )
+}
+
+/// Production delay between failed Bluetooth connect attempts by the
+/// `bt-bootstrap` worker.
+///
+/// A transient system-bus/D-Bus failure at boot (service started before
+/// `dbus`/`bluetoothd` finished coming up) must not permanently orphan the
+/// devices command queue: the worker keeps retrying with this backoff and
+/// publishes a toast per attempt so the screen can surface the failure
+/// instead of silently doing nothing.
+#[cfg(feature = "ui")]
+pub const BT_BOOTSTRAP_RETRY: Duration = Duration::from_secs(3);
+
+/// [`spawn_bt_bootstrap_worker`] with a test-injectable retry delay.
+///
+/// Production code keeps the unconditional [`BT_BOOTSTRAP_RETRY`] constant;
+/// integration tests pass a short real-time delay so retry, queue-drain, and
+/// shutdown behavior is exercised without slow tests (repo rule:
+/// "Unconditional Production Constants; Tests Inject Deadlines").
+///
+/// # Errors
+/// Returns the underlying thread-spawn I/O error when the OS refuses to
+/// create the worker thread.
+#[cfg(feature = "ui")]
+pub fn spawn_bt_bootstrap_worker_with_retry(
+    connect: impl Fn() -> Result<speaker_bluetooth::BluetoothDevice, speaker_bluetooth::BtError>
+    + Send
+    + 'static,
+    shared: &Arc<Mutex<BtSharedUpdate>>,
+    commands: &speaker_bluetooth::TransportCommandQueue,
+    device_commands: &speaker_bluetooth::DeviceCommandQueue,
+    running: &Arc<AtomicBool>,
+    connected: &Arc<AtomicBool>,
+    retry: Duration,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let shared = Arc::clone(shared);
     let commands = commands.clone();
@@ -483,22 +536,64 @@ pub fn spawn_bt_bootstrap_worker(
     std::thread::Builder::new()
         .name("bt-bootstrap".into())
         .spawn(move || {
-            let bt = match connect() {
-                Ok(bt) => bt,
-                Err(e) => {
-                    report_display(
-                        tracing::Level::WARN,
-                        "Failed to connect to Bluetooth D-Bus for UI transport",
-                        &e,
-                    );
-                    return;
+            loop {
+                match connect() {
+                    Ok(bt) => {
+                        connected.store(true, Ordering::Release);
+                        // The monitor's first tick publishes the initial
+                        // playback/link snapshots into the shared update channel;
+                        // the render thread applies them — no D-Bus round trip
+                        // ever runs on the UI thread.
+                        bt_monitor_loop(&bt, &shared, &commands, &device_commands, &running);
+                        return;
+                    }
+                    Err(e) => {
+                        report_display(
+                            tracing::Level::WARN,
+                            "Bluetooth connect failed; scheduling a retry",
+                            &e,
+                        );
+                        // Commands queued by the devices screen while the bus is
+                        // down are drained and logged rather than silently
+                        // orphaned: without a worker they would never execute.
+                        let dropped = device_commands.drain();
+                        if !dropped.is_empty() {
+                            tracing::warn!(
+                                dropped = dropped.len(),
+                                "dropped device commands: Bluetooth connection unavailable"
+                            );
+                        }
+                        // Surface the failure on the devices screen: a toast the
+                        // shell applies like any worker-published delta.
+                        let update = BtSharedUpdate {
+                            devices: Some(crate::ui::BtDevicesUpdate {
+                                toast: Some(
+                                    format!(
+                                        "Bluetooth unavailable ({}); retrying…",
+                                        speaker_bluetooth::device_action_message(&e)
+                                    )
+                                    .into(),
+                                ),
+                                ..crate::ui::BtDevicesUpdate::default()
+                            }),
+                            ..BtSharedUpdate::default()
+                        };
+                        BtMonitorState::commit_update(&shared, update);
+                        // Backoff in slices so a shutdown request
+                        // (`running = false`) terminates the worker promptly
+                        // instead of after the full delay.
+                        let mut remaining = retry;
+                        while !remaining.is_zero() && running.load(Ordering::Acquire) {
+                            let slice = remaining.min(Duration::from_millis(100));
+                            std::thread::sleep(slice);
+                            remaining = remaining.saturating_sub(slice);
+                        }
+                        if !running.load(Ordering::Acquire) {
+                            return;
+                        }
+                    }
                 }
-            };
-            connected.store(true, Ordering::Release);
-            // The monitor's first tick publishes the initial playback/link
-            // snapshots into the shared update channel; the render thread
-            // applies them — no D-Bus round trip ever runs on the UI thread.
-            bt_monitor_loop(&bt, &shared, &commands, &device_commands, &running);
+            }
         })
 }
 
@@ -1047,6 +1142,12 @@ impl BtMonitorState {
         self.devices.staged_toast = Some(message.into());
     }
 
+    /// Returns `true` if `row` refers to `addr` (address-keyed lookup across
+    /// publishes; row indices are never trusted — plan A2).
+    fn row_matches(row: &crate::ui::BtDeviceRow, addr: BtAddress) -> bool {
+        BtAddress::parse_str(row.address.as_str()).is_ok_and(|a| a == addr)
+    }
+
     /// Resolves a device's display name from the last published rows,
     /// falling back to the raw address for devices never seen on screen.
     fn device_name(&self, addr: BtAddress) -> Box<str> {
@@ -1054,7 +1155,7 @@ impl BtMonitorState {
             .last_rows
             .iter()
             .chain(self.devices.last_discovered.iter())
-            .find(|row| BtAddress::parse_str(row.address.as_str()).is_ok_and(|a| a == addr))
+            .find(|row| Self::row_matches(row, addr))
             .map_or_else(
                 || addr.to_string().into_boxed_str(),
                 |row| row.name.to_string().into_boxed_str(),
@@ -1065,15 +1166,18 @@ impl BtMonitorState {
     /// `Remove` can disconnect first (`BlueZ` rejects `RemoveDevice` while the
     /// device is connected — plan §12).
     fn device_row_connected(&self, addr: BtAddress) -> bool {
-        self.devices.last_rows.iter().any(|row| {
-            row.connected && BtAddress::parse_str(row.address.as_str()).is_ok_and(|a| a == addr)
-        })
+        self.devices
+            .last_rows
+            .iter()
+            .any(|row| row.connected && Self::row_matches(row, addr))
     }
 
     /// Executes one drained Devices-screen command against `bt`.
     ///
     /// Failures stage a toast (never a panic): the screen keeps working and
-    /// the next authoritative snapshot reconciles the UI.
+    /// the next authoritative snapshot reconciles the UI. Each variant's
+    /// behavior lives in its own small helper so this dispatcher stays a flat
+    /// guard + resolve + match (cargo-crap: complexity budget).
     fn execute_device_command(
         &mut self,
         bt: &speaker_bluetooth::BluetoothDevice,
@@ -1090,9 +1194,7 @@ impl BtMonitorState {
         // Pairing control without an active attempt is a no-op: the UI can
         // fire late (double-tap) after a terminal transition already reaped
         // the session.
-        if matches!(command, DeviceCommand::CancelPairing)
-            && self.devices.pairing.is_none()
-        {
+        if matches!(command, DeviceCommand::CancelPairing) && self.devices.pairing.is_none() {
             tracing::debug!(?command, "Ignoring pairing control with no active attempt");
             return;
         }
@@ -1103,64 +1205,96 @@ impl BtMonitorState {
         match command {
             // Handled above; the arm exists so new variants stay reviewed.
             DeviceCommand::Refresh => {}
-            DeviceCommand::StartDiscovery => match bt.start_discovery(&adapter) {
-                Ok(()) => self.devices.discovery_from_screen = true,
-                Err(e) => self.stage_action_failure(&e),
-            },
-            DeviceCommand::StopDiscovery => {
-                // Only stop scans this screen started: scopes RF scanning to
-                // the screen (pairing reap and explicit Cancel also clear the
-                // flag), and avoids error toasts for never-started scans.
-                if self.devices.discovery_from_screen {
-                    match bt.stop_discovery(&adapter) {
-                        Ok(()) => self.devices.discovery_from_screen = false,
-                        Err(e) => self.stage_action_failure(&e),
-                    }
-                } else {
-                    tracing::debug!("stop discovery skipped: not screen-started");
-                }
-            }
-            DeviceCommand::Connect(addr) => {
-                let name = self.device_name(addr);
-                if let Err(e) = bt.connect_device(&adapter, addr) {
-                    tracing::warn!(device = %name, error = %e, "Connect failed");
-                    self.stage_action_failure(&e);
-                }
-            }
-            DeviceCommand::Disconnect(addr) => {
-                let name = self.device_name(addr);
-                if let Err(e) = bt.disconnect_device(&adapter, addr) {
-                    tracing::warn!(device = %name, error = %e, "Disconnect failed");
-                    self.stage_action_failure(&e);
-                }
-            }
-            DeviceCommand::Remove(addr) => {
-                // BlueZ refuses RemoveDevice on a connected device, so
-                // disconnect first (plan §12). Best-effort: the device may
-                // already be gone, and Remove must still be attempted.
-                if self.device_row_connected(addr)
-                    && let Err(e) = bt.disconnect_device(&adapter, addr)
-                {
-                    tracing::warn!(error = %e, "Disconnect before remove failed; continuing");
-                }
-                let name = self.device_name(addr);
-                if let Err(e) = bt.remove_device(&adapter, addr) {
-                    tracing::warn!(device = %name, error = %e, "Remove failed");
-                    self.stage_action_failure(&e);
-                }
-            }
+            DeviceCommand::StartDiscovery => self.start_screen_discovery(bt, &adapter),
+            DeviceCommand::StopDiscovery => self.stop_screen_discovery(bt, &adapter),
+            DeviceCommand::Connect(addr) => self.connect_device_row(bt, &adapter, addr),
+            DeviceCommand::Disconnect(addr) => self.disconnect_device_row(bt, &adapter, addr),
+            DeviceCommand::Remove(addr) => self.remove_device_row(bt, &adapter, addr),
             DeviceCommand::Pair(addr) => {
                 self.begin_pairing(bt, &adapter, addr, pairing_timeout);
             }
-            DeviceCommand::CancelPairing => {
-                if let Some(session) = self.devices.pairing.as_mut()
-                    && !session.cancel_requested
-                {
-                    session.cancel_requested = true;
-                    if let Err(e) = bt.cancel_pairing(&adapter, session.addr) {
-                        tracing::warn!(error = %e, "Pairing cancellation failed");
-                    }
-                }
+            DeviceCommand::CancelPairing => self.cancel_pairing_session(bt, &adapter),
+        }
+    }
+
+    /// Starts adapter discovery for the Add Device screen.
+    fn start_screen_discovery(&mut self, bt: &speaker_bluetooth::BluetoothDevice, adapter: &str) {
+        match bt.start_discovery(adapter) {
+            Ok(()) => self.devices.discovery_from_screen = true,
+            Err(e) => self.stage_action_failure(&e),
+        }
+    }
+
+    /// Stops adapter discovery, but only scans this screen started: scopes RF
+    /// scanning to the screen (pairing reap and explicit Cancel also clear the
+    /// flag), and avoids error toasts for never-started scans.
+    fn stop_screen_discovery(&mut self, bt: &speaker_bluetooth::BluetoothDevice, adapter: &str) {
+        if !self.devices.discovery_from_screen {
+            tracing::debug!("stop discovery skipped: not screen-started");
+            return;
+        }
+        match bt.stop_discovery(adapter) {
+            Ok(()) => self.devices.discovery_from_screen = false,
+            Err(e) => self.stage_action_failure(&e),
+        }
+    }
+
+    /// Connects a paired/discovered device row.
+    fn connect_device_row(
+        &mut self,
+        bt: &speaker_bluetooth::BluetoothDevice,
+        adapter: &str,
+        addr: BtAddress,
+    ) {
+        let name = self.device_name(addr);
+        if let Err(e) = bt.connect_device(adapter, addr) {
+            tracing::warn!(device = %name, error = %e, "Connect failed");
+            self.stage_action_failure(&e);
+        }
+    }
+
+    /// Disconnects the active device row.
+    fn disconnect_device_row(
+        &mut self,
+        bt: &speaker_bluetooth::BluetoothDevice,
+        adapter: &str,
+        addr: BtAddress,
+    ) {
+        let name = self.device_name(addr);
+        if let Err(e) = bt.disconnect_device(adapter, addr) {
+            tracing::warn!(device = %name, error = %e, "Disconnect failed");
+            self.stage_action_failure(&e);
+        }
+    }
+
+    /// Removes a paired device (`BlueZ` refuses connected devices, so a
+    /// best-effort disconnect happens first — plan §12).
+    fn remove_device_row(
+        &mut self,
+        bt: &speaker_bluetooth::BluetoothDevice,
+        adapter: &str,
+        addr: BtAddress,
+    ) {
+        if self.device_row_connected(addr)
+            && let Err(e) = bt.disconnect_device(adapter, addr)
+        {
+            tracing::warn!(error = %e, "Disconnect before remove failed; continuing");
+        }
+        let name = self.device_name(addr);
+        if let Err(e) = bt.remove_device(adapter, addr) {
+            tracing::warn!(device = %name, error = %e, "Remove failed");
+            self.stage_action_failure(&e);
+        }
+    }
+
+    /// Cancels an in-flight pairing attempt on the adapter.
+    fn cancel_pairing_session(&mut self, bt: &speaker_bluetooth::BluetoothDevice, adapter: &str) {
+        if let Some(session) = self.devices.pairing.as_mut()
+            && !session.cancel_requested
+        {
+            session.cancel_requested = true;
+            if let Err(e) = bt.cancel_pairing(adapter, session.addr) {
+                tracing::warn!(error = %e, "Pairing cancellation failed");
             }
         }
     }
@@ -1316,27 +1450,47 @@ impl BtMonitorState {
             return;
         }
 
-        // Publish the passkey exactly once, and only from a slot recorded for
-        // THIS device: a stale value from a previous attempt must never show.
-        if !session.code_published {
-            let slot = session.codes.lock().unwrap_or_else(|p| {
-                tracing::warn!("Pairing code slot poisoned; recovering");
-                p.into_inner()
-            });
-            if let Some(code) = *slot
-                && code.device == session.addr
-            {
-                session.code_published = true;
-                self.devices.staged_pairing = Some(PairingStatus::AwaitingConfirmation {
-                    name: session.name.clone(),
-                    passkey: code.passkey,
-                });
-            }
-        }
+        self.publish_pairing_code(&mut session);
 
         // Terminal derive: thread completion outranks cancellation, which
         // outranks the deadline; a still-pending session is put back untouched.
-        let terminal = if Self::pairing_finished(&session) {
+        let Some(terminal) = self.derive_pairing_terminal(bt, &mut session) else {
+            self.devices.pairing = Some(session);
+            return;
+        };
+        self.stage_pairing_terminal(bt, session, &terminal);
+    }
+
+    /// Publishes the passkey exactly once, and only from a slot recorded for
+    /// THIS device: a stale value from a previous attempt must never show.
+    fn publish_pairing_code(&mut self, session: &mut PairingSession) {
+        if session.code_published {
+            return;
+        }
+        let slot = session.codes.lock().unwrap_or_else(|p| {
+            tracing::warn!("Pairing code slot poisoned; recovering");
+            p.into_inner()
+        });
+        if let Some(code) = *slot
+            && code.device == session.addr
+        {
+            session.code_published = true;
+            self.devices.staged_pairing = Some(PairingStatus::AwaitingConfirmation {
+                name: session.name.clone(),
+                passkey: code.passkey,
+            });
+        }
+    }
+
+    /// Derives the terminal status for this tick: thread completion outranks
+    /// cancellation, which outranks the deadline. `None` = still pending (the
+    /// session goes back untouched).
+    fn derive_pairing_terminal(
+        &mut self,
+        bt: &speaker_bluetooth::BluetoothDevice,
+        session: &mut PairingSession,
+    ) -> Option<PairingStatus> {
+        if Self::pairing_finished(session) {
             if let Some(handle) = session.handle.take()
                 && let Err(panic) = handle.join()
             {
@@ -1346,7 +1500,7 @@ impl BtMonitorState {
                 tracing::warn!("Pairing result slot poisoned; recovering");
                 p.into_inner()
             });
-            match result.take() {
+            return Some(match result.take() {
                 Some(Ok(())) => PairingStatus::Paired {
                     name: session.name.clone(),
                 },
@@ -1363,10 +1517,12 @@ impl BtMonitorState {
                 None => PairingStatus::Failed {
                     message: "Pairing failed".into(),
                 },
-            }
-        } else if session.cancel_requested {
-            PairingStatus::Cancelled
-        } else if Instant::now() >= session.deadline_at {
+            });
+        }
+        if session.cancel_requested {
+            return Some(PairingStatus::Cancelled);
+        }
+        if Instant::now() >= session.deadline_at {
             session.cancel_requested = true;
             if let Some(adapter) = self.resolve_adapter_id(bt)
                 && let Err(e) = bt.cancel_pairing(&adapter, session.addr)
@@ -1374,24 +1530,31 @@ impl BtMonitorState {
                 tracing::warn!(error = %e, "Timeout pairing cancellation failed");
             }
             self.devices.staged_toast = Some("Pairing timed out".into());
-            PairingStatus::TimedOut
-        } else {
-            self.devices.pairing = Some(session);
-            return;
-        };
+            return Some(PairingStatus::TimedOut);
+        }
+        None
+    }
 
+    /// Records a terminal status on the session, publishes the pairing
+    /// transition, and surfaces pairing failures as a toast (the pairing
+    /// view silently popping back with no explanation reads as "still
+    /// pending" and invites blind retries).
+    ///
+    /// A session completed this tick is reaped immediately so the agent
+    /// releases without waiting out the grace window; otherwise it goes back
+    /// with its terminal recorded.
+    fn stage_pairing_terminal(
+        &mut self,
+        bt: &speaker_bluetooth::BluetoothDevice,
+        mut session: PairingSession,
+        terminal: &PairingStatus,
+    ) {
         session.terminal = Some(terminal.clone());
         self.devices.staged_pairing = Some(terminal.clone());
-        // A pairing failure must be visible: the pairing view silently
-        // popping back with no explanation reads as "still pending" and
-        // invites blind retries (review: failure message never shown —
-        // parity with the timeout path, which stages its own toast).
-        if let PairingStatus::Failed { message } = &terminal {
+        if let PairingStatus::Failed { message } = terminal {
             self.devices.staged_toast = Some(message.clone());
         }
         if Self::pairing_finished(&session) {
-            // Completed this tick: reap immediately so the agent releases
-            // without waiting out the grace window.
             self.reap_pairing(&mut session, bt);
         } else {
             self.devices.pairing = Some(session);
@@ -1422,16 +1585,20 @@ impl BtMonitorState {
             .last_details
             .as_ref()
             .and_then(|details| details.device.as_ref().map(|device| device.address));
+        // Paired/active list: only bonded (or connected) devices.
         let rows = snapshot
             .devices
             .iter()
             .filter(|device| device.paired || device.connected)
             .map(|device| device_row(device, active))
             .collect();
+        // Discovery list: ALL devices the adapter sees (phone-style) — paired
+        // devices in range are shown with their Paired/Active status and a
+        // Connect/Disconnect action instead of vanishing, so "Add Device"
+        // never looks like a stuck, empty scan while a phone is in range.
         let discovered = snapshot
             .devices
             .iter()
-            .filter(|device| !device.paired && !device.connected)
             .map(|device| device_row(device, active))
             .collect();
         BuiltDeviceRows {
@@ -1454,11 +1621,18 @@ impl BtMonitorState {
         let staged_toast = self.devices.staged_toast.take();
         let mut changed = false;
         if let Some(built) = built {
+            let row_count = built.rows.len();
+            let discovered_count = built.discovered.len();
             if built.rows != self.devices.last_rows {
                 self.devices.last_rows = built.rows;
                 changed = true;
             }
             if built.discovered != self.devices.last_discovered {
+                tracing::debug!(
+                    discovered = discovered_count,
+                    paired_rows = row_count,
+                    "Bluetooth discovery list changed"
+                );
                 self.devices.last_discovered = built.discovered;
                 changed = true;
             }
