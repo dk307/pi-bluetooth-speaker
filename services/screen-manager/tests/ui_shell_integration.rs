@@ -763,7 +763,7 @@ fn ui_shell_cover_art_loading_and_error_handling() {
 
 #[cfg(feature = "ui")]
 #[test]
-fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
+fn ui_shell_volume_hud_config_and_amp_auto_popup() {
     use screen_manager::config::{
         CodecHudTimeoutMs, CoreConfig, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
         VolumeStepPercent,
@@ -835,19 +835,44 @@ fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
     assert!(!shell.is_volume_hud_visible());
     assert!(!shell.is_muted());
 
-    // 4. The amp-volume worker publish path drives the shell level and mute.
+    // 4. The initial authoritative amp snapshot drives the shell level and
+    // mute silently; startup must not pop up the Volume HUD.
     shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(64, false));
     assert_eq!(shell.volume(), 64.0);
     assert!(!shell.is_muted());
-    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(64, true));
-    assert!(shell.is_muted());
     assert!(
         !shell.is_volume_hud_visible(),
-        "worker publish must not pop up the Volume HUD"
+        "initial startup amp snapshot must not pop up the Volume HUD"
+    );
+
+    // 5. A subsequent authoritative volume change opens the HUD, regardless
+    // of whether it originated on the screen or from a phone.
+    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(42, false));
+    assert_eq!(shell.volume(), 42.0);
+    assert!(
+        shell.is_volume_hud_visible(),
+        "authoritative external amp volume change must open the Volume HUD"
+    );
+
+    // 6. A mute change also refreshes the same overlay.
+    shell.dismiss_volume_hud();
+    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(42, true));
+    assert!(shell.is_muted());
+    assert!(
+        shell.is_volume_hud_visible(),
+        "authoritative external amp mute change must open the Volume HUD"
+    );
+
+    // An unchanged snapshot must not reopen the overlay.
+    shell.dismiss_volume_hud();
+    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(42, true));
+    assert!(
+        !shell.is_volume_hud_visible(),
+        "unchanged amp snapshot must not reopen the Volume HUD"
     );
 
     // Volume HUD user interaction still covers the marquee area; open it
-    // explicitly since PCM/worker publishes intentionally never auto-open it.
+    // explicitly to verify rendering and dismissal.
     shell.show_volume_hud();
     assert!(shell.is_volume_hud_visible());
     shell.set_track_metadata(
