@@ -78,7 +78,7 @@ export component FontSizeControl inherits Rectangle {
             maximum: 1.35;
             stop_count: 7;
             value <=> TouchScale.font_scale;
-            value_changed(val) => {
+            released(val) => {
                 root.font_scale_changed(val);
             }
         }

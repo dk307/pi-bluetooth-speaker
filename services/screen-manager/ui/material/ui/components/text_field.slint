@@ -94,11 +94,11 @@ export component TextField {
     }
 
     changed vk_visible => {
-        if !root.vk_visible && root.vk_session_id > 0 && VirtualKeyboard.session_id == root.vk_session_id {
-            root.vk_session_id = 0;
-            if VirtualKeyboard.was_submitted {
+        if !root.vk_visible && root.vk_session_id > 0 {
+            if VirtualKeyboard.session_id == root.vk_session_id && VirtualKeyboard.was_submitted {
                 root.accepted(root.text);
             }
+            root.vk_session_id = 0;
         }
     }
 
