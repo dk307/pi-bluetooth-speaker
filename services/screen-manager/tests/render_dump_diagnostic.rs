@@ -8,6 +8,12 @@ use slint::platform::software_renderer::LineBufferProvider;
 use slint::platform::software_renderer::{PremultipliedRgbaColor, TargetPixel};
 use slint::platform::{PointerEventButton, WindowEvent};
 
+// The render harness runs on the live Pi (glibc 2.41) to validate the real
+// UI with the device's fonts, so pin the `GLIBC_2.17` baseline: the kernel
+// sysfs helpers use acosf/atan2f, and Slint 1.19's renderer pulls log10f.
+speaker_common::glibc_compat!();
+speaker_common::glibc_compat_log10!();
+
 const WIDTH: usize = Framebuffer::DEFAULT_WIDTH as usize;
 const HEIGHT: usize = Framebuffer::DEFAULT_HEIGHT as usize;
 
