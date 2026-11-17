@@ -14,12 +14,11 @@ use std::rc::Rc;
 use slint::ComponentHandle;
 
 use crate::config::{
-    CodecHudTimeoutMs, CoreConfig, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
-    VolumeStepPercent, DEFAULT_CODEC_HUD_TIMEOUT_MS, DEFAULT_MARQUEE_FPS,
+    CodecHudTimeoutMs, CoreConfig, DEFAULT_CODEC_HUD_TIMEOUT_MS, DEFAULT_MARQUEE_FPS,
     DEFAULT_VOLUME_HUD_FADE_MS, DEFAULT_VOLUME_HUD_TIMEOUT_MS, DEFAULT_VOLUME_STEP_PERCENT,
     MAX_CODEC_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
     MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_VOLUME_HUD_TIMEOUT_MS,
-    MIN_VOLUME_STEP_PERCENT,
+    MIN_VOLUME_STEP_PERCENT, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
 };
 
 use super::generated::{AppTheme, MainWindow, MarqueeCompose};

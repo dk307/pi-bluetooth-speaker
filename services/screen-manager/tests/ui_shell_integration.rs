@@ -985,12 +985,14 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let live = loop {
         if let Ok(c) = CoreConfig::load(&path)
-            && c.volume_step_percent.value() == 25 {
+            && c.volume_step_percent.value() == 25
+        {
             break c;
         }
-        if std::time::Instant::now() >= deadline {
-            panic!("background persist did not complete within 2s");
-        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background persist did not complete within 2s"
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
     assert_eq!(live.volume_step_percent.value(), 25);
@@ -1029,12 +1031,14 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let saved = loop {
         if let Ok(c) = CoreConfig::load(&path)
-            && c == clamped {
+            && c == clamped
+        {
             break c;
         }
-        if std::time::Instant::now() >= deadline {
-            panic!("final background persist did not complete within 2s");
-        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "final background persist did not complete within 2s"
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
     assert_eq!(saved, clamped);
