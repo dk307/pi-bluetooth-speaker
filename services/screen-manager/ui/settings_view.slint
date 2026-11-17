@@ -1,12 +1,199 @@
-import { ElevatedCard, OutlinedCard, FilledButton, Icon, MaterialText, Horizontal, Vertical } from "@material/material.slint";
-import { MaterialPalette } from "@material/material.slint";
+import { MaterialText, MaterialPalette } from "@material/material.slint";
 import { MaterialTypography } from "@material/material.slint";
 import { MaterialStyleMetrics } from "@material/material.slint";
 import { AppTheme } from "app_theme.slint";
+import { MarqueeCompose } from "marquee_state.slint";
 
-// Theme preset card using Rectangle with Material styling (defined first for use in SettingsView)
+// Compact +/− button used by the Advanced settings rows (Material 3 tonal
+// icon-button look; 40px keeps the 44px row rhythm inside the 420px viewport).
+// Uses real Material SVG icons so −/+ glyphs align (font-baseline mismatch
+// between "−" and "+" never aligns with text rendering).
+component StepButton inherits Rectangle {
+    in property <bool> plus;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    width: MaterialStyleMetrics.size_40;
+    height: MaterialStyleMetrics.size_40;
+    border-radius: self.width / 2;
+    background: root.enabled ? MaterialPalette.secondary_container : MaterialPalette.surface_container_highest;
+    opacity: root.enabled && touch.pressed ? 0.8 : root.enabled ? 1.0 : 0.6;
+    animate opacity { duration: 80ms; easing: ease-out; }
+
+    // "−" (remove) icon: always shown; canonical 24dp M3 icon.
+    // Explicit centering (like the original bar approach) avoids font‑baseline
+    // mismatch and image‑fit ambiguity between "−" and "+" glyphs.
+    Image {
+        source: @image-url("../../../assets/icons/remove.svg");
+        colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
+        width: 20px;
+        height: 20px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        image-fit: contain;
+    }
+
+    // "+" icon: only shown when plus is true; canonical 24dp M3 icon.
+    if root.plus : Image {
+        source: @image-url("../../../assets/icons/add.svg");
+        colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
+        width: 20px;
+        height: 20px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        image-fit: contain;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// One Material 3 list row for a numeric Advanced setting: label text on the
+// left (title-medium, 16px), a −/+ stepper control on the right. The
+// can_decrease / can_increase states reflect whether the value is at its
+// min/max bound, dimming and ignoring the respective button.
+component SettingsStepperRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <bool> can_decrease: true;
+    in property <bool> can_increase: true;
+    callback decrease();
+    callback increase();
+
+    height: 44px;
+
+    HorizontalLayout {
+        spacing: MaterialStyleMetrics.spacing_8;
+
+        Text {
+            text: root.label;
+            font-size: 16px;
+            font-weight: 600;
+            color: MaterialPalette.on_surface;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+            overflow: elide;
+            horizontal-stretch: 2;
+        }
+
+        StepButton {
+            plus: false;
+            enabled: root.can_decrease;
+            clicked => { root.decrease(); }
+        }
+
+        // Fixed width keeps the −/value/+ group identical on every row:
+        // the label alone absorbs the leftover row width, so the minus
+        // buttons line up in one column instead of drifting with the
+        // label text length.
+        Text {
+            text: root.value;
+            font-size: 16px;
+            font-weight: 700;
+            color: MaterialPalette.primary;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            width: 96px;
+            overflow: elide;
+        }
+
+        StepButton {
+            plus: true;
+            enabled: root.can_increase;
+            clicked => { root.increase(); }
+        }
+    }
+}
+
+// Material 3 segmented control for the two allowed marquee rates (30 / 60):
+// one outlined pill, selected segment filled with `secondary_container`.
+component FpsSegmented inherits Rectangle {
+    in property <int> current_fps;
+    callback fps_selected(int);
+
+    width: 168px;
+    height: 36px;
+    border-width: 1px;
+    border-radius: self.height / 2;
+    border-color: MaterialPalette.outline;
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            horizontal-stretch: 1;
+            background: root.current_fps == 30 ? MaterialPalette.secondary_container : transparent;
+
+            Text {
+                text: "30";
+                font-size: 14px;
+                font-weight: root.current_fps == 30 ? 700 : 600;
+                color: root.current_fps == 30 ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                clicked => { root.fps_selected(30); }
+            }
+        }
+
+        Rectangle {
+            width: 1px;
+            background: MaterialPalette.outline;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            background: root.current_fps == 60 ? MaterialPalette.secondary_container : transparent;
+
+            Text {
+                text: "60";
+                font-size: 14px;
+                font-weight: root.current_fps == 60 ? 700 : 600;
+                color: root.current_fps == 60 ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                clicked => { root.fps_selected(60); }
+            }
+        }
+    }
+}
+
+// Advanced list row pairing the "Marquee FPS" label with the segmented
+// 30 / 60 rate selector on the right.
+component FpsSegmentedRow inherits Rectangle {
+    height: 44px;
+    callback set_marquee_fps(int);
+
+    HorizontalLayout {
+        spacing: MaterialStyleMetrics.spacing_8;
+
+        Text {
+            text: "Marquee FPS";
+            font-size: 16px;
+            font-weight: 600;
+            color: MaterialPalette.on_surface;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+            overflow: elide;
+            horizontal-stretch: 2;
+        }
+
+        FpsSegmented {
+            current_fps: MarqueeCompose.marquee_fps;
+            fps_selected(fps) => { root.set_marquee_fps(fps); }
+        }
+    }
+}
+
+// Theme preset card: swatch-colored border marks the active preset.
 component ThemePresetCard inherits Rectangle {
-    in property <int> index;
     in property <string> name;
     in property <string> accent_name;
     in property <color> primary_color;
@@ -14,12 +201,14 @@ component ThemePresetCard inherits Rectangle {
     in property <bool> selected;
     callback clicked();
 
-    width: 136px;
-    height: 54px;
+    width: 140px;
+    height: 64px;
     border-radius: MaterialStyleMetrics.border_radius_10;
     border-width: root.selected ? 2px : 0px;
     border-color: root.primary_color;
     background: root.selected ? transparent : MaterialPalette.surface;
+    opacity: touch.pressed ? 0.8 : 1.0;
+    animate opacity { duration: 80ms; easing: ease-out; }
 
     VerticalLayout {
         alignment: center;
@@ -27,19 +216,19 @@ component ThemePresetCard inherits Rectangle {
 
         MaterialText {
             text: root.name;
-            style: MaterialTypography.label_medium;  // 12px
+            style: MaterialTypography.label_large;  // 14px
             color: root.primary_color;
             horizontal-alignment: center;
         }
         MaterialText {
             text: root.accent_name;
-            style: MaterialTypography.label_small;  // 11px
+            style: MaterialTypography.label_medium;  // 12px
             color: root.secondary_color;
             horizontal-alignment: center;
         }
     }
 
-    TouchArea {
+    touch := TouchArea {
         clicked => { root.clicked(); }
     }
 }
@@ -93,16 +282,24 @@ component SettingsIconButton inherits Rectangle {
 export component SettingsView inherits VerticalLayout {
     in property <bool> cd_enabled: false;
     in-out property <bool> show_themes: false;
+    in property <int> volume_step_percent: 2;
+    in property <int> volume_hud_timeout_ms: 4000;
+    in property <int> volume_hud_fade_ms: 200;
+    in property <int> codec_hud_timeout_ms: 30000;
 
     callback bluetooth_clicked();
     callback vu_meter_clicked();
     callback dsp_clicked();
     callback cd_clicked();
     callback select_theme(int);
-    callback cycle_theme();
+    callback set_marquee_fps(int);
+    callback set_volume_step_percent(int);
+    callback set_volume_hud_timeout_ms(int);
+    callback set_volume_hud_fade_ms(int);
+    callback set_codec_hud_timeout_ms(int);
 
     padding: MaterialStyleMetrics.padding_16;  // 16px
-    spacing: MaterialStyleMetrics.spacing_16;
+    spacing: MaterialStyleMetrics.spacing_8;
 
     // View 1: Android-style icon button grid
     if !root.show_themes : VerticalLayout {
@@ -133,7 +330,7 @@ export component SettingsView inherits VerticalLayout {
 
             SettingsIconButton {
                 icon: @image-url("../../../assets/icons/config.svg");
-                label: "Themes";
+                label: "Screen Settings";
                 clicked => { root.show_themes = true; }
             }
 
@@ -145,91 +342,127 @@ export component SettingsView inherits VerticalLayout {
         }
     }
 
-    // View 2: Theme Preferences Screen
-    if root.show_themes : OutlinedCard {
-        VerticalLayout {
-            alignment: space-around;
-            padding: MaterialStyleMetrics.padding_16;
-            spacing: MaterialStyleMetrics.spacing_12;
+    // View 2: Screen Settings — Material 3 settings list with two sections.
+    // "Theme" groups the preset cards; every remaining screen-manager setting
+    // lives under the "Advanced" section header, separated by a divider.
+    if root.show_themes : VerticalLayout {
+        vertical-stretch: 1;
+        spacing: MaterialStyleMetrics.spacing_4;
 
-            MaterialText {
-                text: "Select Global Appliance Palette:";
-                style: MaterialTypography.label_large;  // 14px
-                color: MaterialPalette.on_surface_variant;
-                horizontal-alignment: center;
+        // Section 1: Theme presets (no extra heading — the cards are self-evident).
+        HorizontalLayout {
+            alignment: center;
+            spacing: MaterialStyleMetrics.spacing_8;
+
+            ThemePresetCard {
+                name: "McIntosh";
+                accent_name: "Electric Cyan";
+                primary_color: #00C8FF;
+                secondary_color: #70E1FF;
+                selected: AppTheme.active_preset == 0;
+                clicked => { root.select_theme(0); }
             }
 
-            // 5 Theme preset buttons
-            HorizontalLayout {
-                alignment: center;
-                spacing: MaterialStyleMetrics.spacing_8;
-
-                // 1. McIntosh Blue
-                ThemePresetCard {
-                    index: 0;
-                    name: "1. McIntosh";
-                    accent_name: "Electric Cyan";
-                    primary_color: #00C8FF;
-                    secondary_color: #70E1FF;
-                    selected: AppTheme.active_preset == 0;
-                    clicked => { root.select_theme(0); }
-                }
-
-                // 2. Marantz Amber
-                ThemePresetCard {
-                    index: 1;
-                    name: "2. Marantz";
-                    accent_name: "Warm Amber";
-                    primary_color: #E5A93C;
-                    secondary_color: #FFD166;
-                    selected: AppTheme.active_preset == 1;
-                    clicked => { root.select_theme(1); }
-                }
-
-                // 3. Cyberpunk Neon
-                ThemePresetCard {
-                    index: 2;
-                    name: "3. Cyberpunk";
-                    accent_name: "Synthwave Pink";
-                    primary_color: #00F0FF;
-                    secondary_color: #FF007F;
-                    selected: AppTheme.active_preset == 2;
-                    clicked => { root.select_theme(2); }
-                }
-
-                // 4. Studio Dark
-                ThemePresetCard {
-                    index: 3;
-                    name: "4. Studio Dark";
-                    accent_name: "Precision Mono";
-                    primary_color: #F0F0F0;
-                    secondary_color: #A0A0A0;
-                    selected: AppTheme.active_preset == 3;
-                    clicked => { root.select_theme(3); }
-                }
-
-                // 5. PeppyMeter Gold
-                ThemePresetCard {
-                    index: 4;
-                    name: "5. PeppyMeter";
-                    accent_name: "Vintage Gold";
-                    primary_color: #F5B83D;
-                    secondary_color: #FFDF85;
-                    selected: AppTheme.active_preset == 4;
-                    clicked => { root.select_theme(4); }
-                }
+            ThemePresetCard {
+                name: "Marantz";
+                accent_name: "Warm Amber";
+                primary_color: #E5A93C;
+                secondary_color: #FFD166;
+                selected: AppTheme.active_preset == 1;
+                clicked => { root.select_theme(1); }
             }
 
-            // Cycle Theme Button
-            HorizontalLayout {
-                alignment: center;
-                FilledButton {
-                    text: "Cycle Next Theme";
-                    width: 220px;
-                    height: 48px;
-                    clicked => { root.cycle_theme(); }
-                }
+            ThemePresetCard {
+                name: "Cyberpunk";
+                accent_name: "Synthwave Pink";
+                primary_color: #00F0FF;
+                secondary_color: #FF007F;
+                selected: AppTheme.active_preset == 2;
+                clicked => { root.select_theme(2); }
             }
+
+            ThemePresetCard {
+                name: "Studio Dark";
+                accent_name: "Precision Mono";
+                primary_color: #F0F0F0;
+                secondary_color: #A0A0A0;
+                selected: AppTheme.active_preset == 3;
+                clicked => { root.select_theme(3); }
+            }
+
+            ThemePresetCard {
+                name: "PeppyMeter";
+                accent_name: "Vintage Gold";
+                primary_color: #F5B83D;
+                secondary_color: #FFDF85;
+                selected: AppTheme.active_preset == 4;
+                clicked => { root.select_theme(4); }
+            }
+        }
+
+        // Section divider (M3: one divider between groups, none between rows).
+        Rectangle {
+            height: 1px;
+            background: MaterialPalette.outline_variant;
+        }
+
+        // Section 2 header: "Advanced".
+        Text {
+            text: "Advanced";
+            font-size: 18px;
+            font-weight: 700;
+            color: MaterialPalette.on_surface;
+            vertical-alignment: center;
+            height: 22px;
+        }
+
+        FpsSegmentedRow {
+            set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
+        }
+
+        // Stepper bounds mirror the Rust config domains (MIN_/MAX_* in
+        // crate::config); the Rust callbacks clamp off-grid steps as well.
+        SettingsStepperRow {
+            label: "Encoder Volume Step";
+            value: "\{root.volume_step_percent} %";
+            can_decrease: root.volume_step_percent > 1;
+            can_increase: root.volume_step_percent < 25;
+            decrease => { root.set_volume_step_percent(root.volume_step_percent - 1); }
+            increase => { root.set_volume_step_percent(root.volume_step_percent + 1); }
+        }
+
+        SettingsStepperRow {
+            label: "Volume HUD Timeout";
+            value: "\{root.volume_hud_timeout_ms} ms";
+            can_decrease: root.volume_hud_timeout_ms > 250;
+            can_increase: root.volume_hud_timeout_ms < 30000;
+            decrease => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms - 250); }
+            increase => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms + 250); }
+        }
+
+        SettingsStepperRow {
+            label: "Volume HUD Fade";
+            value: "\{root.volume_hud_fade_ms} ms";
+            can_decrease: root.volume_hud_fade_ms > 0;
+            can_increase: root.volume_hud_fade_ms < 2000;
+            decrease => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms - 100); }
+            increase => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms + 100); }
+        }
+
+        SettingsStepperRow {
+            label: "Codec HUD Timeout";
+            value: "\{root.codec_hud_timeout_ms} ms";
+            can_decrease: root.codec_hud_timeout_ms > 250;
+            can_increase: root.codec_hud_timeout_ms < 300000;
+            decrease => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms - 1000); }
+            increase => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms + 1000); }
+        }
+
+        // Stretch spacer keeps the settings list top-aligned in the viewport.
+        // Changes apply live (each edit persists immediately), so there is no
+        // Save action on this screen.
+        Rectangle {
+            vertical-stretch: 1;
         }
     }
 }

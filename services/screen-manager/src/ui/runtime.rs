@@ -19,6 +19,7 @@
 //! [`run`]; production relies on the lazily selected `backend-linuxkms`.
 
 use std::cell::{Cell, RefCell};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,6 +42,8 @@ pub struct RuntimeOptions<'a> {
     pub tab: Option<i32>,
     /// Fully resolved appliance configuration.
     pub config: &'a CoreConfig,
+    /// JSON config path wired into the shell's Screen Settings save action.
+    pub config_path: Option<&'a Path>,
     /// Boot-check probe (real hardware or scripted for tests).
     pub probe: BootProbe,
     /// `true` for hermetic host sessions: mocked Bluetooth, no system bus,
@@ -55,6 +58,7 @@ impl std::fmt::Debug for RuntimeOptions<'_> {
             .field("preview_secs", &self.preview_secs)
             .field("tab", &self.tab)
             .field("config", &self.config)
+            .field("config_path", &self.config_path)
             .field("probe", &"<BootProbe>")
             .field("mocked", &self.mocked)
             .finish()
@@ -70,6 +74,7 @@ pub fn run(opts: RuntimeOptions<'_>) {
         preview_secs,
         tab,
         config,
+        config_path,
         probe,
         mocked,
     } = opts;
@@ -77,13 +82,18 @@ pub fn run(opts: RuntimeOptions<'_>) {
         screen = ?screen,
         preview_secs = ?preview_secs,
         tab = ?tab,
+        config_path = ?config_path,
         mocked,
         "UI runtime starting"
     );
     match screen {
         ScreenTarget::Splash => run_splash(probe, preview_secs, config.theme),
-        ScreenTarget::Shell => run_shell(preview_secs, tab, config, mocked),
-        ScreenTarget::Appliance => run_appliance(probe, preview_secs, tab, config, mocked),
+        ScreenTarget::Shell => {
+            run_shell(preview_secs, tab, config, config_path, mocked);
+        }
+        ScreenTarget::Appliance => {
+            run_appliance(probe, preview_secs, tab, config, config_path, mocked);
+        }
     }
 }
 
@@ -393,8 +403,12 @@ fn init_and_show_shell(
     mocked: bool,
     tab: Option<i32>,
     config: &CoreConfig,
+    config_path: Option<&Path>,
 ) -> Option<ShellInit> {
     let init = daemon::init_shell_with_config(main_window, mocked, tab, config);
+    if let Some(path) = config_path {
+        init.shell.wire_config(path);
+    }
     if let Err(err) = init.shell.window().show() {
         report_display(
             tracing::Level::ERROR,
@@ -432,11 +446,17 @@ fn run_shell_session(
 
 /// Shell-only flow: main window, background workers, sync/encoder timers,
 /// optional preview quit.
-fn run_shell(preview_secs: Option<u64>, tab: Option<i32>, config: &CoreConfig, mocked: bool) {
+fn run_shell(
+    preview_secs: Option<u64>,
+    tab: Option<i32>,
+    config: &CoreConfig,
+    config_path: Option<&Path>,
+    mocked: bool,
+) {
     let Some(main_window) = create_main_window() else {
         return;
     };
-    let Some(init) = init_and_show_shell(main_window, mocked, tab, config) else {
+    let Some(init) = init_and_show_shell(main_window, mocked, tab, config, config_path) else {
         return;
     };
     run_shell_session(init, mocked, preview_secs, "Shell", || {});
@@ -450,6 +470,7 @@ fn run_appliance(
     preview_secs: Option<u64>,
     tab: Option<i32>,
     config: &CoreConfig,
+    config_path: Option<&Path>,
     mocked: bool,
 ) {
     let Some(main_window) = create_main_window() else {
@@ -458,7 +479,7 @@ fn run_appliance(
     main_window.set_boot_splash_visible(true);
     let weak_window = main_window.as_weak();
 
-    let Some(init) = init_and_show_shell(main_window, mocked, tab, config) else {
+    let Some(init) = init_and_show_shell(main_window, mocked, tab, config, config_path) else {
         return;
     };
 
