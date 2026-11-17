@@ -1090,10 +1090,8 @@ impl BtMonitorState {
         // Pairing control without an active attempt is a no-op: the UI can
         // fire late (double-tap) after a terminal transition already reaped
         // the session.
-        if matches!(
-            command,
-            DeviceCommand::CancelPairing | DeviceCommand::ReleaseAgent
-        ) && self.devices.pairing.is_none()
+        if matches!(command, DeviceCommand::CancelPairing)
+            && self.devices.pairing.is_none()
         {
             tracing::debug!(?command, "Ignoring pairing control with no active attempt");
             return;
@@ -1154,7 +1152,7 @@ impl BtMonitorState {
             DeviceCommand::Pair(addr) => {
                 self.begin_pairing(bt, &adapter, addr, pairing_timeout);
             }
-            DeviceCommand::CancelPairing | DeviceCommand::ReleaseAgent => {
+            DeviceCommand::CancelPairing => {
                 if let Some(session) = self.devices.pairing.as_mut()
                     && !session.cancel_requested
                 {
@@ -1383,7 +1381,14 @@ impl BtMonitorState {
         };
 
         session.terminal = Some(terminal.clone());
-        self.devices.staged_pairing = Some(terminal);
+        self.devices.staged_pairing = Some(terminal.clone());
+        // A pairing failure must be visible: the pairing view silently
+        // popping back with no explanation reads as "still pending" and
+        // invites blind retries (review: failure message never shown —
+        // parity with the timeout path, which stages its own toast).
+        if let PairingStatus::Failed { message } = &terminal {
+            self.devices.staged_toast = Some(message.clone());
+        }
         if Self::pairing_finished(&session) {
             // Completed this tick: reap immediately so the agent releases
             // without waiting out the grace window.

@@ -39,8 +39,6 @@ pub enum DeviceCommand {
     Pair(BtAddress),
     /// Cancel an in-flight pairing attempt.
     CancelPairing,
-    /// Release the screen-owned pairing agent after a terminal state.
-    ReleaseAgent,
 }
 
 /// Thread-safe queue bridging Slint render-thread callbacks and the worker.
@@ -284,6 +282,35 @@ fn adapter_path(adapter: &str) -> String {
     format!("/org/bluez/{adapter}")
 }
 
+/// Builds the shared adapter-admin proxy at `path` (review: deduplicate the
+/// seven copy-pasted `builder(conn).path(..).and_then(build)` blocks).
+///
+/// # Errors
+/// Returns the underlying `zbus` proxy-build failure.
+fn adapter_admin_proxy<'a>(
+    conn: &'a BlockingConnection,
+    path: &'a str,
+) -> Result<BlueZAdapterAdminProxyBlocking<'a>, BtError> {
+    BlueZAdapterAdminProxyBlocking::builder(conn)
+        .path(path)
+        .and_then(zbus::blocking::proxy::Builder::build)
+        .map_err(BtError::from)
+}
+
+/// Builds the device-object proxy at `path` (review: deduplicate proxy setup).
+///
+/// # Errors
+/// Returns the underlying `zbus` proxy-build failure.
+fn device_proxy<'a>(
+    conn: &'a BlockingConnection,
+    path: &'a str,
+) -> Result<BlueZDevice1ProxyBlocking<'a>, BtError> {
+    BlueZDevice1ProxyBlocking::builder(conn)
+        .path(path)
+        .and_then(zbus::blocking::proxy::Builder::build)
+        .map_err(BtError::from)
+}
+
 /// Maps an adapter-scoped call failure, mirroring [`crate::connection::DbusClient`].
 fn map_adapter_error(err: zbus::Error, adapter: &str) -> BtError {
     let msg = err.to_string();
@@ -301,13 +328,7 @@ fn map_adapter_error(err: zbus::Error, adapter: &str) -> BtError {
 /// underlying `BlueZ` failure otherwise.
 pub(crate) fn start_discovery(conn: &BlockingConnection, adapter: &str) -> Result<(), BtError> {
     let path = adapter_path(adapter);
-    let proxy = match BlueZAdapterAdminProxyBlocking::builder(conn)
-        .path(path.as_str())
-        .and_then(zbus::blocking::proxy::Builder::build)
-    {
-        Ok(proxy) => proxy,
-        Err(e) => return Err(BtError::from(e)),
-    };
+    let proxy = adapter_admin_proxy(conn, path.as_str())?;
     tracing::info!(adapter, "starting Bluetooth discovery");
     proxy
         .start_discovery()
@@ -321,13 +342,7 @@ pub(crate) fn start_discovery(conn: &BlockingConnection, adapter: &str) -> Resul
 /// underlying `BlueZ` failure otherwise.
 pub(crate) fn stop_discovery(conn: &BlockingConnection, adapter: &str) -> Result<(), BtError> {
     let path = adapter_path(adapter);
-    let proxy = match BlueZAdapterAdminProxyBlocking::builder(conn)
-        .path(path.as_str())
-        .and_then(zbus::blocking::proxy::Builder::build)
-    {
-        Ok(proxy) => proxy,
-        Err(e) => return Err(BtError::from(e)),
-    };
+    let proxy = adapter_admin_proxy(conn, path.as_str())?;
     tracing::info!(adapter, "stopping Bluetooth discovery");
     proxy
         .stop_discovery()
@@ -370,13 +385,7 @@ pub(crate) fn connect_device(
     addr: BtAddress,
 ) -> Result<(), BtError> {
     let path = device_object_path(adapter, addr)?;
-    let proxy = match BlueZDevice1ProxyBlocking::builder(conn)
-        .path(path.as_str())
-        .and_then(zbus::blocking::proxy::Builder::build)
-    {
-        Ok(proxy) => proxy,
-        Err(e) => return Err(BtError::from(e)),
-    };
+    let proxy = device_proxy(conn, path.as_str())?;
     tracing::info!(adapter, device = %addr, "connecting to Bluetooth device");
     proxy.connect().map_err(BtError::from)
 }
@@ -391,13 +400,7 @@ pub(crate) fn disconnect_device(
     addr: BtAddress,
 ) -> Result<(), BtError> {
     let path = device_object_path(adapter, addr)?;
-    let proxy = match BlueZDevice1ProxyBlocking::builder(conn)
-        .path(path.as_str())
-        .and_then(zbus::blocking::proxy::Builder::build)
-    {
-        Ok(proxy) => proxy,
-        Err(e) => return Err(BtError::from(e)),
-    };
+    let proxy = device_proxy(conn, path.as_str())?;
     tracing::info!(adapter, device = %addr, "disconnecting Bluetooth device");
     proxy.disconnect().map_err(BtError::from)
 }
@@ -415,13 +418,7 @@ pub(crate) fn pair_device(
     addr: BtAddress,
 ) -> Result<(), BtError> {
     let path = device_object_path(adapter, addr)?;
-    let proxy = match BlueZDevice1ProxyBlocking::builder(conn)
-        .path(path.as_str())
-        .and_then(zbus::blocking::proxy::Builder::build)
-    {
-        Ok(proxy) => proxy,
-        Err(e) => return Err(BtError::from(e)),
-    };
+    let proxy = device_proxy(conn, path.as_str())?;
     tracing::info!(adapter, device = %addr, "pairing with Bluetooth device");
     proxy.pair().map_err(BtError::from)
 }
@@ -436,13 +433,7 @@ pub(crate) fn cancel_pairing(
     addr: BtAddress,
 ) -> Result<(), BtError> {
     let path = device_object_path(adapter, addr)?;
-    let proxy = match BlueZDevice1ProxyBlocking::builder(conn)
-        .path(path.as_str())
-        .and_then(zbus::blocking::proxy::Builder::build)
-    {
-        Ok(proxy) => proxy,
-        Err(e) => return Err(BtError::from(e)),
-    };
+    let proxy = device_proxy(conn, path.as_str())?;
     tracing::info!(adapter, device = %addr, "cancelling Bluetooth pairing");
     proxy.cancel_pairing().map_err(BtError::from)
 }
