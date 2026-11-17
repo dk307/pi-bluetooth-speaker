@@ -14,11 +14,11 @@ use std::rc::Rc;
 use slint::ComponentHandle;
 
 use crate::config::{
-    CodecHudTimeoutMs, CoreConfig, DEFAULT_CODEC_HUD_TIMEOUT_MS, DEFAULT_MARQUEE_FPS,
-    DEFAULT_VOLUME_HUD_FADE_MS, DEFAULT_VOLUME_HUD_TIMEOUT_MS, DEFAULT_VOLUME_STEP_PERCENT,
+    CodecHudTimeoutMs, CoreConfig, DEFAULT_MARQUEE_FPS, DEFAULT_VOLUME_STEP_PERCENT,
     MAX_CODEC_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
-    MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_VOLUME_HUD_TIMEOUT_MS,
-    MIN_VOLUME_STEP_PERCENT, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+    MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_VOLUME_HUD_FADE_MS,
+    MIN_VOLUME_HUD_TIMEOUT_MS, MIN_VOLUME_STEP_PERCENT, MarqueeFps, VolumeHudFadeMs,
+    VolumeHudTimeoutMs, VolumeStepPercent,
 };
 
 use super::generated::{AppTheme, MainWindow, MarqueeCompose};
@@ -284,10 +284,10 @@ impl AppShell {
             )),
         };
 
-        shell.set_volume_step_percent(DEFAULT_VOLUME_STEP_PERCENT);
-        shell.set_volume_hud_timeout_ms(DEFAULT_VOLUME_HUD_TIMEOUT_MS);
-        shell.set_volume_hud_fade_ms(DEFAULT_VOLUME_HUD_FADE_MS);
-        shell.set_codec_hud_timeout_ms(DEFAULT_CODEC_HUD_TIMEOUT_MS);
+        shell.set_volume_step_percent(VolumeStepPercent::DEFAULT);
+        shell.set_volume_hud_timeout_ms(VolumeHudTimeoutMs::DEFAULT);
+        shell.set_volume_hud_fade_ms(VolumeHudFadeMs::DEFAULT);
+        shell.set_codec_hud_timeout_ms(CodecHudTimeoutMs::DEFAULT);
         shell.setup_callbacks();
         shell.apply_theme(ThemePreset::default());
         shell
@@ -296,68 +296,78 @@ impl AppShell {
     /// Applies runtime parameters from [`CoreConfig`] (theme, marquee fps, volume step,
     /// Volume HUD timeout/fade durations, and Codec HUD timeout) to this shell.
     pub fn apply_config(&self, config: &CoreConfig) {
-        self.set_marquee_fps(config.marquee_fps.value());
-        self.set_volume_step_percent(config.volume_step_percent.value());
-        self.set_volume_hud_timeout_ms(config.volume_hud_timeout_ms.value());
-        self.set_volume_hud_fade_ms(config.volume_hud_fade_ms.value());
-        self.set_codec_hud_timeout_ms(config.codec_hud_timeout_ms.value());
+        self.set_marquee_fps(config.marquee_fps);
+        self.set_volume_step_percent(config.volume_step_percent);
+        self.set_volume_hud_timeout_ms(config.volume_hud_timeout_ms);
+        self.set_volume_hud_fade_ms(config.volume_hud_fade_ms);
+        self.set_codec_hud_timeout_ms(config.codec_hud_timeout_ms);
         if let Some(theme) = config.theme {
             self.apply_theme(theme);
         }
     }
 
-    /// Returns the configured volume step percentage per rotary encoder detent (`1..=25`).
+    /// Returns the configured volume step percentage per rotary encoder detent.
     #[must_use]
-    pub fn volume_step_percent(&self) -> u8 {
-        u8::try_from(self.window.get_volume_step_percent())
-            .unwrap_or(DEFAULT_VOLUME_STEP_PERCENT)
-            .clamp(MIN_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT)
+    pub fn volume_step_percent(&self) -> VolumeStepPercent {
+        Self::volume_step_percent_from_window(&self.window)
     }
 
-    /// Sets the volume step percentage per rotary encoder detent (clamped to `1..=25`).
-    pub fn set_volume_step_percent(&self, step: u8) {
-        let step = step.clamp(MIN_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT);
-        self.window.set_volume_step_percent(i32::from(step));
+    /// Sets the volume step percentage per rotary encoder detent.
+    ///
+    /// The [`VolumeStepPercent`] parameter guarantees the `1..=25` invariant by
+    /// construction; the validated value is written to the Slint property verbatim.
+    pub fn set_volume_step_percent(&self, step: VolumeStepPercent) {
+        self.window.set_volume_step_percent(i32::from(step.value()));
     }
 
     /// Returns the selected marquee scroll rate in fps (`30` or `60`).
     #[must_use]
-    pub fn marquee_fps(&self) -> u32 {
-        u32::try_from(self.window.global::<MarqueeCompose>().get_marquee_fps())
-            .unwrap_or(DEFAULT_MARQUEE_FPS)
+    pub fn marquee_fps(&self) -> MarqueeFps {
+        Self::marquee_fps_from_window(&self.window)
     }
 
     /// Sets the marquee scroll rate in fps (`30` or `60`) on the shared composer global.
-    pub fn set_marquee_fps(&self, fps: u32) {
-        let fps = if fps == 30 { 30 } else { DEFAULT_MARQUEE_FPS };
+    ///
+    /// The [`MarqueeFps`] parameter guarantees the `30`/`60` invariant by
+    /// construction; the validated value is written to the Slint property verbatim.
+    pub fn set_marquee_fps(&self, fps: MarqueeFps) {
         self.window
             .global::<MarqueeCompose>()
-            .set_marquee_fps(i32::try_from(fps).unwrap_or(i32::MAX));
+            .set_marquee_fps(Self::slint_i32(fps.value(), "marquee_fps"));
     }
 
-    /// Returns the Volume HUD auto-dismiss timeout in milliseconds.
+    /// Returns the Volume HUD auto-dismiss timeout.
     #[must_use]
-    pub fn volume_hud_timeout_ms(&self) -> u32 {
-        u32::try_from(self.window.get_volume_hud_timeout_ms())
-            .unwrap_or(DEFAULT_VOLUME_HUD_TIMEOUT_MS)
+    pub fn volume_hud_timeout_ms(&self) -> VolumeHudTimeoutMs {
+        Self::volume_hud_timeout_from_window(&self.window)
     }
 
-    /// Sets the Volume HUD auto-dismiss timeout in milliseconds.
-    pub fn set_volume_hud_timeout_ms(&self, timeout_ms: u32) {
-        self.window
-            .set_volume_hud_timeout_ms(i32::try_from(timeout_ms).unwrap_or(i32::MAX));
+    /// Sets the Volume HUD auto-dismiss timeout.
+    ///
+    /// The [`VolumeHudTimeoutMs`] parameter guarantees the `250..=30000`
+    /// invariant by construction; the validated value is written to the Slint
+    /// property verbatim.
+    pub fn set_volume_hud_timeout_ms(&self, timeout_ms: VolumeHudTimeoutMs) {
+        self.window.set_volume_hud_timeout_ms(Self::slint_i32(
+            timeout_ms.value(),
+            "volume_hud_timeout_ms",
+        ));
     }
 
-    /// Returns the Volume HUD fade-out duration in milliseconds.
+    /// Returns the Volume HUD fade-out duration.
     #[must_use]
-    pub fn volume_hud_fade_ms(&self) -> u32 {
-        u32::try_from(self.window.get_volume_hud_fade_ms()).unwrap_or(DEFAULT_VOLUME_HUD_FADE_MS)
+    pub fn volume_hud_fade_ms(&self) -> VolumeHudFadeMs {
+        Self::hud_fade_from_window(&self.window)
     }
 
-    /// Sets the Volume HUD fade-out duration in milliseconds.
-    pub fn set_volume_hud_fade_ms(&self, fade_ms: u32) {
+    /// Sets the Volume HUD fade-out duration.
+    ///
+    /// The [`VolumeHudFadeMs`] parameter guarantees the `0..=2000` invariant
+    /// by construction; the validated value is written to the Slint property
+    /// verbatim.
+    pub fn set_volume_hud_fade_ms(&self, fade_ms: VolumeHudFadeMs) {
         self.window
-            .set_volume_hud_fade_ms(i32::try_from(fade_ms).unwrap_or(i32::MAX));
+            .set_volume_hud_fade_ms(Self::slint_i32(fade_ms.value(), "volume_hud_fade_ms"));
     }
 
     /// Returns whether the Volume HUD overlay is currently in its active hold state.
@@ -416,17 +426,20 @@ impl AppShell {
         self.window.invoke_dismiss_codec_hud();
     }
 
-    /// Returns the Codec HUD auto-dismiss timeout in milliseconds.
+    /// Returns the Codec HUD auto-dismiss timeout.
     #[must_use]
-    pub fn codec_hud_timeout_ms(&self) -> u32 {
-        u32::try_from(self.window.get_codec_hud_timeout_ms())
-            .unwrap_or(DEFAULT_CODEC_HUD_TIMEOUT_MS)
+    pub fn codec_hud_timeout_ms(&self) -> CodecHudTimeoutMs {
+        Self::codec_hud_timeout_from_window(&self.window)
     }
 
-    /// Sets the Codec HUD auto-dismiss timeout in milliseconds.
-    pub fn set_codec_hud_timeout_ms(&self, timeout_ms: u32) {
+    /// Sets the Codec HUD auto-dismiss timeout.
+    ///
+    /// The [`CodecHudTimeoutMs`] parameter guarantees the `250..=300000`
+    /// invariant by construction; the validated value is written to the Slint
+    /// property verbatim.
+    pub fn set_codec_hud_timeout_ms(&self, timeout_ms: CodecHudTimeoutMs) {
         self.window
-            .set_codec_hud_timeout_ms(i32::try_from(timeout_ms).unwrap_or(i32::MAX));
+            .set_codec_hud_timeout_ms(Self::slint_i32(timeout_ms.value(), "codec_hud_timeout_ms"));
     }
 
     /// Binds the JSON path used by the live Screen Settings persistence.
@@ -447,8 +460,10 @@ impl AppShell {
                     // M-PANIC-ON-BUG: a worker crash is a bug, not a
                     // recoverable I/O hiccup — re-raise instead of silently
                     // killing the worker and dropping queued snapshots.
+                    // A failed save is logged by persist_config and dropped:
+                    // the worker must survive to persist the next edit.
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        Self::persist_config(&config, &worker_path);
+                        let _ = Self::persist_config(&config, &worker_path);
                     }));
                     if let Err(p) = result {
                         std::panic::resume_unwind(p);
@@ -477,14 +492,18 @@ impl AppShell {
 
     /// Saves the current shell state as JSON to the wired config path.
     ///
+    /// This is the synchronous path used by boot-time persistence and tests;
+    /// UI edits go through the background persist worker instead (see
+    /// [`Self::wire_config`]).
+    ///
     /// # Errors
     /// Returns [`crate::config::ConfigError`] when no config path is wired or
     /// the atomic JSON write fails.
     pub fn save_current_config(&self) -> Result<(), crate::config::ConfigError> {
-        let path = self.config_path.borrow().as_ref().cloned().ok_or_else(|| {
+        let path = self.config_path.borrow().clone().ok_or_else(|| {
             crate::config::ConfigError::invalid("Screen Settings are not wired to a config path")
         })?;
-        self.current_config().save(&path)
+        Self::persist_config(&self.current_config(), &path)
     }
 
     /// Snapshot builder shared by live persistence and the public getter.
@@ -493,26 +512,22 @@ impl AppShell {
             theme: Some(ThemePreset::from_index(
                 window.global::<AppTheme>().get_active_preset(),
             )),
-            marquee_fps: MarqueeFps::try_from(Self::marquee_fps_from_window(window))
-                .unwrap_or_default(),
-            volume_step_percent: VolumeStepPercent::new(Self::volume_step_percent_from_window(
-                window,
-            )),
-            volume_hud_timeout_ms: VolumeHudTimeoutMs::new(
-                Self::slint_ms_to_u32(window.get_volume_hud_timeout_ms())
-                    .clamp(MIN_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_TIMEOUT_MS),
-            ),
-            volume_hud_fade_ms: VolumeHudFadeMs::new(Self::hud_fade_from_window(window)),
-            codec_hud_timeout_ms: CodecHudTimeoutMs::new(
-                Self::slint_ms_to_u32(window.get_codec_hud_timeout_ms())
-                    .clamp(MIN_CODEC_HUD_TIMEOUT_MS, MAX_CODEC_HUD_TIMEOUT_MS),
-            ),
+            marquee_fps: Self::marquee_fps_from_window(window),
+            volume_step_percent: Self::volume_step_percent_from_window(window),
+            volume_hud_timeout_ms: Self::volume_hud_timeout_from_window(window),
+            volume_hud_fade_ms: Self::hud_fade_from_window(window),
+            codec_hud_timeout_ms: Self::codec_hud_timeout_from_window(window),
         }
     }
 
-    /// Saves a config snapshot to `path`, logging the outcome with structured fields.
-    fn persist_config(config: &CoreConfig, path: &Path) {
-        match config.save(path) {
+    /// Saves a config snapshot to `path` and logs the outcome with structured fields.
+    ///
+    /// Returns the raw save result so synchronous callers
+    /// ([`Self::save_current_config`]) propagate write failures; the background
+    /// worker logs and drops it (a failed live save must not kill the worker).
+    fn persist_config(config: &CoreConfig, path: &Path) -> Result<(), crate::config::ConfigError> {
+        let result = config.save(path);
+        match &result {
             Ok(()) => tracing::info!(
                 path = %path.display(),
                 theme = config.theme.map_or_else(|| "default", |t| t.slug()),
@@ -529,6 +544,7 @@ impl AppShell {
                 "failed to save screen settings"
             ),
         }
+        result
     }
 
     /// Queues the current window state for background persistence after a UI edit.
@@ -555,17 +571,35 @@ impl AppShell {
         }
     }
 
-    /// Returns the composer-global marquee rate clamped to `30`/`60`.
-    fn marquee_fps_from_window(window: &MainWindow) -> u32 {
+    /// Returns the composer-global marquee rate, snapping out-of-domain values
+    /// to the default rate (the Slint global is untyped beyond `i32`).
+    fn marquee_fps_from_window(window: &MainWindow) -> MarqueeFps {
         u32::try_from(window.global::<MarqueeCompose>().get_marquee_fps())
-            .unwrap_or(DEFAULT_MARQUEE_FPS)
+            .ok()
+            .and_then(|fps| MarqueeFps::try_from(fps).ok())
+            .unwrap_or_default()
     }
 
-    /// Returns the window volume-step property clamped to `1..=25`.
-    fn volume_step_percent_from_window(window: &MainWindow) -> u8 {
-        u8::try_from(window.get_volume_step_percent())
+    /// Returns the window volume-step property clamped into `1..=25`.
+    fn volume_step_percent_from_window(window: &MainWindow) -> VolumeStepPercent {
+        let step = u8::try_from(window.get_volume_step_percent())
             .unwrap_or(DEFAULT_VOLUME_STEP_PERCENT)
-            .clamp(MIN_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT)
+            .clamp(MIN_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT);
+        VolumeStepPercent::new(step)
+    }
+
+    /// Returns the window Volume HUD timeout clamped into `250..=30000`.
+    fn volume_hud_timeout_from_window(window: &MainWindow) -> VolumeHudTimeoutMs {
+        let ms = Self::slint_ms_to_u32(window.get_volume_hud_timeout_ms())
+            .clamp(MIN_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_TIMEOUT_MS);
+        VolumeHudTimeoutMs::new(ms)
+    }
+
+    /// Returns the window Codec HUD timeout clamped into `250..=300000`.
+    fn codec_hud_timeout_from_window(window: &MainWindow) -> CodecHudTimeoutMs {
+        let ms = Self::slint_ms_to_u32(window.get_codec_hud_timeout_ms())
+            .clamp(MIN_CODEC_HUD_TIMEOUT_MS, MAX_CODEC_HUD_TIMEOUT_MS);
+        CodecHudTimeoutMs::new(ms)
     }
 
     /// Converts a Slint `i32` timeout to `u32` (negative values clamp to `0`).
@@ -573,15 +607,33 @@ impl AppShell {
         u32::try_from(value.max(0)).unwrap_or_default()
     }
 
-    /// Clamps a Slint `i32` milliseconds value into the given `u32` domain.
-    fn clamp_hud_ms(value: i32, min: u32, max: u32) -> i32 {
-        let clamped = Self::slint_ms_to_u32(value).clamp(min, max);
-        i32::try_from(clamped).unwrap_or(i32::MAX)
+    /// Converts a validated domain `u32` to the Slint `i32` property type.
+    ///
+    /// `field` names the settings field for diagnostics. Panics if the value
+    /// exceeds `i32::MAX` — domain newtypes cap every field far below that
+    /// bound, so a failure here is a violated invariant (M-PANIC-ON-BUG),
+    /// not a recoverable condition.
+    fn slint_i32(value: u32, field: &str) -> i32 {
+        i32::try_from(value).unwrap_or_else(|_| panic!("{field} value {value} exceeds i32"))
     }
 
-    /// Reads and clamps the Volume HUD fade duration window property.
-    fn hud_fade_from_window(window: &MainWindow) -> u32 {
-        Self::slint_ms_to_u32(window.get_volume_hud_fade_ms()).clamp(0, MAX_VOLUME_HUD_FADE_MS)
+    /// Clamps a Slint `i32` milliseconds value into the given `u32` domain.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the clamped value exceeds `i32::MAX` — every HUD domain caps
+    /// far below that bound, so a failure here is a violated invariant
+    /// (M-PANIC-ON-BUG), not a recoverable condition.
+    fn clamp_hud_ms(value: i32, min: u32, max: u32) -> i32 {
+        let clamped = Self::slint_ms_to_u32(value).clamp(min, max);
+        i32::try_from(clamped).expect("clamped HUD value fits in i32")
+    }
+
+    /// Reads and clamps the Volume HUD fade duration window property into `0..=2000`.
+    fn hud_fade_from_window(window: &MainWindow) -> VolumeHudFadeMs {
+        let ms =
+            Self::slint_ms_to_u32(window.get_volume_hud_fade_ms()).clamp(0, MAX_VOLUME_HUD_FADE_MS);
+        VolumeHudFadeMs::new(ms)
     }
 
     /// Adjusts volume by `detents * volume_step_percent`, unmutes, opens/refreshes the
@@ -601,7 +653,7 @@ impl AppShell {
         } else {
             0
         };
-        let delta = detents.saturating_mul(i32::from(self.volume_step_percent()));
+        let delta = detents.saturating_mul(i32::from(self.volume_step_percent().value()));
         let target = u8::try_from(current.saturating_add(delta).clamp(0, 100)).unwrap_or(0);
         // The `volume_changed` callback owns the optimistic UI update, the
         // mute-clear (queued as an explicit `SetMute(false)` amp command when
@@ -1056,7 +1108,8 @@ impl AppShell {
         let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_set_volume_hud_fade_ms(move |ms| {
             if let Some(w) = win.upgrade() {
-                let clamped = Self::clamp_hud_ms(ms, 0, MAX_VOLUME_HUD_FADE_MS);
+                let clamped =
+                    Self::clamp_hud_ms(ms, MIN_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_FADE_MS);
                 w.set_volume_hud_fade_ms(clamped);
                 Self::persist_window_state(&w, &persist_tx);
             }

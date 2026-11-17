@@ -752,9 +752,9 @@ fn ui_shell_volume_hud_config_and_amp_auto_popup() {
     assert!(!shell.is_volume_hud_visible());
     assert!(!shell.is_volume_hud_active());
     assert_eq!(shell.volume_hud_opacity(), 0.0);
-    assert_eq!(shell.volume_step_percent(), 2);
-    assert_eq!(shell.volume_hud_timeout_ms(), 4_000);
-    assert_eq!(shell.volume_hud_fade_ms(), 200);
+    assert_eq!(shell.volume_step_percent().value(), 2);
+    assert_eq!(shell.volume_hud_timeout_ms().value(), 4_000);
+    assert_eq!(shell.volume_hud_fade_ms().value(), 200);
 
     // 2. Apply CoreConfig overrides
     let cfg = CoreConfig {
@@ -767,13 +767,13 @@ fn ui_shell_volume_hud_config_and_amp_auto_popup() {
     };
     shell.apply_config(&cfg);
     assert_eq!(shell.current_theme(), ThemePreset::MarantzAmber);
-    assert_eq!(shell.volume_step_percent(), 4);
-    assert_eq!(shell.volume_hud_timeout_ms(), 1_500);
-    assert_eq!(shell.volume_hud_fade_ms(), 150);
+    assert_eq!(shell.volume_step_percent().value(), 4);
+    assert_eq!(shell.volume_hud_timeout_ms().value(), 1_500);
+    assert_eq!(shell.volume_hud_fade_ms().value(), 150);
 
     // Reset step to 2% per user default
-    shell.set_volume_step_percent(2);
-    assert_eq!(shell.volume_step_percent(), 2);
+    shell.set_volume_step_percent(VolumeStepPercent::new(2));
+    assert_eq!(shell.volume_step_percent().value(), 2);
 
     // 3. PCM stream metadata never drives the volume: the level and mute
     // indicator reflect the amp exclusively (apply_amp_volume).
@@ -942,6 +942,25 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     };
     use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
     use speaker_common::diag::ScopedTempDir;
+    use std::path::Path;
+
+    /// Polls `path` until the persisted config satisfies `condition`, panicking
+    /// after a generous deadline (CI's ARM runner is slow).
+    fn wait_until_persisted(path: &Path, condition: impl Fn(&CoreConfig) -> bool) -> CoreConfig {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(config) = CoreConfig::load(path)
+                && condition(&config)
+            {
+                return config;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background persist did not complete within 10s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
 
     let _window = Framebuffer::new_mocked()
         .0
@@ -982,21 +1001,8 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     // write to complete before asserting disk state.
     shell.window().invoke_set_volume_step_percent(999);
     assert_eq!(shell.window().get_volume_step_percent(), 25);
-    // Poll until the background persist worker finishes the write.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let live = loop {
-        if let Ok(c) = CoreConfig::load(&path)
-            && c.volume_step_percent.value() == 25
-        {
-            break c;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "background persist did not complete within 10s"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    assert_eq!(live.volume_step_percent.value(), 25);
+    // The predicate returning proves the value; keep the binding for intent.
+    let _live = wait_until_persisted(&path, |c| c.volume_step_percent.value() == 25);
     shell.window().invoke_set_volume_step_percent(-7);
     assert_eq!(shell.window().get_volume_step_percent(), 1);
 
@@ -1017,33 +1023,19 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
 
     // Marquee fps accepts only 30/60; anything else snaps to the 60 default.
     shell.window().invoke_set_marquee_fps(45);
-    assert_eq!(shell.marquee_fps(), 60);
+    assert_eq!(shell.marquee_fps().value(), 60);
     shell.window().invoke_set_marquee_fps(30);
-    assert_eq!(shell.marquee_fps(), 30);
+    assert_eq!(shell.marquee_fps().value(), 30);
 
-    // The clamped state is exactly what live persistence wrote to disk.
+    // The clamped state is exactly what live persistence wrote to disk; the
+    // predicate returning proves the match.
     let clamped = shell.current_config();
     assert_eq!(clamped.volume_step_percent.value(), 1);
     assert_eq!(clamped.volume_hud_timeout_ms.value(), 250);
     assert_eq!(clamped.volume_hud_fade_ms.value(), 0);
     assert_eq!(clamped.codec_hud_timeout_ms.value(), 250);
     assert_eq!(clamped.marquee_fps, MarqueeFps::FPS_30);
-    // Poll until the final background persist (marquee fps = 30) completes.
-    // CI's ARM runner is slow; use a generous timeout.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let saved = loop {
-        if let Ok(c) = CoreConfig::load(&path)
-            && c == clamped
-        {
-            break c;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "final background persist did not complete within 10s"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    assert_eq!(saved, clamped);
+    let _saved = wait_until_persisted(&path, |c| c == &clamped);
 
     // Persisting to an unwritable path logs an error instead of panicking.
     shell.wire_config(std::path::Path::new("/nonexistent-dir/settings.json"));
