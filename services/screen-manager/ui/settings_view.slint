@@ -5,21 +5,22 @@ import { MaterialStyleMetrics } from "@material/material.slint";
 import { AppTheme } from "app_theme.slint";
 import { MarqueeCompose } from "marquee_state.slint";
 
-// Compact +/− button used by every numeric Screen Settings row.
+// Compact +/− button used by the Advanced settings rows (Material 3 tonal
+// icon-button look; 40px keeps the 44px row rhythm inside the 420px viewport).
 component StepButton inherits Rectangle {
     in property <string> symbol;
     callback clicked();
 
-    width: 40px;
-    height: 40px;
-    border-radius: MaterialStyleMetrics.border_radius_10;
+    width: MaterialStyleMetrics.size_40;
+    height: MaterialStyleMetrics.size_40;
+    border-radius: self.width / 2;
     background: MaterialPalette.secondary_container;
     opacity: touch.pressed ? 0.8 : 1.0;
     animate opacity { duration: 80ms; easing: ease-out; }
 
     Text {
         text: root.symbol;
-        font-size: 20px;
+        font-size: 22px;
         font-weight: 700;
         color: MaterialPalette.on_secondary_container;
         horizontal-alignment: center;
@@ -31,91 +32,140 @@ component StepButton inherits Rectangle {
     }
 }
 
-// One label / value / +/- line in the numeric settings card.
-component SettingsStepper inherits HorizontalLayout {
+// One Material 3 list row for a numeric Advanced setting: label text on the
+// left (title-medium, 16px), a −/+ stepper control on the right.
+component SettingsStepperRow inherits Rectangle {
     in property <string> label;
     in property <string> value;
     callback decrease();
     callback increase();
 
-    spacing: 8px;
+    height: 44px;
 
-    Rectangle {
-        horizontal-stretch: 3;
-        height: 40px;
-        border-radius: MaterialStyleMetrics.border_radius_10;
-        background: MaterialPalette.surface_container_lowest;
+    HorizontalLayout {
+        spacing: MaterialStyleMetrics.spacing_8;
 
         Text {
             text: root.label;
-            font-size: 13px;
+            font-size: 16px;
             font-weight: 600;
             color: MaterialPalette.on_surface;
             vertical-alignment: center;
-            horizontal-alignment: center;
+            horizontal-alignment: left;
             overflow: elide;
+            horizontal-stretch: 2;
         }
-    }
 
-    Rectangle {
-        horizontal-stretch: 2;
-        height: 40px;
-        border-radius: MaterialStyleMetrics.border_radius_10;
-        background: MaterialPalette.surface_container_high;
+        StepButton {
+            symbol: "−";
+            clicked => { root.decrease(); }
+        }
 
         Text {
             text: root.value;
-            font-size: 14px;
+            font-size: 16px;
             font-weight: 700;
             color: MaterialPalette.primary;
-            horizontal-alignment: center;
             vertical-alignment: center;
+            horizontal-alignment: center;
+            horizontal-stretch: 1;
+            min-width: 96px;
+        }
+
+        StepButton {
+            symbol: "+";
+            clicked => { root.increase(); }
         }
     }
+}
 
-    StepButton {
-        symbol: "−";
-        clicked => { root.decrease(); }
-    }
+// Material 3 segmented control for the two allowed marquee rates (30 / 60):
+// one outlined pill, selected segment filled with `secondary_container`.
+component FpsSegmented inherits Rectangle {
+    in property <int> current_fps;
+    callback fps_selected(int);
 
-    StepButton {
-        symbol: "+";
-        clicked => { root.increase(); }
+    width: 168px;
+    height: 36px;
+    border-width: 1px;
+    border-radius: self.height / 2;
+    border-color: MaterialPalette.outline;
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            horizontal-stretch: 1;
+            background: root.current_fps == 30 ? MaterialPalette.secondary_container : transparent;
+
+            Text {
+                text: "30";
+                font-size: 14px;
+                font-weight: root.current_fps == 30 ? 700 : 600;
+                color: root.current_fps == 30 ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                clicked => { root.fps_selected(30); }
+            }
+        }
+
+        Rectangle {
+            width: 1px;
+            background: MaterialPalette.outline;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            background: root.current_fps == 60 ? MaterialPalette.secondary_container : transparent;
+
+            Text {
+                text: "60";
+                font-size: 14px;
+                font-weight: root.current_fps == 60 ? 700 : 600;
+                color: root.current_fps == 60 ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                clicked => { root.fps_selected(60); }
+            }
+        }
     }
 }
 
-// Compact selectable option card used for the two allowed marquee rates.
-component ChoiceCard inherits Rectangle {
-    in property <string> label;
-    in property <bool> selected;
-    callback clicked();
+// Advanced list row pairing the "Marquee FPS" label with the segmented
+// 30 / 60 rate selector on the right.
+component FpsSegmentedRow inherits Rectangle {
+    height: 44px;
+    callback set_marquee_fps(int);
 
-    horizontal-stretch: 1;
-    height: 40px;
-    border-radius: MaterialStyleMetrics.border_radius_10;
-    border-width: root.selected ? 2px : 0px;
-    border-color: MaterialPalette.primary;
-    background: root.selected ? MaterialPalette.primary_container : MaterialPalette.surface_container_lowest;
-    opacity: touch.pressed ? 0.8 : 1.0;
-    animate opacity { duration: 80ms; easing: ease-out; }
+    HorizontalLayout {
+        spacing: MaterialStyleMetrics.spacing_8;
 
-    Text {
-        text: root.label;
-        font-size: 13px;
-        font-weight: 700;
-        color: root.selected ? MaterialPalette.on_primary_container : MaterialPalette.on_surface;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
+        Text {
+            text: "Marquee FPS";
+            font-size: 16px;
+            font-weight: 600;
+            color: MaterialPalette.on_surface;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+            overflow: elide;
+            horizontal-stretch: 2;
+        }
 
-    touch := TouchArea {
-        clicked => { root.clicked(); }
+        FpsSegmented {
+            current_fps: MarqueeCompose.marquee_fps;
+            fps_selected(fps) => { root.set_marquee_fps(fps); }
+        }
     }
 }
 
-// Theme preset card using Rectangle with Material styling (defined first for use in SettingsView)
+// Theme preset card: swatch-colored border marks the active preset.
 component ThemePresetCard inherits Rectangle {
-    in property <int> index;
     in property <string> name;
     in property <string> accent_name;
     in property <color> primary_color;
@@ -123,12 +173,14 @@ component ThemePresetCard inherits Rectangle {
     in property <bool> selected;
     callback clicked();
 
-    width: 136px;
-    height: 54px;
+    width: 140px;
+    height: 64px;
     border-radius: MaterialStyleMetrics.border_radius_10;
     border-width: root.selected ? 2px : 0px;
     border-color: root.primary_color;
     background: root.selected ? transparent : MaterialPalette.surface;
+    opacity: touch.pressed ? 0.8 : 1.0;
+    animate opacity { duration: 80ms; easing: ease-out; }
 
     VerticalLayout {
         alignment: center;
@@ -136,19 +188,19 @@ component ThemePresetCard inherits Rectangle {
 
         MaterialText {
             text: root.name;
-            style: MaterialTypography.label_medium;  // 12px
+            style: MaterialTypography.label_large;  // 14px
             color: root.primary_color;
             horizontal-alignment: center;
         }
         MaterialText {
             text: root.accent_name;
-            style: MaterialTypography.label_small;  // 11px
+            style: MaterialTypography.label_medium;  // 12px
             color: root.secondary_color;
             horizontal-alignment: center;
         }
     }
 
-    TouchArea {
+    touch := TouchArea {
         clicked => { root.clicked(); }
     }
 }
@@ -264,171 +316,121 @@ export component SettingsView inherits VerticalLayout {
         }
     }
 
-    // View 2: Screen Settings (theme, marquee, HUDs, and encoder volume)
-    if root.show_themes : OutlinedCard {
-        VerticalLayout {
-            alignment: space-between;
-            padding: MaterialStyleMetrics.padding_12;
-            spacing: MaterialStyleMetrics.spacing_6;
+    // View 2: Screen Settings — Material 3 settings list with two sections.
+    // "Theme" groups the preset cards; every remaining screen-manager setting
+    // lives under the "Advanced" section header, separated by a divider.
+    if root.show_themes : VerticalLayout {
+        vertical-stretch: 1;
+        spacing: MaterialStyleMetrics.spacing_4;
 
-            MaterialText {
-                text: "Screen Settings";
-                style: MaterialTypography.title_medium;  // 16px
-                color: MaterialPalette.primary;
-                horizontal-alignment: center;
+        // Section 1: Theme presets (no extra heading — the cards are self-evident).
+        HorizontalLayout {
+            alignment: center;
+            spacing: MaterialStyleMetrics.spacing_8;
+
+            ThemePresetCard {
+                name: "McIntosh";
+                accent_name: "Electric Cyan";
+                primary_color: #00C8FF;
+                secondary_color: #70E1FF;
+                selected: AppTheme.active_preset == 0;
+                clicked => { root.select_theme(0); }
             }
 
-            MaterialText {
-                text: "Theme Preset";
-                style: MaterialTypography.label_large;  // 14px
-                color: MaterialPalette.on_surface_variant;
-                horizontal-alignment: center;
+            ThemePresetCard {
+                name: "Marantz";
+                accent_name: "Warm Amber";
+                primary_color: #E5A93C;
+                secondary_color: #FFD166;
+                selected: AppTheme.active_preset == 1;
+                clicked => { root.select_theme(1); }
             }
 
-            HorizontalLayout {
-                alignment: center;
-                spacing: MaterialStyleMetrics.spacing_4;
-
-                ThemePresetCard {
-                    index: 0;
-                    name: "1. McIntosh";
-                    accent_name: "Electric Cyan";
-                    primary_color: #00C8FF;
-                    secondary_color: #70E1FF;
-                    selected: AppTheme.active_preset == 0;
-                    clicked => { root.select_theme(0); }
-                }
-
-                ThemePresetCard {
-                    index: 1;
-                    name: "2. Marantz";
-                    accent_name: "Warm Amber";
-                    primary_color: #E5A93C;
-                    secondary_color: #FFD166;
-                    selected: AppTheme.active_preset == 1;
-                    clicked => { root.select_theme(1); }
-                }
-
-                ThemePresetCard {
-                    index: 2;
-                    name: "3. Cyberpunk";
-                    accent_name: "Synthwave Pink";
-                    primary_color: #00F0FF;
-                    secondary_color: #FF007F;
-                    selected: AppTheme.active_preset == 2;
-                    clicked => { root.select_theme(2); }
-                }
-
-                ThemePresetCard {
-                    index: 3;
-                    name: "4. Studio Dark";
-                    accent_name: "Precision Mono";
-                    primary_color: #F0F0F0;
-                    secondary_color: #A0A0A0;
-                    selected: AppTheme.active_preset == 3;
-                    clicked => { root.select_theme(3); }
-                }
-
-                ThemePresetCard {
-                    index: 4;
-                    name: "5. PeppyMeter";
-                    accent_name: "Vintage Gold";
-                    primary_color: #F5B83D;
-                    secondary_color: #FFDF85;
-                    selected: AppTheme.active_preset == 4;
-                    clicked => { root.select_theme(4); }
-                }
-
-                StepButton {
-                    symbol: "↻";
-                    clicked => { root.cycle_theme(); }
-                }
+            ThemePresetCard {
+                name: "Cyberpunk";
+                accent_name: "Synthwave Pink";
+                primary_color: #00F0FF;
+                secondary_color: #FF007F;
+                selected: AppTheme.active_preset == 2;
+                clicked => { root.select_theme(2); }
             }
 
-            MaterialText {
-                text: "Marquee & Encoder";
-                style: MaterialTypography.label_large;  // 14px
-                color: MaterialPalette.on_surface_variant;
-                horizontal-alignment: center;
+            ThemePresetCard {
+                name: "Studio Dark";
+                accent_name: "Precision Mono";
+                primary_color: #F0F0F0;
+                secondary_color: #A0A0A0;
+                selected: AppTheme.active_preset == 3;
+                clicked => { root.select_theme(3); }
             }
 
-            HorizontalLayout {
-                spacing: MaterialStyleMetrics.spacing_8;
-
-                Rectangle {
-                    horizontal-stretch: 3;
-                    height: 40px;
-                    border-radius: MaterialStyleMetrics.border_radius_10;
-                    background: MaterialPalette.surface_container_lowest;
-
-                    Text {
-                        text: "Marquee FPS";
-                        font-size: 13px;
-                        font-weight: 600;
-                        color: MaterialPalette.on_surface;
-                        vertical-alignment: center;
-                        horizontal-alignment: center;
-                    }
-                }
-
-                ChoiceCard {
-                    label: "30";
-                    selected: MarqueeCompose.marquee_fps == 30;
-                    clicked => { root.set_marquee_fps(30); }
-                }
-
-                ChoiceCard {
-                    label: "60";
-                    selected: MarqueeCompose.marquee_fps == 60;
-                    clicked => { root.set_marquee_fps(60); }
-                }
+            ThemePresetCard {
+                name: "PeppyMeter";
+                accent_name: "Vintage Gold";
+                primary_color: #F5B83D;
+                secondary_color: #FFDF85;
+                selected: AppTheme.active_preset == 4;
+                clicked => { root.select_theme(4); }
             }
+        }
 
-            SettingsStepper {
-                label: "Encoder Volume Step";
-                value: "\{root.volume_step_percent} %";
-                decrease => { root.set_volume_step_percent(root.volume_step_percent - 1); }
-                increase => { root.set_volume_step_percent(root.volume_step_percent + 1); }
-            }
+        // Section divider (M3: one divider between groups, none between rows).
+        Rectangle {
+            height: 1px;
+            background: MaterialPalette.outline_variant;
+        }
 
-            MaterialText {
-                text: "Overlay Timings";
-                style: MaterialTypography.label_large;  // 14px
-                color: MaterialPalette.on_surface_variant;
-                horizontal-alignment: center;
-            }
+        // Section 2 header: "Advanced".
+        Text {
+            text: "Advanced";
+            font-size: 14px;
+            font-weight: 600;
+            color: MaterialPalette.on_surface_variant;
+            vertical-alignment: center;
+            height: 18px;
+        }
 
-            SettingsStepper {
-                label: "Volume HUD Timeout";
-                value: "\{root.volume_hud_timeout_ms} ms";
-                decrease => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms - 250); }
-                increase => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms + 250); }
-            }
+        FpsSegmentedRow {
+            set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
+        }
 
-            SettingsStepper {
-                label: "Volume HUD Fade";
-                value: "\{root.volume_hud_fade_ms} ms";
-                decrease => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms - 100); }
-                increase => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms + 100); }
-            }
+        SettingsStepperRow {
+            label: "Encoder Volume Step";
+            value: "\{root.volume_step_percent} %";
+            decrease => { root.set_volume_step_percent(root.volume_step_percent - 1); }
+            increase => { root.set_volume_step_percent(root.volume_step_percent + 1); }
+        }
 
-            SettingsStepper {
-                label: "Codec HUD Timeout";
-                value: "\{root.codec_hud_timeout_ms} ms";
-                decrease => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms - 1000); }
-                increase => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms + 1000); }
-            }
+        SettingsStepperRow {
+            label: "Volume HUD Timeout";
+            value: "\{root.volume_hud_timeout_ms} ms";
+            decrease => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms - 250); }
+            increase => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms + 250); }
+        }
 
-            HorizontalLayout {
-                alignment: center;
+        SettingsStepperRow {
+            label: "Volume HUD Fade";
+            value: "\{root.volume_hud_fade_ms} ms";
+            decrease => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms - 100); }
+            increase => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms + 100); }
+        }
 
-                FilledButton {
-                    text: "Save Settings";
-                    width: 220px;
-                    height: 48px;
-                    clicked => { root.save_settings(); }
-                }
-            }
+        SettingsStepperRow {
+            label: "Codec HUD Timeout";
+            value: "\{root.codec_hud_timeout_ms} ms";
+            decrease => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms - 1000); }
+            increase => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms + 1000); }
+        }
+
+        // Stretch spacer keeps the Save action pinned to the bottom edge.
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        FilledButton {
+            text: "Save Settings";
+            height: 48px;
+            clicked => { root.save_settings(); }
         }
     }
 }
