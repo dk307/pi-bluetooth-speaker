@@ -731,8 +731,6 @@ pub async fn run_task(
             backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
             continue;
         };
-        backoff = RECONNECT_BACKOFF_BASE;
-
         // Subscribe BEFORE seeding so no `Running` / `InterfacesAdded` /
         // `InterfacesRemoved` signal can be missed between snapshot and stream
         // registration (subscribe-then-snapshot).
@@ -746,7 +744,13 @@ pub async fn run_task(
         };
         if !seeded {
             seeded = seed_from_bt(&mut state, &ctx).await;
+            if !seeded {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
+                continue;
+            }
         }
+        backoff = RECONNECT_BACKOFF_BASE;
 
         drive_arbiter_streams(
             &mut state,
