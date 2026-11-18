@@ -4,6 +4,7 @@ import {
     TouchScale,
 } from "@material/material.slint";
 import { MarqueeCompose } from "marquee_state.slint";
+import "./fonts/InterTabular-Bold.ttf";
 
 // Scrolling marquee over live text.
 //
@@ -458,8 +459,9 @@ export component NowPlayingView inherits Rectangle {
 
                     Text {
                         text: root.position_text;
+                        font-family: "Inter Tabular";
                         font-size: 18px * TouchScale.clamped_font_scale;
-                        font-weight: 800;
+                        font-weight: 700;
                         color: MaterialPalette.on_surface;
                         vertical-alignment: center;
                         width: 64px * TouchScale.widget_scale;
@@ -494,8 +496,9 @@ export component NowPlayingView inherits Rectangle {
 
                     Text {
                         text: root.duration_text;
+                        font-family: "Inter Tabular";
                         font-size: 18px * TouchScale.clamped_font_scale;
-                        font-weight: 800;
+                        font-weight: 700;
                         color: MaterialPalette.on_surface_variant;
                         vertical-alignment: center;
                         width: 64px * TouchScale.widget_scale;
