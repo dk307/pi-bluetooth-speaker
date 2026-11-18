@@ -117,8 +117,8 @@ fn row_presentation_formats_subtitle_status_and_passkey() {
     assert_eq!(subtitle_text(phone), "Phone · AA:BB:CC:DD:EE:FF");
     assert_eq!(
         status_text(phone, false),
-        "Active",
-        "connected reads Active"
+        "Connected",
+        "connected non-active device reads Connected"
     );
     assert_eq!(status_text(phone, true), "Active");
 
@@ -156,8 +156,8 @@ fn device_row_maps_fields_and_active_address() {
     let connected = device_row(phone, None);
     assert_eq!(
         connected.status.as_str(),
-        "Active",
-        "connected stays Active"
+        "Connected",
+        "connected without active_address reads Connected"
     );
 
     let available = device_row(pixel, None);
@@ -1088,4 +1088,101 @@ fn select_covers_active_device_and_adapter_name_fallbacks() {
     let absent = BtLinkDetails::select(&bt.link_snapshot().expect("snapshot"), None);
     assert!(absent.adapter.is_none());
     assert_eq!(absent.adapter_name_text().as_str(), "—");
+}
+
+#[test]
+fn multi_source_connected_devices_distinguish_active_from_standby() {
+    let (bt, mock) = BluetoothDevice::new_mocked();
+    let mut second = unpaired_device(PIXEL);
+    second.name = "Pixel 9".into();
+    second.paired = true;
+    second.connected = true;
+    mock.add_device(second);
+    bt.set_active_source(Some(PHONE));
+
+    let shared = Mutex::new(BtSharedUpdate::default());
+    let commands = TransportCommandQueue::default();
+    let device_commands = DeviceCommandQueue::default();
+    let mut state = BtMonitorState::default();
+
+    assert!(state.poll_tick(
+        &bt,
+        &shared,
+        &commands,
+        &device_commands,
+        std::time::Duration::from_secs(30),
+    ));
+    let devices = shared
+        .lock()
+        .unwrap()
+        .devices
+        .take()
+        .expect("devices update");
+    assert_eq!(devices.rows.len(), 2);
+    let phone_row = devices
+        .rows
+        .iter()
+        .find(|r| r.address.as_str() == "AA:BB:CC:DD:EE:FF")
+        .expect("phone row");
+    let pixel_row = devices
+        .rows
+        .iter()
+        .find(|r| r.address.as_str() == "11:22:33:44:55:66")
+        .expect("pixel row");
+    assert_eq!(phone_row.status.as_str(), "Active");
+    assert_eq!(pixel_row.status.as_str(), "Connected");
+
+    // Switching the arbitrated active source flips the row badges without
+    // disconnecting either device.
+    bt.set_active_source(Some(PIXEL));
+    assert!(state.poll_tick(
+        &bt,
+        &shared,
+        &commands,
+        &device_commands,
+        std::time::Duration::from_secs(30),
+    ));
+    let devices = shared
+        .lock()
+        .unwrap()
+        .devices
+        .take()
+        .expect("devices update");
+    let phone_row = devices
+        .rows
+        .iter()
+        .find(|r| r.address.as_str() == "AA:BB:CC:DD:EE:FF")
+        .expect("phone row");
+    let pixel_row = devices
+        .rows
+        .iter()
+        .find(|r| r.address.as_str() == "11:22:33:44:55:66")
+        .expect("pixel row");
+    assert_eq!(phone_row.status.as_str(), "Connected");
+    assert_eq!(pixel_row.status.as_str(), "Active");
+
+    // With no active source and no active playback, both connected devices
+    // read "Connected" rather than falsely promoting one to "Active".
+    bt.set_active_source(None);
+    mock.set_playback(None);
+    assert!(state.poll_tick(
+        &bt,
+        &shared,
+        &commands,
+        &device_commands,
+        std::time::Duration::from_secs(30),
+    ));
+    let devices = shared
+        .lock()
+        .unwrap()
+        .devices
+        .take()
+        .expect("devices update");
+    assert!(
+        devices
+            .rows
+            .iter()
+            .all(|r| r.connected && r.status.as_str() == "Connected"),
+        "standby connected devices should all read Connected"
+    );
 }

@@ -990,6 +990,7 @@ pub struct BtMonitorState {
     last_pb: Option<speaker_bluetooth::BtPlaybackState>,
     last_pcms: Option<Box<[speaker_bluetooth::BlueAlsaPcm]>>,
     last_active_pcm: Option<speaker_bluetooth::BlueAlsaPcm>,
+    last_active_device: Option<BtAddress>,
     last_details: Option<crate::ui::BtLinkDetails>,
     cover: CoverState,
     settle: Option<SettleWindow>,
@@ -1106,6 +1107,7 @@ impl BtMonitorState {
             }
         };
         let active_addr = bt.active_device();
+        self.last_active_device = active_addr;
         let active_pcm =
             speaker_bluetooth::select_active_pcm_for(&snapshot.pcms, active_addr).cloned();
         if self.last_pcms.as_ref() != Some(&snapshot.pcms) || self.last_active_pcm != active_pcm {
@@ -1128,6 +1130,7 @@ impl BtMonitorState {
         self.cover.path = None;
         self.last_pcms = None;
         self.last_active_pcm = None;
+        self.last_active_device = None;
         self.last_details = None;
         // The Devices screen re-publishes rows/alias/scanning after an aborted
         // tick, but staged pairing/toast events survive: they are one-shot
@@ -1604,12 +1607,12 @@ impl BtMonitorState {
             None => (None, false, None),
         };
         self.devices.adapter_id = adapter_id;
-        // Active device = the same selection the details pane uses, so the
-        // "Active" row badge always matches the playing connection.
+        // Active device = arbitrated `ActiveDevice` (falling back to the active
+        // playback player) so only the playing source reads "Active" while
+        // other connected standby devices read "Connected".
         let active = self
-            .last_details
-            .as_ref()
-            .and_then(|details| details.device.as_ref().map(|device| device.address));
+            .last_active_device
+            .or_else(|| self.last_pb.as_ref().and_then(|pb| pb.device_address));
         // Paired/active list: only bonded (or connected) devices.
         let rows = snapshot
             .devices

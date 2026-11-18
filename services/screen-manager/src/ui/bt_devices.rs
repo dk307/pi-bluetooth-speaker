@@ -90,12 +90,15 @@ pub fn subtitle_text(device: &BtDevice) -> String {
     )
 }
 
-/// Card status label: the active/connected device reads `Active`, other
-/// paired devices `Paired`, discovery rows `Available`.
+/// Card status label: `Active` for the currently selected audio source,
+/// `Connected` for other connected devices, `Paired` for bonded offline
+/// devices, and `Available` for unpaired discovery rows.
 #[must_use]
 pub fn status_text(device: &BtDevice, active: bool) -> &'static str {
-    if active || device.connected {
+    if active {
         "Active"
+    } else if device.connected {
+        "Connected"
     } else if device.paired {
         "Paired"
     } else {

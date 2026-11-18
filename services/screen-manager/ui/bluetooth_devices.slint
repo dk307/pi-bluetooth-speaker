@@ -19,7 +19,7 @@ export struct BtDeviceRow {
     address: string,
     name: string,
     subtitle: string, // "Phone · AA:BB:CC:DD:EE:FF"
-    status: string, // "Active" | "Paired" | "Available"
+    status: string, // "Active" | "Connected" | "Paired" | "Available"
     icon: string, // asset slug: phone | laptop | tablet | headset | bluetooth
     connected: bool,
     paired: bool,
@@ -207,7 +207,6 @@ component BtDestructivePill inherits Rectangle {
 component BtDeviceCard inherits Rectangle {
     in property <BtDeviceRow> device;
     in property <bool> from_discovery: false;
-    in property <bool> make_active: false;
     callback activate();
     callback remove();
 
@@ -284,7 +283,7 @@ component BtDeviceCard inherits Rectangle {
 
         // Connect: not connected, and not an unpaired discovery row.
         if !root.device.connected && !(root.from_discovery && !root.device.paired) : TonalButton {
-            text: root.make_active ? "Make Active" : "Connect";
+            text: "Connect";
             height: BtMetrics.pill_height_small;
             width: self.preferred-width;
             clicked => {
@@ -340,7 +339,6 @@ component BtDevicesList inherits Rectangle {
                 for row[i] in root.rows : BtDeviceCard {
                     device: row;
                     from_discovery: root.from_discovery;
-                    make_active: !root.from_discovery && i > 0 && root.rows[0].connected;
                     activate => {
                         root.action(i, root.from_discovery);
                     }
