@@ -30,6 +30,8 @@ pub struct BtDevicesUpdate {
     pub toast: Option<Box<str>>,
     /// Adapter alias for the header subtitle, when it changed.
     pub adapter_alias: Option<Box<str>>,
+    /// One-shot signal that a queued Connect/Disconnect/Remove action settled.
+    pub action_settled: bool,
 }
 
 /// Shell-side dedup gate: drops consecutive identical publishes so the Slint
@@ -46,7 +48,7 @@ impl BtDevicesController {
     /// are always delivered: a repeated refusal toast or pairing terminal is a
     /// fresh user-visible event, not redundant state.
     pub fn accepts(&mut self, update: &BtDevicesUpdate) -> bool {
-        let one_shot = update.pairing.is_some() || update.toast.is_some();
+        let one_shot = update.pairing.is_some() || update.toast.is_some() || update.action_settled;
         if !one_shot && self.last.as_ref() == Some(update) {
             return false;
         }

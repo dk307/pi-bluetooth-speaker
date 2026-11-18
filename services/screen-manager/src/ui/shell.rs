@@ -1090,6 +1090,10 @@ impl AppShell {
             }
         }
 
+        if update.action_settled || update.toast.is_some() {
+            w.set_bt_pending_address(String::new().into());
+        }
+
         if let Some(text) = &update.toast {
             // A refusal toast published WITHOUT a pairing session (agent
             // registration failure, no adapter, pairing-thread spawn failure)
@@ -1344,6 +1348,9 @@ impl AppShell {
                 tracing::debug!(idx, from_discovery, "Bluetooth row action index out of range");
                 return;
             };
+            if w.get_bt_pending_address().as_str() == row.address.as_str() {
+                return;
+            }
             let addr = match speaker_bluetooth::BtAddress::parse_str(row.address.as_str()) {
                 Ok(addr) => addr,
                 Err(e) => {
@@ -1360,10 +1367,12 @@ impl AppShell {
                 w.set_bt_pair_spinning(true);
                 speaker_bluetooth::DeviceCommand::Pair(addr)
             } else if row.connected {
+                w.set_bt_pending_address(row.address.clone());
                 speaker_bluetooth::DeviceCommand::Disconnect(addr)
             } else {
                 // Includes already-paired devices seen in discovery: connect
                 // without re-pairing (phone-style discovery list).
+                w.set_bt_pending_address(row.address.clone());
                 speaker_bluetooth::DeviceCommand::Connect(addr)
             };
             push_device_command(&device_cmds, command);

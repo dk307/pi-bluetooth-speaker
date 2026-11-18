@@ -1186,3 +1186,47 @@ fn multi_source_connected_devices_distinguish_active_from_standby() {
         "standby connected devices should all read Connected"
     );
 }
+
+#[test]
+fn row_action_sets_pending_address_and_clears_when_settled() {
+    let (shell, _win) = shell_with_window();
+    let device_commands = DeviceCommandQueue::default();
+    shell.wire_bluetooth_devices(&device_commands);
+
+    let (bt, _mock) = BluetoothDevice::new_mocked();
+    let snapshot = bt.link_snapshot().expect("snapshot");
+    let phone = &snapshot.devices[0];
+    shell.apply_bt_devices(BtDevicesUpdate {
+        rows: vec![device_row(phone, Some(PHONE))],
+        ..BtDevicesUpdate::default()
+    });
+
+    shell.window().invoke_bt_row_action(0, false);
+    assert_eq!(
+        shell.window().get_bt_pending_address().as_str(),
+        "AA:BB:CC:DD:EE:FF"
+    );
+    // Duplicate tap while pending is ignored.
+    shell.window().invoke_bt_row_action(0, false);
+    assert_eq!(device_commands.drain().len(), 1);
+
+    // An unrelated periodic publish without `action_settled` keeps the spinner.
+    shell.apply_bt_devices(BtDevicesUpdate {
+        rows: vec![device_row(phone, Some(PHONE))],
+        toast: None,
+        action_settled: false,
+        ..BtDevicesUpdate::default()
+    });
+    assert_eq!(
+        shell.window().get_bt_pending_address().as_str(),
+        "AA:BB:CC:DD:EE:FF"
+    );
+
+    // Worker settlement clears the pending address.
+    shell.apply_bt_devices(BtDevicesUpdate {
+        rows: vec![device_row(phone, Some(PHONE))],
+        action_settled: true,
+        ..BtDevicesUpdate::default()
+    });
+    assert_eq!(shell.window().get_bt_pending_address().as_str(), "");
+}

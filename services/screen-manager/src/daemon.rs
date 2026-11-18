@@ -955,6 +955,8 @@ struct BtDevicesMonitorState {
     staged_pairing: Option<PairingStatus>,
     /// User-visible action-failure toast awaiting publish.
     staged_toast: Option<Box<str>>,
+    /// One-shot flag set when a Connect/Disconnect/Remove command finishes.
+    staged_action_settled: bool,
 }
 
 #[cfg(feature = "ui")]
@@ -1228,6 +1230,7 @@ impl BtMonitorState {
         }
         let Some(adapter) = self.resolve_adapter_id(bt) else {
             self.devices.staged_toast = Some("Bluetooth adapter not available".into());
+            self.devices.staged_action_settled = true;
             return;
         };
         match command {
@@ -1279,6 +1282,7 @@ impl BtMonitorState {
             tracing::warn!(device = %name, error = %e, "Connect failed");
             self.stage_action_failure(&e);
         }
+        self.devices.staged_action_settled = true;
     }
 
     /// Disconnects the active device row.
@@ -1293,6 +1297,7 @@ impl BtMonitorState {
             tracing::warn!(device = %name, error = %e, "Disconnect failed");
             self.stage_action_failure(&e);
         }
+        self.devices.staged_action_settled = true;
     }
 
     /// Removes a paired device (`BlueZ` refuses connected devices, so a
@@ -1313,6 +1318,7 @@ impl BtMonitorState {
             tracing::warn!(device = %name, error = %e, "Remove failed");
             self.stage_action_failure(&e);
         }
+        self.devices.staged_action_settled = true;
     }
 
     /// Cancels an in-flight pairing attempt on the adapter.
@@ -1647,6 +1653,7 @@ impl BtMonitorState {
     ) {
         let staged_pairing = self.devices.staged_pairing.take();
         let staged_toast = self.devices.staged_toast.take();
+        let staged_action_settled = std::mem::take(&mut self.devices.staged_action_settled);
         let mut changed = false;
         if let Some(built) = built {
             let row_count = built.rows.len();
@@ -1682,14 +1689,27 @@ impl BtMonitorState {
                 || staged_alias.is_some()
                 || staged_pairing.is_some()
                 || staged_toast.is_some()
+                || staged_action_settled
             {
-                self.stage_devices_publish(update, staged_pairing, staged_toast, staged_alias);
+                self.stage_devices_publish(
+                    update,
+                    staged_pairing,
+                    staged_toast,
+                    staged_alias,
+                    staged_action_settled,
+                );
             }
             return;
         }
         // Snapshot failed: only staged events publish; rows stay as-is.
-        if staged_pairing.is_some() || staged_toast.is_some() {
-            self.stage_devices_publish(update, staged_pairing, staged_toast, None);
+        if staged_pairing.is_some() || staged_toast.is_some() || staged_action_settled {
+            self.stage_devices_publish(
+                update,
+                staged_pairing,
+                staged_toast,
+                None,
+                staged_action_settled,
+            );
         }
     }
 
@@ -1701,6 +1721,7 @@ impl BtMonitorState {
         pairing: Option<PairingStatus>,
         toast: Option<Box<str>>,
         adapter_alias: Option<Box<str>>,
+        action_settled: bool,
     ) {
         update.devices = Some(BtDevicesUpdate {
             rows: self.devices.last_rows.clone(),
@@ -1709,6 +1730,7 @@ impl BtMonitorState {
             pairing,
             toast,
             adapter_alias,
+            action_settled,
         });
     }
 

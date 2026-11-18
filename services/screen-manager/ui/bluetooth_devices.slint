@@ -10,7 +10,7 @@
 // deprecated animation-tick perpetual driver must never appear here.
 
 import { FilledButton, IconButton, OutlineButton, OutlineIconButton, TonalButton, TonalIconButton, MaterialPalette, MaterialStyleMetrics, MaterialText, MaterialTypography, TouchScale } from "@material/material.slint";
-import { OverlayAppBar } from "screen_app_bar.slint";
+import { OverlayAppBar, ScreenAppBar } from "screen_app_bar.slint";
 
 // One row of the paired/active device list or of the discovery list.
 // `address` keys every action and deletion in Rust — never an index: rows can
@@ -176,6 +176,8 @@ component BtDestructivePill inherits Rectangle {
 component BtDeviceCard inherits Rectangle {
     in property <BtDeviceRow> device;
     in property <bool> from_discovery: false;
+    in property <bool> pending: false;
+    in property <int> anim_frame: 0;
     callback activate();
     callback remove();
 
@@ -254,8 +256,23 @@ component BtDeviceCard inherits Rectangle {
             }
         }
 
+        // In-progress feedback while Connect/Disconnect is executing over RF.
+        if root.pending : Rectangle {
+            width: MaterialStyleMetrics.size_40;
+            height: MaterialStyleMetrics.size_40;
+            background: transparent;
+            BtProgressRing {
+                width: MaterialStyleMetrics.icon_size_24;
+                height: MaterialStyleMetrics.icon_size_24;
+                stroke_width: MaterialStyleMetrics.size_3;
+                frame: root.anim_frame;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+
         // Pair: unpaired discovery rows (phone-style flow).
-        if root.from_discovery && !root.device.paired : FilledButton {
+        if !root.pending && root.from_discovery && !root.device.paired : FilledButton {
             text: "Pair";
             width: self.preferred-width;
             clicked => {
@@ -264,7 +281,7 @@ component BtDeviceCard inherits Rectangle {
         }
 
         // Disconnect: connected rows (paired list or discovery).
-        if root.device.connected : OutlineIconButton {
+        if !root.pending && root.device.connected : OutlineIconButton {
             icon: @image-url("../../../assets/icons/close.svg");
             tooltip: "Disconnect";
             clicked => {
@@ -273,7 +290,7 @@ component BtDeviceCard inherits Rectangle {
         }
 
         // Connect: not connected, and not an unpaired discovery row.
-        if !root.device.connected && !(root.from_discovery && !root.device.paired) : TonalIconButton {
+        if !root.pending && !root.device.connected && !(root.from_discovery && !root.device.paired) : TonalIconButton {
             icon: @image-url("../../../assets/icons/bluetooth.svg");
             tooltip: "Connect";
             clicked => {
@@ -299,6 +316,8 @@ component BtDevicesList inherits Rectangle {
     in property <bool> from_discovery: false;
     in property <bool> scanning: false;
     in property <bool> delete_open: false;
+    in property <string> pending_address: "";
+    in property <int> anim_frame: 0;
     callback action(int, bool);
     callback remove(int);
 
@@ -329,6 +348,8 @@ component BtDevicesList inherits Rectangle {
                 for row[i] in root.rows : BtDeviceCard {
                     device: row;
                     from_discovery: root.from_discovery;
+                    pending: root.pending_address != "" && row.address == root.pending_address;
+                    anim_frame: root.anim_frame;
                     activate => {
                         root.action(i, root.from_discovery);
                     }
@@ -578,6 +599,7 @@ export component BluetoothDevicesScreen inherits Rectangle {
     in property <string> bt_delete_device_name;
     in-out property <bool> bt_toast_visible: false;
     in property <string> bt_toast_text;
+    in property <string> bt_pending_address: "";
 
     callback bt_add_device_clicked();
     callback bt_cancel_scan_clicked();
@@ -600,7 +622,7 @@ export component BluetoothDevicesScreen inherits Rectangle {
 
     spin_timer := Timer {
         interval: 16.65ms;
-        running: root.bt_devices_open && ((root.bt_devices_mode == 2 && root.bt_pair_spinning) || (root.bt_devices_mode == 1 && root.bt_scanning));
+        running: root.bt_devices_open && ((root.bt_devices_mode == 2 && root.bt_pair_spinning) || (root.bt_devices_mode == 1 && root.bt_scanning) || root.bt_pending_address != "");
         triggered() => {
             root.bt_anim_frame += 1;
         }
@@ -631,11 +653,10 @@ export component BluetoothDevicesScreen inherits Rectangle {
         }
     }
 
-    if root.bt_devices_mode != 2 : VerticalLayout {
-        // Standard overlay chrome (same app bar family as the Settings screens):
-        // centered title, Add Device action icon next to the trailing Close.
+    // Mode 0: Paired & Connected Bluetooth Devices screen.
+    if root.bt_devices_mode == 0 : VerticalLayout {
         OverlayAppBar {
-            title: root.bt_devices_mode == 1 ? "Add Device" : "Bluetooth Devices";
+            title: "Bluetooth Devices";
             trailing_icon: @image-url("../../../assets/icons/close.svg");
             trailing_tooltip: "Close";
             trailing_clicked => {
@@ -643,23 +664,22 @@ export component BluetoothDevicesScreen inherits Rectangle {
             }
         }
 
-        // Sub-header strip: mode 0 = live adapter subtitle + Add Device button;
-        // mode 1 = scanning status with spinner and a quick Cancel.
-        if root.bt_devices_mode == 0 : Rectangle {
-            min-height: max(MaterialStyleMetrics.size_48, mode0_sub.min-height);
-            background: MaterialPalette.surface;
+        // Dedicated action bar below the app bar: prominent visibility label + Add Device button.
+        Rectangle {
+            min-height: max(MaterialStyleMetrics.size_56, mode0_sub.min-height);
+            background: MaterialPalette.surface_container_low;
             mode0_sub := HorizontalLayout {
                 padding-left: BtMetrics.list_padding_h;
                 padding-right: BtMetrics.list_padding_h;
-                padding-top: MaterialStyleMetrics.padding_4;
-                padding-bottom: MaterialStyleMetrics.padding_4;
-                spacing: MaterialStyleMetrics.spacing_8;
+                padding-top: MaterialStyleMetrics.padding_12;
+                padding-bottom: MaterialStyleMetrics.padding_12;
+                spacing: MaterialStyleMetrics.spacing_12;
                 alignment: space-between;
                 cross-axis-alignment: center;
                 MaterialText {
                     text: root.bt_devices_subtitle;
-                    style: MaterialTypography.body_medium;
-                    color: MaterialPalette.on_surface_variant;
+                    style: MaterialTypography.title_medium;
+                    color: MaterialPalette.on_surface;
                     overflow: elide;
                     wrap: no-wrap;
                 }
@@ -673,12 +693,41 @@ export component BluetoothDevicesScreen inherits Rectangle {
             }
         }
 
-        if root.bt_devices_mode == 1 : Rectangle {
-            height: MaterialStyleMetrics.size_40;
+        BtDevicesList {
+            rows: root.bt_device_rows;
+            from_discovery: false;
+            scanning: false;
+            delete_open: root.bt_delete_open;
+            pending_address: root.bt_pending_address;
+            anim_frame: root.bt_anim_frame;
+            action(idx, from_discovery) => {
+                root.bt_row_action(idx, from_discovery);
+            }
+            remove(idx) => {
+                root.bt_row_delete(idx);
+            }
+        }
+    }
+
+    // Mode 1: Dedicated Add Device discovery screen (separate view & scroll state).
+    if root.bt_devices_mode == 1 : VerticalLayout {
+        ScreenAppBar {
+            title: "Add Device";
+            trailing_icon: @image-url("../../../assets/icons/back.svg");
+            trailing_tooltip: "Back";
+            trailing_clicked => {
+                root.bt_cancel_scan_clicked();
+            }
+        }
+
+        Rectangle {
+            min-height: max(MaterialStyleMetrics.size_48, mode1_sub.min-height);
             background: MaterialPalette.surface;
-            HorizontalLayout {
+            mode1_sub := HorizontalLayout {
                 padding-left: BtMetrics.list_padding_h;
                 padding-right: BtMetrics.list_padding_h;
+                padding-top: MaterialStyleMetrics.padding_8;
+                padding-bottom: MaterialStyleMetrics.padding_8;
                 spacing: MaterialStyleMetrics.spacing_8;
                 alignment: space-between;
                 cross-axis-alignment: center;
@@ -711,10 +760,12 @@ export component BluetoothDevicesScreen inherits Rectangle {
         }
 
         BtDevicesList {
-            rows: root.bt_devices_mode == 1 ? root.bt_discovered_rows : root.bt_device_rows;
-            from_discovery: root.bt_devices_mode == 1;
+            rows: root.bt_discovered_rows;
+            from_discovery: true;
             scanning: root.bt_scanning;
             delete_open: root.bt_delete_open;
+            pending_address: root.bt_pending_address;
+            anim_frame: root.bt_anim_frame;
             action(idx, from_discovery) => {
                 root.bt_row_action(idx, from_discovery);
             }
