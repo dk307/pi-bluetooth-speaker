@@ -516,6 +516,14 @@ fn is_animating_tracks_pairing_and_toast() {
     w.set_bt_toast_visible(false);
     assert!(!w.get_is_animating());
 
+    w.set_bt_pending_address("AA:BB:CC:DD:EE:FF".into());
+    assert!(
+        w.get_is_animating(),
+        "pending row action spinner keeps render loop active"
+    );
+    w.set_bt_pending_address("".into());
+    assert!(!w.get_is_animating());
+
     // A16: the indeterminate scanning spinner (mode 1) is a live animation
     // source too, so `is_animating` must cover it.
     w.set_bt_devices_mode(1);

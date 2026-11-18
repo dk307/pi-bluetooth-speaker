@@ -95,9 +95,11 @@ export component MainWindow inherits Window {
     out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01
         // The devices screen keeps frames coming only while a live animation
         // source runs: the pairing ring (mode 2 + spinning), the Add-Device
-        // scanning spinner (mode 1 + scanning), or a visible toast (plan A9/A16).
+        // scanning spinner (mode 1 + scanning), a pending row action, or a
+        // visible toast (plan A9/A16).
         || (root.bt_devices_open && ((root.bt_devices_mode == 2 && root.bt_pair_spinning)
             || (root.bt_devices_mode == 1 && root.bt_scanning)
+            || root.bt_pending_address != ""
             || root.bt_toast_visible));
 
     // Lifted to MainWindow for title switching in ScreenAppBar
