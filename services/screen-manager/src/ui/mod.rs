@@ -28,7 +28,7 @@ pub(crate) mod theme;
 #[doc(inline)]
 pub use backdrop::{
     BACKDROP_BLUR_RADIUS, BackdropAction, BackdropError, BlurredBackdrop, OVERLAY_TOP_INSET,
-    OverlayBackdropTracker, bgrx_to_rgba, blur_premultiplied_rgba, blur_region,
+    OverlayBackdropTracker, bgrx_to_rgba, blur_premultiplied_rgba, blur_region, blur_rgba_region,
 };
 #[doc(inline)]
 pub use boot::{BootCheckId, BootCheckStatus, BootCheckUpdate, BootProbe};

@@ -98,6 +98,52 @@ pub fn blur_region(
     })
 }
 
+/// Extracts the region below `top_inset` from a full-frame RGBA8 buffer and
+/// returns its blurred, premultiplied RGBA representation.
+///
+/// `rgba` must hold exactly `frame_width * frame_height * 4` bytes.
+///
+/// # Errors
+///
+/// Returns [`BackdropError::geometry`] when the buffer length does not match the
+/// announced geometry or when `top_inset` covers the whole frame, and
+/// [`BackdropError::blur`] when the blur backend rejects the image.
+pub fn blur_rgba_region(
+    rgba: &[u8],
+    frame_width: u32,
+    frame_height: u32,
+    top_inset: u32,
+    radius: u32,
+) -> Result<BlurredBackdrop, BackdropError> {
+    let expected = (frame_width as usize) * (frame_height as usize) * 4;
+    if rgba.len() != expected {
+        return Err(BackdropError::geometry(
+            format!("{expected} bytes"),
+            format!("captured frame has {} bytes", rgba.len()),
+        ));
+    }
+    if top_inset >= frame_height {
+        return Err(BackdropError::geometry(
+            format!("top inset < {frame_height}"),
+            format!("top inset {top_inset} leaves no rows to capture"),
+        ));
+    }
+
+    let width = frame_width;
+    let height = frame_height - top_inset;
+    let byte_offset = top_inset as usize * frame_width as usize * 4;
+    let mut cropped = rgba[byte_offset..].to_vec();
+    for alpha in cropped.iter_mut().skip(3).step_by(4) {
+        *alpha = 255;
+    }
+    blur_premultiplied_rgba(&mut cropped, width, height, radius)?;
+    Ok(BlurredBackdrop {
+        width,
+        height,
+        pixels: cropped,
+    })
+}
+
 /// Applies a stack blur to a premultiplied RGBA buffer in place.
 ///
 /// The buffer must hold at least `width * height * 4` bytes; a shorter buffer

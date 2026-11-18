@@ -312,15 +312,16 @@ impl Session {
                 shell_sync.wire_bluetooth_transport(&commands_sync);
             }
             daemon::apply_shared_bt_state(&shell_sync, &shared);
+            // Release the frozen backdrop once both overlays (and their fade-out)
+            // have finished closing so the next open captures a fresh snapshot.
+            if shell_sync.window().get_overlay_backdrop_available()
+                && !shell_sync.is_volume_hud_active()
+                && !shell_sync.is_codec_hud_active()
+            {
+                shell_sync.set_overlay_backdrop(slint::Image::default());
+                tracing::debug!("Cleared overlay backdrop");
+            }
         });
-
-        // The KMS/FemtoVG backend exposes no CPU-readable scanout, so blurred
-        // overlay backdrops cannot be captured here: `overlay_backdrop_available`
-        // stays false and overlays keep the full-strength 0.55 scrim.
-        // `daemon::sync_overlay_backdrop` stays harness-only.
-        tracing::info!(
-            "Overlay backdrop capture unavailable on the KMS backend; overlays use scrim dimming only"
-        );
 
         // Physical EC12 encoder only exists on the live appliance (mocked
         // sessions must never open GPIO).

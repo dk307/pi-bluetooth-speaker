@@ -1101,6 +1101,67 @@ impl AppShell {
     fn setup_callbacks(&self) {
         self.setup_navigation_callbacks();
         self.setup_transport_callbacks();
+        self.setup_overlay_backdrop_callback();
+    }
+
+    fn setup_overlay_backdrop_callback(&self) {
+        let win_weak = self.window.as_weak();
+        self.window.on_prepare_overlay_backdrop(move || {
+            let Some(win) = win_weak.upgrade() else {
+                return;
+            };
+            let top_inset = win.get_top_bar_height().round();
+            let top_inset = if top_inset.is_finite() && top_inset >= 0.0 {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "top_inset is finite, >= 0.0, and bounded by the window height"
+                )]
+                {
+                    top_inset as u32
+                }
+            } else {
+                OVERLAY_TOP_INSET
+            };
+            let snapshot = match win.window().take_snapshot() {
+                Ok(snapshot) => snapshot,
+                Err(err) => {
+                    tracing::debug!(
+                        error = %err,
+                        "Window snapshot unavailable for overlay backdrop; using scrim dimming"
+                    );
+                    return;
+                }
+            };
+            match super::backdrop::blur_rgba_region(
+                snapshot.as_bytes(),
+                snapshot.width(),
+                snapshot.height(),
+                top_inset,
+                super::backdrop::BACKDROP_BLUR_RADIUS,
+            ) {
+                Ok(blurred) => {
+                    let mut buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(
+                        blurred.width,
+                        blurred.height,
+                    );
+                    buffer.make_mut_bytes().copy_from_slice(&blurred.pixels);
+                    win.set_overlay_backdrop(slint::Image::from_rgba8_premultiplied(buffer));
+                    win.set_overlay_backdrop_available(true);
+                    tracing::debug!(
+                        width = blurred.width,
+                        height = blurred.height,
+                        "Captured blurred overlay backdrop from window snapshot"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "Failed to blur window snapshot; falling back to scrim dimming"
+                    );
+                }
+            }
+        });
     }
 
     fn setup_navigation_callbacks(&self) {

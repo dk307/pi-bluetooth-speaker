@@ -111,7 +111,12 @@ export component MainWindow inherits Window {
         ok: false,
     };
 
+    callback prepare_overlay_backdrop();
+
     public function show_volume_hud() {
+        if (!root.volume_hud_visible && root.volume_hud_opacity <= 0.01 && !root.codec_hud_visible && root.codec_hud_opacity <= 0.01) {
+            root.prepare_overlay_backdrop();
+        }
         root.volume_hud_elapsed_ms = 0;
         root.volume_hud_visible = true;
         root.codec_hud_visible = false;
@@ -127,6 +132,9 @@ export component MainWindow inherits Window {
     // Opens the codec information overlay. The Volume HUD and the codec overlay are
     // mutually exclusive: only one of them can cover the viewport at a time.
     public function show_codec_hud() {
+        if (!root.volume_hud_visible && root.volume_hud_opacity <= 0.01 && !root.codec_hud_visible && root.codec_hud_opacity <= 0.01) {
+            root.prepare_overlay_backdrop();
+        }
         root.codec_hud_elapsed_ms = 0;
         root.codec_hud_visible = true;
         root.volume_hud_visible = false;

@@ -14,6 +14,7 @@ use screen_manager::daemon::sync_overlay_backdrop;
 use screen_manager::ui::{
     AppShell, BACKDROP_BLUR_RADIUS, BackdropAction, Bgrx8888Pixel, Framebuffer, MainWindow,
     OVERLAY_TOP_INSET, OverlayBackdropTracker, bgrx_to_rgba, blur_premultiplied_rgba, blur_region,
+    blur_rgba_region,
 };
 use slint::platform::software_renderer::MinimalSoftwareWindow;
 use slint::platform::{PointerEventButton, WindowEvent};
@@ -564,6 +565,9 @@ fn the_panel_is_opaque_when_no_backdrop_is_published() {
     for open in [AppShell::show_volume_hud, AppShell::show_codec_hud] {
         shell.window().set_active_tab(1);
         open(&shell);
+        // Simulate a failed/unavailable snapshot so the panel must fall back to
+        // its opaque gradient rather than letting live content ghost through.
+        shell.set_overlay_backdrop(slint::Image::default());
         settle();
         let top_bar_px = shell.window().get_top_bar_height().ceil();
         assert!(
@@ -604,4 +608,34 @@ fn the_panel_is_opaque_when_no_backdrop_is_published() {
             ghost.map(|(i, _)| i)
         );
     }
+}
+
+#[test]
+fn blur_rgba_region_crops_blurs_and_validates_geometry() {
+    let err =
+        blur_rgba_region(&[0u8; 16], 10, 10, 2, 1).expect_err("short RGBA buffer must be rejected");
+    assert!(err.is_geometry());
+
+    let valid = vec![255u8; 10 * 10 * 4];
+    let err = blur_rgba_region(&valid, 10, 10, 10, 1)
+        .expect_err("top inset covering whole frame must be rejected");
+    assert!(err.is_geometry());
+
+    let mut frame = vec![0u8; 20 * 20 * 4];
+    for y in 0..20 {
+        for x in 0..20 {
+            let idx = (y * 20 + x) * 4;
+            frame[idx] = if x < 10 { 200 } else { 20 };
+            frame[idx + 3] = 255;
+        }
+    }
+    let blurred = blur_rgba_region(&frame, 20, 20, 4, 3).expect("valid RGBA blur");
+    assert_eq!(blurred.width, 20);
+    assert_eq!(blurred.height, 16);
+    // Mid-boundary pixel should be smoothed between 200 and 20.
+    let mid_r = blurred.pixels[(8 * 20 + 10) * 4];
+    assert!(
+        mid_r > 20 && mid_r < 200,
+        "expected smoothed edge, got {mid_r}"
+    );
 }
