@@ -67,7 +67,7 @@ export component RadioButton {
             indicator.background: MaterialPalette.on_surface;
             indicator.opacity: root.checked ? MaterialPalette.disable_opacity : 0;
         }
-        highlighted when !root.checked && (state_area.pressed || state_area.has_focus || state_area.has_hover) : {
+        highlighted when !root.checked && (state_area.pressed || state_area.has_focus) : {
             border.border_color: MaterialPalette.on_surface;
         }
         checked when root.checked : {

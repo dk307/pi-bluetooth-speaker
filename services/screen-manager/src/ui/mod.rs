@@ -30,7 +30,8 @@ pub use boot::{BootCheckId, BootCheckStatus, BootCheckUpdate, BootProbe};
 pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError, FramebufferMockCtrl};
 #[doc(inline)]
 pub use generated::{
-    AppTheme, BootCheckLine, MainWindow, MarqueeCompose, MaterialPalette, SplashScreen,
+    AppTheme, BootCheckLine, MainWindow, MarqueeCompose, MaterialPalette, MaterialStyleMetrics,
+    SplashScreen, TouchScale, VirtualKeyboard,
 };
 #[doc(inline)]
 pub use shell::{AppShell, BtLinkDetails, EncoderVolumeTracker};

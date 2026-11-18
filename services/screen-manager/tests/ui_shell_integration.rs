@@ -764,6 +764,7 @@ fn ui_shell_volume_hud_config_and_amp_auto_popup() {
         volume_hud_timeout_ms: VolumeHudTimeoutMs::new(1_500),
         volume_hud_fade_ms: VolumeHudFadeMs::new(150),
         codec_hud_timeout_ms: CodecHudTimeoutMs::new(10_000),
+        ..CoreConfig::default()
     };
     shell.apply_config(&cfg);
     assert_eq!(shell.current_theme(), ThemePreset::MarantzAmber);
@@ -935,9 +936,137 @@ fn ui_shell_rotary_encoder_volume_and_mute_integration() {
 
 #[cfg(feature = "ui")]
 #[test]
+fn ui_shell_touch_scale_and_virtual_keyboard_integration() {
+    use screen_manager::ui::{
+        AppShell, Framebuffer, MainWindow, MaterialStyleMetrics, TouchScale, VirtualKeyboard,
+    };
+    use slint::ComponentHandle;
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+    shell.window().show().expect("Failed to show MainWindow");
+
+    // 1. Default TouchScale: font_scale = 1.15, widget_scale = 1.075
+    assert!((shell.font_scale() - 1.15).abs() < 1e-4);
+    assert!((shell.widget_scale() - 1.075).abs() < 1e-4);
+
+    let metrics = shell.window().global::<MaterialStyleMetrics>();
+    // Thin stroke tokens remain unscaled integer pixels (1px, 2px, 3px).
+    assert!((metrics.get_size_1() - 1.0).abs() < 1e-4);
+    assert!((metrics.get_size_2() - 2.0).abs() < 1e-4);
+    assert!((metrics.get_size_3() - 3.0).abs() < 1e-4);
+    // Damped widget metrics at default 1.15 (widget_scale = 1.075)
+    assert!((metrics.get_size_32() - 38.0 * 1.075).abs() < 1e-2);
+    assert!((metrics.get_size_40() - 46.0 * 1.075).abs() < 1e-2);
+    assert!((metrics.get_padding_16() - 14.0 * 1.075).abs() < 1e-2);
+    assert!((metrics.get_icon_size_24() - 24.0 * 1.075).abs() < 1e-2);
+
+    // 2. Top bar height: fixed 60px on Tab 0, scaled `size_64` on Tabs 1..=5
+    assert_eq!(shell.current_tab(), 0);
+    assert!((shell.window().get_top_bar_height() - 60.0).abs() < 1e-4);
+
+    shell.set_tab(5);
+    assert!((shell.window().get_top_bar_height() - 56.0 * 1.075).abs() < 1e-2);
+
+    // 3. Scale transitions across 1.0..=1.35 and NaN/out-of-bounds clamping
+    shell.set_font_scale(1.0);
+    assert!((shell.font_scale() - 1.0).abs() < 1e-4);
+    assert!((shell.widget_scale() - 1.0).abs() < 1e-4);
+    assert!((shell.window().get_top_bar_height() - 56.0).abs() < 1e-2);
+
+    shell.set_font_scale(1.35);
+    assert!((shell.font_scale() - 1.35).abs() < 1e-4);
+    assert!((shell.widget_scale() - 1.175).abs() < 1e-4);
+    assert!((shell.window().get_top_bar_height() - 56.0 * 1.175).abs() < 1e-2);
+
+    shell.set_font_scale(0.5);
+    assert!((shell.font_scale() - 1.0).abs() < 1e-4);
+    shell.set_font_scale(2.5);
+    assert!((shell.font_scale() - 1.35).abs() < 1e-4);
+    shell.set_font_scale(f32::NAN);
+    assert!((shell.font_scale() - 1.15).abs() < 1e-4);
+
+    // Callback from FontSizeControl slider updates TouchScale with clamping
+    shell.window().invoke_font_scale_changed(1.25);
+    assert!((shell.font_scale() - 1.25).abs() < 1e-4);
+    assert!((shell.widget_scale() - 1.125).abs() < 1e-4);
+    shell.window().invoke_font_scale_changed(f32::NAN);
+    assert!((shell.font_scale() - 1.15).abs() < 1e-4);
+
+    // Guard against NaN injected directly into the Slint global
+    shell
+        .window()
+        .global::<TouchScale>()
+        .set_font_scale(f32::NAN);
+    assert!((shell.font_scale() - 1.0).abs() < 1e-4);
+    shell.set_font_scale(1.15);
+
+    // 4. Render 800x480 Themes & Scale view and Widget Scale Showcase at 1.0, 1.15, 1.35
+    shell.window().set_show_themes(true);
+    for scale in [1.0_f32, 1.15, 1.35] {
+        shell.set_font_scale(scale);
+        shell.window().set_show_widget_preview(false);
+        assert!(
+            fb.render_frame_full_redraw(&window)
+                .expect("render themes view")
+        );
+        shell.window().set_show_widget_preview(true);
+        assert!(
+            fb.render_frame_full_redraw(&window)
+                .expect("render widget showcase")
+        );
+    }
+
+    // 5. VirtualKeyboard lifecycle & app_bar_back hierarchy
+    let vk = shell.window().global::<VirtualKeyboard>();
+    assert!(!vk.get_visible());
+    vk.invoke_open("Speaker Name".into(), "DietPi".into());
+    assert!(vk.get_visible());
+    assert_eq!(vk.get_label().as_str(), "Speaker Name");
+    assert_eq!(vk.get_current_text().as_str(), "DietPi");
+
+    vk.invoke_push_key("X".into());
+    assert_eq!(vk.get_current_text().as_str(), "DietPiX");
+    assert!(
+        fb.render_frame_full_redraw(&window)
+            .expect("render virtual keyboard")
+    );
+
+    // Pressing app_bar_back while VirtualKeyboard is open closes the keyboard first
+    shell.window().invoke_app_bar_back();
+    assert!(!vk.get_visible());
+    assert!(shell.window().get_show_widget_preview());
+
+    // Re-open, clear, and submit
+    vk.invoke_open("Speaker Name".into(), "DietPi".into());
+    vk.invoke_clear();
+    assert_eq!(vk.get_current_text().as_str(), "");
+    vk.invoke_push_key("H".into());
+    vk.invoke_push_key("I".into());
+    vk.invoke_submit();
+    assert!(!vk.get_visible());
+    assert_eq!(vk.get_current_text().as_str(), "HI");
+
+    // Next app_bar_back exits widget preview -> themes -> settings -> Now Playing
+    shell.window().invoke_app_bar_back();
+    assert!(!shell.window().get_show_widget_preview());
+    assert!(shell.window().get_show_themes());
+
+    shell.window().invoke_app_bar_back();
+    assert!(!shell.window().get_show_themes());
+    assert_eq!(shell.current_tab(), 5);
+
+    shell.window().invoke_app_bar_back();
+    assert_eq!(shell.current_tab(), 0);
+}
+
+#[cfg(feature = "ui")]
+#[test]
 fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     use screen_manager::config::{
-        CodecHudTimeoutMs, CoreConfig, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
+        CodecHudTimeoutMs, CoreConfig, FontScale, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
         VolumeStepPercent,
     };
     use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
@@ -984,6 +1113,7 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
         volume_hud_timeout_ms: VolumeHudTimeoutMs::new(5_250),
         volume_hud_fade_ms: VolumeHudFadeMs::new(650),
         codec_hud_timeout_ms: CodecHudTimeoutMs::new(45_000),
+        font_scale: FontScale::from_percent(125),
     };
     shell.apply_config(&cfg);
 
@@ -1040,4 +1170,79 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     // Persisting to an unwritable path logs an error instead of panicking.
     shell.wire_config(std::path::Path::new("/nonexistent-dir/settings.json"));
     shell.window().invoke_set_volume_step_percent(2);
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_font_size_slider_touch_interaction() {
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use slint::{ComponentHandle, LogicalPosition};
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+    shell.window().show().expect("Failed to show MainWindow");
+
+    shell.set_tab(5);
+    shell.window().set_show_themes(true);
+    shell.set_font_scale(1.15);
+    assert!(
+        fb.render_frame_full_redraw(&window)
+            .expect("render Screen Settings")
+    );
+
+    // First verify ThemePresetCard at (220, 100) receives taps inside Screen Settings
+    let theme_pos = LogicalPosition::new(220.0, 100.0);
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: theme_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: theme_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert_eq!(
+        shell.current_theme(),
+        screen_manager::ui::ThemePreset::MarantzAmber,
+        "tapping second ThemePresetCard inside ScrollView must switch theme"
+    );
+
+    // Tap the large "A" button (x ≈ 665px, y ≈ 165px) to step up by 0.05.
+    let inc_pos = LogicalPosition::new(665.0, 165.0);
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: inc_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: inc_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert!(
+        shell.font_scale() > 1.15,
+        "tapping large A button must increase font_scale (got {})",
+        shell.font_scale()
+    );
+
+    // Drag across the FontSizeControl slider track (x 250 -> x 600 at y=165) to verify sliding works.
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: LogicalPosition::new(250.0, 165.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(600.0, 165.0),
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: LogicalPosition::new(600.0, 165.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert!(
+        shell.font_scale() > 1.25,
+        "sliding FontSizeControl slider to the right must increase font_scale (got {})",
+        shell.font_scale()
+    );
 }

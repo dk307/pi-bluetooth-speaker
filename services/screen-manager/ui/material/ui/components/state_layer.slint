@@ -3,8 +3,6 @@
 
 import { MaterialAnimations } from "../styling/material_animations.slint";
 import { MaterialPalette } from "../styling/material_palette.slint";
-import { ToolTip } from "./tooltip.slint";
-import { MaterialWindowAdapter } from "./material_window.slint";
 
 export component Ripple {
     in property <length> border_radius;
@@ -20,15 +18,15 @@ export component Ripple {
         clip: root.clip_ripple;
 
         ripple := Rectangle {
-            x: root.pressed_x  - self.width / 2;
-            y: root.pressed_y  - self.height / 2;
+            x: root.pressed_x - self.width / 2;
+            y: root.pressed_y - self.height / 2;
             height: self.width;
             border_radius: self.width / 2;
             opacity: MaterialPalette.state_layer_opacity_press;
             background: root.color;
 
             init => {
-                self.width =  root.width * 2 * 1.4142;
+                self.width = root.width * 2 * 1.4142;
             }
 
             animate width { duration: MaterialAnimations.ripple_duration; easing: MaterialAnimations.ripple_easing; }
@@ -45,7 +43,7 @@ export component StateLayer {
     in property <bool> has_focus;
     in property <bool> has_hover;
 
-    property <float> state_layer_opacity;
+    property <float> state_layer_opacity: 0;
 
     Rectangle {
         width: 100%;
@@ -64,6 +62,9 @@ export component StateLayer {
         @children
     }
 
+    // Touch hover state intentionally omitted: touchscreen taps leave
+    // `TouchArea.has-hover` true after finger lift, so only `pressed`,
+    // `focus`, and `disabled` states render.
     states [
         disabled when !root.enabled && root.display_background : {
             root.state_layer_opacity: MaterialPalette.state_layer_opacity_focus;
@@ -73,9 +74,6 @@ export component StateLayer {
         }
         pressed when root.enabled && root.pressed : {
             root.state_layer_opacity: MaterialPalette.state_layer_opacity_press;
-        }
-        hover when root.enabled && root.has_hover && !MaterialWindowAdapter.disable_hover : {
-            root.state_layer_opacity: MaterialPalette.state_layer_opacity_hover;
         }
     ]
 
@@ -126,12 +124,6 @@ export component FocusTouchArea inherits TouchArea {
     }
 
     @children
-
-
-    if root.tooltip != "" && root.has_hover && !MaterialWindowAdapter.disable_hover && !root.pressed : ToolTip {
-        y: root.tooltip_offset;
-        text: root.tooltip;
-    }
 }
 
 export component StateLayerArea inherits FocusTouchArea {
@@ -144,7 +136,7 @@ export component StateLayerArea inherits FocusTouchArea {
     property <bool> popup_open;
     property <bool> has_h: root.mouse-x > 0 && root.mouse-x < root.width && root.mouse-y > 0 && root.mouse-y < root.height;
 
-    if !root.enabled || (root.enabled && (root.has_focus || root.pressed || root.enter_pressed || root.has_hover)) : StateLayer {
+    if !root.enabled || (root.enabled && (root.has_focus || root.pressed || root.enter_pressed)) : StateLayer {
         width: 100%;
         height: 100%;
         background: root.transparent_background ? transparent : root.color;
@@ -152,7 +144,7 @@ export component StateLayerArea inherits FocusTouchArea {
         enabled: root.enabled;
         pressed: root.pressed || root.enter_pressed;
         has_focus: root.has_focus;
-        has_hover: root.has_hover;
+        has_hover: false;
         display_background: root.display_background;
     }
 

@@ -68,6 +68,7 @@ component TabItemTemplate inherits BaseTabItemTemplate {
                     text: root.text;
                     style: MaterialTypography.title_small;
                     color: MaterialPalette.on_surface_variant;
+                    overflow: elide;
                 }
             }
         }
@@ -115,6 +116,7 @@ component SecondaryTabItemTemplate inherits BaseTabItemTemplate {
                 style: MaterialTypography.title_small;
                 color: MaterialPalette.on_surface_variant;
                 vertical_alignment: center;
+                overflow: elide;
             }
         }
 

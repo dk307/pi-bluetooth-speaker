@@ -14,14 +14,14 @@ use std::rc::Rc;
 use slint::ComponentHandle;
 
 use crate::config::{
-    CodecHudTimeoutMs, CoreConfig, DEFAULT_MARQUEE_FPS, DEFAULT_VOLUME_STEP_PERCENT,
-    MAX_CODEC_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
-    MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_VOLUME_HUD_FADE_MS,
-    MIN_VOLUME_HUD_TIMEOUT_MS, MIN_VOLUME_STEP_PERCENT, MarqueeFps, VolumeHudFadeMs,
-    VolumeHudTimeoutMs, VolumeStepPercent,
+    CodecHudTimeoutMs, CoreConfig, DEFAULT_FONT_SCALE, DEFAULT_MARQUEE_FPS,
+    DEFAULT_VOLUME_STEP_PERCENT, FontScale, MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE,
+    MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_STEP_PERCENT,
+    MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE, MIN_VOLUME_HUD_FADE_MS, MIN_VOLUME_HUD_TIMEOUT_MS,
+    MIN_VOLUME_STEP_PERCENT, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
 };
 
-use super::generated::{AppTheme, MainWindow, MarqueeCompose};
+use super::generated::{AppTheme, MainWindow, MarqueeCompose, TouchScale};
 use super::theme::ThemePreset;
 
 /// Tracks cumulative [`speaker_hardware::EncoderStatus`] counters and translates
@@ -301,6 +301,7 @@ impl AppShell {
         self.set_volume_hud_timeout_ms(config.volume_hud_timeout_ms);
         self.set_volume_hud_fade_ms(config.volume_hud_fade_ms);
         self.set_codec_hud_timeout_ms(config.codec_hud_timeout_ms);
+        self.set_font_scale(config.font_scale.value());
         if let Some(theme) = config.theme {
             self.apply_theme(theme);
         }
@@ -517,6 +518,8 @@ impl AppShell {
             volume_hud_timeout_ms: Self::volume_hud_timeout_from_window(window),
             volume_hud_fade_ms: Self::hud_fade_from_window(window),
             codec_hud_timeout_ms: Self::codec_hud_timeout_from_window(window),
+            font_scale: FontScale::try_from(window.global::<TouchScale>().get_clamped_font_scale())
+                .unwrap_or_default(),
         }
     }
 
@@ -693,6 +696,36 @@ impl AppShell {
         self.window.get_cd_enabled()
     }
 
+    /// Default touch font scale (`1.15`).
+    pub const DEFAULT_FONT_SCALE: f32 = DEFAULT_FONT_SCALE;
+
+    /// Minimum allowed touch font scale (`1.0`).
+    pub const MIN_FONT_SCALE: f32 = MIN_FONT_SCALE;
+
+    /// Maximum allowed touch font scale (`1.35`).
+    pub const MAX_FONT_SCALE: f32 = MAX_FONT_SCALE;
+
+    /// Returns the active clamped touch font scale (`1.0..=1.35`).
+    #[must_use]
+    pub fn font_scale(&self) -> f32 {
+        self.window.global::<TouchScale>().get_clamped_font_scale()
+    }
+
+    /// Returns the active damped widget scale (`1.0 + (font_scale - 1.0) * 0.5`).
+    #[must_use]
+    pub fn widget_scale(&self) -> f32 {
+        self.window.global::<TouchScale>().get_widget_scale()
+    }
+
+    /// Sets the touch font scale (clamped to `1.0..=1.35`, defaulting to `1.15` on `NaN`).
+    pub fn set_font_scale(&self, scale: f32) {
+        let clamped = if scale.is_finite() {
+            scale.clamp(Self::MIN_FONT_SCALE, Self::MAX_FONT_SCALE)
+        } else {
+            Self::DEFAULT_FONT_SCALE
+        };
+        self.window.global::<TouchScale>().set_font_scale(clamped);
+    }
     /// Sets whether the optical CD player service and navigation entry are enabled.
     ///
     /// If disabled while the shell is currently on the CD Player tab (tab 3), the active tab
@@ -1140,6 +1173,21 @@ impl AppShell {
 
         self.window.on_night_mode_clicked(|| {
             tracing::info!("Night mode clicked");
+        });
+
+        let win = self.window.as_weak();
+        let persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_font_scale_changed(move |scale| {
+            if let Some(w) = win.upgrade() {
+                let clamped = if scale.is_finite() {
+                    scale.clamp(Self::MIN_FONT_SCALE, Self::MAX_FONT_SCALE)
+                } else {
+                    Self::DEFAULT_FONT_SCALE
+                };
+                w.global::<TouchScale>().set_font_scale(clamped);
+                Self::persist_window_state(&w, &persist_tx);
+                tracing::debug!(font_scale = clamped, "Touch font scale updated");
+            }
         });
     }
 

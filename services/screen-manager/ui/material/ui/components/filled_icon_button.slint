@@ -17,6 +17,9 @@ export component FilledIconButton {
 
     callback clicked();
 
+    min_width: base.min_width;
+    min_height: base.min_height;
+
     accessible-role: button;
     accessible-enabled: root.enabled;
     accessible-label: root.tooltip;
@@ -33,12 +36,15 @@ export component FilledIconButton {
     }
 
     base := BaseButton {
+        width: 100%;
+        height: 100%;
         icon: root.checked ? root.checked_icon : root.icon;
         border_radius: self.height / 2;
         color: !root.enabled ? MaterialPalette.on_surface_variant : root.checkable ? MaterialPalette.primary : MaterialPalette.on_primary;
         button_horizontal_padding: 0;
         button_vertical_padding: 0;
-        width: self.height;
+        min_layout_width: MaterialStyleMetrics.size_40;
+        min_layout_height: self.min_layout_width;
         icon_size: MaterialStyleMetrics.icon_size_24;
 
         clicked => {

@@ -1,33 +1,46 @@
-import { MaterialPalette } from "@material/material.slint";
+import {
+    MaterialPalette,
+    MaterialStyleMetrics,
+    MaterialText,
+    MaterialTypography,
+    TouchScale,
+} from "@material/material.slint";
 import { AppTheme } from "app_theme.slint";
 import { NowPlayingView } from "now_playing.slint";
 import { SettingsView } from "settings_view.slint";
 
-// One label / value line in the Bluetooth details cards.
+// One label / value line in the Bluetooth details cards, scaled by `TouchScale`.
 component DetailRow inherits Rectangle {
     in property <string> label;
     in property <string> value;
-    height: 24px;
+    min-height: max(24px * TouchScale.widget_scale, row_layout.min-height);
 
-    HorizontalLayout {
-        spacing: 8px;
+    row_layout := HorizontalLayout {
+        spacing: MaterialStyleMetrics.spacing_8;
 
-        Text {
+        MaterialText {
             text: root.label;
             color: MaterialPalette.secondary;
-            font-size: 12px;
-            font-weight: 800;
+            style: {
+                font_size: MaterialTypography.label_medium.font_size,
+                font_weight: 800,
+            };
             vertical-alignment: center;
-            width: 76px;
+            width: 84px * TouchScale.widget_scale;
+            overflow: elide;
+            wrap: no-wrap;
         }
 
-        Text {
+        MaterialText {
             text: root.value;
             color: MaterialPalette.on_surface;
-            font-size: 14px;
-            font-weight: 600;
+            style: {
+                font_size: MaterialTypography.body_medium.font_size,
+                font_weight: 600,
+            };
             vertical-alignment: center;
             overflow: elide;
+            wrap: no-wrap;
             horizontal-stretch: 1;
         }
     }
@@ -39,6 +52,8 @@ export component MainViewport inherits Rectangle {
     in-out property <int> active_tab: 0;
     in property <bool> cd_enabled: false;
     in-out property <bool> show_themes: false;
+    in-out property <bool> show_widget_preview: false;
+    in-out property <string> speaker_alias: "DietPi Speaker";
     in-out property <string> track_title: "Waiting for Bluetooth Connection...";
     in-out property <string> track_artist: "";
     in-out property <string> track_album: "";
@@ -81,6 +96,8 @@ export component MainViewport inherits Rectangle {
     callback volume_changed(float);
     callback stream_pill_clicked();
     callback select_theme(int);
+    callback cycle_theme();
+    callback font_scale_changed(float);
     callback set_marquee_fps(int);
     callback set_volume_step_percent(int);
     callback set_volume_hud_timeout_ms(int);
@@ -146,11 +163,11 @@ export component MainViewport inherits Rectangle {
 
     // Tab 2: Bluetooth connection details (opened from the status bar or the dock)
     if root.active_tab == 2 : VerticalLayout {
-        padding: 14px;
-        spacing: 12px;
+        padding: MaterialStyleMetrics.padding_14;
+        spacing: MaterialStyleMetrics.spacing_12;
 
         HorizontalLayout {
-            spacing: 14px;
+            spacing: MaterialStyleMetrics.padding_14;
 
             // Left card: connected source (org.bluez.Device1)
             Rectangle {
@@ -161,14 +178,18 @@ export component MainViewport inherits Rectangle {
                 border-color: MaterialPalette.outline_variant;
 
                 VerticalLayout {
-                    padding: 16px;
-                    spacing: 6px;
+                    padding: MaterialStyleMetrics.padding_16;
+                    spacing: MaterialStyleMetrics.spacing_6;
 
-                    Text {
+                    MaterialText {
                         text: "CONNECTED SOURCE";
                         color: MaterialPalette.primary;
-                        font-size: 13px;
-                        font-weight: 800;
+                        style: {
+                            font_size: MaterialTypography.label_large.font_size,
+                            font_weight: 800,
+                        };
+                        overflow: elide;
+                        wrap: no-wrap;
                     }
                     DetailRow { label: "DEVICE"; value: root.track_or_device; }
                     DetailRow { label: "ADDRESS"; value: root.bt_device_address; }
@@ -188,14 +209,18 @@ export component MainViewport inherits Rectangle {
                 border-color: MaterialPalette.outline_variant;
 
                 VerticalLayout {
-                    padding: 16px;
-                    spacing: 6px;
+                    padding: MaterialStyleMetrics.padding_16;
+                    spacing: MaterialStyleMetrics.spacing_6;
 
-                    Text {
+                    MaterialText {
                         text: "AUDIO STREAM";
                         color: MaterialPalette.primary;
-                        font-size: 13px;
-                        font-weight: 800;
+                        style: {
+                            font_size: MaterialTypography.label_large.font_size,
+                            font_weight: 800,
+                        };
+                        overflow: elide;
+                        wrap: no-wrap;
                     }
                     DetailRow {
                         label: "STATE";
@@ -214,8 +239,8 @@ export component MainViewport inherits Rectangle {
 
     // Tab 3: CD Player
     if root.active_tab == 3 : VerticalLayout {
-        padding: 14px;
-        spacing: 12px;
+        padding: MaterialStyleMetrics.padding_14;
+        spacing: MaterialStyleMetrics.spacing_12;
 
         Rectangle {
             background: MaterialPalette.surface;
@@ -228,11 +253,10 @@ export component MainViewport inherits Rectangle {
                 alignment: center;
                 spacing: 10px;
 
-                Text {
+                MaterialText {
                     text: "USB Optical Drive Subsystem (cdda://)";
                     color: MaterialPalette.secondary;
-                    font-size: 16px;
-                    font-weight: 600;
+                    style: MaterialTypography.title_medium;
                     horizontal-alignment: center;
                 }
             }
@@ -241,8 +265,8 @@ export component MainViewport inherits Rectangle {
 
     // Tab 4: DSP & Tone Control
     if root.active_tab == 4 : VerticalLayout {
-        padding: 14px;
-        spacing: 12px;
+        padding: MaterialStyleMetrics.padding_14;
+        spacing: MaterialStyleMetrics.spacing_12;
 
         Rectangle {
             background: MaterialPalette.surface;
@@ -255,11 +279,10 @@ export component MainViewport inherits Rectangle {
                 alignment: center;
                 spacing: 10px;
 
-                Text {
+                MaterialText {
                     text: "48kHz / 32-bit LE Processing Pipeline";
                     color: MaterialPalette.secondary;
-                    font-size: 16px;
-                    font-weight: 600;
+                    style: MaterialTypography.title_medium;
                     horizontal-alignment: center;
                 }
             }
@@ -273,6 +296,8 @@ export component MainViewport inherits Rectangle {
         SettingsView {
             cd_enabled: root.cd_enabled;
             show_themes <=> root.show_themes;
+            show_widget_preview <=> root.show_widget_preview;
+            speaker_alias <=> root.speaker_alias;
             volume_step_percent: root.volume_step_percent;
             volume_hud_timeout_ms: root.volume_hud_timeout_ms;
             volume_hud_fade_ms: root.volume_hud_fade_ms;
@@ -282,6 +307,8 @@ export component MainViewport inherits Rectangle {
             dsp_clicked => { root.select_tab(4); }
             cd_clicked => { root.select_tab(3); }
             select_theme(idx) => { root.select_theme(idx); }
+            cycle_theme => { root.cycle_theme(); }
+            font_scale_changed(val) => { root.font_scale_changed(val); }
             set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
             set_volume_step_percent(step) => { root.set_volume_step_percent(step); }
             set_volume_hud_timeout_ms(ms) => { root.set_volume_hud_timeout_ms(ms); }
