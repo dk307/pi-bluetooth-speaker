@@ -18,7 +18,8 @@ use crate::config::{
     DEFAULT_VOLUME_STEP_PERCENT, FontScale, MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE,
     MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_STEP_PERCENT,
     MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE, MIN_VOLUME_HUD_FADE_MS, MIN_VOLUME_HUD_TIMEOUT_MS,
-    MIN_VOLUME_STEP_PERCENT, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+    MIN_VOLUME_STEP_PERCENT, MarqueeFps, TitleDisplayMode, VolumeHudFadeMs, VolumeHudTimeoutMs,
+    VolumeStepPercent,
 };
 
 use super::generated::{AppTheme, MainWindow, MarqueeCompose, TouchScale};
@@ -293,10 +294,11 @@ impl AppShell {
         shell
     }
 
-    /// Applies runtime parameters from [`CoreConfig`] (theme, marquee fps, volume step,
-    /// Volume HUD timeout/fade durations, and Codec HUD timeout) to this shell.
+    /// Applies runtime parameters from [`CoreConfig`] (theme, marquee fps, title display mode,
+    /// volume step, Volume HUD timeout/fade durations, and Codec HUD timeout) to this shell.
     pub fn apply_config(&self, config: &CoreConfig) {
         self.set_marquee_fps(config.marquee_fps);
+        self.set_title_display_mode(config.title_display_mode);
         self.set_volume_step_percent(config.volume_step_percent);
         self.set_volume_hud_timeout_ms(config.volume_hud_timeout_ms);
         self.set_volume_hud_fade_ms(config.volume_hud_fade_ms);
@@ -335,6 +337,17 @@ impl AppShell {
         self.window
             .global::<MarqueeCompose>()
             .set_marquee_fps(Self::slint_i32(fps.value(), "marquee_fps"));
+    }
+
+    /// Returns the active track title display mode (`Marquee` or `Split`).
+    #[must_use]
+    pub fn title_display_mode(&self) -> TitleDisplayMode {
+        TitleDisplayMode::from_split(self.window.get_title_split_mode())
+    }
+
+    /// Sets the track title display mode (`Marquee` or `Split`).
+    pub fn set_title_display_mode(&self, mode: TitleDisplayMode) {
+        self.window.set_title_split_mode(mode.is_split());
     }
 
     /// Returns the Volume HUD auto-dismiss timeout.
@@ -514,6 +527,7 @@ impl AppShell {
                 window.global::<AppTheme>().get_active_preset(),
             )),
             marquee_fps: Self::marquee_fps_from_window(window),
+            title_display_mode: TitleDisplayMode::from_split(window.get_title_split_mode()),
             volume_step_percent: Self::volume_step_percent_from_window(window),
             volume_hud_timeout_ms: Self::volume_hud_timeout_from_window(window),
             volume_hud_fade_ms: Self::hud_fade_from_window(window),
@@ -535,6 +549,7 @@ impl AppShell {
                 path = %path.display(),
                 theme = config.theme.map_or_else(|| "default", |t| t.slug()),
                 marquee_fps = config.marquee_fps.value(),
+                title_display_mode = config.title_display_mode.slug(),
                 volume_step_percent = config.volume_step_percent.value(),
                 volume_hud_timeout_ms = config.volume_hud_timeout_ms.value(),
                 volume_hud_fade_ms = config.volume_hud_fade_ms.value(),
@@ -770,7 +785,8 @@ impl AppShell {
         artist: impl Into<slint::SharedString>,
         album: impl Into<slint::SharedString>,
     ) {
-        self.window.set_track_title(title.into());
+        let title: slint::SharedString = title.into();
+        Self::apply_track_title(&self.window, title.as_str());
         self.window.set_track_artist(artist.into());
         self.window.set_track_album(album.into());
     }
@@ -949,14 +965,27 @@ impl AppShell {
         Self::apply_playback_to_window(&self.window, playback);
     }
 
-    fn apply_playback_to_window(w: &MainWindow, playback: &speaker_bluetooth::BtPlaybackState) {
+    fn apply_track_title(w: &MainWindow, title: &str) {
         // Only notify Slint property bindings when the value actually changed: the
         // Bluetooth worker re-applies state every 250 ms position tick, and
         // unconditional `set_track_*` calls invalidate `MarqueeText` layout bindings
         // and force text re-shaping four times per second during active scrolling.
-        if w.get_track_title().as_str() != playback.title.as_ref() {
-            w.set_track_title(playback.title.as_ref().into());
+        if w.get_track_title().as_str() != title {
+            let split = speaker_title_breaker::split_song_title_with_config(
+                title,
+                &speaker_title_breaker::BreakerConfig {
+                    min_wrap_chars: 20,
+                    max_line1_chars: Some(24),
+                },
+            );
+            w.set_track_title(title.into());
+            w.set_track_title_line1(split.line1.into());
+            w.set_track_title_line2(split.line2.into());
         }
+    }
+
+    fn apply_playback_to_window(w: &MainWindow, playback: &speaker_bluetooth::BtPlaybackState) {
+        Self::apply_track_title(w, playback.title.as_ref());
         if w.get_track_artist().as_str() != playback.artist.as_ref() {
             w.set_track_artist(playback.artist.as_ref().into());
         }
@@ -1074,18 +1103,7 @@ impl AppShell {
         self.setup_transport_callbacks();
     }
 
-    fn setup_navigation_callbacks(&self) {
-        let win = self.window.as_weak();
-        self.window.on_tab_selected(move |idx| {
-            if let Some(w) = win.upgrade() {
-                let mut clamped = idx.clamp(0, 5);
-                if clamped == 3 && !w.get_cd_enabled() {
-                    clamped = 0;
-                }
-                w.set_active_tab(clamped);
-            }
-        });
-
+    fn setup_settings_callbacks(&self) {
         let win = self.window.as_weak();
         let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_select_theme(move |idx| {
@@ -1109,6 +1127,15 @@ impl AppShell {
                     i32::try_from(DEFAULT_MARQUEE_FPS).unwrap_or(i32::MAX)
                 };
                 w.global::<MarqueeCompose>().set_marquee_fps(fps);
+                Self::persist_window_state(&w, &persist_tx);
+            }
+        });
+
+        let win = self.window.as_weak();
+        let persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_set_title_split_mode(move |split| {
+            if let Some(w) = win.upgrade() {
+                w.set_title_split_mode(split);
                 Self::persist_window_state(&w, &persist_tx);
             }
         });
@@ -1156,6 +1183,21 @@ impl AppShell {
                     Self::clamp_hud_ms(ms, MIN_CODEC_HUD_TIMEOUT_MS, MAX_CODEC_HUD_TIMEOUT_MS);
                 w.set_codec_hud_timeout_ms(clamped);
                 Self::persist_window_state(&w, &persist_tx);
+            }
+        });
+    }
+
+    fn setup_navigation_callbacks(&self) {
+        self.setup_settings_callbacks();
+
+        let win = self.window.as_weak();
+        self.window.on_tab_selected(move |idx| {
+            if let Some(w) = win.upgrade() {
+                let mut clamped = idx.clamp(0, 5);
+                if clamped == 3 && !w.get_cd_enabled() {
+                    clamped = 0;
+                }
+                w.set_active_tab(clamped);
             }
         });
 

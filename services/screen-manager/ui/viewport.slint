@@ -55,6 +55,9 @@ export component MainViewport inherits Rectangle {
     in-out property <bool> show_widget_preview: false;
     in-out property <string> speaker_alias: "DietPi Speaker";
     in-out property <string> track_title: "Waiting for Bluetooth Connection...";
+    in-out property <string> track_title_line1: "";
+    in-out property <string> track_title_line2: "";
+    in-out property <bool> title_split_mode: false;
     in-out property <string> track_artist: "";
     in-out property <string> track_album: "";
     in-out property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit -> DSP 32-bit";
@@ -99,6 +102,7 @@ export component MainViewport inherits Rectangle {
     callback cycle_theme();
     callback font_scale_changed(float);
     callback set_marquee_fps(int);
+    callback set_title_split_mode(bool);
     callback set_volume_step_percent(int);
     callback set_volume_hud_timeout_ms(int);
     callback set_volume_hud_fade_ms(int);
@@ -117,6 +121,9 @@ export component MainViewport inherits Rectangle {
 
             now_playing := NowPlayingView {
                 track_title: root.track_title;
+                track_title_line1: root.track_title_line1;
+                track_title_line2: root.track_title_line2;
+                title_split_mode: root.title_split_mode;
                 track_artist: root.track_artist;
                 track_album: root.track_album;
                 position_text: root.position_text;
@@ -302,6 +309,7 @@ export component MainViewport inherits Rectangle {
             volume_hud_timeout_ms: root.volume_hud_timeout_ms;
             volume_hud_fade_ms: root.volume_hud_fade_ms;
             codec_hud_timeout_ms: root.codec_hud_timeout_ms;
+            title_split_mode: root.title_split_mode;
             bluetooth_clicked => { root.select_tab(2); }
             vu_meter_clicked => { root.select_tab(1); }
             dsp_clicked => { root.select_tab(4); }
@@ -310,6 +318,7 @@ export component MainViewport inherits Rectangle {
             cycle_theme => { root.cycle_theme(); }
             font_scale_changed(val) => { root.font_scale_changed(val); }
             set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
+            set_title_split_mode(split) => { root.set_title_split_mode(split); }
             set_volume_step_percent(step) => { root.set_volume_step_percent(step); }
             set_volume_hud_timeout_ms(ms) => { root.set_volume_hud_timeout_ms(ms); }
             set_volume_hud_fade_ms(ms) => { root.set_volume_hud_fade_ms(ms); }

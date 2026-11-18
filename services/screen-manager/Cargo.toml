@@ -16,6 +16,7 @@ speaker-common = { workspace = true }
 speaker-hardware = { workspace = true }
 speaker-bluetooth = { workspace = true }
 speaker-dsp = { workspace = true }
+speaker-title-breaker = { workspace = true }
 config = { workspace = true }
 tempfile = { workspace = true }
 image = { workspace = true }

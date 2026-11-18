@@ -106,11 +106,14 @@ component SettingsStepperRow inherits Rectangle {
     }
 }
 
-// Material 3 segmented control for the two allowed marquee rates (30 / 60):
-// one outlined pill, selected segment filled with `secondary_container`.
-component FpsSegmented inherits Rectangle {
-    in property <int> current_fps;
-    callback fps_selected(int);
+// Material 3 two-option segmented control: one outlined pill, selected segment
+// filled with `secondary_container`. Used for binary Advanced settings
+// (Marquee FPS 30/60, Track Title Marquee/Split).
+component TwoOptionSegmented inherits Rectangle {
+    in property <string> left_label;
+    in property <string> right_label;
+    in property <bool> right_selected;
+    callback select_right(bool);
 
     width: 168px * TouchScale.widget_scale;
     height: MaterialStyleMetrics.size_36;
@@ -123,19 +126,19 @@ component FpsSegmented inherits Rectangle {
 
         Rectangle {
             horizontal-stretch: 1;
-            background: root.current_fps == 30 ? MaterialPalette.secondary_container : transparent;
+            background: !root.right_selected ? MaterialPalette.secondary_container : transparent;
 
             MaterialText {
-                text: "30";
+                text: root.left_label;
                 style: MaterialTypography.label_large;
-                color: root.current_fps == 30 ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
+                color: !root.right_selected ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
                 horizontal-alignment: center;
                 vertical-alignment: center;
                 wrap: no-wrap;
             }
 
             TouchArea {
-                clicked => { root.fps_selected(30); }
+                clicked => { root.select_right(false); }
             }
         }
 
@@ -146,35 +149,40 @@ component FpsSegmented inherits Rectangle {
 
         Rectangle {
             horizontal-stretch: 1;
-            background: root.current_fps == 60 ? MaterialPalette.secondary_container : transparent;
+            background: root.right_selected ? MaterialPalette.secondary_container : transparent;
 
             MaterialText {
-                text: "60";
+                text: root.right_label;
                 style: MaterialTypography.label_large;
-                color: root.current_fps == 60 ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
+                color: root.right_selected ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
                 horizontal-alignment: center;
                 vertical-alignment: center;
                 wrap: no-wrap;
             }
 
             TouchArea {
-                clicked => { root.fps_selected(60); }
+                clicked => { root.select_right(true); }
             }
         }
     }
 }
 
-// Advanced list row pairing the "Marquee FPS" label with the segmented
-// 30 / 60 rate selector on the right.
-component FpsSegmentedRow inherits Rectangle {
+// Advanced list row pairing a setting label with a two-option segmented
+// control on the right.
+component TwoOptionSegmentedRow inherits Rectangle {
+    in property <string> label;
+    in property <string> left_label;
+    in property <string> right_label;
+    in property <bool> right_selected;
+    callback select_right(bool);
+
     min-height: max(MaterialStyleMetrics.size_40, row_layout.min-height);
-    callback set_marquee_fps(int);
 
     row_layout := HorizontalLayout {
         spacing: MaterialStyleMetrics.spacing_8;
 
         MaterialText {
-            text: "Marquee FPS";
+            text: root.label;
             style: MaterialTypography.body_large;
             color: MaterialPalette.on_surface;
             vertical-alignment: center;
@@ -184,9 +192,11 @@ component FpsSegmentedRow inherits Rectangle {
             horizontal-stretch: 1;
         }
 
-        FpsSegmented {
-            current_fps: MarqueeCompose.marquee_fps;
-            fps_selected(fps) => { root.set_marquee_fps(fps); }
+        TwoOptionSegmented {
+            left_label: root.left_label;
+            right_label: root.right_label;
+            right_selected: root.right_selected;
+            select_right(is_right) => { root.select_right(is_right); }
         }
     }
 }
@@ -313,6 +323,7 @@ export component SettingsView inherits VerticalLayout {
     in property <int> volume_hud_timeout_ms: 4000;
     in property <int> volume_hud_fade_ms: 200;
     in property <int> codec_hud_timeout_ms: 30000;
+    in property <bool> title_split_mode: false;
 
     callback bluetooth_clicked();
     callback vu_meter_clicked();
@@ -322,6 +333,7 @@ export component SettingsView inherits VerticalLayout {
     callback cycle_theme();
     callback font_scale_changed(float);
     callback set_marquee_fps(int);
+    callback set_title_split_mode(bool);
     callback set_volume_step_percent(int);
     callback set_volume_hud_timeout_ms(int);
     callback set_volume_hud_fade_ms(int);
@@ -433,6 +445,15 @@ export component SettingsView inherits VerticalLayout {
             font_scale_changed(val) => { root.font_scale_changed(val); }
         }
 
+        // Track Title display mode (Marquee vs Split), live-persisted to config.json.
+        TwoOptionSegmentedRow {
+            label: "Track Title";
+            left_label: "Marquee";
+            right_label: "Split";
+            right_selected: root.title_split_mode;
+            select_right(split) => { root.set_title_split_mode(split); }
+        }
+
         // Section divider (M3: one divider between groups, none between rows).
         Rectangle {
             height: 1px;
@@ -460,8 +481,12 @@ export component SettingsView inherits VerticalLayout {
                     vertical-alignment: center;
                 }
 
-                FpsSegmentedRow {
-                    set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
+                TwoOptionSegmentedRow {
+                    label: "Marquee FPS";
+                    left_label: "30";
+                    right_label: "60";
+                    right_selected: MarqueeCompose.marquee_fps == 60;
+                    select_right(is_60) => { root.set_marquee_fps(is_60 ? 60 : 30); }
                 }
 
                 // Stepper bounds mirror the Rust config domains (MIN_/MAX_* in

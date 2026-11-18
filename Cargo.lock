@@ -4422,6 +4422,7 @@ dependencies = [
  "speaker-common",
  "speaker-dsp",
  "speaker-hardware",
+ "speaker-title-breaker",
  "tempfile",
  "tokio",
  "tracing",
