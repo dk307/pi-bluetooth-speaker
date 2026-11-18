@@ -418,8 +418,8 @@ component BtDevicesList inherits Rectangle {
     }
 }
 
-// Non-scrollable centered pairing view (mode 2): ring with device glyph,
-// device name, passkey headline, helper text, top-right Cancel.
+// Non-scrollable centered pairing view (mode 2): app bar with Back/Cancel,
+// ring with device glyph, device name, passkey headline, helper text.
 component BtPairingView inherits Rectangle {
     in property <string> device_name;
     in property <string> code;
@@ -430,66 +430,60 @@ component BtPairingView inherits Rectangle {
     background: MaterialPalette.surface;
 
     VerticalLayout {
-        alignment: center;
-        cross-axis-alignment: center;
-        spacing: 20px * TouchScale.widget_scale;
+        ScreenAppBar {
+            title: "Pair Device";
+            trailing_icon: @image-url("../../../assets/icons/back.svg");
+            trailing_tooltip: "Cancel";
+            trailing_clicked => {
+                root.cancel_pressed();
+            }
+        }
 
         Rectangle {
-            width: MaterialStyleMetrics.size_200;
-            height: MaterialStyleMetrics.size_200;
+            vertical-stretch: 1;
             background: transparent;
-            BtProgressRing {
-                width: parent.width;
-                height: parent.height;
-                frame: root.frame;
-                visible: root.spinning;
-            }
-            Image {
-                source: @image-url("../../../assets/icons/bluetooth.svg");
-                colorize: MaterialPalette.primary;
-                width: MaterialStyleMetrics.size_48;
-                height: MaterialStyleMetrics.size_48;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-            }
-        }
 
-        MaterialText {
-            text: "Connecting to " + root.device_name;
-            style: MaterialTypography.title_large;
-            color: MaterialPalette.on_surface;
-        }
+            VerticalLayout {
+                alignment: center;
+                cross-axis-alignment: center;
+                spacing: 20px * TouchScale.widget_scale;
 
-        if root.code != "" : MaterialText {
-            text: "Pairing Code: " + root.code;
-            style: MaterialTypography.headline_large;
-            color: MaterialPalette.on_surface;
-        }
+                Rectangle {
+                    width: MaterialStyleMetrics.size_200;
+                    height: MaterialStyleMetrics.size_200;
+                    background: transparent;
+                    BtProgressRing {
+                        width: parent.width;
+                        height: parent.height;
+                        frame: root.frame;
+                        visible: root.spinning;
+                    }
+                    Image {
+                        source: @image-url("../../../assets/icons/bluetooth.svg");
+                        colorize: MaterialPalette.primary;
+                        width: MaterialStyleMetrics.size_48;
+                        height: MaterialStyleMetrics.size_48;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
 
-        MaterialText {
-            text: "Keep the device nearby while pairing completes.";
-            style: MaterialTypography.body_large;
-            color: MaterialPalette.on_surface_variant;
-        }
-    }
+                MaterialText {
+                    text: "Connecting to " + root.device_name;
+                    style: MaterialTypography.title_large;
+                    color: MaterialPalette.on_surface;
+                }
 
-    // Top-anchored cancel row: the inset comes from layout padding + metrics
-    // so it tracks panel changes without literal pixel offsets
-    // (M-SLINT-MATH-LAYOUT).
-    VerticalLayout {
-        width: parent.width;
-        height: parent.height;
-        alignment: start;
-        padding-top: BtMetrics.list_padding_h;
-        padding-right: BtMetrics.list_padding_h;
-        HorizontalLayout {
-            alignment: end;
-            cross-axis-alignment: center;
-            OutlineButton {
-                text: "Cancel";
-                height: BtMetrics.pill_height;
-                clicked => {
-                    root.cancel_pressed();
+                if root.code != "" : MaterialText {
+                    text: "Pairing Code: " + root.code;
+                    style: MaterialTypography.headline_large;
+                    color: MaterialPalette.on_surface;
+                }
+
+                MaterialText {
+                    text: "Keep the device nearby while pairing completes.";
+                    style: MaterialTypography.body_large;
+                    color: MaterialPalette.on_surface_variant;
                 }
             }
         }
@@ -758,13 +752,6 @@ export component BluetoothDevicesScreen inherits Rectangle {
                         text: root.bt_scanning ? "Scanning for nearby devices..." : "Discovery stopped";
                         style: MaterialTypography.body_medium;
                         color: MaterialPalette.on_surface_variant;
-                    }
-                }
-
-                if root.bt_scanning : OutlineButton {
-                    text: "Cancel";
-                    clicked => {
-                        root.bt_cancel_scan_clicked();
                     }
                 }
             }
