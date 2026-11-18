@@ -9,7 +9,7 @@
 // while the screen genuinely animates (pairing ring or discovery spinner). The
 // deprecated animation-tick perpetual driver must never appear here.
 
-import { FilledButton, OutlineButton, TonalButton, MaterialPalette, MaterialStyleMetrics, MaterialText, MaterialTypography } from "@material/material.slint";
+import { FilledButton, IconButton, OutlineButton, TonalButton, MaterialPalette, MaterialStyleMetrics, MaterialText, MaterialTypography, TouchScale } from "@material/material.slint";
 import { OverlayAppBar } from "screen_app_bar.slint";
 
 // One row of the paired/active device list or of the discovery list.
@@ -25,17 +25,16 @@ export struct BtDeviceRow {
     paired: bool,
 }
 
-// Fixed design tokens for the 800x480 appliance panel (plan §5).
+// TouchScale-responsive design tokens for the 800x480 appliance panel.
 global BtMetrics {
-    in property <length> card_radius: 20px;
-    in property <length> card_gap: 12px;
-    in property <length> card_height: 88px;
-    in property <length> list_padding_h: 24px;
-    in property <length> scrollbar_width: 4px;
-    in property <length> scrollbar_margin: 8px;
-    in property <length> cue_height: 32px;
-    in property <length> pill_height: 48px;
-    in property <length> pill_height_small: 44px;
+    out property <length> card_radius: 20px * TouchScale.widget_scale;
+    out property <length> card_gap: MaterialStyleMetrics.spacing_12;
+    out property <length> card_height: 88px * TouchScale.widget_scale;
+    out property <length> list_padding_h: MaterialStyleMetrics.padding_24;
+    out property <length> scrollbar_width: 4px;
+    out property <length> scrollbar_margin: MaterialStyleMetrics.spacing_8;
+    out property <length> cue_height: 32px * TouchScale.widget_scale;
+    out property <length> pill_height: MaterialStyleMetrics.size_48;
 }
 
 // Determinate-free progress ring. The sweeping arc is recomputed from an integer
@@ -134,46 +133,12 @@ component BtThinScrollBar inherits Rectangle {
     }
 }
 
-// 40x40 circular icon button (back / trash).
-component BtIconButton inherits Rectangle {
-    in property <image> source;
-    in property <brush> tint: MaterialPalette.on_surface;
-    callback clicked();
-
-    width: 40px;
-    height: 40px;
-    border-radius: self.height / 2;
-    background: transparent;
-    opacity: touch.pressed ? 0.8 : 1.0;
-    animate opacity {
-        duration: 80ms;
-        easing: ease-out;
-    }
-
-    Image {
-        source: root.source;
-        colorize: root.tint;
-        width: 24px;
-        height: 24px;
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-    }
-
-    touch := TouchArea {
-        clicked => {
-            root.clicked();
-        }
-    }
-}
-
-// Error-tinted destructive pill (audit A7 maps the dialog Delete button here;
-// the material library does not export BaseButton, so this follows the repo's
-// SettingsIconButton Rectangle + TouchArea pattern).
+// Error-tinted destructive pill matching `BaseButton` TouchScale sizing.
 component BtDestructivePill inherits Rectangle {
     in property <string> text;
     callback clicked();
 
-    height: BtMetrics.pill_height;
+    min-height: max(MaterialStyleMetrics.size_40, pill_layout.min-height);
     background: MaterialPalette.error;
     border-radius: self.height / 2;
     opacity: touch.pressed ? 0.8 : 1.0;
@@ -182,15 +147,19 @@ component BtDestructivePill inherits Rectangle {
         easing: ease-out;
     }
 
-    HorizontalLayout {
+    pill_layout := HorizontalLayout {
         alignment: center;
         cross-axis-alignment: center;
-        padding-left: 24px;
-        padding-right: 24px;
+        padding-left: MaterialStyleMetrics.padding_24;
+        padding-right: MaterialStyleMetrics.padding_24;
+        padding-top: MaterialStyleMetrics.padding_8;
+        padding-bottom: MaterialStyleMetrics.padding_8;
         MaterialText {
             text: root.text;
             style: MaterialTypography.label_large;
             color: MaterialPalette.on_error;
+            wrap: no-wrap;
+            overflow: elide;
         }
     }
 
@@ -225,16 +194,16 @@ component BtDeviceCard inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 16px;
-        padding-right: 16px;
-        spacing: 12px;
+        padding-left: MaterialStyleMetrics.padding_16;
+        padding-right: MaterialStyleMetrics.padding_16;
+        spacing: MaterialStyleMetrics.spacing_12;
         cross-axis-alignment: center;
 
         Image {
             source: root.icon_source();
             colorize: root.device.connected ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
-            width: 32px;
-            height: 32px;
+            width: 32px * TouchScale.widget_scale;
+            height: 32px * TouchScale.widget_scale;
         }
 
         VerticalLayout {
@@ -264,7 +233,6 @@ component BtDeviceCard inherits Rectangle {
         // Pair: unpaired discovery rows (phone-style flow).
         if root.from_discovery && !root.device.paired : FilledButton {
             text: "Pair";
-            height: BtMetrics.pill_height_small;
             width: self.preferred-width;
             clicked => {
                 root.activate();
@@ -274,7 +242,6 @@ component BtDeviceCard inherits Rectangle {
         // Disconnect: connected rows (paired list or discovery).
         if root.device.connected : OutlineButton {
             text: "Disconnect";
-            height: BtMetrics.pill_height_small;
             width: self.preferred-width;
             clicked => {
                 root.activate();
@@ -284,16 +251,15 @@ component BtDeviceCard inherits Rectangle {
         // Connect: not connected, and not an unpaired discovery row.
         if !root.device.connected && !(root.from_discovery && !root.device.paired) : TonalButton {
             text: "Connect";
-            height: BtMetrics.pill_height_small;
             width: self.preferred-width;
             clicked => {
                 root.activate();
             }
         }
 
-        if !root.from_discovery : BtIconButton {
-            source: @image-url("../../../assets/icons/delete.svg");
-            tint: MaterialPalette.on_surface_variant;
+        if !root.from_discovery : IconButton {
+            icon: @image-url("../../../assets/icons/delete.svg");
+            tooltip: "Forget";
             clicked => {
                 root.remove();
             }
@@ -410,11 +376,11 @@ component BtPairingView inherits Rectangle {
     VerticalLayout {
         alignment: center;
         cross-axis-alignment: center;
-        spacing: 20px;
+        spacing: 20px * TouchScale.widget_scale;
 
         Rectangle {
-            width: 160px;
-            height: 160px;
+            width: MaterialStyleMetrics.size_200;
+            height: MaterialStyleMetrics.size_200;
             background: transparent;
             BtProgressRing {
                 width: parent.width;
@@ -425,8 +391,8 @@ component BtPairingView inherits Rectangle {
             Image {
                 source: @image-url("../../../assets/icons/bluetooth.svg");
                 colorize: MaterialPalette.primary;
-                width: 48px;
-                height: 48px;
+                width: MaterialStyleMetrics.size_48;
+                height: MaterialStyleMetrics.size_48;
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
             }
@@ -493,15 +459,15 @@ component BtDeleteDialog inherits Rectangle {
         cross-axis-alignment: center;
 
         Rectangle {
-            width: 420px;
+            width: min(420px * TouchScale.widget_scale, 720px);
             background: MaterialPalette.surface_container_highest;
             border-radius: MaterialStyleMetrics.border_radius_16;
             VerticalLayout {
-                padding-top: 24px;
-                padding-bottom: 24px;
-                padding-left: 24px;
-                padding-right: 24px;
-                spacing: 16px;
+                padding-top: MaterialStyleMetrics.padding_24;
+                padding-bottom: MaterialStyleMetrics.padding_24;
+                padding-left: MaterialStyleMetrics.padding_24;
+                padding-right: MaterialStyleMetrics.padding_24;
+                spacing: MaterialStyleMetrics.spacing_16;
                 MaterialText {
                     text: "Delete " + root.device_name + "?";
                     style: MaterialTypography.title_large;
@@ -514,11 +480,10 @@ component BtDeleteDialog inherits Rectangle {
                 }
                 HorizontalLayout {
                     alignment: end;
-                    spacing: 12px;
+                    spacing: MaterialStyleMetrics.spacing_12;
                     cross-axis-alignment: center;
                     OutlineButton {
                         text: "Cancel";
-                        height: BtMetrics.pill_height;
                         width: self.preferred_width;
                         clicked => {
                             root.cancel_pressed();
@@ -546,16 +511,18 @@ component BtToast inherits Rectangle {
 
     VerticalLayout {
         alignment: end;
-        padding-bottom: 24px;
+        padding-bottom: MaterialStyleMetrics.padding_24;
         HorizontalLayout {
             alignment: center;
             Rectangle {
-                height: BtMetrics.pill_height;
+                min-height: max(BtMetrics.pill_height, toast_layout.min-height);
                 border-radius: self.height / 2;
                 background: MaterialPalette.surface_container_highest;
-                HorizontalLayout {
-                    padding-left: 24px;
-                    padding-right: 24px;
+                toast_layout := HorizontalLayout {
+                    padding-left: MaterialStyleMetrics.padding_24;
+                    padding-right: MaterialStyleMetrics.padding_24;
+                    padding-top: MaterialStyleMetrics.padding_8;
+                    padding-bottom: MaterialStyleMetrics.padding_8;
                     cross-axis-alignment: center;
                     MaterialText {
                         text: root.text;
@@ -656,7 +623,7 @@ export component BluetoothDevicesScreen inherits Rectangle {
         // status with spinner and a quick Cancel (stop discovery without
         // closing the screen).
         if root.bt_devices_mode == 0 : Rectangle {
-            height: 40px;
+            height: MaterialStyleMetrics.size_40;
             background: MaterialPalette.surface;
             MaterialText {
                 x: BtMetrics.list_padding_h;
@@ -668,23 +635,23 @@ export component BluetoothDevicesScreen inherits Rectangle {
         }
 
         if root.bt_devices_mode == 1 : Rectangle {
-            height: 40px;
+            height: MaterialStyleMetrics.size_40;
             background: MaterialPalette.surface;
             HorizontalLayout {
                 padding-left: BtMetrics.list_padding_h;
                 padding-right: BtMetrics.list_padding_h;
-                spacing: 8px;
+                spacing: MaterialStyleMetrics.spacing_8;
                 alignment: space-between;
                 cross-axis-alignment: center;
 
                 HorizontalLayout {
-                    spacing: 8px;
+                    spacing: MaterialStyleMetrics.spacing_8;
                     alignment: start;
                     cross-axis-alignment: center;
                     BtProgressRing {
-                        width: 16px;
-                        height: 16px;
-                        stroke_width: 2px;
+                        width: MaterialStyleMetrics.size_16;
+                        height: MaterialStyleMetrics.size_16;
+                        stroke_width: MaterialStyleMetrics.size_2;
                         frame: root.bt_anim_frame;
                         visible: root.bt_scanning;
                     }
@@ -697,7 +664,6 @@ export component BluetoothDevicesScreen inherits Rectangle {
 
                 if root.bt_scanning : OutlineButton {
                     text: "Cancel";
-                    height: BtMetrics.pill_height_small;
                     clicked => {
                         root.bt_cancel_scan_clicked();
                     }
