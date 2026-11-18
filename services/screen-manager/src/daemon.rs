@@ -21,9 +21,7 @@ use std::time::Instant;
 use crate::config::CoreConfig;
 #[cfg(feature = "ui")]
 use crate::ui::{
-    AppShell, BACKDROP_BLUR_RADIUS, BackdropAction, BootCheckLine, BootCheckStatus,
-    BootCheckUpdate, BootProbe, Framebuffer, MainWindow, OVERLAY_TOP_INSET, OverlayBackdropTracker,
-    SplashScreen, blur_region,
+    AppShell, BootCheckLine, BootCheckStatus, BootCheckUpdate, BootProbe, MainWindow, SplashScreen,
 };
 #[cfg(feature = "ui")]
 use slint::ComponentHandle;
@@ -1183,71 +1181,6 @@ pub fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtShared
         }
         if let Some(amp) = lock.amp_volume.take() {
             shell.apply_amp_volume(&amp);
-        }
-    }
-}
-
-/// Keeps the blurred overlay backdrop in sync with the overlay visibility.
-///
-/// Slint has no backdrop-blur primitive, so the screen that an overlay covers is
-/// snapshotted from the offscreen framebuffer harness's shadow buffer, blurred
-/// on the CPU and published back to the UI as an image that the overlay panel
-/// renders behind itself.
-///
-/// The snapshot is taken exactly once per "overlay is on screen" period: while an
-/// overlay is open the shadow buffer already contains the overlay panel and must
-/// not be re-captured, and once every overlay closed the next open starts from a
-/// clean scene again. A failed capture is not retried while the overlay stays
-/// open — by then the render buffer contains the overlay itself, so a retry
-/// would bake the overlay into its own backdrop. The overlay degrades to
-/// scrim-only dimming until it reopens.
-///
-/// Scope note: the production KMS/FemtoVG backend exposes no CPU-readable
-/// scanout, so the runtime never calls this — there, `overlay_backdrop_available`
-/// stays false and overlays render with the full-strength 0.55 scrim. The
-/// harness (software renderer) provides the shadow buffer this function captures.
-#[cfg(feature = "ui")]
-pub fn sync_overlay_backdrop(
-    fb: &Framebuffer,
-    shell: &AppShell,
-    tracker: &mut OverlayBackdropTracker,
-) {
-    let overlay_active = shell.is_volume_hud_active() || shell.is_codec_hud_active();
-    match tracker.on_overlay_state_changed(overlay_active) {
-        BackdropAction::Keep => {}
-        BackdropAction::Clear => {
-            shell.set_overlay_backdrop(slint::Image::default());
-            tracing::debug!("Cleared overlay backdrop");
-        }
-        BackdropAction::Capture => {
-            let captured = blur_region(
-                fb.shadow_buffer(),
-                Framebuffer::DEFAULT_WIDTH,
-                Framebuffer::DEFAULT_HEIGHT,
-                OVERLAY_TOP_INSET,
-                BACKDROP_BLUR_RADIUS,
-            );
-            match captured {
-                Ok(blurred) => {
-                    let mut buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(
-                        blurred.width,
-                        blurred.height,
-                    );
-                    buffer.make_mut_bytes().copy_from_slice(&blurred.pixels);
-                    shell.set_overlay_backdrop(slint::Image::from_rgba8_premultiplied(buffer));
-                    tracing::info!(
-                        width = blurred.width,
-                        height = blurred.height,
-                        "Captured blurred overlay backdrop"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to capture the overlay backdrop; continuing with scrim only until the overlay reopens"
-                    );
-                }
-            }
         }
     }
 }

@@ -1,28 +1,21 @@
 //! Blurred backdrop snapshot for the full-screen overlays.
 //!
-//! Slint 1.18 has no backdrop-blur primitive, so the "frosted glass" effect is
-//! produced here: the frame that an overlay is about to cover is captured from
-//! the framebuffer shadow buffer, converted to premultiplied RGBA, blurred with
-//! [`libblur`] and published back to Slint as an [`slint::Image`].
-//!
-//! The capture happens exactly once per "overlay open" period, because the
-//! shadow buffer still holds the clean, overlay-free frame at the moment an
-//! overlay is opened.
+//! Slint's `FemtoVG` and software renderers have no `backdrop-blur` primitive, so
+//! the frosted-glass effect is produced here: when an overlay is about to open,
+//! [`AppShell`] captures a [`slint::Window::take_snapshot`] of the clean scene,
+//! blurs it with [`libblur`] (stronger behind the overlay than in the top bar
+//! outside it), and publishes it back to Slint as an [`slint::Image`].
 
 use std::backtrace::Backtrace;
 use std::fmt::{self, Debug, Formatter};
 
 use libblur::{AnisotropicRadius, BlurError, BlurImageMut, FastBlurChannels, ThreadingPolicy};
 
-use super::framebuffer::Bgrx8888Pixel;
-
 /// Height of the top status bar, in pixels.
 ///
 /// Single source of truth for the overlay inset: [`AppShell::new`] seeds the
 /// Slint `overlay_top_inset` property from this constant at startup, so the
 /// `60px` literal in `appwindow.slint` is only a design-preview fallback.
-/// Overlays only ever cover the viewport area below the top bar, so the
-/// backdrop snapshot starts at this row.
 pub const OVERLAY_TOP_INSET: u32 = 60;
 
 /// Blur radius, in pixels, applied to the backdrop behind the overlay panel.
@@ -40,111 +33,6 @@ pub struct BlurredBackdrop {
     pub height: u32,
     /// Premultiplied RGBA bytes; `width * height * 4` entries long.
     pub pixels: Vec<u8>,
-}
-
-/// Converts a BGRX pixel slice into premultiplied RGBA bytes.
-///
-/// The framebuffer alpha byte is unused by the `BGRX` scanout format, so the
-/// alpha channel of the snapshot is set to fully opaque.
-#[must_use]
-pub fn bgrx_to_rgba(pixels: &[Bgrx8888Pixel]) -> Vec<u8> {
-    let mut rgba = Vec::with_capacity(pixels.len() * 4);
-    for pixel in pixels {
-        rgba.extend_from_slice(&[pixel.red, pixel.green, pixel.blue, 255]);
-    }
-    rgba
-}
-
-/// Extracts the region below `top_inset` from a full-frame BGRX buffer and returns
-/// its blurred, premultiplied RGBA representation.
-///
-/// `frame` must hold exactly `frame_width * frame_height` pixels.
-///
-/// # Errors
-///
-/// Returns [`BackdropError::geometry`] when the buffer length does not match the
-/// announced geometry or when `top_inset` covers the whole frame, and
-/// [`BackdropError::blur`] when the blur backend rejects the image.
-pub fn blur_region(
-    frame: &[Bgrx8888Pixel],
-    frame_width: u32,
-    frame_height: u32,
-    top_inset: u32,
-    radius: u32,
-) -> Result<BlurredBackdrop, BackdropError> {
-    let expected = (frame_width as usize) * (frame_height as usize);
-    if frame.len() != expected {
-        return Err(BackdropError::geometry(
-            format!("{expected} pixels"),
-            format!("captured frame has {} pixels", frame.len()),
-        ));
-    }
-    if top_inset >= frame_height {
-        return Err(BackdropError::geometry(
-            format!("top inset < {frame_height}"),
-            format!("top inset {top_inset} leaves no rows to capture"),
-        ));
-    }
-
-    let width = frame_width;
-    let height = frame_height - top_inset;
-    // `u32 -> usize` is lossless on every supported target (`usize` is never
-    // narrower than 32 bits) and the geometry validation above bounds the
-    // product well below `frame.len()`.
-    let row_offset = top_inset as usize * frame_width as usize;
-    let mut rgba = bgrx_to_rgba(&frame[row_offset..]);
-    blur_premultiplied_rgba(&mut rgba, width, height, radius)?;
-    Ok(BlurredBackdrop {
-        width,
-        height,
-        pixels: rgba,
-    })
-}
-
-/// Extracts the region below `top_inset` from a full-frame RGBA8 buffer and
-/// returns its blurred, premultiplied RGBA representation.
-///
-/// `rgba` must hold exactly `frame_width * frame_height * 4` bytes.
-///
-/// # Errors
-///
-/// Returns [`BackdropError::geometry`] when the buffer length does not match the
-/// announced geometry or when `top_inset` covers the whole frame, and
-/// [`BackdropError::blur`] when the blur backend rejects the image.
-pub fn blur_rgba_region(
-    rgba: &[u8],
-    frame_width: u32,
-    frame_height: u32,
-    top_inset: u32,
-    radius: u32,
-) -> Result<BlurredBackdrop, BackdropError> {
-    let expected = (frame_width as usize) * (frame_height as usize) * 4;
-    if rgba.len() != expected {
-        return Err(BackdropError::geometry(
-            format!("{expected} bytes"),
-            format!("captured frame has {} bytes", rgba.len()),
-        ));
-    }
-    if top_inset >= frame_height {
-        return Err(BackdropError::geometry(
-            format!("top inset < {frame_height}"),
-            format!("top inset {top_inset} leaves no rows to capture"),
-        ));
-    }
-
-    let width = frame_width;
-    let height = frame_height - top_inset;
-    let byte_offset = top_inset as usize * frame_width as usize * 4;
-    let mut cropped = rgba[byte_offset..].to_vec();
-    for alpha in cropped.iter_mut().skip(3).step_by(4) {
-        *alpha = 255;
-    }
-    blur_premultiplied_rgba(&mut cropped, width, height, radius)?;
-    Ok(BlurredBackdrop {
-        width,
-        height,
-        pixels: cropped,
-    })
 }
 
 /// Blurs a full-frame RGBA8 snapshot, applying `outside_radius` to the area
@@ -232,59 +120,6 @@ pub fn blur_premultiplied_rgba(
         ThreadingPolicy::Single,
     )?;
     Ok(())
-}
-
-/// Action the renderer must take after an overlay state change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackdropAction {
-    /// Keep the currently published backdrop.
-    Keep,
-    /// Capture and publish a new backdrop.
-    Capture,
-    /// Drop the published backdrop.
-    Clear,
-}
-
-/// Tracks the overlay backdrop lifecycle across overlay open/close periods.
-///
-/// The backdrop is captured once when an overlay opens and kept until every
-/// overlay has closed again, so that switching between overlays (for example
-/// from the Volume HUD to the codec panel) reuses the same snapshot. The
-/// snapshot is intentionally frozen for the overlay period: content changes
-/// underneath are not re-captured until the overlay reopens.
-///
-/// A failed capture is never retried while the overlay stays open: after the
-/// opening frame the render buffer contains the overlay itself, so re-capturing
-/// would bake the overlay into its own backdrop. A failed capture therefore
-/// degrades to scrim-only dimming until the overlay reopens.
-#[derive(Debug, Default)]
-pub struct OverlayBackdropTracker {
-    active: bool,
-}
-
-impl OverlayBackdropTracker {
-    /// Creates a tracker in the "no overlay on screen" state.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self { active: false }
-    }
-
-    /// Reports the current overlay state and returns the action the renderer must take.
-    pub fn on_overlay_state_changed(&mut self, overlay_active: bool) -> BackdropAction {
-        let action = match (self.active, overlay_active) {
-            (false, true) => BackdropAction::Capture,
-            (true, false) => BackdropAction::Clear,
-            _ => BackdropAction::Keep,
-        };
-        self.active = overlay_active;
-        action
-    }
-
-    /// Returns `true` while an overlay is on screen.
-    #[must_use]
-    pub const fn is_active(&self) -> bool {
-        self.active
-    }
 }
 
 /// Detailed reason for a [`BackdropError`].
