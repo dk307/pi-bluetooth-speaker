@@ -1,4 +1,8 @@
-import { MaterialPalette } from "@material/material.slint";
+import {
+    MaterialPalette,
+    MaterialStyleMetrics,
+    TouchScale,
+} from "@material/material.slint";
 import { OverlayAppBar } from "screen_app_bar.slint";
 import "./fonts/InterTabular-Bold.ttf";
 
@@ -35,11 +39,11 @@ export component VolumeHudOverlay inherits Rectangle {
         }
     }
 
-    // Main content column: header (60px) + body (fills remaining)
+    // Main content column: header (scaled by `MaterialStyleMetrics.size_64`) + body (fills remaining)
     VerticalLayout {
-        // Overlay app bar header (60px) — title "Volume", close icon on the right
+        // Overlay app bar header — title "Volume", close icon on the right
         Rectangle {
-            height: 60px;
+            height: MaterialStyleMetrics.size_64;
             width: 100%;
             OverlayAppBar {
                 width: 100%;
@@ -190,45 +194,48 @@ export component VolumeHudOverlay inherits Rectangle {
 
             // 4. Dedicated Mute / Unmute Button Row
             Rectangle {
-                height: 48px;
+                height: mute_btn.height;
                 background: transparent;
 
                 mute_btn := Rectangle {
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
-                    width: 220px;
-                    height: 48px;
+                    width: max(220px * TouchScale.widget_scale, mute_layout.min-width);
+                    height: max(MaterialStyleMetrics.size_48, mute_layout.min-height);
                     border-radius: self.height / 2;
                     background: root.is_muted ? MaterialPalette.error : MaterialPalette.surface;
                     border-width: 2px;
                     border-color: root.is_muted ? MaterialPalette.error : MaterialPalette.primary;
                     opacity: mute_touch.pressed ? 0.75 : 1.0;
 
-                    VerticalLayout {
+                    mute_layout := HorizontalLayout {
                         alignment: center;
+                        padding-left: MaterialStyleMetrics.padding_24;
+                        padding-right: MaterialStyleMetrics.padding_24;
+                        padding-top: MaterialStyleMetrics.padding_8;
+                        padding-bottom: MaterialStyleMetrics.padding_8;
+                        spacing: MaterialStyleMetrics.spacing_12;
 
-                        HorizontalLayout {
+                        VerticalLayout {
                             alignment: center;
-                            spacing: 12px;
-
                             Image {
                                 source: root.is_muted
                                     ? @image-url("../../../assets/icons/volume-mute.svg")
                                     : @image-url("../../../assets/icons/volume-3.svg");
                                 colorize: root.is_muted ? MaterialPalette.on_error : MaterialPalette.primary;
-                                width: 24px;
-                                height: 24px;
+                                width: MaterialStyleMetrics.icon_size_24;
+                                height: self.width;
                                 image-fit: contain;
                             }
+                        }
 
-                            Text {
-                                text: root.is_muted ? "UNMUTE" : "MUTE";
-                                color: root.is_muted ? MaterialPalette.on_error : MaterialPalette.on_surface;
-                                font-size: 16px;
-                                font-weight: 800;
-                                letter-spacing: 1px;
-                                vertical-alignment: center;
-                            }
+                        Text {
+                            text: root.is_muted ? "UNMUTE" : "MUTE";
+                            color: root.is_muted ? MaterialPalette.on_error : MaterialPalette.on_surface;
+                            font-size: 16px * TouchScale.clamped_font_scale;
+                            font-weight: 800;
+                            letter-spacing: 1px;
+                            vertical-alignment: center;
                         }
                     }
 

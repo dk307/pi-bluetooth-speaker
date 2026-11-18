@@ -1,13 +1,18 @@
-import { MaterialText, MaterialPalette } from "@material/material.slint";
-import { MaterialTypography } from "@material/material.slint";
-import { MaterialStyleMetrics } from "@material/material.slint";
+import {
+    MaterialPalette,
+    MaterialStyleMetrics,
+    MaterialText,
+    MaterialTypography,
+    ScrollView,
+    TouchScale,
+} from "@material/material.slint";
 import { AppTheme } from "app_theme.slint";
 import { MarqueeCompose } from "marquee_state.slint";
+import { FontSizeControl, TouchScaleShowcase } from "touch_scale_widgets.slint";
 
 // Compact +/− button used by the Advanced settings rows (Material 3 tonal
-// icon-button look; 40px keeps the 44px row rhythm inside the 420px viewport).
-// Uses real Material SVG icons so −/+ glyphs align (font-baseline mismatch
-// between "−" and "+" never aligns with text rendering).
+// icon-button look; scales with `MaterialStyleMetrics.size_40`).
+// Uses real Material SVG icons so −/+ glyphs align.
 component StepButton inherits Rectangle {
     in property <bool> plus;
     in property <bool> enabled: true;
@@ -21,13 +26,11 @@ component StepButton inherits Rectangle {
     animate opacity { duration: 80ms; easing: ease-out; }
 
     // "−" (remove) icon: always shown; canonical 24dp M3 icon.
-    // Explicit centering (like the original bar approach) avoids font‑baseline
-    // mismatch and image‑fit ambiguity between "−" and "+" glyphs.
     Image {
         source: @image-url("../../../assets/icons/remove.svg");
         colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
-        width: 20px;
-        height: 20px;
+        width: MaterialStyleMetrics.icon_size_18;
+        height: self.width;
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         image-fit: contain;
@@ -37,8 +40,8 @@ component StepButton inherits Rectangle {
     if root.plus : Image {
         source: @image-url("../../../assets/icons/add.svg");
         colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
-        width: 20px;
-        height: 20px;
+        width: MaterialStyleMetrics.icon_size_18;
+        height: self.width;
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         image-fit: contain;
@@ -51,9 +54,9 @@ component StepButton inherits Rectangle {
 }
 
 // One Material 3 list row for a numeric Advanced setting: label text on the
-// left (title-medium, 16px), a −/+ stepper control on the right. The
-// can_decrease / can_increase states reflect whether the value is at its
-// min/max bound, dimming and ignoring the respective button.
+// left, a −/+ stepper control on the right.
+// The value column has a fixed scaled width (`96px * TouchScale.widget_scale`)
+// so all −/+ buttons stay vertically aligned regardless of label width.
 component SettingsStepperRow inherits Rectangle {
     in property <string> label;
     in property <string> value;
@@ -62,20 +65,20 @@ component SettingsStepperRow inherits Rectangle {
     callback decrease();
     callback increase();
 
-    height: 44px;
+    min-height: max(MaterialStyleMetrics.size_40, row_layout.min-height);
 
-    HorizontalLayout {
+    row_layout := HorizontalLayout {
         spacing: MaterialStyleMetrics.spacing_8;
 
-        Text {
+        MaterialText {
             text: root.label;
-            font-size: 16px;
-            font-weight: 600;
+            style: MaterialTypography.body_large;
             color: MaterialPalette.on_surface;
             vertical-alignment: center;
             horizontal-alignment: left;
             overflow: elide;
-            horizontal-stretch: 2;
+            wrap: no-wrap;
+            horizontal-stretch: 1;
         }
 
         StepButton {
@@ -84,19 +87,15 @@ component SettingsStepperRow inherits Rectangle {
             clicked => { root.decrease(); }
         }
 
-        // Fixed width keeps the −/value/+ group identical on every row:
-        // the label alone absorbs the leftover row width, so the minus
-        // buttons line up in one column instead of drifting with the
-        // label text length.
-        Text {
+        MaterialText {
             text: root.value;
-            font-size: 16px;
-            font-weight: 700;
+            style: MaterialTypography.title_medium;
             color: MaterialPalette.primary;
             vertical-alignment: center;
             horizontal-alignment: center;
-            width: 96px;
+            width: 96px * TouchScale.widget_scale;
             overflow: elide;
+            wrap: no-wrap;
         }
 
         StepButton {
@@ -113,8 +112,8 @@ component FpsSegmented inherits Rectangle {
     in property <int> current_fps;
     callback fps_selected(int);
 
-    width: 168px;
-    height: 36px;
+    width: 168px * TouchScale.widget_scale;
+    height: MaterialStyleMetrics.size_36;
     border-width: 1px;
     border-radius: self.height / 2;
     border-color: MaterialPalette.outline;
@@ -126,13 +125,13 @@ component FpsSegmented inherits Rectangle {
             horizontal-stretch: 1;
             background: root.current_fps == 30 ? MaterialPalette.secondary_container : transparent;
 
-            Text {
+            MaterialText {
                 text: "30";
-                font-size: 14px;
-                font-weight: root.current_fps == 30 ? 700 : 600;
+                style: MaterialTypography.label_large;
                 color: root.current_fps == 30 ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
                 horizontal-alignment: center;
                 vertical-alignment: center;
+                wrap: no-wrap;
             }
 
             TouchArea {
@@ -149,13 +148,13 @@ component FpsSegmented inherits Rectangle {
             horizontal-stretch: 1;
             background: root.current_fps == 60 ? MaterialPalette.secondary_container : transparent;
 
-            Text {
+            MaterialText {
                 text: "60";
-                font-size: 14px;
-                font-weight: root.current_fps == 60 ? 700 : 600;
+                style: MaterialTypography.label_large;
                 color: root.current_fps == 60 ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
                 horizontal-alignment: center;
                 vertical-alignment: center;
+                wrap: no-wrap;
             }
 
             TouchArea {
@@ -168,21 +167,21 @@ component FpsSegmented inherits Rectangle {
 // Advanced list row pairing the "Marquee FPS" label with the segmented
 // 30 / 60 rate selector on the right.
 component FpsSegmentedRow inherits Rectangle {
-    height: 44px;
+    min-height: max(MaterialStyleMetrics.size_40, row_layout.min-height);
     callback set_marquee_fps(int);
 
-    HorizontalLayout {
+    row_layout := HorizontalLayout {
         spacing: MaterialStyleMetrics.spacing_8;
 
-        Text {
+        MaterialText {
             text: "Marquee FPS";
-            font-size: 16px;
-            font-weight: 600;
+            style: MaterialTypography.body_large;
             color: MaterialPalette.on_surface;
             vertical-alignment: center;
             horizontal-alignment: left;
             overflow: elide;
-            horizontal-stretch: 2;
+            wrap: no-wrap;
+            horizontal-stretch: 1;
         }
 
         FpsSegmented {
@@ -201,30 +200,39 @@ component ThemePresetCard inherits Rectangle {
     in property <bool> selected;
     callback clicked();
 
-    width: 140px;
-    height: 64px;
+    horizontal-stretch: 1;
+    min-width: 118px;
+    min-height: max(56px * TouchScale.widget_scale, card_layout.min-height);
     border-radius: MaterialStyleMetrics.border_radius_10;
-    border-width: root.selected ? 2px : 0px;
-    border-color: root.primary_color;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? root.primary_color : MaterialPalette.outline_variant;
     background: root.selected ? transparent : MaterialPalette.surface;
     opacity: touch.pressed ? 0.8 : 1.0;
     animate opacity { duration: 80ms; easing: ease-out; }
 
-    VerticalLayout {
+    card_layout := VerticalLayout {
         alignment: center;
+        padding-left: MaterialStyleMetrics.padding_6;
+        padding-right: MaterialStyleMetrics.padding_6;
+        padding-top: MaterialStyleMetrics.padding_6;
+        padding-bottom: MaterialStyleMetrics.padding_6;
         spacing: MaterialStyleMetrics.spacing_2;
 
         MaterialText {
             text: root.name;
-            style: MaterialTypography.label_large;  // 14px
+            style: MaterialTypography.label_large;
             color: root.primary_color;
             horizontal-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
         }
         MaterialText {
             text: root.accent_name;
-            style: MaterialTypography.label_medium;  // 12px
+            style: MaterialTypography.label_small;
             color: root.secondary_color;
             horizontal-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
         }
     }
 
@@ -233,39 +241,56 @@ component ThemePresetCard inherits Rectangle {
     }
 }
 
-// Android-style icon button for settings grid (custom component like TransportButton)
+// Android-style icon button for settings grid, scaled by `TouchScale.widget_scale`.
 component SettingsIconButton inherits Rectangle {
     in property <image> icon;
     in property <string> label;
     in property <bool> enabled: true;
 
-    width: 120px;
-    height: 120px;
-    border-radius: MaterialStyleMetrics.border_radius_16;  // 16px rounded
+    width: 120px * TouchScale.widget_scale;
+    min-height: max(120px * TouchScale.widget_scale, btn_layout.min-height);
+    border-radius: MaterialStyleMetrics.border_radius_16;
     background: root.enabled ? MaterialPalette.secondary_container : MaterialPalette.surface_container_highest;
     opacity: root.enabled ? (touch.pressed ? 0.8 : 1.0) : 0.6;
     animate opacity { duration: 80ms; easing: ease-out; }
 
-    VerticalLayout {
+    // Off-layout single-line probe so `is_multiline` depends only on `root.width`
+    // and `root.label` without creating a layout binding loop.
+    label_probe := Text {
+        x: 0;
+        y: 0;
+        visible: false;
+        text: root.label;
+        font-size: MaterialTypography.title_medium.font_size;
+        font-weight: MaterialTypography.title_medium.font_weight;
+        wrap: no-wrap;
+    }
+
+    property <bool> is_multiline: label_probe.preferred-width > root.width - 2 * MaterialStyleMetrics.padding_8;
+
+    btn_layout := VerticalLayout {
         alignment: center;
-        spacing: MaterialStyleMetrics.spacing_12;
+        padding: MaterialStyleMetrics.padding_8;
+        spacing: root.is_multiline ? MaterialStyleMetrics.spacing_8 : MaterialStyleMetrics.spacing_12;
 
         HorizontalLayout {
             alignment: center;
             Image {
                 source: root.icon;
                 colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
-                width: MaterialStyleMetrics.icon_size_36;  // 48px
-                height: MaterialStyleMetrics.icon_size_36;
+                width: root.is_multiline ? 32px * TouchScale.widget_scale : MaterialStyleMetrics.icon_size_36;
+                height: self.width;
                 image-fit: contain;
             }
         }
 
-        MaterialText {
+        label_text := MaterialText {
             text: root.label;
-            style: MaterialTypography.title_medium;  // 16px (+1 from title_small)
+            style: MaterialTypography.title_medium;
             color: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
             horizontal-alignment: center;
+            overflow: elide;
+            wrap: word-wrap;
         }
     }
 
@@ -282,6 +307,8 @@ component SettingsIconButton inherits Rectangle {
 export component SettingsView inherits VerticalLayout {
     in property <bool> cd_enabled: false;
     in-out property <bool> show_themes: false;
+    in-out property <bool> show_widget_preview: false;
+    in-out property <string> speaker_alias: "DietPi Speaker";
     in property <int> volume_step_percent: 2;
     in property <int> volume_hud_timeout_ms: 4000;
     in property <int> volume_hud_fade_ms: 200;
@@ -292,14 +319,16 @@ export component SettingsView inherits VerticalLayout {
     callback dsp_clicked();
     callback cd_clicked();
     callback select_theme(int);
+    callback cycle_theme();
+    callback font_scale_changed(float);
     callback set_marquee_fps(int);
     callback set_volume_step_percent(int);
     callback set_volume_hud_timeout_ms(int);
     callback set_volume_hud_fade_ms(int);
     callback set_codec_hud_timeout_ms(int);
 
-    padding: MaterialStyleMetrics.padding_16;  // 16px
-    spacing: MaterialStyleMetrics.spacing_8;
+    padding: root.show_widget_preview ? 0px : MaterialStyleMetrics.padding_12;
+    spacing: MaterialStyleMetrics.spacing_6;
 
     // View 1: Android-style icon button grid
     if !root.show_themes : VerticalLayout {
@@ -342,16 +371,15 @@ export component SettingsView inherits VerticalLayout {
         }
     }
 
-    // View 2: Screen Settings — Material 3 settings list with two sections.
-    // "Theme" groups the preset cards; every remaining screen-manager setting
-    // lives under the "Advanced" section header, separated by a divider.
-    if root.show_themes : VerticalLayout {
+    // View 2: Screen Settings — Appearance (Theme presets + Text Size) pinned
+    // above the scrollable Advanced list so the Text Size slider receives
+    // uninterrupted horizontal drag gestures on the touchscreen.
+    if root.show_themes && !root.show_widget_preview : VerticalLayout {
         vertical-stretch: 1;
-        spacing: MaterialStyleMetrics.spacing_4;
+        spacing: MaterialStyleMetrics.spacing_8;
 
-        // Section 1: Theme presets (no extra heading — the cards are self-evident).
+        // Section 1: Theme presets + Text Size (non-advanced appearance settings)
         HorizontalLayout {
-            alignment: center;
             spacing: MaterialStyleMetrics.spacing_8;
 
             ThemePresetCard {
@@ -400,69 +428,93 @@ export component SettingsView inherits VerticalLayout {
             }
         }
 
+        // Text Size ("A — Slider — A") setting, live-persisted to config.json.
+        FontSizeControl {
+            font_scale_changed(val) => { root.font_scale_changed(val); }
+        }
+
         // Section divider (M3: one divider between groups, none between rows).
         Rectangle {
             height: 1px;
             background: MaterialPalette.outline_variant;
         }
 
-        // Section 2 header: "Advanced".
-        Text {
-            text: "Advanced";
-            font-size: 18px;
-            font-weight: 700;
-            color: MaterialPalette.on_surface;
-            vertical-alignment: center;
-            height: 22px;
-        }
-
-        FpsSegmentedRow {
-            set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
-        }
-
-        // Stepper bounds mirror the Rust config domains (MIN_/MAX_* in
-        // crate::config); the Rust callbacks clamp off-grid steps as well.
-        SettingsStepperRow {
-            label: "Encoder Volume Step";
-            value: "\{root.volume_step_percent} %";
-            can_decrease: root.volume_step_percent > 1;
-            can_increase: root.volume_step_percent < 25;
-            decrease => { root.set_volume_step_percent(root.volume_step_percent - 1); }
-            increase => { root.set_volume_step_percent(root.volume_step_percent + 1); }
-        }
-
-        SettingsStepperRow {
-            label: "Volume HUD Timeout";
-            value: "\{root.volume_hud_timeout_ms} ms";
-            can_decrease: root.volume_hud_timeout_ms > 250;
-            can_increase: root.volume_hud_timeout_ms < 30000;
-            decrease => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms - 250); }
-            increase => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms + 250); }
-        }
-
-        SettingsStepperRow {
-            label: "Volume HUD Fade";
-            value: "\{root.volume_hud_fade_ms} ms";
-            can_decrease: root.volume_hud_fade_ms > 0;
-            can_increase: root.volume_hud_fade_ms < 2000;
-            decrease => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms - 100); }
-            increase => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms + 100); }
-        }
-
-        SettingsStepperRow {
-            label: "Codec HUD Timeout";
-            value: "\{root.codec_hud_timeout_ms} ms";
-            can_decrease: root.codec_hud_timeout_ms > 250;
-            can_increase: root.codec_hud_timeout_ms < 300000;
-            decrease => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms - 1000); }
-            increase => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms + 1000); }
-        }
-
-        // Stretch spacer keeps the settings list top-aligned in the viewport.
-        // Changes apply live (each edit persists immediately), so there is no
-        // Save action on this screen.
-        Rectangle {
+        // Section 2: Scrollable Advanced settings list
+        settings_scroll := ScrollView {
             vertical-stretch: 1;
+            horizontal_scrollbar_policy: ScrollBarPolicy.always_off;
+            content_width: settings_scroll.visible_width;
+            content_height: settings_list.min-height;
+
+            settings_list := VerticalLayout {
+                width: settings_scroll.visible_width;
+                height: max(settings_scroll.visible_height, self.min-height);
+                padding-right: MaterialStyleMetrics.padding_4;
+                spacing: MaterialStyleMetrics.spacing_8;
+
+                // Section 2 header: "Advanced".
+                MaterialText {
+                    text: "Advanced";
+                    style: MaterialTypography.title_medium;
+                    color: MaterialPalette.primary;
+                    vertical-alignment: center;
+                }
+
+                FpsSegmentedRow {
+                    set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
+                }
+
+                // Stepper bounds mirror the Rust config domains (MIN_/MAX_* in
+                // crate::config); the Rust callbacks clamp off-grid steps as well.
+                SettingsStepperRow {
+                    label: "Encoder Volume Step";
+                    value: "\{root.volume_step_percent} %";
+                    can_decrease: root.volume_step_percent > 1;
+                    can_increase: root.volume_step_percent < 25;
+                    decrease => { root.set_volume_step_percent(root.volume_step_percent - 1); }
+                    increase => { root.set_volume_step_percent(root.volume_step_percent + 1); }
+                }
+
+                SettingsStepperRow {
+                    label: "Volume HUD Timeout";
+                    value: "\{root.volume_hud_timeout_ms} ms";
+                    can_decrease: root.volume_hud_timeout_ms > 250;
+                    can_increase: root.volume_hud_timeout_ms < 30000;
+                    decrease => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms - 250); }
+                    increase => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms + 250); }
+                }
+
+                SettingsStepperRow {
+                    label: "Volume HUD Fade";
+                    value: "\{root.volume_hud_fade_ms} ms";
+                    can_decrease: root.volume_hud_fade_ms > 0;
+                    can_increase: root.volume_hud_fade_ms < 2000;
+                    decrease => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms - 100); }
+                    increase => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms + 100); }
+                }
+
+                SettingsStepperRow {
+                    label: "Codec HUD Timeout";
+                    value: "\{root.codec_hud_timeout_ms} ms";
+                    can_decrease: root.codec_hud_timeout_ms > 250;
+                    can_increase: root.codec_hud_timeout_ms < 300000;
+                    decrease => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms - 1000); }
+                    increase => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms + 1000); }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+            }
+        }
+    }
+
+    // View 3: 800x480 Widget Scale Audit & Interactive Showcase
+    if root.show_themes && root.show_widget_preview : TouchScaleShowcase {
+        vertical-stretch: 1;
+        speaker_alias <=> root.speaker_alias;
+        font_scale_changed(val) => {
+            root.font_scale_changed(val);
         }
     }
 }

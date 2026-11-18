@@ -1,0 +1,178 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: MIT
+//
+import { MaterialStyleMetrics } from "../styling/material_style_metrics.slint";
+import { MaterialPalette } from "../styling/material_palette.slint";
+import { StateLayer } from "./state_layer.slint";
+
+export component Slider {
+    in property <bool> enabled: true;
+    in_out property <float> value;
+    in property <float> minimum: 0;
+    in property <int> stop_count: 0;
+    in property <float> maximum: 100;
+
+    callback released(value: float);
+    callback value_changed(value: float);
+
+    property <float> steps: root.stop_count > 0 ? (root.maximum - root.minimum) / root.stop_count : 0;
+
+    min_width: 80px;
+    min_height: MaterialStyleMetrics.size_40;
+    accessible-role: slider;
+    accessible-enabled: root.enabled;
+    accessible-value: root.value;
+    accessible-value-minimum: root.minimum;
+    accessible-value-maximum: root.maximum;
+    accessible-value-step: root.steps > 0 ? root.steps : (root.maximum - root.minimum) / 100;
+    accessible-action-set-value(v) => {
+        if v.is-float() {
+            root.set_value(v.to-float());
+        }
+    }
+    accessible-action-increment => { root.increment_value(); }
+    accessible-action-decrement => { root.decrement_value(); }
+    forward-focus: focus_scope;
+
+    focus_scope := FocusScope {
+        touch_area := TouchArea {
+            width: 100%;
+            height: 100%;
+            enabled: root.enabled;
+
+            track := Rectangle {
+                x: MaterialStyleMetrics.size_8;
+                y: (parent.height - self.height) / 2;
+                width: max(1px, parent.width - MaterialStyleMetrics.size_16);
+                height: MaterialStyleMetrics.size_14;
+                background: MaterialPalette.surface_container_highest;
+                border_radius: self.height / 2;
+                clip: true;
+
+                // Active filled track
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: root.value_to_length(parent.width, root.value);
+                    height: parent.height;
+                    border_radius: self.height / 2;
+                    background: root.enabled ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
+                }
+
+                // Discrete stop dots (Android M3 stepped slider)
+                if root.stop_count > 1: Rectangle {
+                    width: 100%;
+                    height: 100%;
+
+                    for i in root.stop_count - 1: Rectangle {
+                        property <length> dot_x: root.value_to_length(track.width, root.minimum + (i + 1) * root.steps);
+                        x: self.dot_x - self.width / 2;
+                        y: (parent.height - self.height) / 2;
+                        height: MaterialStyleMetrics.size_4;
+                        width: self.height;
+                        border_radius: self.height / 2;
+                        background: (root.minimum + (i + 1) * root.steps) <= root.value
+                            ? MaterialPalette.on_primary
+                            : MaterialPalette.outline;
+                    }
+                }
+            }
+
+            // Touch-friendly circular thumb + state halo
+            state_layer := Rectangle {
+                x: track.x + root.value_to_length(track.width, root.value) - self.width / 2;
+                y: (parent.height - self.height) / 2;
+                width: MaterialStyleMetrics.size_32;
+                height: self.width;
+
+                StateLayer {
+                    width: 100%;
+                    height: 100%;
+                    border_radius: self.width / 2;
+                    pressed: touch_area.pressed;
+                    has_hover: false;
+                    has_focus: focus_scope.has_focus;
+                    enabled: root.enabled;
+                    background: MaterialPalette.primary;
+                    display_background: touch_area.pressed || focus_scope.has_focus;
+                }
+
+                thumb := Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: MaterialStyleMetrics.size_20;
+                    height: self.width;
+                    border_radius: self.height / 2;
+                    background: root.enabled ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
+                    border_width: 2px;
+                    border_color: MaterialPalette.surface;
+                }
+            }
+
+            clicked => {
+                if !root.enabled {
+                    return;
+                }
+                root.set_value(root.length_to_value(self.mouse_x - track.x, track.width));
+            }
+
+            pointer_event(event) => {
+                if !root.enabled {
+                    return;
+                }
+                if event.kind == PointerEventKind.down {
+                    root.set_value(root.length_to_value(self.mouse_x - track.x, track.width));
+                }
+                if event.kind == PointerEventKind.up {
+                    root.released(root.value);
+                }
+            }
+
+            moved => {
+                if self.pressed && root.enabled {
+                    root.set_value(root.length_to_value(self.mouse_x - track.x, track.width));
+                }
+            }
+        }
+
+        key_pressed(event) => {
+            if event.text == Key.LeftArrow {
+                root.decrement_value();
+                return accept;
+            }
+            if event.text == Key.RightArrow {
+                root.increment_value();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    changed value => {
+        root.value_changed(root.value);
+    }
+
+    pure function value_to_length(width: length, value: float) -> length {
+        clamp(width * (value - root.minimum) / max(0.0001, root.maximum - root.minimum), 0, width)
+    }
+
+    pure function length_to_value(x: length, width: length) -> float {
+        root.minimum + x * (root.maximum - root.minimum) / max(1px, width)
+    }
+
+    function set_value(value: float) {
+        if root.stop_count > 0 && root.steps > 0 {
+            root.value = clamp(root.minimum + round((value - root.minimum) / root.steps) * root.steps, root.minimum, root.maximum)
+        } else {
+            root.value = clamp(value, root.minimum, root.maximum)
+        }
+    }
+
+    function increment_value() {
+        root.set_value(root.value + (root.steps > 0 ? root.steps : (root.maximum - root.minimum) / 20));
+    }
+
+    function decrement_value() {
+        root.set_value(root.value - (root.steps > 0 ? root.steps : (root.maximum - root.minimum) / 20));
+    }
+}

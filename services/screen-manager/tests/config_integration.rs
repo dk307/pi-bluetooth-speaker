@@ -2,8 +2,8 @@
 #![cfg(feature = "ui")]
 
 use screen_manager::config::{
-    ConfigError, CoreConfig, DEFAULT_MARQUEE_FPS, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
-    VolumeStepPercent,
+    ConfigError, CoreConfig, DEFAULT_MARQUEE_FPS, FontScale, MarqueeFps, VolumeHudFadeMs,
+    VolumeHudTimeoutMs, VolumeStepPercent,
 };
 use screen_manager::ui::ThemePreset;
 use speaker_common::diag::ScopedTempDir;
@@ -361,4 +361,27 @@ fn volume_hud_timeout_ms_new_rejects_overflow() {
 #[should_panic(expected = "volume_hud_fade_ms out of range 0..=2000")]
 fn volume_hud_fade_ms_new_rejects_overflow() {
     let _ = VolumeHudFadeMs::new(2_001);
+}
+
+#[test]
+fn font_scale_enforces_domain_bounds_and_roundtrips() {
+    assert_eq!(FontScale::default(), FontScale::DEFAULT);
+    assert_eq!(FontScale::DEFAULT.percent(), 115);
+    assert!((FontScale::DEFAULT.value() - 1.15).abs() < 1e-6);
+    assert!((f32::from(FontScale::from_percent(125)) - 1.25).abs() < 1e-6);
+
+    for good in [1.0_f32, 1.15, 1.25, 1.35] {
+        let parsed = FontScale::try_from(good).expect("valid font_scale");
+        assert!((parsed.value() - good).abs() < 1e-2);
+    }
+
+    for bad in [0.99_f32, 1.36, -1.0, f32::NAN, f32::INFINITY] {
+        let err = FontScale::try_from(bad).expect_err("invalid font_scale must be rejected");
+        assert!(err.is_invalid_value());
+        assert!(err.summary().contains("invalid font_scale"));
+    }
+
+    let json = serde_json::to_string(&FontScale::from_percent(130)).expect("serialize");
+    let decoded: FontScale = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(decoded, FontScale::from_percent(130));
 }
