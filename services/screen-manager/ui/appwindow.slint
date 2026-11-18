@@ -421,7 +421,7 @@ export component MainWindow inherits Window {
 
         // Transfers the keyboard focus to the Volume HUD overlay.
         public function focus_volume_hud() {
-            volume_hud.take_focus();
+            volume_hud.focus();
         }
 
         // Releases the keyboard focus held by the Volume HUD overlay.
@@ -431,7 +431,7 @@ export component MainWindow inherits Window {
 
         // Transfers the keyboard focus to the codec information overlay.
         public function focus_codec_hud() {
-            codec_hud.take_focus();
+            codec_hud.focus();
         }
 
         // Releases the keyboard focus held by the codec information overlay.

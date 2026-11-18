@@ -29,11 +29,7 @@ export component VolumeHudOverlay inherits Rectangle {
 
     // True while the overlay owns the keyboard focus.
     out property <bool> has-focus: focus_scope.has-focus;
-
-    // Transfers the keyboard focus to the overlay.
-    public function take_focus() {
-        focus_scope.focus();
-    }
+    forward-focus: focus_scope;
 
     // Releases the keyboard focus held by the overlay.
     public function release_focus() {
