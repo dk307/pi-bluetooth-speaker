@@ -443,6 +443,40 @@ impl From<FontScale> for f32 {
     }
 }
 
+/// Track title presentation mode on the Now Playing screen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleDisplayMode {
+    /// Scroll overflowing titles horizontally in a continuous marquee.
+    #[default]
+    Marquee,
+    /// Semantically split long titles across up to two lines.
+    Split,
+}
+
+impl TitleDisplayMode {
+    /// Returns the canonical config slug (`"marquee"` or `"split"`).
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Marquee => "marquee",
+            Self::Split => "split",
+        }
+    }
+
+    /// Returns `true` when two-line semantic splitting is active.
+    #[must_use]
+    pub const fn is_split(self) -> bool {
+        matches!(self, Self::Split)
+    }
+
+    /// Constructs the mode from a boolean split flag (`false` = `Marquee`, `true` = `Split`).
+    #[must_use]
+    pub const fn from_split(split: bool) -> Self {
+        if split { Self::Split } else { Self::Marquee }
+    }
+}
+
 /// Strongly typed appliance configuration persisted as JSON on disk.
 ///
 /// Missing fields deserialize to their defaults, so minimal config files
@@ -457,6 +491,8 @@ pub struct CoreConfig {
     pub theme: Option<ThemePreset>,
     /// Marquee scroll rate in fps (`30` or `60`).
     pub marquee_fps: MarqueeFps,
+    /// Track title display mode (`"marquee"` or `"split"`, default `"marquee"`).
+    pub title_display_mode: TitleDisplayMode,
     /// Rotary encoder volume step percentage per detent (`1..=25`, default `2`).
     pub volume_step_percent: VolumeStepPercent,
     /// Volume HUD auto-dismiss timeout in milliseconds (`250..=30000`, default `4000`).

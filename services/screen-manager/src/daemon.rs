@@ -392,15 +392,16 @@ pub fn init_shell_with_config(
 
 #[cfg(feature = "ui")]
 fn apply_initial_bt_state(shell: &AppShell, bt: &speaker_bluetooth::BluetoothDevice) {
+    let active = bt.active_device();
     let preferred = match bt.playback_state() {
         Ok(Some(pb)) => {
             shell.apply_bluetooth_playback(&pb);
-            pb.device_address
+            active.or(pb.device_address)
         }
-        Ok(None) => None,
+        Ok(None) => active,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to query initial Bluetooth playback state");
-            None
+            active
         }
     };
     match bt.link_snapshot() {
@@ -664,8 +665,14 @@ pub fn publish_playback_state(
     cover: &mut CoverState,
     settle: &mut Option<SettleWindow>,
 ) {
-    match bt.playback_state() {
+    let fallback_addr = last_pb.as_ref().and_then(|p| p.device_address);
+    match bt.playback_state_for(fallback_addr) {
         Ok(Some(ref pb)) => {
+            // Compute device_changed before settle-expiry resets `last_pb` to
+            // `None`, otherwise the force-publish tick on the same device
+            // would look like a device switch and clear prior cover art.
+            let device_changed =
+                last_pb.as_ref().and_then(|p| p.device_address) != pb.device_address;
             // Force-publish one authoritative snapshot after the settle window
             // expires: if the command failed silently (or the peer never changed
             // status), the shell's optimistic flip must be reconciled instead of
@@ -693,7 +700,13 @@ pub fn publish_playback_state(
             let retry_due = cover
                 .failed_since
                 .is_some_and(|t| t.elapsed() >= COVER_DECODE_RETRY);
-            if (cover.path != cover_path || retry_due)
+            if cover_path.is_none() && device_changed && cover.path.is_some() {
+                // Switched to a device without cover art (e.g. a laptop with
+                // no BIP service): clear the previous device's artwork so the
+                // old phone's cover never lingers on top of the new track.
+                update.cover = Some(None);
+                *cover = CoverState::default();
+            } else if (cover.path != cover_path || retry_due)
                 && let Some(path) = cover_path.as_ref()
             {
                 if let Some(buffer) = decode_cover_buffer(path) {
@@ -745,6 +758,7 @@ const BT_WAIT_SLICE: Duration = Duration::from_millis(100);
 pub struct BtMonitorState {
     last_pb: Option<speaker_bluetooth::BtPlaybackState>,
     last_pcms: Option<Box<[speaker_bluetooth::BlueAlsaPcm]>>,
+    last_active_pcm: Option<speaker_bluetooth::BlueAlsaPcm>,
     last_details: Option<crate::ui::BtLinkDetails>,
     cover: CoverState,
     settle: Option<SettleWindow>,
@@ -855,13 +869,18 @@ impl BtMonitorState {
                 return;
             }
         };
-        if self.last_pcms.as_ref() != Some(&snapshot.pcms) {
-            if let Some(active) = speaker_bluetooth::select_active_pcm(&snapshot.pcms) {
+        let active_addr = bt.active_device();
+        let active_pcm =
+            speaker_bluetooth::select_active_pcm_for(&snapshot.pcms, active_addr).cloned();
+        if self.last_pcms.as_ref() != Some(&snapshot.pcms) || self.last_active_pcm != active_pcm {
+            if let Some(ref active) = active_pcm {
                 update.pcm = Some(active.clone());
             }
             self.last_pcms = Some(snapshot.pcms.clone());
+            self.last_active_pcm = active_pcm;
         }
-        let preferred = self.last_pb.as_ref().and_then(|pb| pb.device_address);
+        let preferred =
+            active_addr.or_else(|| self.last_pb.as_ref().and_then(|pb| pb.device_address));
         let details = crate::ui::BtLinkDetails::select(&snapshot, preferred);
         if self.last_details.as_ref() != Some(&details) {
             update.details = Some(details.clone());
@@ -875,6 +894,7 @@ impl BtMonitorState {
         self.last_pb = None;
         self.cover.path = None;
         self.last_pcms = None;
+        self.last_active_pcm = None;
         self.last_details = None;
     }
 

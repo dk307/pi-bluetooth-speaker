@@ -207,3 +207,42 @@ fn a2dp_detection_accepts_both_transport_spellings() {
         ["Volume"].into_iter()
     ));
 }
+
+#[test]
+fn active_device_scoping_ignores_shutout_pcm_and_rearms_on_switch() {
+    use bt_manager::volume_sync::a2dp_volume_for;
+    use speaker_bluetooth::BtAddress;
+
+    let pcm_a = "/org/bluealsa/hci0/dev_C4_03_A8_BD_EF_74/a2dpsnk/source";
+    let pcm_b = "/org/bluealsa/hci0/dev_30_E0_44_67_38_A2/a2dpsnk/source";
+    let addr_a = BtAddress::parse_str("C4:03:A8:BD:EF:74").unwrap();
+    let addr_b = BtAddress::parse_str("30:E0:44:67:38:A2").unwrap();
+
+    let t0 = Instant::now();
+    let mut state = VolumeSyncState::new();
+    assert!(state.is_active_pcm_path(pcm_a));
+    assert!(state.is_active_pcm_path(pcm_b));
+
+    assert!(state.set_active_device(Some(addr_a), t0));
+    assert!(state.is_active_pcm_path(pcm_a));
+    assert!(!state.is_active_pcm_path(pcm_b));
+    assert!(state.suppression_active(t0));
+
+    // Setting the same active device again does not re-arm suppression.
+    assert!(!state.set_active_device(Some(addr_a), t0 + FRESH_PCM_SETTLE + Duration::from_secs(1)));
+
+    // Switching to B re-arms suppression and swaps the allowed PCM path.
+    let t2 = t0 + FRESH_PCM_SETTLE + Duration::from_secs(2);
+    assert!(state.set_active_device(Some(addr_b), t2));
+    assert!(!state.is_active_pcm_path(pcm_a));
+    assert!(state.is_active_pcm_path(pcm_b));
+    assert!(state.suppression_active(t2));
+
+    let mut p_a = pcm(pcm_a, true, Some(77));
+    p_a.device_address = addr_a;
+    let mut p_b = pcm(pcm_b, true, Some(33));
+    p_b.device_address = addr_b;
+    let pcms = vec![p_b, p_a];
+    assert_eq!(a2dp_volume_for(&pcms, Some(addr_a)), Some(77));
+    assert_eq!(a2dp_volume_for(&pcms, Some(addr_b)), Some(33));
+}

@@ -312,9 +312,29 @@ pub async fn run_app(bt: BluetoothDevice, opts: BtManagerOptions) -> ExitCode {
     let mut ticks: u64 = 0;
     let mut last_status: Option<(usize, bool)> = None;
 
-    // Volume sync uses two independent system connections: signal streams on
-    // one socket and method calls on another, so a saturated signal queue can
-    // never block a method reply (see `volume_sync` module docs).
+    // Active-source arbiter + volume sync each use dedicated signal/control
+    // system D-Bus connections so a saturated signal queue can never block a
+    // method reply (see `volume_sync` module docs).
+    let (active_tx, active_rx) = tokio::sync::watch::channel(None);
+    match tokio::try_join!(Connection::system(), Connection::system()) {
+        Ok((arb_signal_conn, arb_control_conn)) => {
+            let bt_for_arbiter = bt.clone();
+            tokio::spawn(crate::active_source::run_task(
+                bt_for_arbiter,
+                arb_signal_conn,
+                arb_control_conn,
+                active_tx,
+                cover_art_shutdown.clone(),
+            ));
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Failed to connect to system D-Bus for active-source arbiter; arbitration disabled"
+            );
+        }
+    }
+
     let signal_conn = Connection::system().await;
     let control_conn = Connection::system().await;
     match (signal_conn, control_conn) {
@@ -324,6 +344,7 @@ pub async fn run_app(bt: BluetoothDevice, opts: BtManagerOptions) -> ExitCode {
                 bt_for_sync,
                 signal_conn,
                 control_conn,
+                active_rx,
             ));
         }
         (Err(e), _) | (_, Err(e)) => {

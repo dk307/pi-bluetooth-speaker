@@ -2,8 +2,8 @@
 #![cfg(feature = "ui")]
 
 use screen_manager::config::{
-    ConfigError, CoreConfig, DEFAULT_MARQUEE_FPS, FontScale, MarqueeFps, VolumeHudFadeMs,
-    VolumeHudTimeoutMs, VolumeStepPercent,
+    ConfigError, CoreConfig, DEFAULT_MARQUEE_FPS, FontScale, MarqueeFps, TitleDisplayMode,
+    VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
 };
 use screen_manager::ui::ThemePreset;
 use speaker_common::diag::ScopedTempDir;
@@ -19,6 +19,9 @@ fn defaults_are_sensible() {
     assert_eq!(config.marquee_fps, MarqueeFps::FPS_60);
     assert_eq!(config.marquee_fps.value(), 60);
     assert_eq!(DEFAULT_MARQUEE_FPS, 60);
+    assert_eq!(config.title_display_mode, TitleDisplayMode::Marquee);
+    assert_eq!(config.title_display_mode.slug(), "marquee");
+    assert!(!config.title_display_mode.is_split());
 }
 
 #[test]
@@ -69,6 +72,30 @@ fn minimal_config_deserializes_with_defaults() {
         serde_json::from_str(r#"{"theme": "studio-dark"}"#).expect("theme only");
     assert_eq!(config.theme, Some(ThemePreset::StudioDark));
     assert_eq!(config.marquee_fps, MarqueeFps::FPS_60);
+    assert_eq!(config.title_display_mode, TitleDisplayMode::Marquee);
+}
+
+#[test]
+fn title_display_mode_roundtrip_and_invalid_rejection() {
+    let dir = ScopedTempDir::new("cfg_title_mode");
+    let path = dir.path().join("config.json");
+
+    let cfg = CoreConfig {
+        title_display_mode: TitleDisplayMode::Split,
+        ..CoreConfig::default()
+    };
+    cfg.save(&path).expect("save split mode");
+    let loaded = CoreConfig::load(&path).expect("load split mode");
+    assert_eq!(loaded.title_display_mode, TitleDisplayMode::Split);
+    assert!(loaded.title_display_mode.is_split());
+    assert_eq!(loaded.title_display_mode.slug(), "split");
+
+    let raw = std::fs::read_to_string(&path).expect("read config");
+    assert!(raw.contains(r#""title_display_mode": "split""#), "{raw}");
+
+    std::fs::write(&path, r#"{"title_display_mode": "wrap"}"#).expect("write invalid");
+    let err = CoreConfig::load(&path).expect_err("invalid title_display_mode must fail");
+    assert!(err.is_config());
 }
 
 #[test]

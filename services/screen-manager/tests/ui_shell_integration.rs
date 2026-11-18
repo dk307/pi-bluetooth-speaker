@@ -1109,6 +1109,7 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     let cfg = CoreConfig {
         theme: Some(screen_manager::ui::ThemePreset::CyberpunkNeon),
         marquee_fps: MarqueeFps::FPS_30,
+        title_display_mode: screen_manager::config::TitleDisplayMode::Split,
         volume_step_percent: VolumeStepPercent::new(7),
         volume_hud_timeout_ms: VolumeHudTimeoutMs::new(5_250),
         volume_hud_fade_ms: VolumeHudFadeMs::new(650),
@@ -1157,6 +1158,18 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     shell.window().invoke_set_marquee_fps(30);
     assert_eq!(shell.marquee_fps().value(), 30);
 
+    // Title display mode toggles between Split and Marquee and persists.
+    shell.window().invoke_set_title_split_mode(false);
+    assert_eq!(
+        shell.title_display_mode(),
+        screen_manager::config::TitleDisplayMode::Marquee
+    );
+    shell.window().invoke_set_title_split_mode(true);
+    assert_eq!(
+        shell.title_display_mode(),
+        screen_manager::config::TitleDisplayMode::Split
+    );
+
     // The clamped state is exactly what live persistence wrote to disk; the
     // predicate returning proves the match.
     let clamped = shell.current_config();
@@ -1165,11 +1178,64 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     assert_eq!(clamped.volume_hud_fade_ms.value(), 0);
     assert_eq!(clamped.codec_hud_timeout_ms.value(), 250);
     assert_eq!(clamped.marquee_fps, MarqueeFps::FPS_30);
+    assert_eq!(
+        clamped.title_display_mode,
+        screen_manager::config::TitleDisplayMode::Split
+    );
     let _saved = wait_until_persisted(&path, |c| c == &clamped);
 
     // Persisting to an unwritable path logs an error instead of panicking.
     shell.wire_config(std::path::Path::new("/nonexistent-dir/settings.json"));
     shell.window().invoke_set_volume_step_percent(2);
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn track_title_splits_long_titles_and_preserves_short_titles() {
+    use screen_manager::config::TitleDisplayMode;
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use speaker_bluetooth::BtPlaybackState;
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    // Default mode is Marquee.
+    assert_eq!(shell.title_display_mode(), TitleDisplayMode::Marquee);
+    assert!(!shell.window().get_title_split_mode());
+
+    // Short title stays on one line (line2 is empty).
+    shell.set_track_metadata("Money for Nothing", "Dire Straits", "Brothers in Arms");
+    assert_eq!(shell.window().get_track_title(), "Money for Nothing");
+    assert_eq!(shell.window().get_track_title_line1(), "Money for Nothing");
+    assert_eq!(shell.window().get_track_title_line2(), "");
+
+    // Long title splits semantically across line1 and line2.
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        title: "Kesariya (From \"Brahmastra\")".into(),
+        artist: "Arijit Singh".into(),
+        album: "Brahmastra".into(),
+        duration_ms: 268_000,
+        position_ms: 12_000,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert_eq!(
+        shell.window().get_track_title(),
+        "Kesariya (From \"Brahmastra\")"
+    );
+    assert_eq!(shell.window().get_track_title_line1(), "Kesariya");
+    assert_eq!(
+        shell.window().get_track_title_line2(),
+        "(From \"Brahmastra\")"
+    );
+
+    // Switching to Split mode enables the split view in Slint and renders cleanly.
+    shell.set_title_display_mode(TitleDisplayMode::Split);
+    assert_eq!(shell.title_display_mode(), TitleDisplayMode::Split);
+    assert!(shell.window().get_title_split_mode());
+    assert!(fb.render_frame(&window).expect("render split title frame"));
 }
 
 #[cfg(feature = "ui")]
