@@ -9,7 +9,7 @@
 // while the screen genuinely animates (pairing ring or discovery spinner). The
 // deprecated animation-tick perpetual driver must never appear here.
 
-import { FilledButton, IconButton, OutlineButton, TonalButton, MaterialPalette, MaterialStyleMetrics, MaterialText, MaterialTypography, TouchScale } from "@material/material.slint";
+import { FilledButton, IconButton, OutlineButton, OutlineIconButton, TonalButton, TonalIconButton, MaterialPalette, MaterialStyleMetrics, MaterialText, MaterialTypography, TouchScale } from "@material/material.slint";
 import { OverlayAppBar } from "screen_app_bar.slint";
 
 // One row of the paired/active device list or of the discovery list.
@@ -29,7 +29,7 @@ export struct BtDeviceRow {
 global BtMetrics {
     out property <length> card_radius: 20px * TouchScale.widget_scale;
     out property <length> card_gap: MaterialStyleMetrics.spacing_12;
-    out property <length> card_height: 88px * TouchScale.widget_scale;
+    out property <length> card_height: 88px * TouchScale.clamped_font_scale;
     out property <length> list_padding_h: MaterialStyleMetrics.padding_24;
     out property <length> scrollbar_width: 4px;
     out property <length> scrollbar_margin: MaterialStyleMetrics.spacing_8;
@@ -202,32 +202,56 @@ component BtDeviceCard inherits Rectangle {
         Image {
             source: root.icon_source();
             colorize: root.device.connected ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
-            width: 32px * TouchScale.widget_scale;
-            height: 32px * TouchScale.widget_scale;
+            width: 32px * TouchScale.clamped_font_scale;
+            height: 32px * TouchScale.clamped_font_scale;
         }
 
         VerticalLayout {
+            horizontal-stretch: 1;
             alignment: center;
             spacing: 2px;
             MaterialText {
                 text: root.device.name;
                 style: MaterialTypography.headline_small;
                 color: root.device.connected ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
+                overflow: elide;
+                wrap: no-wrap;
             }
             MaterialText {
                 text: root.device.subtitle;
                 style: MaterialTypography.body_large;
                 color: root.device.connected ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
                 opacity: 0.85;
+                overflow: elide;
+                wrap: no-wrap;
             }
         }
 
-        // Status text: paired rows (list or discovery) show Paired/Active.
-        if !root.from_discovery || root.device.paired : MaterialText {
-            text: root.device.status;
-            style: MaterialTypography.body_medium;
-            color: root.device.status == "Active" ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
-            width: self.preferred-width;
+        // Fixed-width aligned status icon slot: Active (speaker/audio),
+        // Connected (check), or spacer for Paired/Available so trailing
+        // action buttons align vertically across every row.
+        Rectangle {
+            width: 32px * TouchScale.clamped_font_scale;
+            height: 32px * TouchScale.clamped_font_scale;
+            background: transparent;
+
+            if root.device.status == "Active" : Image {
+                source: @image-url("../../../assets/icons/volume-up.svg");
+                colorize: MaterialPalette.primary;
+                width: 24px * TouchScale.clamped_font_scale;
+                height: 24px * TouchScale.clamped_font_scale;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+
+            if root.device.status == "Connected" : Image {
+                source: @image-url("material/ui/icons/check.svg");
+                colorize: MaterialPalette.on_secondary_container;
+                width: 22px * TouchScale.clamped_font_scale;
+                height: 22px * TouchScale.clamped_font_scale;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
         }
 
         // Pair: unpaired discovery rows (phone-style flow).
@@ -240,18 +264,18 @@ component BtDeviceCard inherits Rectangle {
         }
 
         // Disconnect: connected rows (paired list or discovery).
-        if root.device.connected : OutlineButton {
-            text: "Disconnect";
-            width: self.preferred-width;
+        if root.device.connected : OutlineIconButton {
+            icon: @image-url("../../../assets/icons/close.svg");
+            tooltip: "Disconnect";
             clicked => {
                 root.activate();
             }
         }
 
         // Connect: not connected, and not an unpaired discovery row.
-        if !root.device.connected && !(root.from_discovery && !root.device.paired) : TonalButton {
-            text: "Connect";
-            width: self.preferred-width;
+        if !root.device.connected && !(root.from_discovery && !root.device.paired) : TonalIconButton {
+            icon: @image-url("../../../assets/icons/bluetooth.svg");
+            tooltip: "Connect";
             clicked => {
                 root.activate();
             }
@@ -459,7 +483,7 @@ component BtDeleteDialog inherits Rectangle {
         cross-axis-alignment: center;
 
         Rectangle {
-            width: min(420px * TouchScale.widget_scale, 720px);
+            width: min(420px * TouchScale.clamped_font_scale, 720px);
             background: MaterialPalette.surface_container_highest;
             border-radius: MaterialStyleMetrics.border_radius_16;
             VerticalLayout {
@@ -472,11 +496,13 @@ component BtDeleteDialog inherits Rectangle {
                     text: "Delete " + root.device_name + "?";
                     style: MaterialTypography.title_large;
                     color: MaterialPalette.on_surface;
+                    wrap: word-wrap;
                 }
                 MaterialText {
                     text: "This removes the paired device from the speaker.";
                     style: MaterialTypography.body_large;
                     color: MaterialPalette.on_surface_variant;
+                    wrap: word-wrap;
                 }
                 HorizontalLayout {
                     alignment: end;
@@ -568,6 +594,10 @@ export component BluetoothDevicesScreen inherits Rectangle {
 
     background: MaterialPalette.surface;
 
+    // Swallow pointer events so taps on the overlay never fall through to
+    // TopStatusBar (volume/codec pills) or MainViewport behind it.
+    TouchArea {}
+
     spin_timer := Timer {
         interval: 16.65ms;
         running: root.bt_devices_open && ((root.bt_devices_mode == 2 && root.bt_pair_spinning) || (root.bt_devices_mode == 1 && root.bt_scanning));
@@ -606,12 +636,6 @@ export component BluetoothDevicesScreen inherits Rectangle {
         // centered title, Add Device action icon next to the trailing Close.
         OverlayAppBar {
             title: root.bt_devices_mode == 1 ? "Add Device" : "Bluetooth Devices";
-            has_action: root.bt_devices_mode == 0;
-            action_icon: @image-url("../../../assets/icons/add.svg");
-            action_tooltip: "Add Device";
-            action_clicked => {
-                root.bt_add_device_clicked();
-            }
             trailing_icon: @image-url("../../../assets/icons/close.svg");
             trailing_tooltip: "Close";
             trailing_clicked => {
@@ -619,18 +643,33 @@ export component BluetoothDevicesScreen inherits Rectangle {
             }
         }
 
-        // Sub-header strip: mode 0 = live adapter subtitle; mode 1 = scanning
-        // status with spinner and a quick Cancel (stop discovery without
-        // closing the screen).
+        // Sub-header strip: mode 0 = live adapter subtitle + Add Device button;
+        // mode 1 = scanning status with spinner and a quick Cancel.
         if root.bt_devices_mode == 0 : Rectangle {
-            height: MaterialStyleMetrics.size_40;
+            min-height: max(MaterialStyleMetrics.size_48, mode0_sub.min-height);
             background: MaterialPalette.surface;
-            MaterialText {
-                x: BtMetrics.list_padding_h;
-                y: (parent.height - self.height) / 2;
-                text: root.bt_devices_subtitle;
-                style: MaterialTypography.body_medium;
-                color: MaterialPalette.on_surface_variant;
+            mode0_sub := HorizontalLayout {
+                padding-left: BtMetrics.list_padding_h;
+                padding-right: BtMetrics.list_padding_h;
+                padding-top: MaterialStyleMetrics.padding_4;
+                padding-bottom: MaterialStyleMetrics.padding_4;
+                spacing: MaterialStyleMetrics.spacing_8;
+                alignment: space-between;
+                cross-axis-alignment: center;
+                MaterialText {
+                    text: root.bt_devices_subtitle;
+                    style: MaterialTypography.body_medium;
+                    color: MaterialPalette.on_surface_variant;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+                FilledButton {
+                    icon: @image-url("../../../assets/icons/add.svg");
+                    text: "Add Device";
+                    clicked => {
+                        root.bt_add_device_clicked();
+                    }
+                }
             }
         }
 
