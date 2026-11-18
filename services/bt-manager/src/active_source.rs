@@ -86,6 +86,7 @@ impl ActiveSourceState {
         let prev = self.active;
         self.pcms.clear();
         self.paused_shutout.clear();
+        self.player_playing.clear();
         self.active = None;
 
         let mut running_addrs: Vec<(&str, BtAddress)> = Vec::new();
@@ -205,6 +206,9 @@ impl ActiveSourceState {
         };
         if !self.has_running_pcm(removed.address) {
             self.paused_shutout.remove(&removed.address);
+        }
+        if !self.pcms.values().any(|e| e.address == removed.address) {
+            self.player_playing.remove(&removed.address);
         }
         if self.active == Some(removed.address) && !self.has_running_pcm(removed.address) {
             return self.promote_next_running();
@@ -373,34 +377,58 @@ pub async fn serve_active_source_on(
     Ok(emitter)
 }
 
-async fn pause_remote_player(conn: &Connection, device: BtAddress) {
-    let Ok(mgr) = ObjectManagerProxy::builder(conn)
+async fn fetch_bluez_objects(conn: &Connection) -> Option<ManagedObjects> {
+    let builder = match ObjectManagerProxy::builder(conn)
         .destination("org.bluez")
         .and_then(|b| b.path("/"))
-    else {
-        return;
+    {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to configure BlueZ ObjectManager proxy");
+            return None;
+        }
     };
-    let Ok(mgr) = mgr.build().await else {
-        return;
+    let mgr = match builder.build().await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to build BlueZ ObjectManager proxy");
+            return None;
+        }
     };
-    let Ok(objects): zbus::Result<ManagedObjects> =
-        mgr.get_managed_objects().await.map_err(Into::into)
-    else {
+    match mgr.get_managed_objects().await {
+        Ok(objs) => Some(objs),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to query BlueZ managed objects");
+            None
+        }
+    }
+}
+
+async fn pause_remote_player(conn: &Connection, device: BtAddress) {
+    let Some(objects) = fetch_bluez_objects(conn).await else {
         return;
     };
     let Some(player_path) = DbusClient::find_player_path_for_device(&objects, device) else {
         tracing::debug!(%device, "No BlueZ MediaPlayer1 found for shut-out device");
         return;
     };
-    let Ok(builder) = zbus::proxy::Builder::<Proxy<'_>>::new(conn)
+    let builder = match zbus::proxy::Builder::<Proxy<'_>>::new(conn)
         .destination("org.bluez")
         .and_then(|b| b.path(player_path.as_ref()))
         .and_then(|b| b.interface("org.bluez.MediaPlayer1"))
-    else {
-        return;
+    {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(%device, path = %player_path, error = %e, "Invalid MediaPlayer1 proxy params");
+            return;
+        }
     };
-    let Ok(proxy) = builder.build().await else {
-        return;
+    let proxy = match builder.build().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(%device, path = %player_path, error = %e, "Failed to build MediaPlayer1 proxy");
+            return;
+        }
     };
     match proxy.call_method("Pause", &()).await {
         Ok(_) => tracing::info!(%device, path = %player_path, "Paused shut-out Bluetooth player"),
@@ -411,19 +439,30 @@ async fn pause_remote_player(conn: &Connection, device: BtAddress) {
 }
 
 async fn release_lingering_a2dp(conn: &Connection, device: BtAddress) {
-    let dev_path = format!(
-        "/org/bluez/hci0/dev_{}",
-        device.to_string().replace(':', "_")
-    );
-    let Ok(builder) = zbus::proxy::Builder::<Proxy<'_>>::new(conn)
-        .destination("org.bluez")
-        .and_then(|b| b.path(dev_path.as_str()))
-        .and_then(|b| b.interface("org.bluez.Device1"))
-    else {
+    let Some(objects) = fetch_bluez_objects(conn).await else {
         return;
     };
-    let Ok(proxy) = builder.build().await else {
+    let Some(dev_path) = DbusClient::find_device_path(&objects, device) else {
+        tracing::warn!(%device, "No BlueZ Device1 object found to release lingering A2DP");
         return;
+    };
+    let builder = match zbus::proxy::Builder::<Proxy<'_>>::new(conn)
+        .destination("org.bluez")
+        .and_then(|b| b.path(dev_path.as_ref()))
+        .and_then(|b| b.interface("org.bluez.Device1"))
+    {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(%device, path = %dev_path, error = %e, "Invalid Device1 proxy params");
+            return;
+        }
+    };
+    let proxy = match builder.build().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(%device, path = %dev_path, error = %e, "Failed to build Device1 proxy");
+            return;
+        }
     };
     match proxy
         .call_method("DisconnectProfile", &(UUID_A2DP_SOURCE,))
@@ -431,10 +470,12 @@ async fn release_lingering_a2dp(conn: &Connection, device: BtAddress) {
     {
         Ok(_) => tracing::info!(
             %device,
+            path = %dev_path,
             "Disconnected lingering A2DP profile on paused device so new source can play"
         ),
         Err(e) => tracing::warn!(
             %device,
+            path = %dev_path,
             error = %e,
             "Failed to disconnect lingering A2DP profile on paused device"
         ),
@@ -480,6 +521,11 @@ async fn seed_from_bt(state: &mut ActiveSourceState, ctx: &ArbiterCtx<'_>) {
             .iter()
             .map(|p| (p.pcm_path.as_ref(), p.running)),
     );
+    if let Some(objects) = fetch_bluez_objects(ctx.control_conn).await {
+        for (addr, playing) in DbusClient::player_playing_states(&objects) {
+            state.on_player_status_changed(addr, playing);
+        }
+    }
     apply_outcome(outcome, ctx).await;
 }
 

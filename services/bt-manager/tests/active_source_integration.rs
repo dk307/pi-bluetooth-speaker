@@ -94,6 +94,14 @@ fn paused_active_device_with_lingering_pcm_hands_over_to_new_player() {
         }
     );
     assert_eq!(state.active(), Some(addr_b()));
+
+    // Removing A prunes its stale player_playing entry, and seed() clears any
+    // remaining player_playing entries across reconnects.
+    state.on_pcm_removed(PCM_A);
+    state.seed([(PCM_A, true), (PCM_B, false)]);
+    let out = state.on_pcm_running_changed(PCM_B, true);
+    assert_eq!(out.pause_device, Some(addr_b()));
+    assert_eq!(out.release_device, None);
 }
 
 #[test]

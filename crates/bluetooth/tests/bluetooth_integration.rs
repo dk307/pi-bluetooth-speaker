@@ -2778,3 +2778,56 @@ fn preferred_active_device_overrides_player_sort_and_resolves_avrcp_path() {
         DbusClient::parse_bluez_all_for(&objects, Some("hci0"), Some(addr_a)).unwrap();
     assert_eq!(pb_pref.unwrap().device_address, Some(addr_a));
 }
+
+#[test]
+fn find_device_path_supports_non_hci0_and_extracts_player_states() {
+    use speaker_bluetooth::BtAddress;
+
+    let addr_a = BtAddress::parse_str("C4:03:A8:BD:EF:74").unwrap();
+    let addr_c = BtAddress::parse_str("11:22:33:44:55:66").unwrap();
+
+    let mut objects: ManagedObjects = HashMap::new();
+    let mut hci0_dev = HashMap::new();
+    let mut hci0_props = HashMap::new();
+    hci0_props.insert("Address".to_string(), to_val("C4:03:A8:BD:EF:74"));
+    hci0_dev.insert(iface("org.bluez.Device1"), hci0_props);
+    objects.insert(
+        OwnedObjectPath::try_from("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74").unwrap(),
+        hci0_dev,
+    );
+
+    let mut hci1_dev = HashMap::new();
+    let mut hci1_props = HashMap::new();
+    hci1_props.insert("Address".to_string(), to_val("11:22:33:44:55:66"));
+    hci1_dev.insert(iface("org.bluez.Device1"), hci1_props);
+    objects.insert(
+        OwnedObjectPath::try_from("/org/bluez/hci1/dev_11_22_33_44_55_66").unwrap(),
+        hci1_dev,
+    );
+
+    let mut p_ifaces = HashMap::new();
+    let mut p_props = HashMap::new();
+    p_props.insert(
+        "Device".to_string(),
+        to_val(OwnedObjectPath::try_from("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74").unwrap()),
+    );
+    p_props.insert("Status".to_string(), to_val("playing"));
+    p_ifaces.insert(iface("org.bluez.MediaPlayer1"), p_props);
+    objects.insert(
+        OwnedObjectPath::try_from("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74/avrcp/player0").unwrap(),
+        p_ifaces,
+    );
+
+    assert_eq!(
+        DbusClient::find_device_path(&objects, addr_a).as_deref(),
+        Some("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74")
+    );
+    assert_eq!(
+        DbusClient::find_device_path(&objects, addr_c).as_deref(),
+        Some("/org/bluez/hci1/dev_11_22_33_44_55_66")
+    );
+    let states: std::collections::HashMap<_, _> = DbusClient::player_playing_states(&objects)
+        .into_iter()
+        .collect();
+    assert_eq!(states.get(&addr_a), Some(&true));
+}

@@ -1622,6 +1622,52 @@ impl DbusClient {
         candidates.into_iter().next().map(|(_, p)| Box::from(p))
     }
 
+    /// Resolves the live `org.bluez.Device1` object path for `device`
+    /// regardless of adapter name (`hci0`, `hci1`, etc.).
+    #[must_use]
+    pub fn find_device_path(objects: &ManagedObjects, device: BtAddress) -> Option<Box<str>> {
+        let mut paths: Vec<&str> = objects
+            .iter()
+            .filter_map(|(path, ifaces)| {
+                let props = find_iface(ifaces, "org.bluez.Device1")?;
+                let matches_addr = get_str(props, "Address")
+                    .and_then(|s| BtAddress::parse_str(s).ok())
+                    .or_else(|| crate::active_source::device_address_from_path(path.as_str()))
+                    == Some(device);
+                matches_addr.then_some(path.as_str())
+            })
+            .collect();
+        paths.sort_unstable();
+        paths.into_iter().next().map(Box::from)
+    }
+
+    /// Extracts `(device_address, is_playing)` for every `org.bluez.MediaPlayer1`
+    /// in `objects`, preferring `"playing"` if a device exposes multiple players.
+    #[must_use]
+    pub fn player_playing_states(objects: &ManagedObjects) -> Vec<(BtAddress, bool)> {
+        let mut by_dev: HashMap<BtAddress, bool> = HashMap::new();
+        for (path, ifaces) in objects {
+            let Some(props) = find_iface(ifaces, "org.bluez.MediaPlayer1") else {
+                continue;
+            };
+            let Some(addr) = props
+                .get("Device")
+                .and_then(|v| <&str>::try_from(v).ok())
+                .and_then(crate::active_source::device_address_from_path)
+                .or_else(|| crate::active_source::device_address_from_path(path.as_str()))
+            else {
+                continue;
+            };
+            let is_playing =
+                get_str(props, "Status").is_some_and(|s| s.eq_ignore_ascii_case("playing"));
+            by_dev
+                .entry(addr)
+                .and_modify(|prev| *prev |= is_playing)
+                .or_insert(is_playing);
+        }
+        by_dev.into_iter().collect()
+    }
+
     /// Extracts the active `MediaPlayer1` object path from a parsed playback state.
     ///
     /// # Errors
