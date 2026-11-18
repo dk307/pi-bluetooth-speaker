@@ -1,0 +1,153 @@
+import { MaterialPalette } from "@material/material.slint";
+import { OverlayAppBar } from "screen_app_bar.slint";
+
+// One label / value line in the codec information panel.
+//
+// The parent positions the row (x/y/width/height); the row only lays out its
+// two text columns relative to its own bounds.
+component CodecRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+
+    // Width of the uppercase caption column; the value column takes the rest.
+    property <length> label_width: 140px;
+
+    Text {
+        x: 0;
+        y: 0;
+        width: parent.label_width;
+        height: parent.height;
+        text: parent.label;
+        color: MaterialPalette.secondary;
+        font-size: 15px;
+        font-weight: 800;
+        vertical-alignment: center;
+    }
+
+    Text {
+        x: parent.label_width + 12px;
+        y: 0;
+        width: parent.width - self.x;
+        height: parent.height;
+        text: parent.value;
+        color: MaterialPalette.on_surface;
+        font-size: 22px;
+        font-weight: 700;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// Codec information overlay, opened by tapping the codec badge in the top bar.
+//
+// Mirrors the Volume HUD: a full-viewport panel below the top bar with its own
+// overlay app bar ("Codec" + close) and a backdrop touch catcher that dismisses
+// the panel when the user taps outside the information.
+export component CodecHudOverlay inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: @linear-gradient(150deg, MaterialPalette.surface 0%, MaterialPalette.background 100%);
+    border-width: 1px;
+    border-color: MaterialPalette.outline_variant;
+    clip: true;
+
+    // Negotiated stream properties of the connected device.
+    in property <string> codec: "";
+    in property <string> sample_rate: "";
+    in property <string> bit_depth: "";
+    in property <string> stream_format: "";
+    in property <string> delay_text: "";
+    // False while no Bluetooth device is connected (no stream to report).
+    in property <bool> connected: false;
+
+    callback dismiss_requested();
+
+    // Value shown for a property that is not available (no active stream).
+    property <string> unknown: "—";
+
+    // Shared geometry: header height and the label/value row grid. Every
+    // position below is derived from these so the grid cannot drift apart.
+    property <length> bar_height: 60px;
+    property <length> row_height: 40px;
+    property <length> row_spacing: 6px;
+    property <length> column_width: 560px;
+    property <length> row_pitch: root.row_height + root.row_spacing;
+
+    // Full-viewport backdrop touch catcher: prevents touches from leaking through to
+    // the underlying tab and allows tapping empty space to dismiss the panel early.
+    backdrop_touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            root.dismiss_requested();
+        }
+    }
+
+    // App bar header laid out at the top; the body fills the remaining space
+    // (Volume HUD structure — layouts own the header/body split, math centers
+    // the content block inside the body).
+    VerticalLayout {
+        // Header — title "Codec", close icon on the right.
+        Rectangle {
+            height: root.bar_height;
+            OverlayAppBar {
+                width: 100%;
+                height: 100%;
+                title: "Codec";
+                trailing_icon: @image-url("../../../assets/icons/close.svg");
+                trailing_tooltip: "Close";
+                trailing_clicked => { root.dismiss_requested(); }
+            }
+        }
+
+        // Body — fills the space below the app bar.
+        Rectangle {
+            background: transparent;
+
+            // Label/value block centered in the body area.
+            Rectangle {
+                width: root.column_width;
+                height: 5 * root.row_height + 4 * root.row_spacing;
+                background: transparent;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+
+                CodecRow {
+                    y: 0 * root.row_pitch;
+                    width: 100%;
+                    height: root.row_height;
+                    label: "CODEC";
+                    value: root.connected ? root.codec : root.unknown;
+                }
+                CodecRow {
+                    y: 1 * root.row_pitch;
+                    width: 100%;
+                    height: root.row_height;
+                    label: "SAMPLE RATE";
+                    value: root.connected ? root.sample_rate : root.unknown;
+                }
+                CodecRow {
+                    y: 2 * root.row_pitch;
+                    width: 100%;
+                    height: root.row_height;
+                    label: "BIT DEPTH";
+                    value: root.connected ? root.bit_depth : root.unknown;
+                }
+                CodecRow {
+                    y: 3 * root.row_pitch;
+                    width: 100%;
+                    height: root.row_height;
+                    label: "FORMAT";
+                    value: root.connected ? root.stream_format : root.unknown;
+                }
+                CodecRow {
+                    y: 4 * root.row_pitch;
+                    width: 100%;
+                    height: root.row_height;
+                    label: "LATENCY";
+                    value: root.connected ? root.delay_text : root.unknown;
+                }
+            }
+        }
+    }
+}

@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 authors = ["Audio Appliance Team"]
 license = "Apache-2.0"
@@ -60,7 +60,6 @@ tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 
 # Async Trait for Trait-based Dependency Injection / Mocks
 async-trait = "=0.1.86"
-memmap2 = "=0.9.12"
 thiserror = "=2.0.21"
 sd-notify = "=0.1.1"
 
@@ -75,9 +74,9 @@ libc = "=0.2.191"
 ctrlc = "=3.4.2"
 
 # UI Framework (Slint with Linux Framebuffer & KMS/DRM backends)
-slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "renderer-software", "software-renderer-systemfonts"] }
-i-slint-core = { version = "=1.18.1", features = ["svg", "image-decoders", "image-default-formats"] }
-slint-build = "=1.18.1"
+slint = { version = "=1.19.0", default-features = false, features = ["std", "compat-1-18", "renderer-femtovg", "renderer-software", "software-renderer-systemfonts", "backend-linuxkms", "backend-linuxkms-noseat"] }
+i-slint-core = { version = "=1.19.0", features = ["svg", "image-decoders", "image-default-formats"] }
+slint-build = "=1.19.0"
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"

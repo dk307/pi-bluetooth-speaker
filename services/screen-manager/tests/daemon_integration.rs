@@ -1,17 +1,14 @@
 //! Integration tests for the central core appliance daemon.
 
 #[cfg(feature = "ui")]
-use std::fs;
-#[cfg(feature = "ui")]
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "ui")]
 use screen_manager::daemon::{
     BT_COMMAND_SETTLE, BT_KEEP_ALIVE, BT_PLAYING_POLL, BtMonitorState, BtSharedUpdate,
     COVER_DECODE_RETRY, CoverState, SettleKind, SettleWindow, ShellInit, TARGET_COVER_SIZE,
-    decode_cover_buffer, finish_boot_worker, idle_sleep, init_shell, publish_playback_state,
-    report_display, run_app, run_render_loop, run_shell_on, run_splash_on, run_ui_display,
-    run_ui_display_on_path, run_ui_lifecycle,
+    decode_cover_buffer, finish_boot_worker, init_shell, publish_playback_state, report_display,
+    run_app, run_ui_display,
 };
 use screen_manager::daemon::{
     CoreCliOptions, ScreenTarget, headless_requested, parse_cli_args_from, parse_preview_secs,
@@ -19,6 +16,8 @@ use screen_manager::daemon::{
 };
 #[cfg(feature = "ui")]
 use screen_manager::ui::Framebuffer;
+#[cfg(feature = "ui")]
+use screen_manager::ui::runtime::{RuntimeOptions, run as runtime_run};
 use speaker_common::diag::CliParse;
 #[cfg(feature = "ui")]
 use speaker_common::diag::ScopedTempDir;
@@ -27,6 +26,22 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "ui")]
 static ENV_GUARD: Mutex<()> = Mutex::new(());
+
+/// Polls `condition` until it holds or the deadline expires.
+///
+/// Used to await a worker-thread side effect (a published state delta) without
+/// sleeping for a fixed, flaky duration.
+#[cfg(feature = "ui")]
+fn wait_for(mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("condition not met within the 5 s deadline");
+}
 
 #[cfg(feature = "ui")]
 fn lock_env() -> std::sync::MutexGuard<'static, ()> {
@@ -175,16 +190,19 @@ fn run_ui_display_headless_short_circuits() {
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_ui_display_missing_device_returns_early() {
+fn run_ui_display_returns_early_without_drm_device() {
     let _guard = lock_env();
     // SAFETY: tests are serialized by ENV_GUARD; no other test thread reads
     // SPEAKER_CORE_HEADLESS while this guard is held.
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
-    let dir = ScopedTempDir::new("fb-boot-splash-missing");
-    let missing = dir.path().join("fb0");
-    run_ui_display_on_path(&missing, ScreenTarget::Appliance, Some(1), None, None, 60);
-    run_ui_display_on_path(&missing, ScreenTarget::Splash, Some(1), None, None, 60);
-    run_ui_display_on_path(&missing, ScreenTarget::Shell, Some(1), None, None, 60);
+    if std::path::Path::new("/dev/dri/card0").exists() {
+        // Never probe the KMS path on a host with a live DRM device: it would
+        // attempt to become DRM master. CI runners have no /dev/dri.
+        return;
+    }
+    run_ui_display(ScreenTarget::Appliance, Some(1), None, None, 60);
+    run_ui_display(ScreenTarget::Splash, Some(1), None, None, 60);
+    run_ui_display(ScreenTarget::Shell, Some(1), None, None, 60);
 }
 
 #[cfg(feature = "ui")]
@@ -199,165 +217,175 @@ fn instant_probes(text: Result<&'static str, &'static str>) -> screen_manager::u
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_splash_on_mocked_drains_checks_and_renders_frames() {
-    let (mut fb, ctrl) = Framebuffer::new_mocked();
-    assert!(fb.is_mocked());
-    run_splash_on(&mut fb, instant_probes(Ok("all good")), None, None);
-    assert_eq!(fb.unblank_count(), 1);
+fn runtime_splash_drains_checks_and_quits() {
+    use screen_manager::config::CoreConfig;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+
+    // A short-lived timer proves the hermetic event loop advanced timers
+    // before the boot-check settle quit ended the session.
+    let ticked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let flag = std::rc::Rc::clone(&ticked);
+    slint::Timer::single_shot(Duration::from_millis(5), move || flag.set(true));
+
+    runtime_run(RuntimeOptions {
+        screen: ScreenTarget::Splash,
+        preview_secs: None,
+        tab: None,
+        config: &CoreConfig::default(),
+        config_path: None,
+        probe: instant_probes(Ok("all good")),
+        mocked: true,
+    });
     assert!(
-        fb.render_count() >= 2,
-        "initial frame plus check-loop frames"
+        ticked.get(),
+        "splash event loop must advance timers before quitting"
     );
-    assert_eq!(ctrl.counters(), (1, fb.render_count()));
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_splash_on_mocked_failed_probes_still_terminate() {
-    let (mut fb, _ctrl) = Framebuffer::new_mocked();
-    run_splash_on(&mut fb, instant_probes(Err("probe blew up")), None, None);
-    assert!(fb.render_count() >= 2);
+fn runtime_splash_failed_probes_still_terminate() {
+    use screen_manager::config::CoreConfig;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    runtime_run(RuntimeOptions {
+        screen: ScreenTarget::Splash,
+        preview_secs: None,
+        tab: None,
+        config: &CoreConfig::default(),
+        config_path: None,
+        probe: instant_probes(Err("probe blew up")),
+        mocked: true,
+    });
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_splash_on_mocked_zero_preview_exits_after_checks() {
-    let (mut fb, _ctrl) = Framebuffer::new_mocked();
-    run_splash_on(&mut fb, instant_probes(Ok("ok")), Some(0), None);
-    assert!(fb.render_count() >= 2);
+fn runtime_splash_zero_preview_exits_after_checks() {
+    use screen_manager::config::CoreConfig;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    runtime_run(RuntimeOptions {
+        screen: ScreenTarget::Splash,
+        preview_secs: Some(0),
+        tab: None,
+        config: &CoreConfig::default(),
+        config_path: None,
+        probe: instant_probes(Ok("ok")),
+        mocked: true,
+    });
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_splash_on_mocked_reports_unblank_failure_and_continues() {
-    let (mut fb, ctrl) = Framebuffer::new_mocked();
-    ctrl.set_unblank_error("simulated unblank failure");
-    run_splash_on(
-        &mut fb,
-        instant_probes(Ok("ok")),
-        None,
-        Some(screen_manager::ui::ThemePreset::Peppy),
-    );
-    // Unblank failure is non-fatal: splash still initializes and renders
-    assert_eq!(fb.unblank_count(), 0);
-    assert!(fb.render_count() >= 2);
+fn runtime_shell_runs_timers_and_shuts_down() {
+    use screen_manager::config::CoreConfig;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    runtime_run(RuntimeOptions {
+        screen: ScreenTarget::Shell,
+        preview_secs: Some(1),
+        tab: Some(1),
+        config: &CoreConfig {
+            theme: Some(screen_manager::ui::ThemePreset::Peppy),
+            marquee_fps: screen_manager::config::MarqueeFps::FPS_30,
+            ..CoreConfig::default()
+        },
+        config_path: None,
+        probe: instant_probes(Ok("unused")),
+        mocked: true,
+    });
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_splash_on_mocked_render_error_does_not_join_check_thread() {
-    let (mut fb, ctrl) = Framebuffer::new_mocked();
-    ctrl.set_render_error("simulated render failure");
-    run_splash_on(&mut fb, instant_probes(Ok("ok")), None, None);
-    assert_eq!(fb.render_count(), 0);
-    assert_eq!(ctrl.counters(), (1, 0));
+fn runtime_shell_zero_preview_returns_immediately() {
+    use screen_manager::config::CoreConfig;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    runtime_run(RuntimeOptions {
+        screen: ScreenTarget::Shell,
+        preview_secs: Some(0),
+        tab: None,
+        config: &CoreConfig::default(),
+        config_path: None,
+        probe: instant_probes(Ok("unused")),
+        mocked: true,
+    });
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_shell_on_mocked_renders_and_tracks_counters() {
-    let (mut fb, ctrl) = Framebuffer::new_mocked();
-    assert!(fb.is_mocked());
-    run_shell_on(&mut fb, Some(0), None, None, 60);
-    assert_eq!(fb.unblank_count(), 1);
-    assert_eq!(fb.render_count(), 1);
-    assert_eq!(ctrl.counters(), (1, 1));
+fn runtime_appliance_settles_boot_overlay_then_runs_shell() {
+    use screen_manager::config::CoreConfig;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    let opts = RuntimeOptions {
+        screen: ScreenTarget::Appliance,
+        preview_secs: Some(1),
+        tab: Some(2),
+        config: &CoreConfig::default(),
+        config_path: None,
+        probe: instant_probes(Ok("all good")),
+        mocked: true,
+    };
+    // Exercise the manual Debug impl (BootProbe itself has no Debug derive).
+    assert!(format!("{opts:?}").contains("RuntimeOptions"));
+    runtime_run(opts);
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_shell_on_mocked_reports_unblank_failure_and_continues() {
-    let (mut fb, ctrl) = Framebuffer::new_mocked();
-    ctrl.set_unblank_error("simulated unblank failure");
-    run_shell_on(&mut fb, Some(0), None, None, 60);
-    assert_eq!(fb.unblank_count(), 0);
-    assert_eq!(fb.render_count(), 1);
+fn runtime_appliance_abandons_hung_boot_probe_on_preview_expiry() {
+    use screen_manager::config::CoreConfig;
+    use screen_manager::ui::BootProbe;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    // A probe that outlives the preview window forces the deadline branch:
+    // the boot phase ends unsettled and the worker is abandoned with a warning.
+    let hung = BootProbe::from_probes(std::array::from_fn(|_| {
+        Box::new(move || {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            Ok::<Box<str>, Box<str>>("late".into())
+        }) as Box<dyn FnOnce() -> Result<Box<str>, Box<str>> + Send>
+    }));
+    runtime_run(RuntimeOptions {
+        screen: ScreenTarget::Appliance,
+        preview_secs: Some(1),
+        tab: None,
+        config: &CoreConfig::default(),
+        config_path: None,
+        probe: hung,
+        mocked: true,
+    });
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_shell_on_mocked_render_error_skips_loop() {
-    let (mut fb, ctrl) = Framebuffer::new_mocked();
-    ctrl.set_render_error("simulated render failure");
-    run_shell_on(&mut fb, Some(0), None, None, 60);
-    assert_eq!(fb.render_count(), 0);
-    assert_eq!(ctrl.counters(), (1, 0));
-}
+fn runtime_appliance_zero_preview_abandons_boot_before_first_tick() {
+    use screen_manager::config::CoreConfig;
 
-#[cfg(feature = "ui")]
-#[test]
-fn run_shell_on_mocked_with_theme_and_tab() {
-    let (mut fb, ctrl) = Framebuffer::new_mocked();
-    run_shell_on(
-        &mut fb,
-        Some(0),
-        Some(screen_manager::ui::ThemePreset::Peppy),
-        Some(1),
-        30,
-    );
-    assert_eq!(fb.render_count(), 1);
-    assert_eq!(ctrl.counters(), (1, 1));
-}
-
-#[cfg(feature = "ui")]
-#[test]
-fn run_render_loop_mocked_and_bluetooth_paths() {
-    use screen_manager::ui::{AppShell, MainWindow};
-
-    let (mut fb, ctrl) = Framebuffer::new_mocked();
-    let window = fb.init_platform().unwrap();
-    let main_window = MainWindow::new().unwrap();
-    let shell = AppShell::new(main_window);
-
-    // 1. None bluetooth path breaking on render failure
-    ctrl.set_render_error("simulated loop failure");
-    let commands = speaker_bluetooth::TransportCommandQueue::new();
-    run_render_loop(
-        &mut fb,
-        &window,
-        &shell,
-        None,
-        &commands,
-        &screen_manager::volume::AmpVolumeCommandQueue::new(),
-        Some(10),
-    );
-
-    // 2. Bluetooth sync branch with mocked BluetoothDevice breaking on render failure
-    let (bt, _) = speaker_bluetooth::BluetoothDevice::new_mocked();
-    ctrl.set_render_error("simulated bt loop failure");
-    let commands = speaker_bluetooth::TransportCommandQueue::new();
-    run_render_loop(
-        &mut fb,
-        &window,
-        &shell,
-        Some(&bt),
-        &commands,
-        &screen_manager::volume::AmpVolumeCommandQueue::new(),
-        Some(10),
-    );
-
-    // 3. Bluetooth sync branch running short preview loop to completion (clear fault first)
-    ctrl.clear_render_error();
-    let commands = speaker_bluetooth::TransportCommandQueue::new();
-    run_render_loop(
-        &mut fb,
-        &window,
-        &shell,
-        Some(&bt),
-        &commands,
-        &screen_manager::volume::AmpVolumeCommandQueue::new(),
-        Some(1),
-    );
-
-    // 4. run_shell_on with render error
-    ctrl.set_render_error("simulated shell render error");
-    run_shell_on(&mut fb, Some(0), None, None, 60);
-
-    // 5. run_shell_on with unblank error
-    ctrl.clear_render_error();
-    ctrl.set_unblank_error("simulated unblank error");
-    run_shell_on(&mut fb, Some(0), None, None, 60);
-    ctrl.clear_unblank_error();
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    // The preview single-shot (0 s) fires before the 16 ms drain timer ever
+    // runs, so the post-loop abandon path must release the worker handle.
+    runtime_run(RuntimeOptions {
+        screen: ScreenTarget::Appliance,
+        preview_secs: Some(0),
+        tab: None,
+        config: &CoreConfig::default(),
+        config_path: None,
+        probe: instant_probes(Ok("ok")),
+        mocked: true,
+    });
 }
 
 #[test]
@@ -540,7 +568,7 @@ fn run_app_headless_executes_successfully() {
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_ui_display_on_valid_and_invalid_file_paths() {
+fn report_display_logs_all_levels() {
     report_display(
         tracing::Level::INFO,
         "Info test context",
@@ -556,44 +584,6 @@ fn run_ui_display_on_valid_and_invalid_file_paths() {
         "Error test context",
         "error error message",
     );
-
-    let dir = ScopedTempDir::new("fb-valid-display-test");
-    let dev = dir.path().join("fake_fb");
-    fs::write(&dev, vec![0u8; 800 * 480 * 4]).unwrap();
-
-    run_ui_display_on_path(&dev, ScreenTarget::Appliance, Some(0), None, None, 60);
-    run_ui_display_on_path(&dev, ScreenTarget::Splash, Some(0), None, None, 60);
-    run_ui_display_on_path(
-        &dev,
-        ScreenTarget::Shell,
-        Some(0),
-        Some(screen_manager::ui::ThemePreset::Peppy),
-        Some(1),
-        60,
-    );
-
-    // Directory path to trigger Framebuffer::open failure path
-    run_ui_display_on_path(dir.path(), ScreenTarget::Splash, Some(0), None, None, 60);
-}
-
-#[cfg(feature = "ui")]
-#[test]
-fn run_ui_lifecycle_error_and_preview_paths() {
-    let (mut fb, ctrl) = Framebuffer::new_mocked();
-    // Test setup failure
-    run_ui_lifecycle(&mut fb, "Failing Component", Some(0), || {
-        Err::<(), Box<dyn std::error::Error>>("simulated setup failure".into())
-    });
-
-    // Test already current buffer (second render without request_redraw returns Ok(false))
-    run_ui_lifecycle(&mut fb, "Already Current", Some(0), || Ok(()));
-
-    // Test preview loop without error
-    run_ui_lifecycle(&mut fb, "Active Render Loop", Some(1), || Ok(()));
-
-    // Test preview loop break on render error
-    ctrl.set_render_error("simulated render loop error");
-    run_ui_lifecycle(&mut fb, "Failing Render Loop", Some(1), || Ok(()));
 }
 
 #[test]
@@ -613,11 +603,16 @@ fn run_ui_display_with_headless_disabled_checks_device() {
         "SPEAKER_CORE_HEADLESS=0 must not enable headless mode"
     );
 
-    let dir = ScopedTempDir::new("fb-headless-disabled");
-    let missing = dir.path().join("fb0");
-    run_ui_display_on_path(&missing, ScreenTarget::Splash, Some(0), None, None, 60);
-    run_ui_display_on_path(&missing, ScreenTarget::Shell, Some(0), None, None, 60);
-    run_ui_display_on_path(&missing, ScreenTarget::Appliance, Some(0), None, None, 60);
+    if std::path::Path::new("/dev/dri/card0").exists() {
+        // Never probe the KMS path on a host with a live DRM device: it would
+        // attempt to become DRM master. CI runners have no /dev/dri.
+        // SAFETY: serialized test guard
+        unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
+        return;
+    }
+    run_ui_display(ScreenTarget::Splash, Some(0), None, None, 60);
+    run_ui_display(ScreenTarget::Shell, Some(0), None, None, 60);
+    run_ui_display(ScreenTarget::Appliance, Some(0), None, None, 60);
 
     // SAFETY: serialized test guard
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
@@ -642,13 +637,16 @@ fn test_core_daemon_main_entrypoint() {
 fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
     use screen_manager::ui::{Framebuffer, MainWindow};
 
-    // 1. run_ui_display with headless disabled calls run_ui_display_on_path
+    // 1. run_ui_display with headless disabled reaches the DRM device probe
     let _guard = lock_env();
     // SAFETY: serialized test guard
     unsafe { std::env::set_var("SPEAKER_CORE_HEADLESS", "0") };
-    run_ui_display(ScreenTarget::Splash, Some(0), None, None, 60);
-    run_ui_display(ScreenTarget::Shell, Some(0), None, None, 60);
-    run_ui_display(ScreenTarget::Appliance, Some(0), None, None, 60);
+    if !std::path::Path::new("/dev/dri/card0").exists() {
+        // Early-return path: safe to probe on hosts without a DRM device.
+        run_ui_display(ScreenTarget::Splash, Some(0), None, None, 60);
+        run_ui_display(ScreenTarget::Shell, Some(0), None, None, 60);
+        run_ui_display(ScreenTarget::Appliance, Some(0), None, None, 60);
+    }
     // SAFETY: serialized test guard
     unsafe { std::env::remove_var("SPEAKER_CORE_HEADLESS") };
 
@@ -686,6 +684,108 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
     assert!(bt_mock.is_some());
     assert!(shell_mock.is_playing());
     assert_eq!(shell_mock.current_tab(), 2);
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn live_init_defers_bluez_connect_to_bootstrap() {
+    use screen_manager::ui::MainWindow;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+
+    // Live init must not touch the system bus: the blocking BlueZ connect
+    // runs on the `bt-bootstrap` worker, so `bt` stays `None` here and first
+    // paint can never be delayed by a slow D-Bus.
+    let main_window = MainWindow::new().unwrap();
+    let ShellInit { bt, .. } = init_shell(main_window, false, None, None, 60);
+    assert!(
+        bt.is_none(),
+        "live init must defer the blocking BlueZ connect"
+    );
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn bootstrap_worker_publishes_state_without_touching_the_ui_thread() {
+    use screen_manager::ui::MainWindow;
+    use std::sync::atomic::AtomicBool;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+
+    let main_window = MainWindow::new().unwrap();
+    let ShellInit {
+        shell, commands, ..
+    } = init_shell(main_window, false, None, None, 60);
+    let shell = std::rc::Rc::new(shell);
+    let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
+    let running = Arc::new(AtomicBool::new(true));
+    let connected = Arc::new(AtomicBool::new(false));
+
+    // The injected mock connection stands in for the blocking system-bus
+    // connect: the worker runs it off the render thread and publishes the
+    // resulting state through the shared update channel.
+    let (mock_bt, _mock_ctrl) = speaker_bluetooth::BluetoothDevice::new_mocked();
+    let worker = screen_manager::daemon::spawn_bt_bootstrap_worker(
+        || Ok(mock_bt),
+        &shared,
+        &commands,
+        &running,
+        &connected,
+    )
+    .expect("bt-bootstrap thread spawns");
+
+    // The connect succeeded and the monitor published the initial snapshot.
+    wait_for(|| connected.load(std::sync::atomic::Ordering::Relaxed));
+    wait_for(|| shared.lock().is_ok_and(|state| state.playback.is_some()));
+
+    // The render thread applies the published state to the shell.
+    screen_manager::daemon::apply_shared_bt_state(&shell, &shared);
+    assert!(shell.is_playing(), "published playback state applied");
+    assert!(connected.load(std::sync::atomic::Ordering::Relaxed));
+
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
+    worker.join().expect("bt-bootstrap worker exits cleanly");
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn bootstrap_worker_reports_connect_failure_without_publishing_state() {
+    use screen_manager::ui::MainWindow;
+    use std::sync::atomic::AtomicBool;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+
+    let main_window = MainWindow::new().unwrap();
+    let ShellInit { commands, .. } = init_shell(main_window, false, None, None, 60);
+    let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
+    let running = Arc::new(AtomicBool::new(true));
+    let connected = Arc::new(AtomicBool::new(false));
+
+    // A failed connection is reported at WARN on the worker thread: no state
+    // is published and the connected flag stays down, so the UI never wires
+    // the transport callbacks.
+    let worker = screen_manager::daemon::spawn_bt_bootstrap_worker(
+        || Err(speaker_bluetooth::BtError::dbus("no system bus")),
+        &shared,
+        &commands,
+        &running,
+        &connected,
+    )
+    .expect("bt-bootstrap thread spawns");
+    worker.join().expect("bt-bootstrap worker exits cleanly");
+
+    assert!(
+        !connected.load(std::sync::atomic::Ordering::Relaxed),
+        "failed connect must not raise the connected flag"
+    );
+    let state = shared.lock().expect("shared state lock");
+    assert!(
+        state.playback.is_none() && state.details.is_none(),
+        "failed connect must not publish any state"
+    );
 }
 
 #[cfg(feature = "ui")]
@@ -883,43 +983,36 @@ fn publish_device_gone_clears_cover() {
 
 #[cfg(feature = "ui")]
 #[test]
-fn run_render_loop_with_devices_polls_rotary_encoder_and_faults_gracefully() {
-    use screen_manager::daemon::run_render_loop_with_devices;
-    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+fn poll_encoder_input_applies_rotation_and_faults_gracefully() {
+    use screen_manager::daemon::poll_encoder_input;
+    use screen_manager::ui::{AppShell, EncoderVolumeTracker, MainWindow};
     use slint::ComponentHandle;
-    use speaker_bluetooth::TransportCommandQueue;
     use speaker_hardware::EncoderDevice;
 
-    let (mut fb, _) = Framebuffer::new_mocked();
-    let window = fb.init_platform().unwrap();
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
     let main_window = MainWindow::new().unwrap();
     let shell = AppShell::new(main_window);
     shell.set_volume(50.0);
     shell.window().show().unwrap();
-    fb.render_frame(&window).unwrap();
 
     let (enc, enc_mock) = EncoderDevice::new_mocked();
     enc_mock.simulate_rotation(speaker_hardware::RotationDirection::Clockwise, 2);
-    let commands = TransportCommandQueue::new();
     // Encoder volume is executed by the internal amp-volume worker (mock
-    // client because the framebuffer backend is mocked); wire the same queue
-    // it receives.
+    // client because the session is mocked); wire the same queue it receives.
     let amp_commands = screen_manager::volume::AmpVolumeCommandQueue::new();
     shell.wire_amp_volume(&amp_commands);
 
-    run_render_loop_with_devices(
-        &mut fb,
-        &window,
-        &shell,
-        None,
-        &commands,
-        &amp_commands,
-        Some(1),
-        None,
-        Some(&enc),
-    );
+    let mut tracker = EncoderVolumeTracker::new();
+    let mut warned = false;
+    poll_encoder_input(Some(&enc), &mut tracker, &shell, &mut warned);
     assert!((shell.volume() - 54.0).abs() < 1e-4);
     assert!(shell.is_volume_hud_visible());
+    assert!(!warned, "successful polls must not latch the warning flag");
+
+    // A missing encoder device is a silent no-op (early return path).
+    poll_encoder_input(None, &mut tracker, &shell, &mut warned);
+    assert!((shell.volume() - 54.0).abs() < 1e-4);
 }
 
 #[cfg(feature = "ui")]
@@ -1075,50 +1168,4 @@ fn finish_boot_worker_abandons_or_joins() {
         finish_boot_worker(Some(panic_handle), true);
     }));
     assert!(res.is_err(), "worker panic must be re-raised");
-}
-
-#[cfg(feature = "ui")]
-#[test]
-fn idle_sleep_various_fd_conditions() {
-    // 1. None fd (always sleeps timeout)
-    idle_sleep(None);
-
-    // 2. Negative fd (POSIX specifies negative fds are ignored and revents=0, times out safely)
-    idle_sleep(Some(-1));
-
-    // 3. Pipe fd with no data (poll times out, sleeps safely)
-    let mut fds = [0; 2];
-    // SAFETY: pipe creates 2 valid descriptors.
-    let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    assert_eq!(ret, 0);
-    let [rfd, wfd] = fds;
-
-    idle_sleep(Some(rfd));
-
-    // 4. Pipe fd with pending data (poll wakes immediately)
-    let data = b"touch";
-    // SAFETY: writing test bytes into valid pipe.
-    let _ = unsafe { libc::write(wfd, data.as_ptr().cast::<libc::c_void>(), data.len()) };
-    idle_sleep(Some(rfd));
-
-    // SAFETY: close test pipe descriptors.
-    unsafe {
-        libc::close(rfd);
-        libc::close(wfd)
-    };
-
-    // 5. Pipe fd with write end closed (poll immediately wakes with POLLHUP, sleeps to avoid busy-spin)
-    let mut fds2 = [0; 2];
-    // SAFETY: pipe creates 2 valid descriptors.
-    let ret2 = unsafe { libc::pipe(fds2.as_mut_ptr()) };
-    assert_eq!(ret2, 0);
-    let [rfd2, wfd2] = fds2;
-    // SAFETY: closing writer triggers POLLHUP on reader without pending data.
-    unsafe { libc::close(wfd2) };
-    idle_sleep(Some(rfd2));
-    // SAFETY: clean up test reader.
-    unsafe { libc::close(rfd2) };
-
-    // 6. Closed positive fd (poll returns POLLNVAL on Linux/POSIX, sleeps to avoid busy-spin)
-    idle_sleep(Some(rfd2));
 }

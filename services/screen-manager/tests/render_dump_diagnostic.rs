@@ -2,29 +2,35 @@
 //! Host-side diagnostic: render one frame of the shell and dump raw RGBA to
 //! `<tmp>/host_render.raw` for offline band-structure analysis.
 
-use screen_manager::ui::{AppShell, Framebuffer, MainWindow, RgbaPremulPixel, ThemePreset};
+use screen_manager::ui::{AppShell, Framebuffer, MainWindow, ThemePreset};
 use slint::LogicalPosition;
 use slint::platform::software_renderer::LineBufferProvider;
-use slint::platform::software_renderer::TargetPixel;
+use slint::platform::software_renderer::{PremultipliedRgbaColor, TargetPixel};
 use slint::platform::{PointerEventButton, WindowEvent};
+
+// The render harness runs on the live Pi (glibc 2.41) to validate the real
+// UI with the device's fonts, so pin the `GLIBC_2.17` baseline: the kernel
+// sysfs helpers use acosf/atan2f, and Slint 1.19's renderer pulls log10f.
+speaker_common::glibc_compat!();
+speaker_common::glibc_compat_log10!();
 
 const WIDTH: usize = Framebuffer::DEFAULT_WIDTH as usize;
 const HEIGHT: usize = Framebuffer::DEFAULT_HEIGHT as usize;
 
 struct ScratchBuffer {
-    pixels: Vec<RgbaPremulPixel>,
+    pixels: Vec<PremultipliedRgbaColor>,
 }
 
 impl ScratchBuffer {
     fn new() -> Self {
         Self {
-            pixels: vec![RgbaPremulPixel::background(); WIDTH * HEIGHT],
+            pixels: vec![PremultipliedRgbaColor::background(); WIDTH * HEIGHT],
         }
     }
 }
 
 impl LineBufferProvider for &mut ScratchBuffer {
-    type TargetPixel = RgbaPremulPixel;
+    type TargetPixel = PremultipliedRgbaColor;
 
     fn process_line(
         &mut self,
@@ -48,11 +54,21 @@ fn dump_single_frame_for_layout_analysis() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     let open_hud = std::env::var("RENDER_DUMP_HUD").ok().as_deref() == Some("1");
+    let show_themes = std::env::var("RENDER_DUMP_THEMES").ok().as_deref() == Some("1");
+    let at_min = std::env::var("RENDER_DUMP_AT_MIN").ok().as_deref() == Some("1");
 
-    let mut fb = Framebuffer::new_mocked().0;
+    let fb = Framebuffer::new_mocked().0;
     let window = fb.init_platform().expect("platform init");
     let main_window = MainWindow::new().expect("MainWindow");
+    if show_themes {
+        main_window.set_show_themes(true);
+    }
     let shell = AppShell::new(main_window);
+    if at_min {
+        // Park the fade stepper on its lower bound (0) so the row's minus
+        // button renders in its disabled state.
+        shell.window().set_volume_hud_fade_ms(0);
+    }
     shell.apply_theme(ThemePreset::Peppy);
     shell.set_track_metadata(
         "Test Track Title",
@@ -83,7 +99,6 @@ fn dump_single_frame_for_layout_analysis() {
     }
 
     slint::platform::update_timers_and_animations();
-    fb.set_marquee_rows(shell.marquee_row_specs());
     let mut buffer = ScratchBuffer::new();
     window.draw_if_needed(|renderer| {
         renderer.render_by_line(&mut buffer);

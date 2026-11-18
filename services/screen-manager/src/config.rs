@@ -42,8 +42,29 @@ pub const MAX_VOLUME_HUD_TIMEOUT_MS: u32 = 30_000;
 /// Production default Volume HUD fade-out duration in milliseconds (`200` ms).
 pub const DEFAULT_VOLUME_HUD_FADE_MS: u32 = 200;
 
+/// Minimum allowed Volume HUD fade-out duration in milliseconds (`0` ms).
+pub const MIN_VOLUME_HUD_FADE_MS: u32 = 0;
+
 /// Maximum allowed Volume HUD fade-out duration in milliseconds (`2_000` ms).
 pub const MAX_VOLUME_HUD_FADE_MS: u32 = 2_000;
+
+/// Stepper increment for the Volume HUD fade duration in milliseconds (`100` ms).
+pub const VOLUME_HUD_FADE_STEP_MS: u32 = 100;
+
+/// Production default Codec HUD auto-dismiss timeout in milliseconds (`30_000` ms).
+pub const DEFAULT_CODEC_HUD_TIMEOUT_MS: u32 = 30_000;
+
+/// Minimum allowed Codec HUD auto-dismiss timeout in milliseconds (`250` ms).
+pub const MIN_CODEC_HUD_TIMEOUT_MS: u32 = 250;
+
+/// Maximum allowed Codec HUD auto-dismiss timeout in milliseconds (`300_000` ms = 5 min).
+pub const MAX_CODEC_HUD_TIMEOUT_MS: u32 = 300_000;
+
+/// Stepper increment for the Codec HUD timeout in milliseconds (`1_000` ms).
+///
+/// Deliberately distinct from [`MIN_CODEC_HUD_TIMEOUT_MS`]: the step grid is
+/// anchored at 250 + n*1000, not at the domain minimum.
+pub const CODEC_HUD_TIMEOUT_STEP_MS: u32 = 1_000;
 
 /// Allowed marquee scroll rates: 60 is the production default and 30 halves the
 /// render load by scrolling 2 px per 33.3 ms tick at identical on-screen speed.
@@ -282,6 +303,61 @@ impl From<VolumeHudFadeMs> for u32 {
     }
 }
 
+/// Strongly typed Codec HUD auto-dismiss timeout in milliseconds (`250..=300_000`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct CodecHudTimeoutMs(u32);
+
+impl CodecHudTimeoutMs {
+    /// Production default timeout (`30_000` ms).
+    pub const DEFAULT: Self = Self::new(DEFAULT_CODEC_HUD_TIMEOUT_MS);
+
+    /// Const constructor validated against `250..=300_000`.
+    ///
+    /// # Panics
+    /// Panics if `ms` is not in the range `250..=300_000`.
+    #[must_use]
+    pub const fn new(ms: u32) -> Self {
+        assert!(
+            ms >= MIN_CODEC_HUD_TIMEOUT_MS && ms <= MAX_CODEC_HUD_TIMEOUT_MS,
+            "codec_hud_timeout_ms out of range 250..=300000"
+        );
+        Self(ms)
+    }
+
+    /// Returns the raw timeout in milliseconds.
+    #[must_use]
+    pub const fn value(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for CodecHudTimeoutMs {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl TryFrom<u32> for CodecHudTimeoutMs {
+    type Error = ConfigError;
+
+    fn try_from(ms: u32) -> Result<Self, Self::Error> {
+        if (MIN_CODEC_HUD_TIMEOUT_MS..=MAX_CODEC_HUD_TIMEOUT_MS).contains(&ms) {
+            Ok(Self::new(ms))
+        } else {
+            Err(ConfigError::invalid(format!(
+                "invalid codec_hud_timeout_ms '{ms}': expected {MIN_CODEC_HUD_TIMEOUT_MS}..={MAX_CODEC_HUD_TIMEOUT_MS}"
+            )))
+        }
+    }
+}
+
+impl From<CodecHudTimeoutMs> for u32 {
+    fn from(ms: CodecHudTimeoutMs) -> Self {
+        ms.0
+    }
+}
+
 /// Strongly typed appliance configuration persisted as JSON on disk.
 ///
 /// Missing fields deserialize to their defaults, so minimal config files
@@ -302,6 +378,8 @@ pub struct CoreConfig {
     pub volume_hud_timeout_ms: VolumeHudTimeoutMs,
     /// Volume HUD fade-out duration in milliseconds (`0..=2000`, default `200`).
     pub volume_hud_fade_ms: VolumeHudFadeMs,
+    /// Codec HUD auto-dismiss timeout in milliseconds (`250..=300000`, default `30000`).
+    pub codec_hud_timeout_ms: CodecHudTimeoutMs,
 }
 
 impl CoreConfig {

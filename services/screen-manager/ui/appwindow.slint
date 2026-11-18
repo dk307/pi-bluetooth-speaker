@@ -1,12 +1,12 @@
-import { BootCheckLine, SplashScreen } from "splash.slint";
+import { BootCheckLine, SplashContent, SplashScreen } from "splash.slint";
 import { AppTheme } from "app_theme.slint";
 import { MaterialPalette } from "@material/material.slint";
 import { TopStatusBar, CodecSpecs } from "status_bar.slint";
 import { MainViewport } from "viewport.slint";
-import { MarqueeRasterizer } from "marquee_rasterizer.slint";
 import { MarqueeCompose } from "marquee_state.slint";
 import { ScreenAppBar } from "screen_app_bar.slint";
 import { VolumeHudOverlay } from "volume_hud.slint";
+import { CodecHudOverlay } from "codec_hud.slint";
 
 // Re-exported so slint-build generates the Rust global accessor for the composer bridge.
 export { MarqueeCompose }
@@ -17,7 +17,7 @@ import "../../../assets/fonts/Inter-SemiBold.ttf";
 import "../../../assets/fonts/Inter-Bold.ttf";
 import "../../../assets/fonts/Inter-ExtraBold.ttf";
 
-export { BootCheckLine, SplashScreen, MarqueeRasterizer, MaterialPalette, AppTheme }
+export { BootCheckLine, SplashScreen, MaterialPalette, AppTheme }
 
 export component MainWindow inherits Window {
     title: "DietPi Audiophile Console";
@@ -52,12 +52,21 @@ export component MainWindow inherits Window {
     in-out property <int> volume_hud_elapsed_ms: 0;
     out property <float> volume_hud_opacity: root.volume_hud_visible ? 1.0 : 0.0;
     animate volume_hud_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
+    // Codec information overlay: opened from the codec badge in the top bar.
+    // It has its own auto-dismiss timeout (default 30s) and shares the HUD fade duration.
+    in-out property <bool> codec_hud_visible: false;
+    in-out property <int> codec_hud_timeout_ms: 30000;
+    in-out property <int> codec_hud_elapsed_ms: 0;
+    // Rotary encoder step per detent; Screen Settings edits and persists it.
+    in-out property <int> volume_step_percent: 2;
+    out property <float> codec_hud_opacity: root.codec_hud_visible ? 1.0 : 0.0;
+    animate codec_hud_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
     in-out property <bool> has_cover_art: false;
     in-out property <image> cover_image;
     in-out property <float> left_peak_ratio: 0.0;
     in-out property <float> right_peak_ratio: 0.0;
     in-out property <bool> cd_enabled: false;
-    out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01;
+    out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01;
 
     // NEW: show_themes lifted to MainWindow for title switching in ScreenAppBar
     in-out property <bool> show_themes: false;
@@ -65,14 +74,40 @@ export component MainWindow inherits Window {
     // NEW: single source of truth for status bar visibility (Now Playing tab only)
     out property <bool> show_status_bar: root.active_tab == 0;
 
+    // Boot splash overlay state (Appliance boot phase): the KMS backend allows
+    // only one window per process, so boot checks render as an in-window
+    // overlay instead of a separate SplashScreen window. The overlay content
+    // is conditionally instantiated, so its equalizer Timer only runs while
+    // the boot phase is active.
+    in-out property <bool> boot_splash_visible: false;
+    in-out property <BootCheckLine> boot_current_check: {
+        text: "Starting system checks …",
+        running: true,
+        ok: false,
+    };
+
     public function show_volume_hud() {
         root.volume_hud_elapsed_ms = 0;
         root.volume_hud_visible = true;
+        root.codec_hud_visible = false;
     }
 
     public function dismiss_volume_hud() {
         root.volume_hud_visible = false;
         root.volume_hud_elapsed_ms = 0;
+    }
+
+    // Opens the codec information overlay. The Volume HUD and the codec overlay are
+    // mutually exclusive: only one of them can cover the viewport at a time.
+    public function show_codec_hud() {
+        root.codec_hud_elapsed_ms = 0;
+        root.codec_hud_visible = true;
+        root.volume_hud_visible = false;
+    }
+
+    public function dismiss_codec_hud() {
+        root.codec_hud_visible = false;
+        root.codec_hud_elapsed_ms = 0;
     }
 
     Timer {
@@ -83,6 +118,18 @@ export component MainWindow inherits Window {
             if (root.volume_hud_elapsed_ms >= root.volume_hud_timeout_ms) {
                 root.volume_hud_visible = false;
                 root.volume_hud_elapsed_ms = 0;
+            }
+        }
+    }
+
+    Timer {
+        interval: 50ms;
+        running: root.codec_hud_visible;
+        triggered() => {
+            root.codec_hud_elapsed_ms += 50;
+            if (root.codec_hud_elapsed_ms >= root.codec_hud_timeout_ms) {
+                root.codec_hud_visible = false;
+                root.codec_hud_elapsed_ms = 0;
             }
         }
     }
@@ -100,9 +147,6 @@ export component MainWindow inherits Window {
     // Tab to return to when the Bluetooth details screen is dismissed.
     in-out property <int> previous_tab: 0;
 
-    // Marquee text strips pre-rendered offscreen by `MarqueeStripRasterizer`; the images
-    // are re-rasterized from Rust only when their text, color, or typography changes.
-    in-out property <image> title_marquee_strip;
     // Single source of truth for the artist/album composite shown in the second marquee,
     // shared by the declarative binding and the Rust-side strip rasterizer.
     out property <string> artist_marquee_text:
@@ -120,7 +164,11 @@ export component MainWindow inherits Window {
     callback night_mode_clicked();
     callback tab_selected(int);
     callback select_theme(int);
-    callback cycle_theme();
+    callback set_marquee_fps(int);
+    callback set_volume_step_percent(int);
+    callback set_volume_hud_timeout_ms(int);
+    callback set_volume_hud_fade_ms(int);
+    callback set_codec_hud_timeout_ms(int);
 
     // Opens the Bluetooth details tab from any screen; calling it again (or `Back`)
     // returns to the tab it was opened from.
@@ -171,12 +219,13 @@ export component MainWindow inherits Window {
                     stream_bit_depth: root.stream_bit_depth;
                     volume_value: root.volume_value;
                     is_muted: root.is_muted;
+                    bt_connected: root.bt_connected;
                     source_clicked => {
                         root.toggle_bluetooth_details();
                         root.source_clicked();
                     }
                     device_clicked => { root.toggle_bluetooth_details(); }
-                    protocol_clicked => { root.toggle_bluetooth_details(); }
+                    protocol_clicked => { root.show_codec_hud(); }
                     night_mode_clicked => { root.night_mode_clicked(); }
                     volume_clicked => {
                         root.show_volume_hud();
@@ -191,7 +240,7 @@ export component MainWindow inherits Window {
                            root.active_tab == 2 ? "Bluetooth" :
                            root.active_tab == 3 ? "CD Player" :
                            root.active_tab == 4 ? "DSP & Tone" :
-                           root.active_tab == 5 ? (root.show_themes ? "Themes" : "Settings") : "";
+                           root.active_tab == 5 ? (root.show_themes ? "Screen Settings" : "Settings") : "";
                     trailing_icon: @image-url("../../../assets/icons/back.svg");
                     trailing_clicked => { root.app_bar_back(); }
                 }
@@ -219,6 +268,10 @@ export component MainWindow inherits Window {
                 right_peak_ratio: root.right_peak_ratio;
                 track_or_device: root.track_or_device;
                 stream_codec: root.stream_codec;
+                volume_step_percent: root.volume_step_percent;
+                volume_hud_timeout_ms: root.volume_hud_timeout_ms;
+                volume_hud_fade_ms: root.volume_hud_fade_ms;
+                codec_hud_timeout_ms: root.codec_hud_timeout_ms;
                 bt_connected: root.bt_connected;
                 bt_device_address: root.bt_device_address;
                 bt_link_text: root.bt_link_text;
@@ -228,7 +281,6 @@ export component MainWindow inherits Window {
                 bt_delay_text: root.bt_delay_text;
                 bt_adapter_name: root.bt_adapter_name;
                 bt_adapter_address: root.bt_adapter_address;
-                title_marquee_strip: root.title_marquee_strip;
                 artist_marquee_text: root.artist_marquee_text;
                 show_themes <=> root.show_themes;
 
@@ -247,7 +299,11 @@ export component MainWindow inherits Window {
                 }
                 volume_changed(val) => { root.volume_changed(val); }
                 select_theme(idx) => { root.select_theme(idx); }
-                cycle_theme => { root.cycle_theme(); }
+                set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
+                set_volume_step_percent(step) => { root.set_volume_step_percent(step); }
+                set_volume_hud_timeout_ms(ms) => { root.set_volume_hud_timeout_ms(ms); }
+                set_volume_hud_fade_ms(ms) => { root.set_volume_hud_fade_ms(ms); }
+                set_codec_hud_timeout_ms(ms) => { root.set_codec_hud_timeout_ms(ms); }
             }
         }
 
@@ -258,8 +314,8 @@ export component MainWindow inherits Window {
             width: 100%;
             height: parent.height - 60px;
             background: #000000;
-            opacity: root.volume_hud_opacity * 0.55;
-            visible: root.volume_hud_opacity > 0.01;
+            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) * 0.55;
+            visible: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) > 0.01;
         }
 
         // Volume HUD overlay (top layer) — same below-the-top-bar geometry.
@@ -275,6 +331,30 @@ export component MainWindow inherits Window {
             toggle_mute => { root.toggle_mute(); }
             dismiss_requested => { root.dismiss_volume_hud(); }
             interaction_activity => { root.show_volume_hud(); }
+        }
+
+        // Codec information overlay (top layer) — same below-the-top-bar geometry.
+        codec_hud := CodecHudOverlay {
+            y: 60px;
+            width: 100%;
+            height: parent.height - 60px;
+            visible: root.codec_hud_opacity > 0.01;
+            opacity: root.codec_hud_opacity;
+            codec: root.stream_codec;
+            sample_rate: root.stream_sample_rate;
+            bit_depth: root.stream_bit_depth;
+            stream_format: root.bt_stream_format;
+            delay_text: root.bt_delay_text;
+            connected: root.bt_connected;
+            dismiss_requested => { root.dismiss_codec_hud(); }
+        }
+
+        // Boot splash overlay (top-most): full-window coverage during the
+        // Appliance boot phase; hidden (unmounted) for the shell lifetime.
+        if root.boot_splash_visible: boot_splash := SplashContent {
+            width: 100%;
+            height: 100%;
+            current_check: root.boot_current_check;
         }
     }
 }

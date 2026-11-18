@@ -8,18 +8,20 @@
 
 use std::cell::{Cell, RefCell};
 use std::fmt::{self, Debug, Formatter};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use slint::ComponentHandle;
 
 use crate::config::{
-    CoreConfig, DEFAULT_VOLUME_HUD_FADE_MS, DEFAULT_VOLUME_HUD_TIMEOUT_MS,
-    DEFAULT_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT, MIN_VOLUME_STEP_PERCENT,
+    CodecHudTimeoutMs, CoreConfig, DEFAULT_MARQUEE_FPS, DEFAULT_VOLUME_STEP_PERCENT,
+    MAX_CODEC_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
+    MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_VOLUME_HUD_FADE_MS,
+    MIN_VOLUME_HUD_TIMEOUT_MS, MIN_VOLUME_STEP_PERCENT, MarqueeFps, VolumeHudFadeMs,
+    VolumeHudTimeoutMs, VolumeStepPercent,
 };
 
-use super::framebuffer::MarqueeRowSpec;
 use super::generated::{AppTheme, MainWindow, MarqueeCompose};
-use super::marquee::{MarqueeStripCache, MarqueeTypography, StripRequest};
 use super::theme::ThemePreset;
 
 /// Tracks cumulative [`speaker_hardware::EncoderStatus`] counters and translates
@@ -247,8 +249,9 @@ fn pcm_bit_depth(format: &str) -> &'static str {
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
-    strips: Rc<RefCell<MarqueeStripCache>>,
-    volume_step_percent: Cell<u8>,
+    config_path: Rc<RefCell<Option<PathBuf>>>,
+    persist_tx: Rc<RefCell<Option<std::sync::mpsc::Sender<CoreConfig>>>>,
+    last_amp_volume: Cell<Option<crate::volume::AmpVolumeState>>,
     transport_commands: Rc<RefCell<Option<speaker_bluetooth::TransportCommandQueue>>>,
     amp_commands: Rc<RefCell<Option<crate::volume::AmpVolumeCommandQueue>>>,
     last_toggle: Rc<Cell<std::time::Instant>>,
@@ -269,8 +272,9 @@ impl AppShell {
     pub fn new(window: MainWindow) -> Self {
         let shell = Self {
             window,
-            strips: Rc::new(RefCell::new(MarqueeStripCache::default())),
-            volume_step_percent: Cell::new(DEFAULT_VOLUME_STEP_PERCENT),
+            config_path: Rc::new(RefCell::new(None)),
+            persist_tx: Rc::new(RefCell::new(None)),
+            last_amp_volume: Cell::new(None),
             transport_commands: Rc::new(RefCell::new(None)),
             amp_commands: Rc::new(RefCell::new(None)),
             last_toggle: Rc::new(Cell::new(
@@ -280,60 +284,90 @@ impl AppShell {
             )),
         };
 
-        shell.set_volume_hud_timeout_ms(DEFAULT_VOLUME_HUD_TIMEOUT_MS);
-        shell.set_volume_hud_fade_ms(DEFAULT_VOLUME_HUD_FADE_MS);
+        shell.set_volume_step_percent(VolumeStepPercent::DEFAULT);
+        shell.set_volume_hud_timeout_ms(VolumeHudTimeoutMs::DEFAULT);
+        shell.set_volume_hud_fade_ms(VolumeHudFadeMs::DEFAULT);
+        shell.set_codec_hud_timeout_ms(CodecHudTimeoutMs::DEFAULT);
         shell.setup_callbacks();
         shell.apply_theme(ThemePreset::default());
         shell
     }
 
     /// Applies runtime parameters from [`CoreConfig`] (theme, marquee fps, volume step,
-    /// and Volume HUD timeout/fade durations) to this shell.
+    /// Volume HUD timeout/fade durations, and Codec HUD timeout) to this shell.
     pub fn apply_config(&self, config: &CoreConfig) {
-        self.set_marquee_fps(config.marquee_fps.value());
-        self.set_volume_step_percent(config.volume_step_percent.value());
-        self.set_volume_hud_timeout_ms(config.volume_hud_timeout_ms.value());
-        self.set_volume_hud_fade_ms(config.volume_hud_fade_ms.value());
+        self.set_marquee_fps(config.marquee_fps);
+        self.set_volume_step_percent(config.volume_step_percent);
+        self.set_volume_hud_timeout_ms(config.volume_hud_timeout_ms);
+        self.set_volume_hud_fade_ms(config.volume_hud_fade_ms);
+        self.set_codec_hud_timeout_ms(config.codec_hud_timeout_ms);
         if let Some(theme) = config.theme {
             self.apply_theme(theme);
         }
     }
 
-    /// Returns the configured volume step percentage per rotary encoder detent (`1..=25`).
+    /// Returns the configured volume step percentage per rotary encoder detent.
     #[must_use]
-    pub fn volume_step_percent(&self) -> u8 {
-        self.volume_step_percent.get()
+    pub fn volume_step_percent(&self) -> VolumeStepPercent {
+        Self::volume_step_percent_from_window(&self.window)
     }
 
-    /// Sets the volume step percentage per rotary encoder detent (clamped to `1..=25`).
-    pub fn set_volume_step_percent(&self, step: u8) {
-        self.volume_step_percent
-            .set(step.clamp(MIN_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT));
+    /// Sets the volume step percentage per rotary encoder detent.
+    ///
+    /// The [`VolumeStepPercent`] parameter guarantees the `1..=25` invariant by
+    /// construction; the validated value is written to the Slint property verbatim.
+    pub fn set_volume_step_percent(&self, step: VolumeStepPercent) {
+        self.window.set_volume_step_percent(i32::from(step.value()));
     }
 
-    /// Returns the Volume HUD auto-dismiss timeout in milliseconds.
+    /// Returns the selected marquee scroll rate in fps (`30` or `60`).
     #[must_use]
-    pub fn volume_hud_timeout_ms(&self) -> u32 {
-        u32::try_from(self.window.get_volume_hud_timeout_ms())
-            .unwrap_or(DEFAULT_VOLUME_HUD_TIMEOUT_MS)
+    pub fn marquee_fps(&self) -> MarqueeFps {
+        Self::marquee_fps_from_window(&self.window)
     }
 
-    /// Sets the Volume HUD auto-dismiss timeout in milliseconds.
-    pub fn set_volume_hud_timeout_ms(&self, timeout_ms: u32) {
+    /// Sets the marquee scroll rate in fps (`30` or `60`) on the shared composer global.
+    ///
+    /// The [`MarqueeFps`] parameter guarantees the `30`/`60` invariant by
+    /// construction; the validated value is written to the Slint property verbatim.
+    pub fn set_marquee_fps(&self, fps: MarqueeFps) {
         self.window
-            .set_volume_hud_timeout_ms(i32::try_from(timeout_ms).unwrap_or(i32::MAX));
+            .global::<MarqueeCompose>()
+            .set_marquee_fps(Self::slint_i32(fps.value(), "marquee_fps"));
     }
 
-    /// Returns the Volume HUD fade-out duration in milliseconds.
+    /// Returns the Volume HUD auto-dismiss timeout.
     #[must_use]
-    pub fn volume_hud_fade_ms(&self) -> u32 {
-        u32::try_from(self.window.get_volume_hud_fade_ms()).unwrap_or(DEFAULT_VOLUME_HUD_FADE_MS)
+    pub fn volume_hud_timeout_ms(&self) -> VolumeHudTimeoutMs {
+        Self::volume_hud_timeout_from_window(&self.window)
     }
 
-    /// Sets the Volume HUD fade-out duration in milliseconds.
-    pub fn set_volume_hud_fade_ms(&self, fade_ms: u32) {
+    /// Sets the Volume HUD auto-dismiss timeout.
+    ///
+    /// The [`VolumeHudTimeoutMs`] parameter guarantees the `250..=30000`
+    /// invariant by construction; the validated value is written to the Slint
+    /// property verbatim.
+    pub fn set_volume_hud_timeout_ms(&self, timeout_ms: VolumeHudTimeoutMs) {
+        self.window.set_volume_hud_timeout_ms(Self::slint_i32(
+            timeout_ms.value(),
+            "volume_hud_timeout_ms",
+        ));
+    }
+
+    /// Returns the Volume HUD fade-out duration.
+    #[must_use]
+    pub fn volume_hud_fade_ms(&self) -> VolumeHudFadeMs {
+        Self::hud_fade_from_window(&self.window)
+    }
+
+    /// Sets the Volume HUD fade-out duration.
+    ///
+    /// The [`VolumeHudFadeMs`] parameter guarantees the `0..=2000` invariant
+    /// by construction; the validated value is written to the Slint property
+    /// verbatim.
+    pub fn set_volume_hud_fade_ms(&self, fade_ms: VolumeHudFadeMs) {
         self.window
-            .set_volume_hud_fade_ms(i32::try_from(fade_ms).unwrap_or(i32::MAX));
+            .set_volume_hud_fade_ms(Self::slint_i32(fade_ms.value(), "volume_hud_fade_ms"));
     }
 
     /// Returns whether the Volume HUD overlay is currently in its active hold state.
@@ -364,6 +398,244 @@ impl AppShell {
         self.window.invoke_dismiss_volume_hud();
     }
 
+    /// Returns whether the codec information overlay is currently in its active hold state.
+    #[must_use]
+    pub fn is_codec_hud_visible(&self) -> bool {
+        self.window.get_codec_hud_visible()
+    }
+
+    /// Returns the current opacity (`0.0..=1.0`) of the codec information overlay.
+    #[must_use]
+    pub fn codec_hud_opacity(&self) -> f32 {
+        self.window.get_codec_hud_opacity()
+    }
+
+    /// Returns `true` while the codec overlay is visible or actively fading out.
+    #[must_use]
+    pub fn is_codec_hud_active(&self) -> bool {
+        self.is_codec_hud_visible() || self.codec_hud_opacity() > 0.01
+    }
+
+    /// Opens the codec information overlay and resets its auto-dismiss countdown.
+    pub fn show_codec_hud(&self) {
+        self.window.invoke_show_codec_hud();
+    }
+
+    /// Immediately begins dismissing (fading out) the codec information overlay.
+    pub fn dismiss_codec_hud(&self) {
+        self.window.invoke_dismiss_codec_hud();
+    }
+
+    /// Returns the Codec HUD auto-dismiss timeout.
+    #[must_use]
+    pub fn codec_hud_timeout_ms(&self) -> CodecHudTimeoutMs {
+        Self::codec_hud_timeout_from_window(&self.window)
+    }
+
+    /// Sets the Codec HUD auto-dismiss timeout.
+    ///
+    /// The [`CodecHudTimeoutMs`] parameter guarantees the `250..=300000`
+    /// invariant by construction; the validated value is written to the Slint
+    /// property verbatim.
+    pub fn set_codec_hud_timeout_ms(&self, timeout_ms: CodecHudTimeoutMs) {
+        self.window
+            .set_codec_hud_timeout_ms(Self::slint_i32(timeout_ms.value(), "codec_hud_timeout_ms"));
+    }
+
+    /// Binds the JSON path used by the live Screen Settings persistence.
+    ///
+    /// Spawns the single background persist worker: the render thread sends
+    /// config snapshots over an unbounded FIFO channel (non-blocking), and
+    /// the worker performs the blocking temp-file + fsync + rename writes.
+    /// FIFO ordering guarantees the last UI edit wins on disk.
+    pub fn wire_config(&self, path: &Path) {
+        let path = path.to_path_buf();
+        *self.config_path.borrow_mut() = Some(path.clone());
+        let (tx, rx) = std::sync::mpsc::channel::<CoreConfig>();
+        let worker_path = path.clone();
+        let spawned = std::thread::Builder::new()
+            .name("screen-settings-persist".into())
+            .spawn(move || {
+                for config in rx {
+                    // M-PANIC-ON-BUG: a worker crash is a bug, not a
+                    // recoverable I/O hiccup — re-raise instead of silently
+                    // killing the worker and dropping queued snapshots.
+                    // A failed save is logged by persist_config and dropped:
+                    // the worker must survive to persist the next edit.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _ = Self::persist_config(&config, &worker_path);
+                    }));
+                    if let Err(p) = result {
+                        std::panic::resume_unwind(p);
+                    }
+                }
+            });
+        match spawned {
+            Ok(_) => {
+                *self.persist_tx.borrow_mut() = Some(tx);
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    path = %path.display(),
+                    "failed to spawn config persist worker; live settings not saved"
+                );
+            }
+        }
+    }
+
+    /// Builds a [`CoreConfig`] snapshot from the current shell state.
+    #[must_use]
+    pub fn current_config(&self) -> CoreConfig {
+        Self::config_from_window(&self.window)
+    }
+
+    /// Saves the current shell state as JSON to the wired config path.
+    ///
+    /// This is the synchronous path used by boot-time persistence and tests;
+    /// UI edits go through the background persist worker instead (see
+    /// [`Self::wire_config`]).
+    ///
+    /// # Errors
+    /// Returns [`crate::config::ConfigError`] when no config path is wired or
+    /// the atomic JSON write fails.
+    pub fn save_current_config(&self) -> Result<(), crate::config::ConfigError> {
+        let path = self.config_path.borrow().clone().ok_or_else(|| {
+            crate::config::ConfigError::invalid("Screen Settings are not wired to a config path")
+        })?;
+        Self::persist_config(&self.current_config(), &path)
+    }
+
+    /// Snapshot builder shared by live persistence and the public getter.
+    fn config_from_window(window: &MainWindow) -> CoreConfig {
+        CoreConfig {
+            theme: Some(ThemePreset::from_index(
+                window.global::<AppTheme>().get_active_preset(),
+            )),
+            marquee_fps: Self::marquee_fps_from_window(window),
+            volume_step_percent: Self::volume_step_percent_from_window(window),
+            volume_hud_timeout_ms: Self::volume_hud_timeout_from_window(window),
+            volume_hud_fade_ms: Self::hud_fade_from_window(window),
+            codec_hud_timeout_ms: Self::codec_hud_timeout_from_window(window),
+        }
+    }
+
+    /// Saves a config snapshot to `path` and logs the outcome with structured fields.
+    ///
+    /// Returns the raw save result so synchronous callers
+    /// ([`Self::save_current_config`]) propagate write failures; the background
+    /// worker logs and drops it (a failed live save must not kill the worker).
+    fn persist_config(config: &CoreConfig, path: &Path) -> Result<(), crate::config::ConfigError> {
+        let result = config.save(path);
+        match &result {
+            Ok(()) => tracing::info!(
+                path = %path.display(),
+                theme = config.theme.map_or_else(|| "default", |t| t.slug()),
+                marquee_fps = config.marquee_fps.value(),
+                volume_step_percent = config.volume_step_percent.value(),
+                volume_hud_timeout_ms = config.volume_hud_timeout_ms.value(),
+                volume_hud_fade_ms = config.volume_hud_fade_ms.value(),
+                codec_hud_timeout_ms = config.codec_hud_timeout_ms.value(),
+                "Screen settings saved"
+            ),
+            Err(e) => tracing::error!(
+                error = %e,
+                path = %path.display(),
+                "failed to save screen settings"
+            ),
+        }
+        result
+    }
+
+    /// Queues the current window state for background persistence after a UI edit.
+    ///
+    /// # Render-Thread Safety (`M-NO-DBUS-ON-RENDER-THREAD`)
+    ///
+    /// `CoreConfig::save` performs temp-file + fsync + rename on the SD card,
+    /// which can stall the render thread for tens of milliseconds per click.
+    /// The config snapshot is built on the render thread (cheap) and sent over
+    /// an unbounded FIFO channel to the single persist worker spawned by
+    /// [`Self::wire_config`], keeping HUD animations, marquee, and touch input
+    /// responsive. FIFO ordering guarantees the last UI edit wins on disk.
+    fn persist_window_state(
+        window: &MainWindow,
+        persist_tx: &Rc<RefCell<Option<std::sync::mpsc::Sender<CoreConfig>>>>,
+    ) {
+        let Some(tx) = persist_tx.borrow().as_ref().cloned() else {
+            tracing::warn!("Screen settings change not persisted: no config path is wired");
+            return;
+        };
+        let config = Self::config_from_window(window);
+        if tx.send(config).is_err() {
+            tracing::warn!("Screen settings change not persisted: persist worker is gone");
+        }
+    }
+
+    /// Returns the composer-global marquee rate, snapping out-of-domain values
+    /// to the default rate (the Slint global is untyped beyond `i32`).
+    fn marquee_fps_from_window(window: &MainWindow) -> MarqueeFps {
+        u32::try_from(window.global::<MarqueeCompose>().get_marquee_fps())
+            .ok()
+            .and_then(|fps| MarqueeFps::try_from(fps).ok())
+            .unwrap_or_default()
+    }
+
+    /// Returns the window volume-step property clamped into `1..=25`.
+    fn volume_step_percent_from_window(window: &MainWindow) -> VolumeStepPercent {
+        let step = u8::try_from(window.get_volume_step_percent())
+            .unwrap_or(DEFAULT_VOLUME_STEP_PERCENT)
+            .clamp(MIN_VOLUME_STEP_PERCENT, MAX_VOLUME_STEP_PERCENT);
+        VolumeStepPercent::new(step)
+    }
+
+    /// Returns the window Volume HUD timeout clamped into `250..=30000`.
+    fn volume_hud_timeout_from_window(window: &MainWindow) -> VolumeHudTimeoutMs {
+        let ms = Self::slint_ms_to_u32(window.get_volume_hud_timeout_ms())
+            .clamp(MIN_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_TIMEOUT_MS);
+        VolumeHudTimeoutMs::new(ms)
+    }
+
+    /// Returns the window Codec HUD timeout clamped into `250..=300000`.
+    fn codec_hud_timeout_from_window(window: &MainWindow) -> CodecHudTimeoutMs {
+        let ms = Self::slint_ms_to_u32(window.get_codec_hud_timeout_ms())
+            .clamp(MIN_CODEC_HUD_TIMEOUT_MS, MAX_CODEC_HUD_TIMEOUT_MS);
+        CodecHudTimeoutMs::new(ms)
+    }
+
+    /// Converts a Slint `i32` timeout to `u32` (negative values clamp to `0`).
+    fn slint_ms_to_u32(value: i32) -> u32 {
+        u32::try_from(value.max(0)).unwrap_or_default()
+    }
+
+    /// Converts a validated domain `u32` to the Slint `i32` property type.
+    ///
+    /// `field` names the settings field for diagnostics. Panics if the value
+    /// exceeds `i32::MAX` — domain newtypes cap every field far below that
+    /// bound, so a failure here is a violated invariant (M-PANIC-ON-BUG),
+    /// not a recoverable condition.
+    fn slint_i32(value: u32, field: &str) -> i32 {
+        i32::try_from(value).unwrap_or_else(|_| panic!("{field} value {value} exceeds i32"))
+    }
+
+    /// Clamps a Slint `i32` milliseconds value into the given `u32` domain.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the clamped value exceeds `i32::MAX` — every HUD domain caps
+    /// far below that bound, so a failure here is a violated invariant
+    /// (M-PANIC-ON-BUG), not a recoverable condition.
+    fn clamp_hud_ms(value: i32, min: u32, max: u32) -> i32 {
+        let clamped = Self::slint_ms_to_u32(value).clamp(min, max);
+        i32::try_from(clamped).expect("clamped HUD value fits in i32")
+    }
+
+    /// Reads and clamps the Volume HUD fade duration window property into `0..=2000`.
+    fn hud_fade_from_window(window: &MainWindow) -> VolumeHudFadeMs {
+        let ms =
+            Self::slint_ms_to_u32(window.get_volume_hud_fade_ms()).clamp(0, MAX_VOLUME_HUD_FADE_MS);
+        VolumeHudFadeMs::new(ms)
+    }
+
     /// Adjusts volume by `detents * volume_step_percent`, unmutes, opens/refreshes the
     /// Volume HUD, and fires the `volume_changed` callback.
     ///
@@ -381,7 +653,7 @@ impl AppShell {
         } else {
             0
         };
-        let delta = detents.saturating_mul(i32::from(self.volume_step_percent()));
+        let delta = detents.saturating_mul(i32::from(self.volume_step_percent().value()));
         let target = u8::try_from(current.saturating_add(delta).clamp(0, 100)).unwrap_or(0);
         // The `volume_changed` callback owns the optimistic UI update, the
         // mute-clear (queued as an explicit `SetMute(false)` amp command when
@@ -425,114 +697,6 @@ impl AppShell {
     ///
     /// If disabled while the shell is currently on the CD Player tab (tab 3), the active tab
     /// is automatically reset to the Now Playing player tab (tab 0) to prevent state desync.
-    /// Sets the marquee scroll rate in fps (30 or 60) on the shared composer global.
-    pub fn set_marquee_fps(&self, fps: u32) {
-        self.window
-            .global::<MarqueeCompose>()
-            .set_marquee_fps(i32::try_from(fps).unwrap_or(i32::MAX));
-    }
-
-    /// Toggles Rust-side marquee composition (strip images render statically in Slint).
-    pub fn set_marquee_compose_in_rust(&self, compose: bool) {
-        self.window
-            .global::<MarqueeCompose>()
-            .set_compose_in_rust(compose);
-    }
-
-    /// Suspends or resumes marquee strip rendering for the one-frame background capture
-    /// (`visible = false` keeps the strip layout geometry but renders nothing).
-    pub fn set_marquee_strips_visible(&self, visible: bool) {
-        self.window
-            .global::<MarqueeCompose>()
-            .set_capture_pending(!visible);
-    }
-
-    /// Marquee viewport rectangles `(x, y, width, height)` in framebuffer pixels, read
-    /// from the shared composer global (clamped to the fixed 800x480 panel).
-    #[must_use]
-    pub fn marquee_geometry(&self) -> Vec<(u32, u32, u32, u32)> {
-        let g = self.window.global::<MarqueeCompose>();
-        let px = |v: f32, max: f32| u32::try_from(v.round().clamp(0.0, max) as i64).unwrap_or(0);
-        let rect = |origin: slint::LogicalPosition, w: f32, h: f32| {
-            (
-                px(origin.x, 800.0),
-                px(origin.y, 480.0),
-                px(w, 800.0),
-                px(h, 480.0),
-            )
-        };
-        vec![rect(g.get_title_origin(), g.get_title_w(), g.get_title_h())]
-    }
-
-    /// Returns whether the raw marquee overlay should be suppressed
-    /// (e.g. when not on the Now Playing tab or when the Volume HUD is active).
-    #[must_use]
-    pub fn should_suppress_marquee(&self) -> bool {
-        self.current_tab() != 0 || self.is_volume_hud_active()
-    }
-
-    /// Builds [`MarqueeRowSpec`]s for the Rust-side composer from the shared global and
-    /// the cached strip pixels; rows are omitted when the text does not overflow.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the strip-cache mutex was poisoned by a prior panic in this thread.
-    #[must_use]
-    pub fn marquee_row_specs(&self) -> Vec<MarqueeRowSpec> {
-        let g = self.window.global::<MarqueeCompose>();
-        // Suppress Rust-side marquee composition whenever the Now Playing tab is not
-        // visible or while the Volume HUD overlay covers the middle viewport.
-        if !g.get_compose_in_rust() || self.should_suppress_marquee() {
-            return Vec::new();
-        }
-        let px = |v: f32, max: f32| u32::try_from(v.round().clamp(0.0, max) as i64).unwrap_or(0);
-        let row = |origin: slint::LogicalPosition,
-                   w: f32,
-                   h: f32,
-                   scroll: i32,
-                   cycle: i32,
-                   overflow: bool,
-                   strip: Option<&super::marquee::MarqueeStrip>| {
-            let strip = strip.filter(|s| !s.is_empty())?;
-            // Non-overflow rows are composed too (Slint strips are hidden in compose
-            // mode): a single unscrolled tile with a cycle wider than the viewport so
-            // the tiling loop never draws a second copy inside the row.
-            let (scroll_px, cycle_px) = if overflow {
-                (
-                    u32::try_from(scroll).unwrap_or(0),
-                    u32::try_from(cycle).unwrap_or(0),
-                )
-            } else {
-                (0, px(w, 800.0) + 1)
-            };
-            Some(MarqueeRowSpec {
-                rect: (
-                    px(origin.x, 800.0),
-                    px(origin.y, 480.0),
-                    px(w, 800.0),
-                    px(h, 480.0),
-                ),
-                scroll_px,
-                cycle_px,
-                strip: strip.pixels_arc(),
-                strip_w: strip.width(),
-                strip_id: strip.strip_id(),
-            })
-        };
-        vec![row(
-            g.get_title_origin(),
-            g.get_title_w(),
-            g.get_title_h(),
-            g.get_title_scroll_px(),
-            g.get_title_cycle_px(),
-            g.get_title_overflow(),
-            self.strips.borrow().title(),
-        )]
-        .into_iter()
-        .flatten()
-        .collect()
-    }
-
     pub fn set_cd_enabled(&self, enabled: bool) {
         self.window.set_cd_enabled(enabled);
         if !enabled && self.current_tab() == 3 {
@@ -576,7 +740,6 @@ impl AppShell {
         self.window.set_track_title(title.into());
         self.window.set_track_artist(artist.into());
         self.window.set_track_album(album.into());
-        self.refresh_marquee_strips();
     }
 
     /// Returns the current volume percentage (0.0–100.0).
@@ -694,13 +857,21 @@ impl AppShell {
 
     /// Applies the authoritative amp level/mute snapshot published by the
     /// `amp-volume` worker to the volume slider and mute indicator.
+    ///
+    /// The initial snapshot synchronizes the UI silently. Later changes open or
+    /// refresh the Volume HUD, including changes originating outside the screen
+    /// (for example, a phone changing the amplifier volume).
     pub fn apply_amp_volume(&self, state: &crate::volume::AmpVolumeState) {
+        let previous = self.last_amp_volume.replace(Some(*state));
         let volume = f32::from(state.level);
         if (self.window.get_volume_value() - volume).abs() >= 0.5 {
             self.set_volume(volume);
         }
         if self.window.get_is_muted() != state.muted {
             self.window.set_is_muted(state.muted);
+        }
+        if previous.is_some_and(|previous| previous != *state) {
+            self.show_volume_hud();
         }
     }
 
@@ -743,7 +914,6 @@ impl AppShell {
     /// Applies state from a [`speaker_bluetooth::BtPlaybackState`] point-in-time snapshot.
     pub fn apply_bluetooth_playback(&self, playback: &speaker_bluetooth::BtPlaybackState) {
         Self::apply_playback_to_window(&self.window, playback);
-        self.refresh_marquee_strips();
     }
 
     fn apply_playback_to_window(w: &MainWindow, playback: &speaker_bluetooth::BtPlaybackState) {
@@ -841,44 +1011,6 @@ impl AppShell {
     /// Applies a theme preset to the UI shell.
     pub fn apply_theme(&self, preset: ThemePreset) {
         preset.apply(&self.window);
-        self.refresh_marquee_strips();
-    }
-
-    /// Re-rasterizes the marquee strips when their text, color, or typography changed.
-    ///
-    /// Cached strips make this a no-op while metadata, theme, and typography are stable,
-    /// so repeated playback-state ticks perform no offscreen rasterization.
-    fn refresh_marquee_strips(&self) {
-        Self::refresh_marquee_strips_for(&self.window, &self.strips);
-    }
-
-    /// Free-function form of [`AppShell::refresh_marquee_strips`] callable from
-    /// Slint callbacks that only hold a weak window handle and the shared strip cache.
-    fn refresh_marquee_strips_for(w: &MainWindow, strips: &RefCell<MarqueeStripCache>) {
-        let preset = ThemePreset::from_index(w.global::<AppTheme>().get_active_preset());
-        // Use Material scheme's onBackground (equivalent to old text_primary)
-        let schemes = preset.material_schemes();
-        let text_primary = schemes.dark.onBackground;
-        let rgb = |color: slint::Color| (color.red(), color.green(), color.blue());
-
-        let title_request = StripRequest {
-            text: w.get_track_title().as_str().into(),
-            color: rgb(text_primary),
-            font_size_px: MarqueeTypography::TITLE_FONT_SIZE_PX,
-            font_weight: MarqueeTypography::TITLE_FONT_WEIGHT,
-            font_family: preset.font_family().into(),
-        };
-
-        let title_strip = {
-            let mut cache = strips.borrow_mut();
-            cache.rasterize_title(&title_request)
-        };
-        // Only touch the image properties when a strip actually re-rendered: setting an
-        // identical property value still fires Slint change notifications and forces
-        // (expensive) partial/full invalidations four times per second.
-        if let Some(strip) = title_strip {
-            w.set_title_marquee_strip(strip.image().clone());
-        }
     }
 
     /// Cycles to the next available theme preset in cyclic order.
@@ -922,23 +1054,75 @@ impl AppShell {
         });
 
         let win = self.window.as_weak();
-        let strips = Rc::clone(&self.strips);
+        let persist_tx = Rc::clone(&self.persist_tx);
         self.window.on_select_theme(move |idx| {
             if let Some(w) = win.upgrade() {
                 let preset = ThemePreset::from_index(idx);
                 preset.apply(&w);
-                Self::refresh_marquee_strips_for(&w, &strips);
+                Self::persist_window_state(&w, &persist_tx);
             }
         });
 
         let win = self.window.as_weak();
-        let strips = Rc::clone(&self.strips);
-        self.window.on_cycle_theme(move || {
+        let persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_set_marquee_fps(move |fps| {
             if let Some(w) = win.upgrade() {
-                let current = ThemePreset::from_index(w.global::<AppTheme>().get_active_preset());
-                let next = current.next();
-                next.apply(&w);
-                Self::refresh_marquee_strips_for(&w, &strips);
+                // Snap to the valid domain (30/60) before applying; the
+                // programmatic setter does the same, but the callback receives
+                // raw Slint i32 values so it must guard its own input.
+                let fps = if fps == 30 {
+                    30
+                } else {
+                    i32::try_from(DEFAULT_MARQUEE_FPS).unwrap_or(i32::MAX)
+                };
+                w.global::<MarqueeCompose>().set_marquee_fps(fps);
+                Self::persist_window_state(&w, &persist_tx);
+            }
+        });
+
+        let win = self.window.as_weak();
+        let persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_set_volume_step_percent(move |step| {
+            if let Some(w) = win.upgrade() {
+                let clamped = step.clamp(
+                    i32::from(MIN_VOLUME_STEP_PERCENT),
+                    i32::from(MAX_VOLUME_STEP_PERCENT),
+                );
+                w.set_volume_step_percent(clamped);
+                Self::persist_window_state(&w, &persist_tx);
+            }
+        });
+
+        let win = self.window.as_weak();
+        let persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_set_volume_hud_timeout_ms(move |ms| {
+            if let Some(w) = win.upgrade() {
+                let clamped =
+                    Self::clamp_hud_ms(ms, MIN_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_TIMEOUT_MS);
+                w.set_volume_hud_timeout_ms(clamped);
+                Self::persist_window_state(&w, &persist_tx);
+            }
+        });
+
+        let win = self.window.as_weak();
+        let persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_set_volume_hud_fade_ms(move |ms| {
+            if let Some(w) = win.upgrade() {
+                let clamped =
+                    Self::clamp_hud_ms(ms, MIN_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_FADE_MS);
+                w.set_volume_hud_fade_ms(clamped);
+                Self::persist_window_state(&w, &persist_tx);
+            }
+        });
+
+        let win = self.window.as_weak();
+        let persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_set_codec_hud_timeout_ms(move |ms| {
+            if let Some(w) = win.upgrade() {
+                let clamped =
+                    Self::clamp_hud_ms(ms, MIN_CODEC_HUD_TIMEOUT_MS, MAX_CODEC_HUD_TIMEOUT_MS);
+                w.set_codec_hud_timeout_ms(clamped);
+                Self::persist_window_state(&w, &persist_tx);
             }
         });
 

@@ -19,7 +19,6 @@ speaker-dsp = { workspace = true }
 config = { workspace = true }
 tempfile = { workspace = true }
 image = { workspace = true }
-memmap2 = { workspace = true, optional = true }
 libc = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
@@ -35,9 +34,8 @@ slint = { workspace = true, optional = true }
 
 [features]
 default = ["ui"]
-ui = ["dep:slint", "dep:slint-build", "dep:i-slint-core", "dep:memmap2"]
-linuxkms = ["ui", "slint/backend-linuxkms"]
-simulator = ["ui", "slint/backend-winit", "slint/renderer-femtovg"]
+ui = ["dep:slint", "dep:slint-build", "dep:i-slint-core"]
+simulator = ["ui", "slint/backend-winit"]
 test-util = []
 
 [dev-dependencies]
