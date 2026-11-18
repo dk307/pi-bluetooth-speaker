@@ -99,6 +99,9 @@ export component TextField {
                 root.accepted(root.text);
             }
             root.vk_session_id = 0;
+            if input.has_focus {
+                input.clear_focus();
+            }
         }
     }
 
