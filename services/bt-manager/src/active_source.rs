@@ -511,9 +511,9 @@ async fn apply_outcome(outcome: ArbiterOutcome, ctx: &ArbiterCtx<'_>) {
     }
 }
 
-async fn seed_from_bt(state: &mut ActiveSourceState, ctx: &ArbiterCtx<'_>) {
+async fn seed_from_bt(state: &mut ActiveSourceState, ctx: &ArbiterCtx<'_>) -> bool {
     let Ok(snapshot) = ctx.bt.link_snapshot_async().await else {
-        return;
+        return false;
     };
     let outcome = state.seed(
         snapshot
@@ -527,6 +527,7 @@ async fn seed_from_bt(state: &mut ActiveSourceState, ctx: &ArbiterCtx<'_>) {
         }
     }
     apply_outcome(outcome, ctx).await;
+    true
 }
 
 struct ArbiterRules {
@@ -691,6 +692,9 @@ pub async fn run_task(
 
     loop {
         if need_reconnect {
+            // Drop the previous SignalEmitter before requesting the bus name on
+            // the replacement connection so the old connection cannot hold it.
+            emitter = None;
             match tokio::try_join!(Connection::system(), Connection::system()) {
                 Ok((sig, ctrl)) => {
                     signal_conn = sig;
@@ -737,8 +741,7 @@ pub async fn run_task(
             cover_art: cover_art.as_ref(),
         };
         if !seeded {
-            seed_from_bt(&mut state, &ctx).await;
-            seeded = true;
+            seeded = seed_from_bt(&mut state, &ctx).await;
         }
 
         drive_arbiter_streams(

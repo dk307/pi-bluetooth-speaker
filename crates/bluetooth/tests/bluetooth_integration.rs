@@ -2679,6 +2679,21 @@ fn preferred_active_device_overrides_path_sort_in_player_and_pcm_selection() {
             .device_address,
         addr_a
     );
+
+    // If the preferred device exposes both HFP and A2DP PCMs, A2DP wins.
+    let hfp_a = mk_pcm(
+        addr_a,
+        "/org/bluealsa/hci0/dev_C4_03_A8_BD_EF_74/hfphf/source",
+        true,
+    );
+    let mixed = [hfp_a, pcms[1].clone()];
+    assert_eq!(
+        select_active_pcm_for(&mixed, Some(addr_a))
+            .unwrap()
+            .pcm_path
+            .as_ref(),
+        "/org/bluealsa/hci0/dev_C4_03_A8_BD_EF_74/a2dpsnk/source"
+    );
 }
 
 #[test]

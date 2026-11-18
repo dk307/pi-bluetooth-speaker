@@ -71,7 +71,11 @@ pub fn select_active_pcm_for(
     preferred: Option<BtAddress>,
 ) -> Option<&BlueAlsaPcm> {
     preferred
-        .and_then(|addr| pcms.iter().find(|p| p.device_address == addr))
+        .and_then(|addr| {
+            pcms.iter()
+                .find(|p| p.device_address == addr && is_a2dp_pcm_path(&p.pcm_path))
+                .or_else(|| pcms.iter().find(|p| p.device_address == addr))
+        })
         .or_else(|| pcms.iter().find(|p| p.running))
         .or_else(|| pcms.first())
 }
