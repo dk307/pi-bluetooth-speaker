@@ -512,8 +512,12 @@ async fn apply_outcome(outcome: ArbiterOutcome, ctx: &ArbiterCtx<'_>) {
 }
 
 async fn seed_from_bt(state: &mut ActiveSourceState, ctx: &ArbiterCtx<'_>) -> bool {
-    let Ok(snapshot) = ctx.bt.link_snapshot_async().await else {
-        return false;
+    let snapshot = match ctx.bt.link_snapshot_async().await {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            tracing::warn!(error = %e, "Active-source arbiter seed snapshot failed; will retry on reconnect");
+            return false;
+        }
     };
     let outcome = state.seed(
         snapshot

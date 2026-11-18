@@ -668,6 +668,11 @@ pub fn publish_playback_state(
     let fallback_addr = last_pb.as_ref().and_then(|p| p.device_address);
     match bt.playback_state_for(fallback_addr) {
         Ok(Some(ref pb)) => {
+            // Compute device_changed before settle-expiry resets `last_pb` to
+            // `None`, otherwise the force-publish tick on the same device
+            // would look like a device switch and clear prior cover art.
+            let device_changed =
+                last_pb.as_ref().and_then(|p| p.device_address) != pb.device_address;
             // Force-publish one authoritative snapshot after the settle window
             // expires: if the command failed silently (or the peer never changed
             // status), the shell's optimistic flip must be reconciled instead of
@@ -679,8 +684,6 @@ pub fn publish_playback_state(
                 *settle = None;
                 *last_pb = None;
             }
-            let device_changed =
-                last_pb.as_ref().and_then(|p| p.device_address) != pb.device_address;
             let settling = settle.as_ref().is_some_and(|w| w.suppresses(pb));
             if !settling && last_pb.as_ref() != Some(pb) {
                 update.playback = Some(pb.clone());
