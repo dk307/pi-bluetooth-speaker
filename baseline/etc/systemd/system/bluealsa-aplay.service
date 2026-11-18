@@ -13,7 +13,11 @@ User=root
 # bluealsa-aplay maps the BlueZ MediaTransport1 volume into the mixer, which
 # stays 0 under [AVRCP] VolumeCategory=false and slams the amp to raw 0 on
 # every PCM restart (the documented two-writer fight).
-ExecStart=/usr/bin/bluealsa-aplay -S -D default --volume=none
+# `--single-audio` gates ALSA playback to one active BlueALSA PCM at a time
+# (first-play-wins). Note: bluealsa-aplay's built-in AVRCP Pause targets
+# `.../dev_XX/player0`, which fails on BlueZ 5.88 (`.../avrcp/player0`), so
+# `bt-manager` sends the real AVRCP Pause and publishes `ActiveDevice` on D-Bus.
+ExecStart=/usr/bin/bluealsa-aplay -S -D default --volume=none --single-audio
 Restart=always
 RestartSec=2
 

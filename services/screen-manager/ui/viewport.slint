@@ -1,4 +1,10 @@
-import { MaterialPalette } from "@material/material.slint";
+import {
+    MaterialPalette,
+    MaterialStyleMetrics,
+    MaterialText,
+    MaterialTypography,
+    TouchScale,
+} from "@material/material.slint";
 import { AppTheme } from "app_theme.slint";
 import { NowPlayingView } from "now_playing.slint";
 import { SettingsView } from "settings_view.slint";
@@ -9,7 +15,12 @@ export component MainViewport inherits Rectangle {
     in-out property <int> active_tab: 0;
     in property <bool> cd_enabled: false;
     in-out property <bool> show_themes: false;
+    in-out property <bool> show_widget_preview: false;
+    in-out property <string> speaker_alias: "DietPi Speaker";
     in-out property <string> track_title: "Waiting for Bluetooth Connection...";
+    in-out property <string> track_title_line1: "";
+    in-out property <string> track_title_line2: "";
+    in-out property <bool> title_split_mode: false;
     in-out property <string> track_artist: "";
     in-out property <string> track_album: "";
     in-out property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit -> DSP 32-bit";
@@ -28,6 +39,10 @@ export component MainViewport inherits Rectangle {
     in-out property <float> right_peak_ratio: 0.0;
     in-out property <string> track_or_device: "Waiting for Connection...";
     in property <string> stream_codec: "aptX-HD";
+    in property <int> volume_step_percent: 2;
+    in property <int> volume_hud_timeout_ms: 4000;
+    in property <int> volume_hud_fade_ms: 200;
+    in property <int> codec_hud_timeout_ms: 30000;
 
     callback settings_clicked();
     callback select_tab(int);
@@ -38,11 +53,15 @@ export component MainViewport inherits Rectangle {
     callback toggle_mute();
     callback volume_changed(float);
     callback stream_pill_clicked();
-    callback cycle_theme();
     callback select_theme(int);
-    // Font-scale label + cycler, owned by Rust (Settings text-size control).
-    in property <string> text_size_label: "100%";
-    callback font_scale_clicked();
+    callback cycle_theme();
+    callback font_scale_changed(float);
+    callback set_marquee_fps(int);
+    callback set_title_split_mode(bool);
+    callback set_volume_step_percent(int);
+    callback set_volume_hud_timeout_ms(int);
+    callback set_volume_hud_fade_ms(int);
+    callback set_codec_hud_timeout_ms(int);
 
     // Tab 0: Now Playing
     if root.active_tab == 0 : VerticalLayout {
@@ -57,6 +76,9 @@ export component MainViewport inherits Rectangle {
 
             now_playing := NowPlayingView {
                 track_title: root.track_title;
+                track_title_line1: root.track_title_line1;
+                track_title_line2: root.track_title_line2;
+                title_split_mode: root.title_split_mode;
                 track_artist: root.track_artist;
                 track_album: root.track_album;
                 position_text: root.position_text;
@@ -103,8 +125,8 @@ export component MainViewport inherits Rectangle {
 
     // Tab 3: CD Player
     if root.active_tab == 3 : VerticalLayout {
-        padding: 14px;
-        spacing: 12px;
+        padding: MaterialStyleMetrics.padding_14;
+        spacing: MaterialStyleMetrics.spacing_12;
 
         Rectangle {
             background: MaterialPalette.surface;
@@ -117,11 +139,10 @@ export component MainViewport inherits Rectangle {
                 alignment: center;
                 spacing: 10px;
 
-                Text {
+                MaterialText {
                     text: "USB Optical Drive Subsystem (cdda://)";
                     color: MaterialPalette.secondary;
-                    font-size: 16px;
-                    font-weight: 600;
+                    style: MaterialTypography.title_medium;
                     horizontal-alignment: center;
                 }
             }
@@ -130,8 +151,8 @@ export component MainViewport inherits Rectangle {
 
     // Tab 4: DSP & Tone Control
     if root.active_tab == 4 : VerticalLayout {
-        padding: 14px;
-        spacing: 12px;
+        padding: MaterialStyleMetrics.padding_14;
+        spacing: MaterialStyleMetrics.spacing_12;
 
         Rectangle {
             background: MaterialPalette.surface;
@@ -144,11 +165,10 @@ export component MainViewport inherits Rectangle {
                 alignment: center;
                 spacing: 10px;
 
-                Text {
+                MaterialText {
                     text: "48kHz / 32-bit LE Processing Pipeline";
                     color: MaterialPalette.secondary;
-                    font-size: 16px;
-                    font-weight: 600;
+                    style: MaterialTypography.title_medium;
                     horizontal-alignment: center;
                 }
             }
@@ -162,14 +182,26 @@ export component MainViewport inherits Rectangle {
         SettingsView {
             cd_enabled: root.cd_enabled;
             show_themes <=> root.show_themes;
+            show_widget_preview <=> root.show_widget_preview;
+            speaker_alias <=> root.speaker_alias;
+            volume_step_percent: root.volume_step_percent;
+            volume_hud_timeout_ms: root.volume_hud_timeout_ms;
+            volume_hud_fade_ms: root.volume_hud_fade_ms;
+            codec_hud_timeout_ms: root.codec_hud_timeout_ms;
+            title_split_mode: root.title_split_mode;
             bluetooth_clicked => { root.open_bluetooth_devices(); }
             vu_meter_clicked => { root.select_tab(1); }
             dsp_clicked => { root.select_tab(4); }
             cd_clicked => { root.select_tab(3); }
             select_theme(idx) => { root.select_theme(idx); }
             cycle_theme => { root.cycle_theme(); }
-            text_size_label: root.text_size_label;
-            font_scale_clicked => { root.font_scale_clicked(); }
+            font_scale_changed(val) => { root.font_scale_changed(val); }
+            set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
+            set_title_split_mode(split) => { root.set_title_split_mode(split); }
+            set_volume_step_percent(step) => { root.set_volume_step_percent(step); }
+            set_volume_hud_timeout_ms(ms) => { root.set_volume_hud_timeout_ms(ms); }
+            set_volume_hud_fade_ms(ms) => { root.set_volume_hud_fade_ms(ms); }
+            set_codec_hud_timeout_ms(ms) => { root.set_codec_hud_timeout_ms(ms); }
         }
     }
 }

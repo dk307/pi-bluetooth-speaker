@@ -1,12 +1,208 @@
-import { ElevatedCard, OutlinedCard, FilledButton, Icon, MaterialText, Horizontal, Vertical } from "@material/material.slint";
-import { MaterialPalette } from "@material/material.slint";
-import { MaterialTypography } from "@material/material.slint";
-import { MaterialStyleMetrics } from "@material/material.slint";
+import {
+    MaterialPalette,
+    MaterialStyleMetrics,
+    MaterialText,
+    MaterialTypography,
+    ScrollView,
+    TouchScale,
+} from "@material/material.slint";
 import { AppTheme } from "app_theme.slint";
+import { MarqueeCompose } from "marquee_state.slint";
+import { FontSizeControl, TouchScaleShowcase } from "touch_scale_widgets.slint";
 
-// Theme preset card using Rectangle with Material styling (defined first for use in SettingsView)
+// Compact +/− button used by the Advanced settings rows (Material 3 tonal
+// icon-button look; scales with `MaterialStyleMetrics.size_40`).
+// Uses real Material SVG icons so −/+ glyphs align.
+component StepButton inherits Rectangle {
+    in property <bool> plus;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    width: MaterialStyleMetrics.size_40;
+    height: MaterialStyleMetrics.size_40;
+    border-radius: self.width / 2;
+    background: root.enabled ? MaterialPalette.secondary_container : MaterialPalette.surface_container_highest;
+    opacity: root.enabled && touch.pressed ? 0.8 : root.enabled ? 1.0 : 0.6;
+    animate opacity { duration: 80ms; easing: ease-out; }
+
+    // "−" (remove) icon: always shown; canonical 24dp M3 icon.
+    Image {
+        source: @image-url("../../../assets/icons/remove.svg");
+        colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
+        width: MaterialStyleMetrics.icon_size_18;
+        height: self.width;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        image-fit: contain;
+    }
+
+    // "+" icon: only shown when plus is true; canonical 24dp M3 icon.
+    if root.plus : Image {
+        source: @image-url("../../../assets/icons/add.svg");
+        colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
+        width: MaterialStyleMetrics.icon_size_18;
+        height: self.width;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        image-fit: contain;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// One Material 3 list row for a numeric Advanced setting: label text on the
+// left, a −/+ stepper control on the right.
+// The value column has a fixed scaled width (`96px * TouchScale.widget_scale`)
+// so all −/+ buttons stay vertically aligned regardless of label width.
+component SettingsStepperRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <bool> can_decrease: true;
+    in property <bool> can_increase: true;
+    callback decrease();
+    callback increase();
+
+    min-height: max(MaterialStyleMetrics.size_40, row_layout.min-height);
+
+    row_layout := HorizontalLayout {
+        spacing: MaterialStyleMetrics.spacing_8;
+
+        MaterialText {
+            text: root.label;
+            style: MaterialTypography.body_large;
+            color: MaterialPalette.on_surface;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+            overflow: elide;
+            wrap: no-wrap;
+            horizontal-stretch: 1;
+        }
+
+        StepButton {
+            plus: false;
+            enabled: root.can_decrease;
+            clicked => { root.decrease(); }
+        }
+
+        MaterialText {
+            text: root.value;
+            style: MaterialTypography.title_medium;
+            color: MaterialPalette.primary;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            width: 96px * TouchScale.widget_scale;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+
+        StepButton {
+            plus: true;
+            enabled: root.can_increase;
+            clicked => { root.increase(); }
+        }
+    }
+}
+
+// Material 3 two-option segmented control: one outlined pill, selected segment
+// filled with `secondary_container`. Used for binary Advanced settings
+// (Marquee FPS 30/60, Track Title Marquee/Split).
+component TwoOptionSegmented inherits Rectangle {
+    in property <string> left_label;
+    in property <string> right_label;
+    in property <bool> right_selected;
+    callback select_right(bool);
+
+    width: 168px * TouchScale.widget_scale;
+    height: MaterialStyleMetrics.size_36;
+    border-width: 1px;
+    border-radius: self.height / 2;
+    border-color: MaterialPalette.outline;
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            horizontal-stretch: 1;
+            background: !root.right_selected ? MaterialPalette.secondary_container : transparent;
+
+            MaterialText {
+                text: root.left_label;
+                style: MaterialTypography.label_large;
+                color: !root.right_selected ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                wrap: no-wrap;
+            }
+
+            TouchArea {
+                clicked => { root.select_right(false); }
+            }
+        }
+
+        Rectangle {
+            width: 1px;
+            background: MaterialPalette.outline;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            background: root.right_selected ? MaterialPalette.secondary_container : transparent;
+
+            MaterialText {
+                text: root.right_label;
+                style: MaterialTypography.label_large;
+                color: root.right_selected ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                wrap: no-wrap;
+            }
+
+            TouchArea {
+                clicked => { root.select_right(true); }
+            }
+        }
+    }
+}
+
+// Advanced list row pairing a setting label with a two-option segmented
+// control on the right.
+component TwoOptionSegmentedRow inherits Rectangle {
+    in property <string> label;
+    in property <string> left_label;
+    in property <string> right_label;
+    in property <bool> right_selected;
+    callback select_right(bool);
+
+    min-height: max(MaterialStyleMetrics.size_40, row_layout.min-height);
+
+    row_layout := HorizontalLayout {
+        spacing: MaterialStyleMetrics.spacing_8;
+
+        MaterialText {
+            text: root.label;
+            style: MaterialTypography.body_large;
+            color: MaterialPalette.on_surface;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+            overflow: elide;
+            wrap: no-wrap;
+            horizontal-stretch: 1;
+        }
+
+        TwoOptionSegmented {
+            left_label: root.left_label;
+            right_label: root.right_label;
+            right_selected: root.right_selected;
+            select_right(is_right) => { root.select_right(is_right); }
+        }
+    }
+}
+
+// Theme preset card: swatch-colored border marks the active preset.
 component ThemePresetCard inherits Rectangle {
-    in property <int> index;
     in property <string> name;
     in property <string> accent_name;
     in property <color> primary_color;
@@ -14,69 +210,97 @@ component ThemePresetCard inherits Rectangle {
     in property <bool> selected;
     callback clicked();
 
-    width: 136px;
-    height: 54px;
+    horizontal-stretch: 1;
+    min-width: 118px;
+    min-height: max(56px * TouchScale.widget_scale, card_layout.min-height);
     border-radius: MaterialStyleMetrics.border_radius_10;
-    border-width: root.selected ? 2px : 0px;
-    border-color: root.primary_color;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? root.primary_color : MaterialPalette.outline_variant;
     background: root.selected ? transparent : MaterialPalette.surface;
+    opacity: touch.pressed ? 0.8 : 1.0;
+    animate opacity { duration: 80ms; easing: ease-out; }
 
-    VerticalLayout {
+    card_layout := VerticalLayout {
         alignment: center;
+        padding-left: MaterialStyleMetrics.padding_6;
+        padding-right: MaterialStyleMetrics.padding_6;
+        padding-top: MaterialStyleMetrics.padding_6;
+        padding-bottom: MaterialStyleMetrics.padding_6;
         spacing: MaterialStyleMetrics.spacing_2;
 
         MaterialText {
             text: root.name;
-            style: MaterialTypography.label_medium;  // 12px
+            style: MaterialTypography.label_large;
             color: root.primary_color;
             horizontal-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
         }
         MaterialText {
             text: root.accent_name;
-            style: MaterialTypography.label_small;  // 11px
+            style: MaterialTypography.label_small;
             color: root.secondary_color;
             horizontal-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
         }
     }
 
-    TouchArea {
+    touch := TouchArea {
         clicked => { root.clicked(); }
     }
 }
 
-// Android-style icon button for settings grid (custom component like TransportButton)
+// Android-style icon button for settings grid, scaled by `TouchScale.widget_scale`.
 component SettingsIconButton inherits Rectangle {
     in property <image> icon;
     in property <string> label;
     in property <bool> enabled: true;
 
-    width: 120px;
-    height: 120px;
-    border-radius: MaterialStyleMetrics.border_radius_16;  // 16px rounded
+    width: 120px * TouchScale.widget_scale;
+    min-height: max(120px * TouchScale.widget_scale, btn_layout.min-height);
+    border-radius: MaterialStyleMetrics.border_radius_16;
     background: root.enabled ? MaterialPalette.secondary_container : MaterialPalette.surface_container_highest;
     opacity: root.enabled ? (touch.pressed ? 0.8 : 1.0) : 0.6;
     animate opacity { duration: 80ms; easing: ease-out; }
 
-    VerticalLayout {
+    // Off-layout single-line probe so `is_multiline` depends only on `root.width`
+    // and `root.label` without creating a layout binding loop.
+    label_probe := Text {
+        x: 0;
+        y: 0;
+        visible: false;
+        text: root.label;
+        font-size: MaterialTypography.title_medium.font_size;
+        font-weight: MaterialTypography.title_medium.font_weight;
+        wrap: no-wrap;
+    }
+
+    property <bool> is_multiline: label_probe.preferred-width > root.width - 2 * MaterialStyleMetrics.padding_8;
+
+    btn_layout := VerticalLayout {
         alignment: center;
-        spacing: MaterialStyleMetrics.spacing_12;
+        padding: MaterialStyleMetrics.padding_8;
+        spacing: root.is_multiline ? MaterialStyleMetrics.spacing_8 : MaterialStyleMetrics.spacing_12;
 
         HorizontalLayout {
             alignment: center;
             Image {
                 source: root.icon;
                 colorize: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
-                width: MaterialStyleMetrics.icon_size_36;  // 48px
-                height: MaterialStyleMetrics.icon_size_36;
+                width: root.is_multiline ? 32px * TouchScale.widget_scale : MaterialStyleMetrics.icon_size_36;
+                height: self.width;
                 image-fit: contain;
             }
         }
 
-        MaterialText {
+        label_text := MaterialText {
             text: root.label;
-            style: MaterialTypography.title_medium;  // 16px (+1 from title_small)
+            style: MaterialTypography.title_medium;
             color: root.enabled ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface_variant;
             horizontal-alignment: center;
+            overflow: elide;
+            wrap: word-wrap;
         }
     }
 
@@ -93,8 +317,13 @@ component SettingsIconButton inherits Rectangle {
 export component SettingsView inherits VerticalLayout {
     in property <bool> cd_enabled: false;
     in-out property <bool> show_themes: false;
-    // Current font-scale percentage label (e.g. "100%"), owned by Rust.
-    in property <string> text_size_label: "100%";
+    in-out property <bool> show_widget_preview: false;
+    in-out property <string> speaker_alias: "DietPi Speaker";
+    in property <int> volume_step_percent: 2;
+    in property <int> volume_hud_timeout_ms: 4000;
+    in property <int> volume_hud_fade_ms: 200;
+    in property <int> codec_hud_timeout_ms: 30000;
+    in property <bool> title_split_mode: false;
 
     callback bluetooth_clicked();
     callback vu_meter_clicked();
@@ -102,10 +331,16 @@ export component SettingsView inherits VerticalLayout {
     callback cd_clicked();
     callback select_theme(int);
     callback cycle_theme();
-    callback font_scale_clicked();
+    callback font_scale_changed(float);
+    callback set_marquee_fps(int);
+    callback set_title_split_mode(bool);
+    callback set_volume_step_percent(int);
+    callback set_volume_hud_timeout_ms(int);
+    callback set_volume_hud_fade_ms(int);
+    callback set_codec_hud_timeout_ms(int);
 
-    padding: MaterialStyleMetrics.padding_16;  // 16px
-    spacing: MaterialStyleMetrics.spacing_16;
+    padding: root.show_widget_preview ? 0px : MaterialStyleMetrics.padding_12;
+    spacing: MaterialStyleMetrics.spacing_6;
 
     // View 1: Android-style icon button grid
     if !root.show_themes : VerticalLayout {
@@ -136,14 +371,8 @@ export component SettingsView inherits VerticalLayout {
 
             SettingsIconButton {
                 icon: @image-url("../../../assets/icons/config.svg");
-                label: "Themes";
+                label: "Screen Settings";
                 clicked => { root.show_themes = true; }
-            }
-
-            SettingsIconButton {
-                icon: @image-url("../../../assets/icons/text_size.svg");
-                label: "Text " + root.text_size_label;
-                clicked => { root.font_scale_clicked(); }
             }
 
             if root.cd_enabled : SettingsIconButton {
@@ -154,91 +383,163 @@ export component SettingsView inherits VerticalLayout {
         }
     }
 
-    // View 2: Theme Preferences Screen
-    if root.show_themes : OutlinedCard {
-        VerticalLayout {
-            alignment: space-around;
-            padding: MaterialStyleMetrics.padding_16;
-            spacing: MaterialStyleMetrics.spacing_12;
+    // View 2: Screen Settings — Appearance (Theme presets + Text Size) pinned
+    // above the scrollable Advanced list so the Text Size slider receives
+    // uninterrupted horizontal drag gestures on the touchscreen.
+    if root.show_themes && !root.show_widget_preview : VerticalLayout {
+        vertical-stretch: 1;
+        spacing: MaterialStyleMetrics.spacing_8;
 
-            MaterialText {
-                text: "Select Global Appliance Palette:";
-                style: MaterialTypography.label_large;  // 14px
-                color: MaterialPalette.on_surface_variant;
-                horizontal-alignment: center;
+        // Section 1: Theme presets + Text Size (non-advanced appearance settings)
+        HorizontalLayout {
+            spacing: MaterialStyleMetrics.spacing_8;
+
+            ThemePresetCard {
+                name: "McIntosh";
+                accent_name: "Electric Cyan";
+                primary_color: #00C8FF;
+                secondary_color: #70E1FF;
+                selected: AppTheme.active_preset == 0;
+                clicked => { root.select_theme(0); }
             }
 
-            // 5 Theme preset buttons
-            HorizontalLayout {
-                alignment: center;
+            ThemePresetCard {
+                name: "Marantz";
+                accent_name: "Warm Amber";
+                primary_color: #E5A93C;
+                secondary_color: #FFD166;
+                selected: AppTheme.active_preset == 1;
+                clicked => { root.select_theme(1); }
+            }
+
+            ThemePresetCard {
+                name: "Cyberpunk";
+                accent_name: "Synthwave Pink";
+                primary_color: #00F0FF;
+                secondary_color: #FF007F;
+                selected: AppTheme.active_preset == 2;
+                clicked => { root.select_theme(2); }
+            }
+
+            ThemePresetCard {
+                name: "Studio Dark";
+                accent_name: "Precision Mono";
+                primary_color: #F0F0F0;
+                secondary_color: #A0A0A0;
+                selected: AppTheme.active_preset == 3;
+                clicked => { root.select_theme(3); }
+            }
+
+            ThemePresetCard {
+                name: "PeppyMeter";
+                accent_name: "Vintage Gold";
+                primary_color: #F5B83D;
+                secondary_color: #FFDF85;
+                selected: AppTheme.active_preset == 4;
+                clicked => { root.select_theme(4); }
+            }
+        }
+
+        // Text Size ("A — Slider — A") setting, live-persisted to config.json.
+        FontSizeControl {
+            font_scale_changed(val) => { root.font_scale_changed(val); }
+        }
+
+        // Track Title display mode (Marquee vs Split), live-persisted to config.json.
+        TwoOptionSegmentedRow {
+            label: "Track Title";
+            left_label: "Marquee";
+            right_label: "Split";
+            right_selected: root.title_split_mode;
+            select_right(split) => { root.set_title_split_mode(split); }
+        }
+
+        // Section divider (M3: one divider between groups, none between rows).
+        Rectangle {
+            height: 1px;
+            background: MaterialPalette.outline_variant;
+        }
+
+        // Section 2: Scrollable Advanced settings list
+        settings_scroll := ScrollView {
+            vertical-stretch: 1;
+            horizontal_scrollbar_policy: ScrollBarPolicy.always_off;
+            content_width: settings_scroll.visible_width;
+            content_height: settings_list.min-height;
+
+            settings_list := VerticalLayout {
+                width: settings_scroll.visible_width;
+                height: max(settings_scroll.visible_height, self.min-height);
+                padding-right: MaterialStyleMetrics.padding_4;
                 spacing: MaterialStyleMetrics.spacing_8;
 
-                // 1. McIntosh Blue
-                ThemePresetCard {
-                    index: 0;
-                    name: "1. McIntosh";
-                    accent_name: "Electric Cyan";
-                    primary_color: #00C8FF;
-                    secondary_color: #70E1FF;
-                    selected: AppTheme.active_preset == 0;
-                    clicked => { root.select_theme(0); }
+                // Section 2 header: "Advanced".
+                MaterialText {
+                    text: "Advanced";
+                    style: MaterialTypography.title_medium;
+                    color: MaterialPalette.primary;
+                    vertical-alignment: center;
                 }
 
-                // 2. Marantz Amber
-                ThemePresetCard {
-                    index: 1;
-                    name: "2. Marantz";
-                    accent_name: "Warm Amber";
-                    primary_color: #E5A93C;
-                    secondary_color: #FFD166;
-                    selected: AppTheme.active_preset == 1;
-                    clicked => { root.select_theme(1); }
+                TwoOptionSegmentedRow {
+                    label: "Marquee FPS";
+                    left_label: "30";
+                    right_label: "60";
+                    right_selected: MarqueeCompose.marquee_fps == 60;
+                    select_right(is_60) => { root.set_marquee_fps(is_60 ? 60 : 30); }
                 }
 
-                // 3. Cyberpunk Neon
-                ThemePresetCard {
-                    index: 2;
-                    name: "3. Cyberpunk";
-                    accent_name: "Synthwave Pink";
-                    primary_color: #00F0FF;
-                    secondary_color: #FF007F;
-                    selected: AppTheme.active_preset == 2;
-                    clicked => { root.select_theme(2); }
+                // Stepper bounds mirror the Rust config domains (MIN_/MAX_* in
+                // crate::config); the Rust callbacks clamp off-grid steps as well.
+                SettingsStepperRow {
+                    label: "Encoder Volume Step";
+                    value: "\{root.volume_step_percent} %";
+                    can_decrease: root.volume_step_percent > 1;
+                    can_increase: root.volume_step_percent < 25;
+                    decrease => { root.set_volume_step_percent(root.volume_step_percent - 1); }
+                    increase => { root.set_volume_step_percent(root.volume_step_percent + 1); }
                 }
 
-                // 4. Studio Dark
-                ThemePresetCard {
-                    index: 3;
-                    name: "4. Studio Dark";
-                    accent_name: "Precision Mono";
-                    primary_color: #F0F0F0;
-                    secondary_color: #A0A0A0;
-                    selected: AppTheme.active_preset == 3;
-                    clicked => { root.select_theme(3); }
+                SettingsStepperRow {
+                    label: "Volume HUD Timeout";
+                    value: "\{root.volume_hud_timeout_ms} ms";
+                    can_decrease: root.volume_hud_timeout_ms > 250;
+                    can_increase: root.volume_hud_timeout_ms < 30000;
+                    decrease => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms - 250); }
+                    increase => { root.set_volume_hud_timeout_ms(root.volume_hud_timeout_ms + 250); }
                 }
 
-                // 5. PeppyMeter Gold
-                ThemePresetCard {
-                    index: 4;
-                    name: "5. PeppyMeter";
-                    accent_name: "Vintage Gold";
-                    primary_color: #F5B83D;
-                    secondary_color: #FFDF85;
-                    selected: AppTheme.active_preset == 4;
-                    clicked => { root.select_theme(4); }
+                SettingsStepperRow {
+                    label: "Volume HUD Fade";
+                    value: "\{root.volume_hud_fade_ms} ms";
+                    can_decrease: root.volume_hud_fade_ms > 0;
+                    can_increase: root.volume_hud_fade_ms < 2000;
+                    decrease => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms - 100); }
+                    increase => { root.set_volume_hud_fade_ms(root.volume_hud_fade_ms + 100); }
+                }
+
+                SettingsStepperRow {
+                    label: "Codec HUD Timeout";
+                    value: "\{root.codec_hud_timeout_ms} ms";
+                    can_decrease: root.codec_hud_timeout_ms > 250;
+                    can_increase: root.codec_hud_timeout_ms < 300000;
+                    decrease => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms - 1000); }
+                    increase => { root.set_codec_hud_timeout_ms(root.codec_hud_timeout_ms + 1000); }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
                 }
             }
+        }
+    }
 
-            // Cycle Theme Button
-            HorizontalLayout {
-                alignment: center;
-                FilledButton {
-                    text: "Cycle Next Theme";
-                    width: 220px;
-                    height: 48px;
-                    clicked => { root.cycle_theme(); }
-                }
-            }
+    // View 3: 800x480 Widget Scale Audit & Interactive Showcase
+    if root.show_themes && root.show_widget_preview : TouchScaleShowcase {
+        vertical-stretch: 1;
+        speaker_alias <=> root.speaker_alias;
+        font_scale_changed(val) => {
+            root.font_scale_changed(val);
         }
     }
 }

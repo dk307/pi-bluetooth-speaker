@@ -55,6 +55,8 @@ check "ALSA utilities ('amixer' & 'alsactl') installed" "command -v amixer >/dev
 check "ALSA configuration /etc/asound.conf exists" "[ -s /etc/asound.conf ]"
 check "ALSA persisted mixer state /var/lib/alsa/asound.state exists" "[ -s /var/lib/alsa/asound.state ]"
 check "MA12070P HW mixer bound in bluealsa-aplay.service" "grep -q -- '--mixer-control=\"A.Mstr Vol\"' /etc/systemd/system/bluealsa-aplay.service"
+check "Single-audio gate enabled in bluealsa-aplay.service" "grep -q -- '--single-audio' /etc/systemd/system/bluealsa-aplay.service"
+check "D-Bus policy org.speaker.Bluetooth.conf exists" "[ -s /etc/dbus-1/system.d/org.speaker.Bluetooth.conf ]"
 check "CamillaDSP configuration crossover.yml exists" "[ -s /etc/camilladsp/crossover.yml ]"
 
 echo ""

@@ -23,7 +23,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
-use speaker_bluetooth::{BlueAlsaPcm, BluetoothDevice};
+use speaker_bluetooth::{BlueAlsaPcm, BluetoothDevice, BtAddress, device_address_from_path};
+use tokio::sync::watch;
 use zbus::message::Body;
 use zbus::proxy::CacheProperties;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
@@ -117,6 +118,8 @@ pub struct VolumeSyncState {
     /// signal *before* the `InterfacesAdded` handler arms suppression, and an
     /// unbiased `select!` may deliver it first.
     known_pcm_paths: HashSet<Box<str>>,
+    /// Arbitrated active device MAC, when multiple devices may be connected.
+    active_device: Option<BtAddress>,
 }
 
 impl Default for VolumeSyncState {
@@ -128,6 +131,7 @@ impl Default for VolumeSyncState {
             pending_echoes: VecDeque::with_capacity(ECHO_CAPACITY),
             forward_suppress_until: None,
             known_pcm_paths: HashSet::new(),
+            active_device: None,
         }
     }
 }
@@ -261,6 +265,35 @@ impl VolumeSyncState {
     pub fn last_pushed_muted(&self) -> Option<bool> {
         self.last_pushed_muted
     }
+
+    /// Returns the currently scoped active device, if any.
+    #[must_use]
+    pub const fn active_device(&self) -> Option<BtAddress> {
+        self.active_device
+    }
+
+    /// Updates the scoped active device. Returns `true` when switching to a
+    /// new `Some(addr)` (and arms the fresh-PCM settle window so the newly
+    /// active device's stale volume cannot override the amp).
+    pub fn set_active_device(&mut self, active: Option<BtAddress>, now: Instant) -> bool {
+        let prev = self.active_device;
+        self.active_device = active;
+        if active.is_some() && active != prev {
+            self.arm_fresh_pcm(now);
+            return true;
+        }
+        false
+    }
+
+    /// Returns `true` when `path` belongs to the active device (or when no
+    /// active device is currently scoped).
+    #[must_use]
+    pub fn is_active_pcm_path(&self, path: &str) -> bool {
+        match self.active_device {
+            Some(active) => device_address_from_path(path) == Some(active),
+            None => true,
+        }
+    }
 }
 
 /// Predicate: does this D-Bus `PropertiesChanged` signal announce a `BlueALSA`
@@ -326,12 +359,20 @@ pub fn volume_bytes_from_value(value: &Value<'_>) -> Option<Vec<u8>> {
 /// other PCMs are ignored so a voice call cannot change the music volume.
 #[must_use]
 pub fn a2dp_volume(pcms: &[BlueAlsaPcm]) -> Option<u8> {
+    a2dp_volume_for(pcms, None)
+}
+
+/// Returns the A2DP sink PCM volume percentage for `preferred` (falling back
+/// to the running/first A2DP sink PCM when `preferred` is `None`).
+#[must_use]
+pub fn a2dp_volume_for(pcms: &[BlueAlsaPcm], preferred: Option<BtAddress>) -> Option<u8> {
     let a2dp = || {
         pcms.iter()
             .filter(|pcm| speaker_bluetooth::transport::is_a2dp_pcm_path(&pcm.pcm_path))
     };
-    a2dp()
-        .find(|pcm| pcm.running)
+    preferred
+        .and_then(|addr| a2dp().find(|pcm| pcm.device_address == addr))
+        .or_else(|| a2dp().find(|pcm| pcm.running))
         .or_else(|| a2dp().next())
         .and_then(|pcm| pcm.volume_percent)
 }
@@ -368,7 +409,8 @@ fn handle_join_error(context: &str, err: tokio::task::JoinError) {
 /// Pushes one level to the `BlueALSA` PCM (phone AVRCP volume follows).
 async fn push_level(bt: &BluetoothDevice, state: &mut VolumeSyncState, level: u8) {
     let bt_for_push = bt.clone();
-    match tokio::task::spawn_blocking(move || bt_for_push.set_volume(level)).await {
+    let active = state.active_device();
+    match tokio::task::spawn_blocking(move || bt_for_push.set_volume_for(level, active)).await {
         Ok(Ok(())) => {
             state.record_reverse_push(Some(level), None);
             tracing::info!(level, "Volume sync: audio-manager -> BlueALSA");
@@ -381,7 +423,8 @@ async fn push_level(bt: &BluetoothDevice, state: &mut VolumeSyncState, level: u8
 /// Pushes one mute state to the `BlueALSA` PCM (phone AVRCP mute follows).
 async fn push_muted(bt: &BluetoothDevice, state: &mut VolumeSyncState, muted: bool) {
     let bt_for_push = bt.clone();
-    match tokio::task::spawn_blocking(move || bt_for_push.set_mute(muted)).await {
+    let active = state.active_device();
+    match tokio::task::spawn_blocking(move || bt_for_push.set_mute_for(muted, active)).await {
         Ok(Ok(())) => {
             state.record_reverse_push(None, Some(muted));
             tracing::info!(muted, "Mute sync: audio-manager -> BlueALSA");
@@ -407,10 +450,10 @@ async fn reconcile_reverse(amp: &Proxy<'_>, bt: &BluetoothDevice, state: &mut Vo
 }
 
 /// Reads the live A2DP PCM volume from `BlueALSA`.
-async fn read_pcm_volume(bt: &BluetoothDevice) -> Option<u8> {
+async fn read_pcm_volume(bt: &BluetoothDevice, active: Option<BtAddress>) -> Option<u8> {
     let bt_for_read = bt.clone();
     match tokio::task::spawn_blocking(move || bt_for_read.link_snapshot()).await {
-        Ok(Ok(snapshot)) => a2dp_volume(&snapshot.pcms),
+        Ok(Ok(snapshot)) => a2dp_volume_for(&snapshot.pcms, active),
         Ok(Err(e)) => {
             tracing::debug!(error = %e, "Volume sync: PCM read failed");
             None
@@ -427,12 +470,13 @@ async fn read_pcm_volume(bt: &BluetoothDevice) -> Option<u8> {
 /// Also marks every observed PCM path as known (fresh-PCM gating).
 async fn seed_pcm_state(bt: &BluetoothDevice, state: &mut VolumeSyncState) {
     let bt_for_read = bt.clone();
+    let active = state.active_device();
     match tokio::task::spawn_blocking(move || bt_for_read.link_snapshot()).await {
         Ok(Ok(snapshot)) => {
             for pcm in &snapshot.pcms {
                 state.mark_pcm_known(pcm.pcm_path.as_ref());
             }
-            if let Some(pcm_vol) = a2dp_volume(&snapshot.pcms) {
+            if let Some(pcm_vol) = a2dp_volume_for(&snapshot.pcms, active) {
                 state.seed_pcm_volume(pcm_vol);
                 tracing::info!(
                     pcm_volume = pcm_vol,
@@ -460,7 +504,7 @@ async fn watchdog_tick(amp: &Proxy<'_>, bt: &BluetoothDevice, state: &mut Volume
     if state.suppression_active(now) {
         return;
     }
-    if let Some(pcm_vol) = read_pcm_volume(bt).await
+    if let Some(pcm_vol) = read_pcm_volume(bt, state.active_device()).await
         && state.should_forward_pcm(pcm_vol, now)
         && let Err(e) = apply_pcm_volume(amp, state, pcm_vol).await
     {
@@ -526,22 +570,34 @@ fn build_match_rules() -> Option<(MatchRule<'static>, MatchRule<'static>, MatchR
 /// Drives the three live signal streams (plus the watchdog) until one of
 /// them errors or closes, then returns so the caller can rebuild the
 /// connections.
+struct SignalStreams {
+    props: MessageStream,
+    iface: MessageStream,
+    amp: MessageStream,
+}
+
 async fn run_signal_streams(
     amp: &Proxy<'_>,
     bt: &BluetoothDevice,
     state: &mut VolumeSyncState,
     watchdog: &mut tokio::time::Interval,
-    mut props_stream: MessageStream,
-    mut iface_stream: MessageStream,
-    mut amp_stream: MessageStream,
+    active_rx: &mut watch::Receiver<Option<BtAddress>>,
+    mut streams: SignalStreams,
 ) {
     loop {
-        // Biased polling: `InterfacesAdded` is prioritized so a fresh PCM's
-        // establishment (path tracking + suppression arming) is processed
-        // before any of its queued `PropertiesChanged` volume signals.
+        // Biased polling: `InterfacesAdded` and active-source switches are
+        // prioritized so path tracking / suppression arming is processed
+        // before any queued `PropertiesChanged` volume signals.
         tokio::select! {
             biased;
-            signal = iface_stream.next() => {
+            Ok(()) = active_rx.changed() => {
+                let next = *active_rx.borrow_and_update();
+                if state.set_active_device(next, Instant::now()) {
+                    tracing::info!(device = ?next, "Volume sync switched active device; reconciling amp -> phone");
+                    reconcile_reverse(amp, bt, state).await;
+                }
+            }
+            signal = streams.iface.next() => {
                 if handle_interfaces_added_signal(signal, amp, bt, state).await.is_err() {
                     return;
                 }
@@ -549,12 +605,12 @@ async fn run_signal_streams(
             _ = watchdog.tick() => {
                 watchdog_tick(amp, bt, state).await;
             }
-            signal = props_stream.next() => {
+            signal = streams.props.next() => {
                 if handle_bluealsa_props_signal(signal, amp, state).await.is_err() {
                     return;
                 }
             }
-            signal = amp_stream.next() => {
+            signal = streams.amp.next() => {
                 if handle_amp_signal(signal, bt, state).await.is_err() {
                     return;
                 }
@@ -608,14 +664,22 @@ async fn handle_bluealsa_props_signal(
     // default-volume `PropertiesChanged` before the `InterfacesAdded`
     // handler arms suppression. Reject volumes from untracked paths so a
     // default can never reach audio-manager ahead of the settle window.
-    if let Some(pcm_path) = &path
-        && !state.is_pcm_known(pcm_path)
-    {
-        tracing::debug!(
-            pcm = %pcm_path,
-            "Volume sync skipped: PCM not yet established (no InterfacesAdded)"
-        );
-        return Ok(());
+    if let Some(pcm_path) = &path {
+        if !state.is_pcm_known(pcm_path) {
+            tracing::debug!(
+                pcm = %pcm_path,
+                "Volume sync skipped: PCM not yet established (no InterfacesAdded)"
+            );
+            return Ok(());
+        }
+        if !state.is_active_pcm_path(pcm_path) {
+            tracing::debug!(
+                pcm = %pcm_path,
+                active = ?state.active_device(),
+                "Volume sync skipped: PCM belongs to non-active device"
+            );
+            return Ok(());
+        }
     }
     let Some(pcm_vol) = props
         .get("Volume")
@@ -703,7 +767,7 @@ async fn handle_interfaces_added_signal(
     Ok(())
 }
 
-/// Runs the volume sync task forever.
+/// Runs the volume sync task forever, scoped to the arbitrated active device.
 ///
 /// The caller must supply two independent connections: one for signal
 /// subscriptions and one for method calls. See the module documentation for
@@ -712,6 +776,7 @@ pub(crate) async fn run_task(
     bt: BluetoothDevice,
     signal_conn: Connection,
     control_conn: Connection,
+    mut active_rx: watch::Receiver<Option<BtAddress>>,
 ) {
     tracing::info!(
         bluealsa_props_queue = BLUEALSA_PROPS_QUEUE,
@@ -729,6 +794,8 @@ pub(crate) async fn run_task(
     };
 
     let mut state = VolumeSyncState::new();
+    let initial_active = *active_rx.borrow_and_update();
+    let _ = state.set_active_device(initial_active, Instant::now());
     seed_pcm_state(&bt, &mut state).await;
     reconcile_reverse(&amp, &bt, &mut state).await;
 
@@ -808,9 +875,12 @@ pub(crate) async fn run_task(
                     &bt,
                     &mut state,
                     &mut watchdog,
-                    props_stream,
-                    iface_stream,
-                    amp_stream,
+                    &mut active_rx,
+                    SignalStreams {
+                        props: props_stream,
+                        iface: iface_stream,
+                        amp: amp_stream,
+                    },
                 )
                 .await;
                 // A stream died (bus hiccup or connection closure); the

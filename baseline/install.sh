@@ -168,6 +168,10 @@ cp "${SCRIPT_DIR}/etc/systemd/system/bluealsa.service" /etc/systemd/system/
 cp "${SCRIPT_DIR}/etc/systemd/system/bluealsa-aplay.service" /etc/systemd/system/
 cp "${SCRIPT_DIR}/etc/systemd/system/bt-agent.service" /etc/systemd/system/
 
+mkdir -p /etc/dbus-1/system.d
+cp "${SCRIPT_DIR}/etc/dbus-1/system.d/"*.conf /etc/dbus-1/system.d/
+systemctl reload dbus || true
+
 # ------------------------------------------------------------------------------
 # 9. Hardware Diagnostic & Monitoring Scripts
 # ------------------------------------------------------------------------------

@@ -1,17 +1,40 @@
-import { MaterialPalette } from "@material/material.slint";
+import {
+    MaterialPalette,
+    MaterialStyleMetrics,
+    TouchScale,
+} from "@material/material.slint";
 import { OverlayAppBar } from "screen_app_bar.slint";
 import "./fonts/InterTabular-Bold.ttf";
 
 export component VolumeHudOverlay inherits Rectangle {
     width: 100%;
     height: 100%;
-    background: @linear-gradient(150deg, MaterialPalette.surface 0%, MaterialPalette.background 100%);
+    // Translucent panel: the blurred backdrop snapshot published by Rust shows
+    // through the overlay, so the panel itself must not be fully opaque. When no
+    // backdrop is available (e.g. the KMS backend, where nothing can be captured)
+    // the panel falls back to the original opaque gradient — otherwise sharp
+    // live content would ghost through the translucency.
+    background: root.overlay_backdrop_available
+        ? @linear-gradient(150deg, MaterialPalette.surface.transparentize(0.25) 0%, MaterialPalette.background.transparentize(0.25) 100%)
+        : @linear-gradient(150deg, MaterialPalette.surface 0%, MaterialPalette.background 100%);
     border-width: 1px;
     border-color: MaterialPalette.outline_variant;
     clip: true;
 
     in-out property <float> volume_value: 75.0;
     in-out property <bool> is_muted: false;
+    // Mirrors `MainWindow.overlay_backdrop_available`; keys the panel
+    // translucency off the same signal as the window-level scrim.
+    in property <bool> overlay_backdrop_available: false;
+
+    // True while the overlay owns the keyboard focus.
+    out property <bool> has-focus: focus_scope.has-focus;
+    forward-focus: focus_scope;
+
+    // Releases the keyboard focus held by the overlay.
+    public function release_focus() {
+        focus_scope.clear-focus();
+    }
 
     // NaN-safe normalized volume ratio (0.0 .. 1.0)
     property <float> clamped_ratio: root.volume_value >= 0.0 ? Math.min(1.0, root.volume_value / 100.0) : 0.0;
@@ -35,11 +58,20 @@ export component VolumeHudOverlay inherits Rectangle {
         }
     }
 
-    // Main content column: header (60px) + body (fills remaining)
+    // Focus scope owning the overlay. The overlay takes the keyboard focus
+    // while it is open; `focus-on-click` is disabled so the scope never
+    // swallows touches that are meant for the controls below it.
+    focus_scope := FocusScope {
+        width: 100%;
+        height: 100%;
+        focus-on-click: false;
+    }
+
+    // Main content column: header (scaled by `MaterialStyleMetrics.size_64`) + body (fills remaining)
     VerticalLayout {
-        // Overlay app bar header (60px) — title "Volume", close icon on the right
+        // Overlay app bar header — title "Volume", close icon on the right
         Rectangle {
-            height: 60px;
+            height: MaterialStyleMetrics.size_64;
             width: 100%;
             OverlayAppBar {
                 width: 100%;
@@ -190,45 +222,48 @@ export component VolumeHudOverlay inherits Rectangle {
 
             // 4. Dedicated Mute / Unmute Button Row
             Rectangle {
-                height: 48px;
+                height: mute_btn.height;
                 background: transparent;
 
                 mute_btn := Rectangle {
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
-                    width: 220px;
-                    height: 48px;
+                    width: max(220px * TouchScale.widget_scale, mute_layout.min-width);
+                    height: max(MaterialStyleMetrics.size_48, mute_layout.min-height);
                     border-radius: self.height / 2;
                     background: root.is_muted ? MaterialPalette.error : MaterialPalette.surface;
                     border-width: 2px;
                     border-color: root.is_muted ? MaterialPalette.error : MaterialPalette.primary;
                     opacity: mute_touch.pressed ? 0.75 : 1.0;
 
-                    VerticalLayout {
+                    mute_layout := HorizontalLayout {
                         alignment: center;
+                        padding-left: MaterialStyleMetrics.padding_24;
+                        padding-right: MaterialStyleMetrics.padding_24;
+                        padding-top: MaterialStyleMetrics.padding_8;
+                        padding-bottom: MaterialStyleMetrics.padding_8;
+                        spacing: MaterialStyleMetrics.spacing_12;
 
-                        HorizontalLayout {
+                        VerticalLayout {
                             alignment: center;
-                            spacing: 12px;
-
                             Image {
                                 source: root.is_muted
                                     ? @image-url("../../../assets/icons/volume-mute.svg")
                                     : @image-url("../../../assets/icons/volume-3.svg");
                                 colorize: root.is_muted ? MaterialPalette.on_error : MaterialPalette.primary;
-                                width: 24px;
-                                height: 24px;
+                                width: MaterialStyleMetrics.icon_size_24;
+                                height: self.width;
                                 image-fit: contain;
                             }
+                        }
 
-                            Text {
-                                text: root.is_muted ? "UNMUTE" : "MUTE";
-                                color: root.is_muted ? MaterialPalette.on_error : MaterialPalette.on_surface;
-                                font-size: 16px;
-                                font-weight: 800;
-                                letter-spacing: 1px;
-                                vertical-alignment: center;
-                            }
+                        Text {
+                            text: root.is_muted ? "UNMUTE" : "MUTE";
+                            color: root.is_muted ? MaterialPalette.on_error : MaterialPalette.on_surface;
+                            font-size: 16px * TouchScale.clamped_font_scale;
+                            font-weight: 800;
+                            letter-spacing: 1px;
+                            vertical-alignment: center;
                         }
                     }
 

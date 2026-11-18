@@ -234,6 +234,7 @@ fn runtime_splash_drains_checks_and_quits() {
         preview_secs: None,
         tab: None,
         config: &CoreConfig::default(),
+        config_path: None,
         probe: instant_probes(Ok("all good")),
         mocked: true,
     });
@@ -255,6 +256,7 @@ fn runtime_splash_failed_probes_still_terminate() {
         preview_secs: None,
         tab: None,
         config: &CoreConfig::default(),
+        config_path: None,
         probe: instant_probes(Err("probe blew up")),
         mocked: true,
     });
@@ -272,6 +274,7 @@ fn runtime_splash_zero_preview_exits_after_checks() {
         preview_secs: Some(0),
         tab: None,
         config: &CoreConfig::default(),
+        config_path: None,
         probe: instant_probes(Ok("ok")),
         mocked: true,
     });
@@ -293,6 +296,7 @@ fn runtime_shell_runs_timers_and_shuts_down() {
             marquee_fps: screen_manager::config::MarqueeFps::FPS_30,
             ..CoreConfig::default()
         },
+        config_path: None,
         probe: instant_probes(Ok("unused")),
         mocked: true,
     });
@@ -310,6 +314,7 @@ fn runtime_shell_zero_preview_returns_immediately() {
         preview_secs: Some(0),
         tab: None,
         config: &CoreConfig::default(),
+        config_path: None,
         probe: instant_probes(Ok("unused")),
         mocked: true,
     });
@@ -327,6 +332,7 @@ fn runtime_appliance_settles_boot_overlay_then_runs_shell() {
         preview_secs: Some(1),
         tab: Some(2),
         config: &CoreConfig::default(),
+        config_path: None,
         probe: instant_probes(Ok("all good")),
         mocked: true,
     };
@@ -356,6 +362,7 @@ fn runtime_appliance_abandons_hung_boot_probe_on_preview_expiry() {
         preview_secs: Some(1),
         tab: None,
         config: &CoreConfig::default(),
+        config_path: None,
         probe: hung,
         mocked: true,
     });
@@ -375,6 +382,7 @@ fn runtime_appliance_zero_preview_abandons_boot_before_first_tick() {
         preview_secs: Some(0),
         tab: None,
         config: &CoreConfig::default(),
+        config_path: None,
         probe: instant_probes(Ok("ok")),
         mocked: true,
     });

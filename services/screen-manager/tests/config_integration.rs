@@ -2,8 +2,8 @@
 #![cfg(feature = "ui")]
 
 use screen_manager::config::{
-    ConfigError, CoreConfig, DEFAULT_MARQUEE_FPS, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
-    VolumeStepPercent,
+    ConfigError, CoreConfig, DEFAULT_MARQUEE_FPS, FontScale, MarqueeFps, TitleDisplayMode,
+    VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
 };
 use screen_manager::ui::ThemePreset;
 use speaker_common::diag::ScopedTempDir;
@@ -19,6 +19,9 @@ fn defaults_are_sensible() {
     assert_eq!(config.marquee_fps, MarqueeFps::FPS_60);
     assert_eq!(config.marquee_fps.value(), 60);
     assert_eq!(DEFAULT_MARQUEE_FPS, 60);
+    assert_eq!(config.title_display_mode, TitleDisplayMode::Marquee);
+    assert_eq!(config.title_display_mode.slug(), "marquee");
+    assert!(!config.title_display_mode.is_split());
 }
 
 #[test]
@@ -69,6 +72,30 @@ fn minimal_config_deserializes_with_defaults() {
         serde_json::from_str(r#"{"theme": "studio-dark"}"#).expect("theme only");
     assert_eq!(config.theme, Some(ThemePreset::StudioDark));
     assert_eq!(config.marquee_fps, MarqueeFps::FPS_60);
+    assert_eq!(config.title_display_mode, TitleDisplayMode::Marquee);
+}
+
+#[test]
+fn title_display_mode_roundtrip_and_invalid_rejection() {
+    let dir = ScopedTempDir::new("cfg_title_mode");
+    let path = dir.path().join("config.json");
+
+    let cfg = CoreConfig {
+        title_display_mode: TitleDisplayMode::Split,
+        ..CoreConfig::default()
+    };
+    cfg.save(&path).expect("save split mode");
+    let loaded = CoreConfig::load(&path).expect("load split mode");
+    assert_eq!(loaded.title_display_mode, TitleDisplayMode::Split);
+    assert!(loaded.title_display_mode.is_split());
+    assert_eq!(loaded.title_display_mode.slug(), "split");
+
+    let raw = std::fs::read_to_string(&path).expect("read config");
+    assert!(raw.contains(r#""title_display_mode": "split""#), "{raw}");
+
+    std::fs::write(&path, r#"{"title_display_mode": "wrap"}"#).expect("write invalid");
+    let err = CoreConfig::load(&path).expect_err("invalid title_display_mode must fail");
+    assert!(err.is_config());
 }
 
 #[test]
@@ -361,4 +388,27 @@ fn volume_hud_timeout_ms_new_rejects_overflow() {
 #[should_panic(expected = "volume_hud_fade_ms out of range 0..=2000")]
 fn volume_hud_fade_ms_new_rejects_overflow() {
     let _ = VolumeHudFadeMs::new(2_001);
+}
+
+#[test]
+fn font_scale_enforces_domain_bounds_and_roundtrips() {
+    assert_eq!(FontScale::default(), FontScale::DEFAULT);
+    assert_eq!(FontScale::DEFAULT.percent(), 115);
+    assert!((FontScale::DEFAULT.value() - 1.15).abs() < 1e-6);
+    assert!((f32::from(FontScale::from_percent(125)) - 1.25).abs() < 1e-6);
+
+    for good in [1.0_f32, 1.15, 1.25, 1.35] {
+        let parsed = FontScale::try_from(good).expect("valid font_scale");
+        assert!((parsed.value() - good).abs() < 1e-2);
+    }
+
+    for bad in [0.99_f32, 1.36, -1.0, f32::NAN, f32::INFINITY] {
+        let err = FontScale::try_from(bad).expect_err("invalid font_scale must be rejected");
+        assert!(err.is_invalid_value());
+        assert!(err.summary().contains("invalid font_scale"));
+    }
+
+    let json = serde_json::to_string(&FontScale::from_percent(130)).expect("serialize");
+    let decoded: FontScale = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(decoded, FontScale::from_percent(130));
 }

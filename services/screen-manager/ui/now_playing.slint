@@ -1,6 +1,9 @@
-import { MaterialPalette } from "@material/material.slint";
+import {
+    MaterialPalette,
+    MaterialStyleMetrics,
+    TouchScale,
+} from "@material/material.slint";
 import { MarqueeCompose } from "marquee_state.slint";
-import { MaterialStyleMetrics } from "@material/material.slint";
 
 // Scrolling marquee over live text.
 //
@@ -19,10 +22,10 @@ component MarqueeText inherits Rectangle {
     in property <int> clock_frame: 0;
     in property <int> marquee_fps: 60;
     // Minimum height floor to keep geometry deterministic while `text` is empty.
-    in property <length> height_floor: 32px;
+    in property <length> height_floor: 32px * TouchScale.clamped_font_scale;
     // Marquee typography: matches the former strip rasterizer (32 px / extra
-    // bold); the font family is inherited from the window (Inter).
-    property <length> font_size: 32px;
+    // bold) scaled by `TouchScale.clamped_font_scale`; font family inherited (Inter).
+    property <length> font_size: 32px * TouchScale.clamped_font_scale;
     property <int> font_weight: 800;
     property <color> font_color: MaterialPalette.on_background;
     clip: true;
@@ -164,8 +167,8 @@ component TransportButton inherits Rectangle {
     in property <image> play_icon: @image-url("../../../assets/icons/play.svg");
     in property <image> pause_icon: @image-url("../../../assets/icons/pause.svg");
 
-    property <length> btn_size: root.is_hero ? 86px : 72px;
-    property <length> icon_size: root.is_hero ? 26px : 32px;
+    property <length> btn_size: (root.is_hero ? 86px : 72px) * TouchScale.widget_scale;
+    property <length> icon_size: (root.is_hero ? 26px : 32px) * TouchScale.widget_scale;
     width: root.btn_size;
     height: root.btn_size;
     border-radius: root.btn_size / 2;
@@ -202,6 +205,9 @@ component TransportButton inherits Rectangle {
 
 export component NowPlayingView inherits Rectangle {
     in property <string> track_title: "Waiting for Bluetooth Connection...";
+    in property <string> track_title_line1: "";
+    in property <string> track_title_line2: "";
+    in property <bool> title_split_mode: false;
     in property <string> track_artist: "";
     in property <string> track_album: "";
     in property <string> artist_marquee_text;
@@ -221,11 +227,11 @@ export component NowPlayingView inherits Rectangle {
     in-out property <int> marquee_clock <=> MarqueeCompose.clock;
     property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
     property <int> raw_tick: 0;
-    out property <bool> is_animating: title_marquee.is_overflow || root.is_playing;
+    out property <bool> is_animating: (!root.title_split_mode && title_marquee.is_overflow) || root.is_playing;
 
     Timer {
         interval: 16.65ms;
-        running: title_marquee.is_overflow;
+        running: !root.title_split_mode && title_marquee.is_overflow;
         triggered() => {
             root.raw_tick += 1;
             if (Math.mod(root.raw_tick, root.step_frames) == 0) {
@@ -310,12 +316,15 @@ export component NowPlayingView inherits Rectangle {
             horizontal-stretch: 1;
             background: transparent;
 
-            // Artist center tracks the actual title strip height (dynamic), with a
+            // Artist center tracks the actual title container height (dynamic), with a
             // floor for the empty-strip startup state. Strip preferred-height varies
             // when the strip is empty, so a floor keeps distances deterministic at boot.
-            // Use title_marquee.height_floor (32px) as the floor to match the title font size.
-            property <length> artist_center_y: 30px + Math.max(title_marquee.height, title_marquee.height_floor) + 16px + 14px;
-            property <length> settings_center_y: parent.height - 52px;
+            property <length> split_height_floor: 28px * TouchScale.clamped_font_scale;
+            property <length> title_height: root.title_split_mode
+                ? Math.max(split_title.preferred-height, self.split_height_floor)
+                : Math.max(title_marquee.height, title_marquee.height_floor);
+            property <length> artist_center_y: 30px + self.title_height + 16px + 14px * TouchScale.clamped_font_scale;
+            property <length> settings_center_y: parent.height - (MaterialStyleMetrics.padding_24 + 28px * TouchScale.widget_scale);
             property <length> center_step: (self.settings_center_y - self.artist_center_y) / 3.0;
             property <length> seek_center_y: self.artist_center_y + self.center_step;
             property <length> transport_center_y: self.artist_center_y + self.center_step * 2.0;
@@ -326,10 +335,95 @@ export component NowPlayingView inherits Rectangle {
                 width: 100%;
                 spacing: 16px;  // More distance between title and singer
 
-                title_marquee := MarqueeText {
-                    text: root.track_title;
-                    clock_frame: root.marquee_clock;
-                    marquee_fps: root.marquee_fps;
+                title_slot := Rectangle {
+                    width: 100%;
+                    height: right_col.title_height;
+
+                    property <string> split_line1_text: root.track_title_line1 != "" ? root.track_title_line1 : root.track_title;
+
+                    // Off-layout single-line probes (placed in the Rectangle, outside
+                    // VerticalLayout, so they never affect preferred-height) to pick the
+                    // largest font size (32px -> 30px -> 28px) that fits without ellipsis.
+                    probe_32_l1 := Text {
+                        x: 0;
+                        y: 0;
+                        visible: false;
+                        text: title_slot.split_line1_text;
+                        font-size: 32px * TouchScale.clamped_font_scale;
+                        font-weight: 800;
+                        wrap: no-wrap;
+                    }
+                    probe_32_l2 := Text {
+                        x: 0;
+                        y: 0;
+                        visible: false;
+                        text: root.track_title_line2;
+                        font-size: 32px * TouchScale.clamped_font_scale;
+                        font-weight: 800;
+                        wrap: no-wrap;
+                    }
+                    probe_30_l1 := Text {
+                        x: 0;
+                        y: 0;
+                        visible: false;
+                        text: title_slot.split_line1_text;
+                        font-size: 30px * TouchScale.clamped_font_scale;
+                        font-weight: 800;
+                        wrap: no-wrap;
+                    }
+                    probe_30_l2 := Text {
+                        x: 0;
+                        y: 0;
+                        visible: false;
+                        text: root.track_title_line2;
+                        font-size: 30px * TouchScale.clamped_font_scale;
+                        font-weight: 800;
+                        wrap: no-wrap;
+                    }
+
+                    property <bool> fits_32: probe_32_l1.preferred-width <= title_slot.width
+                        && (root.track_title_line2 == "" || probe_32_l2.preferred-width <= title_slot.width);
+                    property <bool> fits_30: probe_30_l1.preferred-width <= title_slot.width
+                        && (root.track_title_line2 == "" || probe_30_l2.preferred-width <= title_slot.width);
+                    property <length> split_font_size: (self.fits_32 ? 32px : (self.fits_30 ? 30px : 28px)) * TouchScale.clamped_font_scale;
+
+                    title_marquee := MarqueeText {
+                        x: 0px;
+                        y: 0px;
+                        width: 100%;
+                        visible: !root.title_split_mode;
+                        text: root.track_title;
+                        clock_frame: root.marquee_clock;
+                        marquee_fps: root.marquee_fps;
+                    }
+
+                    split_title := VerticalLayout {
+                        x: 0px;
+                        y: 0px;
+                        width: 100%;
+                        visible: root.title_split_mode;
+                        spacing: 2px;
+
+                        Text {
+                            text: title_slot.split_line1_text;
+                            color: MaterialPalette.on_background;
+                            font-size: title_slot.split_font_size;
+                            font-weight: 800;
+                            overflow: elide;
+                            wrap: no-wrap;
+                            vertical-alignment: center;
+                        }
+
+                        if root.track_title_line2 != "" : Text {
+                            text: root.track_title_line2;
+                            color: MaterialPalette.on_background;
+                            font-size: title_slot.split_font_size;
+                            font-weight: 800;
+                            overflow: elide;
+                            wrap: no-wrap;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
 
                 HorizontalLayout {
@@ -341,7 +435,7 @@ export component NowPlayingView inherits Rectangle {
                         horizontal-stretch: 1;
                         text: root.artist_marquee_text;
                         color: MaterialPalette.secondary;
-                        font-size: 22px;
+                        font-size: 22px * TouchScale.clamped_font_scale;
                         font-weight: 700;
                         overflow: elide;
                         wrap: no-wrap;
@@ -357,24 +451,24 @@ export component NowPlayingView inherits Rectangle {
 
                 // Playback progress bar - seek center = artist center + D (equal center distances)
                 HorizontalLayout {
-                    y: right_col.seek_center_y - 12px;
+                    y: right_col.seek_center_y - self.height / 2;
                     width: 100%;
-                    height: 24px;
+                    height: 24px * TouchScale.widget_scale;
                     spacing: 16px;
 
                     Text {
                         text: root.position_text;
-                        font-size: 18px;
+                        font-size: 18px * TouchScale.clamped_font_scale;
                         font-weight: 800;
                         color: MaterialPalette.on_surface;
                         vertical-alignment: center;
-                        width: 58px;
+                        width: 64px * TouchScale.widget_scale;
                         horizontal-alignment: right;
                     }
 
                     Rectangle {
                         horizontal-stretch: 1;
-                        height: 24px;
+                        height: parent.height;
                         background: transparent;
 
                         // Background track (Vertically centered)
@@ -400,20 +494,20 @@ export component NowPlayingView inherits Rectangle {
 
                     Text {
                         text: root.duration_text;
-                        font-size: 18px;
+                        font-size: 18px * TouchScale.clamped_font_scale;
                         font-weight: 800;
                         color: MaterialPalette.on_surface_variant;
                         vertical-alignment: center;
-                        width: 58px;
+                        width: 64px * TouchScale.widget_scale;
                         horizontal-alignment: left;
                     }
                 }
 
                 // Transport controls row - transport center = artist center + 2D
                 HorizontalLayout {
-                    y: right_col.transport_center_y - 43px;
+                    y: right_col.transport_center_y - self.height / 2;
                     width: 100%;
-                    height: 86px;
+                    height: 86px * TouchScale.widget_scale;
                     alignment: center;
                     spacing: 36px;
 
@@ -452,11 +546,11 @@ export component NowPlayingView inherits Rectangle {
 
     // Dedicated Settings button anchored to the right-bottom corner with proper padding
     settings_btn := Rectangle {
-        x: parent.width - self.width - MaterialStyleMetrics.padding_24;  // 24px from right edge
-        y: parent.height - self.height - MaterialStyleMetrics.padding_24;  // 24px from bottom edge
-        width: 56px;
-        height: 56px;
-        border-radius: 28px;
+        x: parent.width - self.width - MaterialStyleMetrics.padding_24;
+        y: parent.height - self.height - MaterialStyleMetrics.padding_24;
+        width: 56px * TouchScale.widget_scale;
+        height: self.width;
+        border-radius: self.height / 2;
         background: MaterialPalette.surface;
         border-width: 1px;
         border-color: MaterialPalette.outline_variant;
@@ -466,8 +560,8 @@ export component NowPlayingView inherits Rectangle {
             y: (parent.height - self.height) / 2;
             source: @image-url("../../../assets/icons/config.svg");
             colorize: MaterialPalette.primary;
-            width: 28px;
-            height: 28px;
+            width: 28px * TouchScale.widget_scale;
+            height: self.width;
             image-fit: contain;
         }
 

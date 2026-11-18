@@ -1,6 +1,11 @@
 import { BootCheckLine, SplashContent, SplashScreen } from "splash.slint";
 import { AppTheme } from "app_theme.slint";
-import { MaterialPalette } from "@material/material.slint";
+import {
+    MaterialPalette,
+    MaterialStyleMetrics,
+    TouchScale,
+    VirtualKeyboard,
+} from "@material/material.slint";
 import { TopStatusBar, CodecSpecs } from "status_bar.slint";
 import { MainViewport } from "viewport.slint";
 import { MarqueeCompose } from "marquee_state.slint";
@@ -8,13 +13,10 @@ import { ScreenAppBar } from "screen_app_bar.slint";
 import { VolumeHudOverlay } from "volume_hud.slint";
 import { CodecHudOverlay } from "codec_hud.slint";
 import { BluetoothDevicesScreen, BtDeviceRow } from "bluetooth_devices.slint";
-import { MaterialTypography } from "@material/material.slint";
+import { VirtualKeyboardSheet } from "touch_scale_widgets.slint";
 
-// Re-exported so slint-build generates the Rust global accessor for the composer bridge.
-export { MarqueeCompose }
-// Re-exported so slint-build generates the Rust global accessor for the
-// Settings font-scale control (`AppShell::apply_font_scale_percent`).
-export { MaterialTypography }
+// Re-exported so slint-build generates the Rust global accessors.
+export { MarqueeCompose, TouchScale, VirtualKeyboard }
 
 import "../../../assets/fonts/Inter-Regular.ttf";
 import "../../../assets/fonts/Inter-Medium.ttf";
@@ -22,7 +24,7 @@ import "../../../assets/fonts/Inter-SemiBold.ttf";
 import "../../../assets/fonts/Inter-Bold.ttf";
 import "../../../assets/fonts/Inter-ExtraBold.ttf";
 
-export { BootCheckLine, SplashScreen, MaterialPalette, AppTheme, BtDeviceRow }
+export { BootCheckLine, SplashScreen, MaterialPalette, MaterialStyleMetrics, AppTheme, BtDeviceRow }
 
 export component MainWindow inherits Window {
     title: "DietPi Audiophile Console";
@@ -41,6 +43,9 @@ export component MainWindow inherits Window {
     // Rust even when the conditional TopStatusBar element is not mounted.
     out property <bool> show_stream_specs: !CodecSpecs.is-fixed-spec(root.stream_codec);
     in-out property <string> track_title: "Waiting for Bluetooth Connection...";
+    in-out property <string> track_title_line1: "";
+    in-out property <string> track_title_line2: "";
+    in-out property <bool> title_split_mode: false;
     in-out property <string> track_artist: "";
     in-out property <string> track_album: "";
     in-out property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit -> DSP 32-bit";
@@ -62,10 +67,28 @@ export component MainWindow inherits Window {
     in-out property <bool> codec_hud_visible: false;
     in-out property <int> codec_hud_timeout_ms: 30000;
     in-out property <int> codec_hud_elapsed_ms: 0;
+    // Rotary encoder step per detent; Screen Settings edits and persists it.
+    in-out property <int> volume_step_percent: 2;
     out property <float> codec_hud_opacity: root.codec_hud_visible ? 1.0 : 0.0;
     animate codec_hud_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
     in-out property <bool> has_cover_art: false;
     in-out property <image> cover_image;
+
+    // Blurred snapshot of the screen that the overlays cover. Slint has no
+    // backdrop-blur primitive, so Rust captures the framebuffer shadow buffer
+    // when an overlay opens, blurs it and publishes the result here.
+    in-out property <image> overlay_backdrop;
+
+    // True while a non-empty blurred backdrop is published. The scrim strength
+    // keys off this: with a backdrop the blur provides the separation (0.25
+    // dimming), without one the scrim falls back to full 0.55 dimming.
+    in-out property <bool> overlay_backdrop_available: false;
+
+    // Height of the top status bar. Overlays only ever cover the viewport area
+    // below it, so every overlay layer is aligned on this single inset.
+    // Seeded from Rust's `OVERLAY_TOP_INSET` (backdrop.rs) by `AppShell::new`;
+    // this literal is only the design-preview fallback.
+    in-out property <length> overlay_top_inset: 60px;
     in-out property <float> left_peak_ratio: 0.0;
     in-out property <float> right_peak_ratio: 0.0;
     in-out property <bool> cd_enabled: false;
@@ -77,17 +100,20 @@ export component MainWindow inherits Window {
             || (root.bt_devices_mode == 1 && root.bt_scanning)
             || root.bt_toast_visible));
 
-    // NEW: show_themes lifted to MainWindow for title switching in ScreenAppBar
+    // Lifted to MainWindow for title switching in ScreenAppBar
     in-out property <bool> show_themes: false;
+    in-out property <bool> show_widget_preview: false;
+    in-out property <string> speaker_alias: "DietPi Speaker";
 
-    // NEW: single source of truth for status bar visibility (Now Playing tab only)
+    // Single source of truth for status bar visibility (Now Playing tab only)
     out property <bool> show_status_bar: root.active_tab == 0;
+    // Active top bar height: fixed `overlay_top_inset` (60px) on Now Playing (`TopStatusBar`),
+    // scaled `MaterialStyleMetrics.size_64` (`56px * TouchScale.widget_scale`) on screen tabs.
+    out property <length> top_bar_height: root.show_status_bar ? root.overlay_top_inset : MaterialStyleMetrics.size_64;
 
     // Boot splash overlay state (Appliance boot phase): the KMS backend allows
     // only one window per process, so boot checks render as an in-window
-    // overlay instead of a separate SplashScreen window. The overlay content
-    // is conditionally instantiated, so its equalizer Timer only runs while
-    // the boot phase is active.
+    // overlay instead of a separate SplashScreen window.
     in-out property <bool> boot_splash_visible: false;
     in-out property <BootCheckLine> boot_current_check: {
         text: "Starting system checks …",
@@ -95,29 +121,46 @@ export component MainWindow inherits Window {
         ok: false,
     };
 
+    callback prepare_overlay_backdrop();
+
     public function show_volume_hud() {
+        if (!root.volume_hud_visible && root.volume_hud_opacity <= 0.01 && !root.codec_hud_visible && root.codec_hud_opacity <= 0.01) {
+            root.prepare_overlay_backdrop();
+        }
         root.volume_hud_elapsed_ms = 0;
         root.volume_hud_visible = true;
         root.codec_hud_visible = false;
+        root_stack.focus_volume_hud();
     }
 
     public function dismiss_volume_hud() {
         root.volume_hud_visible = false;
         root.volume_hud_elapsed_ms = 0;
+        root_stack.unfocus_volume_hud();
     }
 
     // Opens the codec information overlay. The Volume HUD and the codec overlay are
     // mutually exclusive: only one of them can cover the viewport at a time.
     public function show_codec_hud() {
+        if (!root.volume_hud_visible && root.volume_hud_opacity <= 0.01 && !root.codec_hud_visible && root.codec_hud_opacity <= 0.01) {
+            root.prepare_overlay_backdrop();
+        }
         root.codec_hud_elapsed_ms = 0;
         root.codec_hud_visible = true;
         root.volume_hud_visible = false;
+        root_stack.focus_codec_hud();
     }
 
     public function dismiss_codec_hud() {
         root.codec_hud_visible = false;
         root.codec_hud_elapsed_ms = 0;
+        root_stack.unfocus_codec_hud();
     }
+
+    // True while the Volume HUD overlay owns the keyboard focus.
+    out property <bool> volume_hud_has_focus: root_stack.volume_hud_has_focus;
+    // True while the codec information overlay owns the keyboard focus.
+    out property <bool> codec_hud_has_focus: root_stack.codec_hud_has_focus;
 
     Timer {
         interval: 50ms;
@@ -192,11 +235,13 @@ export component MainWindow inherits Window {
     callback tab_selected(int);
     callback select_theme(int);
     callback cycle_theme();
-    // Settings text-size cycler: Rust scales the Material typography global and
-    // pushes the new percentage label back through `text_size_label`.
-    callback font_scale_clicked();
-    // Current font-scale percentage label (e.g. "100%"), owned by Rust.
-    in-out property <string> text_size_label: "100%";
+    callback font_scale_changed(float);
+    callback set_marquee_fps(int);
+    callback set_title_split_mode(bool);
+    callback set_volume_step_percent(int);
+    callback set_volume_hud_timeout_ms(int);
+    callback set_volume_hud_fade_ms(int);
+    callback set_codec_hud_timeout_ms(int);
 
     // Bluetooth devices screen actions, handled in Rust (DeviceCommandQueue pushes).
     callback bt_add_device_clicked();
@@ -229,9 +274,13 @@ export component MainWindow inherits Window {
         root.bt_delete_open = false;
     }
 
-    // NEW: Screen app bar back button handler
+    // Screen app bar back button handler
     public function app_bar_back() {
-        if (root.active_tab == 5 && root.show_themes) {
+        if (VirtualKeyboard.visible) {
+            VirtualKeyboard.close();
+        } else if (root.active_tab == 5 && root.show_widget_preview) {
+            root.show_widget_preview = false;
+        } else if (root.active_tab == 5 && root.show_themes) {
             root.show_themes = false;
         } else if (root.active_tab != 0) {
             // Tabs 1, 3, 4, and 5 (when not in themes): return to previous tab, falling back to Now Playing
@@ -239,20 +288,19 @@ export component MainWindow inherits Window {
         }
     }
 
-    // Root stacking container: bg_column (bottom), hud_scrim (middle), volume_hud (top)
-    Rectangle {
+    // Root stacking container (bottom → top): bg_column, hud_backdrop, hud_scrim,
+    // volume_hud / codec_hud, VirtualKeyboardSheet, boot_splash.
+    root_stack := Rectangle {
         // Background column (home AND screens). Overlay dimming is applied by the
         // hud_scrim layer below (single dimming mechanism).
         bg_column := VerticalLayout {
             width: 100%;
             height: 100%;
 
-            // Top bar slot: fixed 800 x 60. Contents are CONDITIONAL (`if`) elements:
-            // unlike `visible: false` (which still reserves layout space — the cause of
-            // the empty "app bar" gap), conditional elements are removed from the item
-            // tree entirely, so the viewport always starts right below this 60px slot.
+            // Top bar slot: 60px on Now Playing (`TopStatusBar`), scaled
+            // `MaterialStyleMetrics.size_64` on screen tabs (`ScreenAppBar`).
             Rectangle {
-                height: 60px;
+                height: root.top_bar_height;
                 width: 100%;
 
                 if root.show_status_bar: status_bar := TopStatusBar {
@@ -290,7 +338,7 @@ export component MainWindow inherits Window {
                     title: root.active_tab == 1 ? "VU Meter" :
                            root.active_tab == 3 ? "CD Player" :
                            root.active_tab == 4 ? "DSP & Tone" :
-                           root.active_tab == 5 ? (root.show_themes ? "Themes" : "Settings") : "";
+                           root.active_tab == 5 ? (root.show_widget_preview ? "Touch Scale Test" : (root.show_themes ? "Screen Settings" : "Settings")) : "";
                     trailing_icon: @image-url("../../../assets/icons/back.svg");
                     trailing_clicked => { root.app_bar_back(); }
                 }
@@ -301,6 +349,9 @@ export component MainWindow inherits Window {
                 active_tab <=> root.active_tab;
                 cd_enabled: root.cd_enabled;
                 track_title: root.track_title;
+                track_title_line1: root.track_title_line1;
+                track_title_line2: root.track_title_line2;
+                title_split_mode: root.title_split_mode;
                 track_artist: root.track_artist;
                 track_album: root.track_album;
                 stream_details: root.stream_details;
@@ -318,8 +369,14 @@ export component MainWindow inherits Window {
                 right_peak_ratio: root.right_peak_ratio;
                 track_or_device: root.track_or_device;
                 stream_codec: root.stream_codec;
+                volume_step_percent: root.volume_step_percent;
+                volume_hud_timeout_ms: root.volume_hud_timeout_ms;
+                volume_hud_fade_ms: root.volume_hud_fade_ms;
+                codec_hud_timeout_ms: root.codec_hud_timeout_ms;
                 artist_marquee_text: root.artist_marquee_text;
                 show_themes <=> root.show_themes;
+                show_widget_preview <=> root.show_widget_preview;
+                speaker_alias <=> root.speaker_alias;
 
                 toggle_play_pause => { root.toggle_play_pause(); }
                 next_track => { root.next_track(); }
@@ -338,8 +395,13 @@ export component MainWindow inherits Window {
                 volume_changed(val) => { root.volume_changed(val); }
                 select_theme(idx) => { root.select_theme(idx); }
                 cycle_theme => { root.cycle_theme(); }
-                text_size_label: root.text_size_label;
-                font_scale_clicked => { root.font_scale_clicked(); }
+                font_scale_changed(val) => { root.font_scale_changed(val); }
+                set_marquee_fps(fps) => { root.set_marquee_fps(fps); }
+                set_title_split_mode(split) => { root.set_title_split_mode(split); }
+                set_volume_step_percent(step) => { root.set_volume_step_percent(step); }
+                set_volume_hud_timeout_ms(ms) => { root.set_volume_hud_timeout_ms(ms); }
+                set_volume_hud_fade_ms(ms) => { root.set_volume_hud_fade_ms(ms); }
+                set_codec_hud_timeout_ms(ms) => { root.set_codec_hud_timeout_ms(ms); }
             }
         }
 
@@ -372,22 +434,42 @@ export component MainWindow inherits Window {
             close_clicked => { root.close_bt_devices(); }
         }
 
-        // HUD scrim (middle layer) — covers only the viewport area below the
-        // 60px top-bar slot: an overlay overlays content, never the top bar.
-        hud_scrim := Rectangle {
-            y: 60px;
+        // Blurred backdrop — the frozen, blurred snapshot of the entire screen
+        // (including the top bar outside the overlay, blurred more strongly).
+        // It sits directly on the background, BELOW the scrim, so the scrim's
+        // 0.25 dimming renders on top of the blur. Published by Rust when an
+        // overlay opens. By design it is not refreshed while the overlay stays
+        // open: content changes underneath only appear after a reopen.
+        hud_backdrop := Image {
+            y: 0;
             width: 100%;
-            height: parent.height - 60px;
+            height: 100%;
+            source: root.overlay_backdrop;
+            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity);
+            visible: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) > 0.01;
+        }
+
+        // HUD scrim (above the backdrop) — dims the entire screen behind the
+        // overlay (including the top bar outside the overlay). The dimming
+        // adapts to backdrop availability: 0.25 when a blurred backdrop is
+        // published (the blur provides most of the separation), falling back
+        // to the pre-backdrop 0.55 when none is — e.g. if snapshot capture fails.
+        hud_scrim := Rectangle {
+            y: 0;
+            width: 100%;
+            height: 100%;
             background: #000000;
-            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) * 0.55;
+            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity)
+                * (root.overlay_backdrop_available ? 0.25 : 0.55);
             visible: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) > 0.01;
         }
 
         // Volume HUD overlay (top layer) — same below-the-top-bar geometry.
         volume_hud := VolumeHudOverlay {
-            y: 60px;
+            y: root.top_bar_height;
             width: 100%;
-            height: parent.height - 60px;
+            height: parent.height - root.top_bar_height;
+            overlay_backdrop_available: root.overlay_backdrop_available;
             visible: root.volume_hud_opacity > 0.01;
             opacity: root.volume_hud_opacity;
             volume_value <=> root.volume_value;
@@ -400,9 +482,10 @@ export component MainWindow inherits Window {
 
         // Codec information overlay (top layer) — same below-the-top-bar geometry.
         codec_hud := CodecHudOverlay {
-            y: 60px;
+            y: root.top_bar_height;
             width: 100%;
-            height: parent.height - 60px;
+            height: parent.height - root.top_bar_height;
+            overlay_backdrop_available: root.overlay_backdrop_available;
             visible: root.codec_hud_opacity > 0.01;
             opacity: root.codec_hud_opacity;
             codec: root.stream_codec;
@@ -412,6 +495,39 @@ export component MainWindow inherits Window {
             delay_text: root.bt_delay_text;
             connected: root.bt_connected;
             dismiss_requested => { root.dismiss_codec_hud(); }
+        }
+
+        // True while the Volume HUD overlay owns the keyboard focus.
+        out property <bool> volume_hud_has_focus: volume_hud.has-focus;
+
+        // True while the codec information overlay owns the keyboard focus.
+        out property <bool> codec_hud_has_focus: codec_hud.has-focus;
+
+        // Transfers the keyboard focus to the Volume HUD overlay.
+        public function focus_volume_hud() {
+            volume_hud.focus();
+        }
+
+        // Releases the keyboard focus held by the Volume HUD overlay.
+        public function unfocus_volume_hud() {
+            volume_hud.release_focus();
+        }
+
+        // Transfers the keyboard focus to the codec information overlay.
+        public function focus_codec_hud() {
+            codec_hud.focus();
+        }
+
+        // Releases the keyboard focus held by the codec information overlay.
+        public function unfocus_codec_hud() {
+            codec_hud.release_focus();
+        }
+
+        // Bottom-sheet virtual keyboard overlay: pops up whenever a `TextField`
+        // gains focus (`VirtualKeyboard.visible == true`).
+        VirtualKeyboardSheet {
+            width: 100%;
+            height: 100%;
         }
 
         // Boot splash overlay (top-most): full-window coverage during the
