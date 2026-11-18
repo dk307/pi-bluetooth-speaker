@@ -641,7 +641,7 @@ fn blur_rgba_region_crops_blurs_and_validates_geometry() {
 }
 
 #[test]
-fn blur_full_rgba_backdrop_blurs_outside_more_than_inside() {
+fn blur_full_rgba_backdrop_blurs_outside_less_than_inside() {
     let err = blur_full_rgba_backdrop(&[0u8; 16], 10, 10, 2, 1, 2)
         .expect_err("short RGBA buffer must be rejected");
     assert!(err.is_geometry());
@@ -652,7 +652,7 @@ fn blur_full_rgba_backdrop_blurs_outside_more_than_inside() {
     assert!(err.is_geometry());
 
     const {
-        assert!(OUTSIDE_BLUR_RADIUS > BACKDROP_BLUR_RADIUS);
+        assert!(OUTSIDE_BLUR_RADIUS < BACKDROP_BLUR_RADIUS);
     }
 
     let mut frame = vec![0u8; 64 * 40 * 4];
@@ -675,12 +675,12 @@ fn blur_full_rgba_backdrop_blurs_outside_more_than_inside() {
     assert_eq!(blurred.width, 64);
     assert_eq!(blurred.height, 40);
 
-    // Away from the edge (x = 18, 14px left of the step), the larger outside
-    // radius spreads darkness farther than the smaller inside radius.
+    // Away from the edge (x = 18, 14px left of the step), the smaller outside
+    // radius preserves more brightness than the larger inside radius.
     let outside_r = blurred.pixels[(6 * 64 + 18) * 4];
     let inside_r = blurred.pixels[(26 * 64 + 18) * 4];
     assert!(
-        outside_r < inside_r,
-        "outside region (r={OUTSIDE_BLUR_RADIUS}) must blur more than inside (r={BACKDROP_BLUR_RADIUS}): outside={outside_r}, inside={inside_r}"
+        outside_r > inside_r,
+        "outside region (r={OUTSIDE_BLUR_RADIUS}) must blur less than inside (r={BACKDROP_BLUR_RADIUS}): outside={outside_r}, inside={inside_r}"
     );
 }

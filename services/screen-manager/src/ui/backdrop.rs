@@ -29,7 +29,7 @@ pub const OVERLAY_TOP_INSET: u32 = 60;
 pub const BACKDROP_BLUR_RADIUS: u32 = 20;
 
 /// Blur radius, in pixels, applied to the area outside the overlay panel (the top bar).
-pub const OUTSIDE_BLUR_RADIUS: u32 = 32;
+pub const OUTSIDE_BLUR_RADIUS: u32 = 10;
 
 /// A blurred, premultiplied RGBA snapshot of the screen region covered by an overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
