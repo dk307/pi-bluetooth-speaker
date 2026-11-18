@@ -56,7 +56,24 @@ impl BlueAlsaPcm {
 /// streaming (`running`) transport, otherwise falling back to the first available stream.
 #[must_use]
 pub fn select_active_pcm(pcms: &[BlueAlsaPcm]) -> Option<&BlueAlsaPcm> {
-    pcms.iter().find(|p| p.running).or_else(|| pcms.first())
+    select_active_pcm_for(pcms, None)
+}
+
+/// Selects the primary [`BlueAlsaPcm`], preferring the arbitrated active
+/// device (see [`crate::active_source`]) over the running/first heuristic.
+///
+/// With several devices connected, path order alone would pick an arbitrary
+/// (possibly muted-by-`--single-audio`) stream; `preferred` pins the choice
+/// to the device that actually owns the speaker.
+#[must_use]
+pub fn select_active_pcm_for(
+    pcms: &[BlueAlsaPcm],
+    preferred: Option<BtAddress>,
+) -> Option<&BlueAlsaPcm> {
+    preferred
+        .and_then(|addr| pcms.iter().find(|p| p.device_address == addr))
+        .or_else(|| pcms.iter().find(|p| p.running))
+        .or_else(|| pcms.first())
 }
 
 /// Computes the playback progress ratio clamped to `0.0..=1.0`.

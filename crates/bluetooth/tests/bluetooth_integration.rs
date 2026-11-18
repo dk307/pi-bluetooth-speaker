@@ -2631,3 +2631,150 @@ fn dbus_pcm_volume_and_mute_target_resolution_and_mock_controls() {
     assert!(device.set_volume(50).unwrap_err().is_no_active_player());
     assert!(device.set_mute(true).unwrap_err().is_no_active_player());
 }
+
+#[test]
+fn preferred_active_device_overrides_path_sort_in_player_and_pcm_selection() {
+    use speaker_bluetooth::{BlueAlsaPcm, BtAddress, select_active_pcm_for};
+
+    let addr_a = BtAddress::parse_str("C4:03:A8:BD:EF:74").unwrap();
+    let addr_b = BtAddress::parse_str("30:E0:44:67:38:A2").unwrap();
+
+    // 30:... sorts before C4:..., so without `preferred`, B wins. With
+    // `preferred = Some(addr_a)`, A wins.
+    let mk_pcm = |addr: BtAddress, path: &str, running: bool| BlueAlsaPcm {
+        pcm_path: path.into(),
+        device_address: addr,
+        resolved_name: "Dev".into(),
+        transport: "A2DP-sink".into(),
+        running,
+        selected_codec: "SBC".into(),
+        available_codecs: vec![].into_boxed_slice(),
+        sampling_rate: 48_000,
+        channels: 2,
+        format: "S16_LE".into(),
+        volume: None,
+        volume_percent: Some(50),
+        muted: false,
+        delay: None,
+    };
+    let pcms = [
+        mk_pcm(
+            addr_b,
+            "/org/bluealsa/hci0/dev_30_E0_44_67_38_A2/a2dpsnk/source",
+            true,
+        ),
+        mk_pcm(
+            addr_a,
+            "/org/bluealsa/hci0/dev_C4_03_A8_BD_EF_74/a2dpsnk/source",
+            true,
+        ),
+    ];
+    assert_eq!(
+        select_active_pcm_for(&pcms, None).unwrap().device_address,
+        addr_b
+    );
+    assert_eq!(
+        select_active_pcm_for(&pcms, Some(addr_a))
+            .unwrap()
+            .device_address,
+        addr_a
+    );
+}
+
+#[test]
+fn preferred_active_device_overrides_player_sort_and_resolves_avrcp_path() {
+    use speaker_bluetooth::BtAddress;
+
+    let addr_a = BtAddress::parse_str("C4:03:A8:BD:EF:74").unwrap();
+    let addr_b = BtAddress::parse_str("30:E0:44:67:38:A2").unwrap();
+    let mut objects: ManagedObjects = HashMap::new();
+    let mut adapter_ifaces = HashMap::new();
+    let mut adapter_props = HashMap::new();
+    adapter_props.insert("Address".to_string(), to_val("DC:A6:32:11:22:33"));
+    adapter_props.insert("Powered".to_string(), to_val(true));
+    adapter_ifaces.insert(iface("org.bluez.Adapter1"), adapter_props);
+    objects.insert(
+        OwnedObjectPath::try_from("/org/bluez/hci0").unwrap(),
+        adapter_ifaces,
+    );
+
+    for (mac, path_seg, title) in [
+        ("30:E0:44:67:38:A2", "dev_30_E0_44_67_38_A2", "Silent Pixel"),
+        (
+            "C4:03:A8:BD:EF:74",
+            "dev_C4_03_A8_BD_EF_74",
+            "Active Laptop",
+        ),
+    ] {
+        let dev_path = format!("/org/bluez/hci0/{path_seg}");
+        let mut dev_ifaces = HashMap::new();
+        let mut dev_props = HashMap::new();
+        dev_props.insert("Address".to_string(), to_val(mac));
+        dev_props.insert("Name".to_string(), to_val(title));
+        dev_props.insert("Connected".to_string(), to_val(true));
+        dev_props.insert("Paired".to_string(), to_val(true));
+        dev_props.insert("Trusted".to_string(), to_val(true));
+        dev_ifaces.insert(iface("org.bluez.Device1"), dev_props);
+        objects.insert(
+            OwnedObjectPath::try_from(dev_path.as_str()).unwrap(),
+            dev_ifaces,
+        );
+
+        let player_path = format!("{dev_path}/avrcp/player0");
+        let mut p_ifaces = HashMap::new();
+        let mut p_props = HashMap::new();
+        p_props.insert(
+            "Device".to_string(),
+            to_val(OwnedObjectPath::try_from(dev_path.as_str()).unwrap()),
+        );
+        p_props.insert("Status".to_string(), to_val("playing"));
+        let mut track: HashMap<String, OwnedValue> = HashMap::new();
+        track.insert("Title".to_string(), to_val(title));
+        p_props.insert(
+            "Track".to_string(),
+            OwnedValue::try_from(zbus::zvariant::Value::from(track)).unwrap(),
+        );
+        p_ifaces.insert(iface("org.bluez.MediaPlayer1"), p_props);
+        objects.insert(
+            OwnedObjectPath::try_from(player_path.as_str()).unwrap(),
+            p_ifaces,
+        );
+    }
+
+    assert_eq!(
+        DbusClient::find_player_path_for_device(&objects, addr_a).as_deref(),
+        Some("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74/avrcp/player0")
+    );
+
+    // When a single device exposes an idle player0 and a playing player1,
+    // `find_player_path_for_device` prefers the playing player1.
+    let p0_path =
+        OwnedObjectPath::try_from("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74/avrcp/player0").unwrap();
+    if let Some(p0_props) = objects
+        .get_mut(&p0_path)
+        .and_then(|ifaces| ifaces.get_mut(&iface("org.bluez.MediaPlayer1")))
+    {
+        p0_props.insert("Status".to_string(), to_val("stopped"));
+    }
+    let mut p1_ifaces = HashMap::new();
+    let mut p1_props = HashMap::new();
+    p1_props.insert(
+        "Device".to_string(),
+        to_val(OwnedObjectPath::try_from("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74").unwrap()),
+    );
+    p1_props.insert("Status".to_string(), to_val("playing"));
+    p1_ifaces.insert(iface("org.bluez.MediaPlayer1"), p1_props);
+    objects.insert(
+        OwnedObjectPath::try_from("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74/avrcp/player1").unwrap(),
+        p1_ifaces,
+    );
+    assert_eq!(
+        DbusClient::find_player_path_for_device(&objects, addr_a).as_deref(),
+        Some("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74/avrcp/player1")
+    );
+    let (_, _, pb_default) = DbusClient::parse_bluez_all_for(&objects, Some("hci0"), None).unwrap();
+    assert_eq!(pb_default.unwrap().device_address, Some(addr_b));
+    let (_, _, pb_pref) =
+        DbusClient::parse_bluez_all_for(&objects, Some("hci0"), Some(addr_a)).unwrap();
+    assert_eq!(pb_pref.unwrap().device_address, Some(addr_a));
+}

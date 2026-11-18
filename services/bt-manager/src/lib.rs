@@ -1,5 +1,6 @@
 //! Bluetooth manager appliance service library.
 
+pub mod active_source;
 pub mod agent;
 pub mod bip_direct;
 pub mod config;

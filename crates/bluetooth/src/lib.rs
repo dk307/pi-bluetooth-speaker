@@ -1,6 +1,7 @@
 //! Bluetooth & `BlueALSA` peripheral drivers, D-Bus connection management,
 //! AVRCP transport, and Cover Art client contract.
 
+pub mod active_source;
 pub mod connection;
 pub mod cover_art;
 pub mod cover_service;
@@ -28,7 +29,13 @@ pub use transport::{
     BtPlaybackState, PERCENT_VOLUME_MAX, TransportCommand, TransportCommandQueue,
     apply_mute_to_volume_bytes, avrcp_avg_to_percent, decode_pcm_format, encode_volume_bytes,
     format_duration_ms, format_volume_bytes, percent_to_bluealsa_level, playback_progress_ratio,
-    seek_offset_us, select_active_pcm,
+    seek_offset_us, select_active_pcm, select_active_pcm_for,
+};
+
+#[doc(inline)]
+pub use active_source::{
+    ACTIVE_DEVICE_PROPERTY, ACTIVE_SOURCE_DBUS_NAME, ACTIVE_SOURCE_INTERFACE,
+    ACTIVE_SOURCE_OBJECT_PATH, device_address_from_path, format_active_device, parse_active_device,
 };
 
 #[doc(inline)]

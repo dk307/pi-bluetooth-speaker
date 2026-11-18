@@ -19,6 +19,10 @@ use zbus::blocking::Connection as BlockingConnection;
 use zbus::names::OwnedInterfaceName;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
+use crate::active_source::{
+    ACTIVE_DEVICE_PROPERTY, ACTIVE_SOURCE_DBUS_NAME, ACTIVE_SOURCE_INTERFACE,
+    ACTIVE_SOURCE_OBJECT_PATH, ActiveSourceMode, parse_active_device,
+};
 use crate::cover_service::CoverSnapshot;
 use speaker_common::runtime::FromJoinError;
 
@@ -1148,7 +1152,9 @@ fn spawn_properties_changed_listener(
                     // unrelated PropertiesChanged on a busy system bus.
                     if msg.header().path().is_some_and(|p| {
                         let p = p.as_str();
-                        p.starts_with("/org/bluez") || p.starts_with("/org/bluealsa")
+                        p.starts_with("/org/bluez")
+                            || p.starts_with("/org/bluealsa")
+                            || p == ACTIVE_SOURCE_OBJECT_PATH
                     }) {
                         listener_flag.notify();
                     }
@@ -1179,6 +1185,7 @@ pub struct DbusClient {
     cache_dir: std::path::PathBuf,
     change_flag: Arc<ChangeFlag>,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    active_source: Arc<Mutex<ActiveSourceMode>>,
 }
 
 /// Snapshot of `BlueZ` adapter, connected/paired devices, and media player state.
@@ -1207,6 +1214,42 @@ impl DbusClient {
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             change_flag: spawn_properties_changed_listener(conn_slot, Arc::clone(&stop)),
             stop,
+            active_source: Arc::new(Mutex::new(ActiveSourceMode::Remote)),
+        }
+    }
+
+    pub(crate) fn set_active_source(&self, device: Option<BtAddress>) {
+        let mut guard = self
+            .active_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = ActiveSourceMode::Local(device);
+        if *guard != next {
+            *guard = next;
+            drop(guard);
+            self.change_flag.notify();
+        }
+    }
+
+    pub(crate) fn read_active_device(&self) -> Option<BtAddress> {
+        let mode = *self
+            .active_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match mode {
+            ActiveSourceMode::Local(dev) => dev,
+            ActiveSourceMode::Remote => {
+                let conn = self.conn();
+                let proxy = zbus::blocking::proxy::Builder::<zbus::blocking::Proxy<'_>>::new(&conn)
+                    .destination(ACTIVE_SOURCE_DBUS_NAME)
+                    .and_then(|b| b.path(ACTIVE_SOURCE_OBJECT_PATH))
+                    .and_then(|b| b.interface(ACTIVE_SOURCE_INTERFACE))
+                    .map(|b| b.cache_properties(zbus::proxy::CacheProperties::No))
+                    .and_then(zbus::blocking::proxy::Builder::build)
+                    .ok()?;
+                let raw: String = proxy.get_property(ACTIVE_DEVICE_PROPERTY).ok()?;
+                parse_active_device(&raw)
+            }
         }
     }
 
@@ -1399,7 +1442,9 @@ impl DbusClient {
 
         let objects = proxy.get_managed_objects()?;
 
-        let (adapter, devices, playback) = Self::parse_bluez_all(&objects, target_adapter)?;
+        let preferred = self.read_active_device();
+        let (adapter, devices, playback) =
+            Self::parse_bluez_all_for(&objects, target_adapter, preferred)?;
         Ok((adapter, devices, playback))
     }
 
@@ -1481,15 +1526,31 @@ impl DbusClient {
         objects: &ManagedObjects,
         target_adapter: Option<&str>,
     ) -> Result<BluezSnapshot, BtError> {
+        Self::parse_bluez_all_for(objects, target_adapter, None)
+    }
+
+    /// Parses `BlueZ` managed objects, preferring the `MediaPlayer1` owned by
+    /// `preferred` when multiple devices are connected.
+    ///
+    /// Falls back to the playing-status / lexicographic-path heuristic when
+    /// `preferred` is `None` or has no `MediaPlayer1`.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if adapter filtering or object parsing fails.
+    pub fn parse_bluez_all_for(
+        objects: &ManagedObjects,
+        target_adapter: Option<&str>,
+        preferred: Option<BtAddress>,
+    ) -> Result<BluezSnapshot, BtError> {
         let (adapter, devices) = Self::parse_bluez_objects(objects, target_adapter)?;
 
         let selected_adapter_id = adapter.as_ref().map(|a| a.id.as_ref());
 
         // 3. Search for MediaPlayer1 interfaces belonging to the selected adapter.
         // All candidates are collected and then selected deterministically:
-        // prefer a player that is actively playing; among equal-status candidates,
-        // break ties by lexicographic object path so the `HashMap` iteration order
-        // of `ManagedObjects` cannot influence the selection.
+        // prefer the arbitrated active device if given, then a player that is
+        // actively playing; among equal candidates, break ties by lexicographic
+        // object path so `HashMap` iteration order never influences selection.
         let mut candidates: Vec<BtPlaybackState> = Vec::new();
         for (path, ifaces) in objects {
             if let Some(props) = find_iface(ifaces, "org.bluez.MediaPlayer1") {
@@ -1514,13 +1575,51 @@ impl DbusClient {
         }
 
         candidates.sort_by(|a, b| {
-            b.is_playing()
-                .cmp(&a.is_playing())
+            let a_pref = preferred.is_some_and(|addr| a.device_address == Some(addr));
+            let b_pref = preferred.is_some_and(|addr| b.device_address == Some(addr));
+            b_pref
+                .cmp(&a_pref)
+                .then_with(|| b.is_playing().cmp(&a.is_playing()))
                 .then_with(|| a.player_path.cmp(&b.player_path))
         });
         let playback = candidates.into_iter().next();
 
         Ok((adapter, devices, playback))
+    }
+
+    /// Resolves the live `org.bluez.MediaPlayer1` object path for `device`
+    /// (e.g. `/org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX/avrcp/player0`).
+    ///
+    /// `BlueZ` 5.88 exposes players under `.../avrcp/player0` rather than
+    /// `.../player0`, so callers must look up the real path from
+    /// `GetManagedObjects` instead of guessing.
+    #[must_use]
+    pub fn find_player_path_for_device(
+        objects: &ManagedObjects,
+        device: BtAddress,
+    ) -> Option<Box<str>> {
+        let mut candidates: Vec<(bool, &str)> = objects
+            .iter()
+            .filter_map(|(path, ifaces)| {
+                let props = find_iface(ifaces, "org.bluez.MediaPlayer1")?;
+                let matches_device = props
+                    .get("Device")
+                    .and_then(|v| <&str>::try_from(v).ok())
+                    .and_then(crate::active_source::device_address_from_path)
+                    .or_else(|| crate::active_source::device_address_from_path(path.as_str()))
+                    == Some(device);
+                if !matches_device {
+                    return None;
+                }
+                let is_playing = props
+                    .get("Status")
+                    .and_then(|v| <&str>::try_from(v).ok())
+                    .is_some_and(|s| s.eq_ignore_ascii_case("playing"));
+                Some((is_playing, path.as_str()))
+            })
+            .collect();
+        candidates.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        candidates.into_iter().next().map(|(_, p)| Box::from(p))
     }
 
     /// Extracts the active `MediaPlayer1` object path from a parsed playback state.
@@ -1624,7 +1723,8 @@ impl DbusClient {
             .and_then(|b| b.path("/"))
             .and_then(zbus::blocking::proxy::Builder::build)?;
         let objects = proxy.get_managed_objects()?;
-        let (_, _, playback) = Self::parse_bluez_all(&objects, None)?;
+        let preferred = self.read_active_device();
+        let (_, _, playback) = Self::parse_bluez_all_for(&objects, None, preferred)?;
         Ok(playback)
     }
 
@@ -1676,13 +1776,17 @@ impl DbusClient {
     /// Filters the candidate PCMs to A2DP streams (both `a2dpsnk` and
     /// `a2dpsink` path spellings) before selection: reverse amp-level writes
     /// must never land on an `HFP-AG` or other non-music PCM during a call.
-    fn select_active_a2dp_pcm(pcms: &[BlueAlsaPcm]) -> Result<&BlueAlsaPcm, BtError> {
+    fn select_active_a2dp_pcm_for(
+        pcms: &[BlueAlsaPcm],
+        preferred: Option<BtAddress>,
+    ) -> Result<&BlueAlsaPcm, BtError> {
         let a2dp = || {
             pcms.iter()
                 .filter(|pcm| crate::transport::is_a2dp_pcm_path(pcm.pcm_path.as_ref()))
         };
-        a2dp()
-            .find(|pcm| pcm.running)
+        preferred
+            .and_then(|addr| a2dp().find(|pcm| pcm.device_address == addr))
+            .or_else(|| a2dp().find(|pcm| pcm.running))
             .or_else(|| a2dp().next())
             .ok_or_else(|| {
                 BtError::no_active_player("no active A2DP BlueALSA PCM stream found on D-Bus")
@@ -1699,8 +1803,22 @@ impl DbusClient {
         objects: &ManagedObjects,
         percent: u8,
     ) -> Result<(Box<str>, Vec<u8>), BtError> {
+        Self::resolve_pcm_volume_target_for(objects, percent, None)
+    }
+
+    /// Selects the target A2DP `BlueALSA` PCM stream (preferring `preferred`
+    /// when present) and encodes its new `Volume` (`ay`) byte array for
+    /// `percent` (`0..=100`, unmuted).
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if no A2DP `BlueALSA` PCM stream is present.
+    pub fn resolve_pcm_volume_target_for(
+        objects: &ManagedObjects,
+        percent: u8,
+        preferred: Option<BtAddress>,
+    ) -> Result<(Box<str>, Vec<u8>), BtError> {
         let pcms = Self::parse_bluealsa_objects(objects, &[]);
-        let pcm = Self::select_active_a2dp_pcm(&pcms)?;
+        let pcm = Self::select_active_a2dp_pcm_for(&pcms, preferred)?;
         let bytes = encode_volume_bytes(pcm.channels, percent, false);
         Ok((pcm.pcm_path.clone(), bytes))
     }
@@ -1715,8 +1833,23 @@ impl DbusClient {
         objects: &ManagedObjects,
         muted: bool,
     ) -> Result<(Box<str>, Vec<u8>), BtError> {
+        Self::resolve_pcm_mute_target_for(objects, muted, None)
+    }
+
+    /// Selects the target A2DP `BlueALSA` PCM stream (preferring `preferred`
+    /// when present) and computes its updated `Volume` (`ay`) byte array with
+    /// the mute bit (`0x80`) set or cleared while preserving per-channel 7-bit
+    /// levels.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if no A2DP `BlueALSA` PCM stream is present.
+    pub fn resolve_pcm_mute_target_for(
+        objects: &ManagedObjects,
+        muted: bool,
+        preferred: Option<BtAddress>,
+    ) -> Result<(Box<str>, Vec<u8>), BtError> {
         let pcms = Self::parse_bluealsa_objects(objects, &[]);
-        let pcm = Self::select_active_a2dp_pcm(&pcms)?;
+        let pcm = Self::select_active_a2dp_pcm_for(&pcms, preferred)?;
         let existing = objects
             .iter()
             .find(|(path, _)| path.as_str() == pcm.pcm_path.as_ref())
@@ -1739,14 +1872,30 @@ impl DbusClient {
     }
 
     pub(crate) fn set_volume(&self, percent: u8) -> Result<(), BtError> {
+        self.set_volume_for(percent, self.read_active_device())
+    }
+
+    pub(crate) fn set_volume_for(
+        &self,
+        percent: u8,
+        preferred: Option<BtAddress>,
+    ) -> Result<(), BtError> {
         let objects = self.fetch_bluealsa_objects()?;
-        let (pcm_path, bytes) = Self::resolve_pcm_volume_target(&objects, percent)?;
+        let (pcm_path, bytes) = Self::resolve_pcm_volume_target_for(&objects, percent, preferred)?;
         self.set_pcm_volume_bytes(&pcm_path, &bytes)
     }
 
     pub(crate) fn set_mute(&self, muted: bool) -> Result<(), BtError> {
+        self.set_mute_for(muted, self.read_active_device())
+    }
+
+    pub(crate) fn set_mute_for(
+        &self,
+        muted: bool,
+        preferred: Option<BtAddress>,
+    ) -> Result<(), BtError> {
         let objects = self.fetch_bluealsa_objects()?;
-        let (pcm_path, bytes) = Self::resolve_pcm_mute_target(&objects, muted)?;
+        let (pcm_path, bytes) = Self::resolve_pcm_mute_target_for(&objects, muted, preferred)?;
         self.set_pcm_volume_bytes(&pcm_path, &bytes)
     }
 
@@ -1951,6 +2100,7 @@ struct MockState {
     devices: Vec<BtDevice>,
     pcms: Vec<BlueAlsaPcm>,
     playback: Option<BtPlaybackState>,
+    active_device: Option<BtAddress>,
     fault: Option<Box<str>>,
     cache_dir: std::path::PathBuf,
 }
@@ -2029,6 +2179,7 @@ impl BluetoothDeviceMock {
                 shuffle: None,
                 scan: None,
             }),
+            active_device: None,
             fault: None,
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
         };
@@ -2382,8 +2533,33 @@ impl BluetoothDeviceMock {
         pcm.volume_percent = vol_pct;
     }
 
-    fn active_mock_pcm_mut(pcms: &mut [BlueAlsaPcm]) -> Option<&mut BlueAlsaPcm> {
-        let idx = pcms.iter().position(|p| p.running).unwrap_or(0);
+    /// Sets the simulated active device address (matching `org.speaker.Bluetooth1.ActiveDevice`).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_active_device(&self, device: Option<BtAddress>) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        state.active_device = device;
+        self.change_flag.notify();
+    }
+
+    /// Returns the simulated active device address.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    #[must_use]
+    pub fn active_device(&self) -> Option<BtAddress> {
+        self.state.read().expect("mock lock poisoned").active_device
+    }
+
+    fn active_mock_pcm_mut(
+        pcms: &mut [BlueAlsaPcm],
+        preferred: Option<BtAddress>,
+    ) -> Option<&mut BlueAlsaPcm> {
+        let idx = preferred
+            .and_then(|addr| pcms.iter().position(|p| p.device_address == addr))
+            .or_else(|| pcms.iter().position(|p| p.running))
+            .unwrap_or(0);
         pcms.get_mut(idx)
     }
 
@@ -2393,30 +2569,33 @@ impl BluetoothDeviceMock {
     /// Panics if the mock state lock is poisoned.
     pub fn set_pcm_volume_state(&self, percent: u8, muted: bool) {
         let mut state = self.state.write().expect("mock lock poisoned");
-        if let Some(pcm) = Self::active_mock_pcm_mut(&mut state.pcms) {
+        let preferred = state.active_device;
+        if let Some(pcm) = Self::active_mock_pcm_mut(&mut state.pcms, preferred) {
             Self::apply_mock_pcm_volume(pcm, percent, muted);
         }
         self.change_flag.notify();
     }
 
-    fn set_volume(&self, percent: u8) -> Result<(), BtError> {
+    fn set_volume_for(&self, percent: u8, preferred: Option<BtAddress>) -> Result<(), BtError> {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(BtError::mock_fault(fault.clone()));
         }
-        let pcm = Self::active_mock_pcm_mut(&mut state.pcms)
+        let target = preferred.or(state.active_device);
+        let pcm = Self::active_mock_pcm_mut(&mut state.pcms, target)
             .ok_or_else(|| BtError::no_active_player("no active mock PCM"))?;
         Self::apply_mock_pcm_volume(pcm, percent, false);
         self.change_flag.notify();
         Ok(())
     }
 
-    fn set_mute(&self, muted: bool) -> Result<(), BtError> {
+    fn set_mute_for(&self, muted: bool, preferred: Option<BtAddress>) -> Result<(), BtError> {
         let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(BtError::mock_fault(fault.clone()));
         }
-        let pcm = Self::active_mock_pcm_mut(&mut state.pcms)
+        let target = preferred.or(state.active_device);
+        let pcm = Self::active_mock_pcm_mut(&mut state.pcms, target)
             .ok_or_else(|| BtError::no_active_player("no active mock PCM"))?;
         let pct = pcm.volume_percent.unwrap_or(0);
         Self::apply_mock_pcm_volume(pcm, pct, muted);
@@ -2927,6 +3106,41 @@ impl BluetoothDevice {
         }
     }
 
+    /// Records the arbitrated active Bluetooth audio source locally (used by
+    /// `bt-manager` so its own queries reflect the arbitrated source without a
+    /// D-Bus round-trip to itself).
+    pub fn set_active_source(&self, device: Option<BtAddress>) {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.set_active_device(device),
+            Backend::Dbus(dbus) => dbus.set_active_source(device),
+        }
+    }
+
+    /// Returns the arbitrated active Bluetooth audio source published by
+    /// `bt-manager` (or recorded locally in `bt-manager` / mock mode).
+    ///
+    /// Returns `None` if nothing is actively streaming or if `bt-manager` is
+    /// not running.
+    #[must_use]
+    pub fn active_device(&self) -> Option<BtAddress> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.active_device(),
+            Backend::Dbus(dbus) => dbus.read_active_device(),
+        }
+    }
+
+    /// Returns the arbitrated active Bluetooth audio source asynchronously.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] only if the blocking task is cancelled or panics.
+    pub async fn active_device_async(&self) -> Result<Option<BtAddress>, BtError> {
+        let dev = self.clone();
+        speaker_common::runtime::run_blocking("bluetooth active_device read", move || {
+            Ok(dev.active_device())
+        })
+        .await
+    }
+
     /// Sets the output volume percentage (`0..=100`) and unmutes the active `BlueALSA` PCM stream.
     ///
     /// # Errors
@@ -2934,8 +3148,22 @@ impl BluetoothDevice {
     /// or (in mock mode) an injected fault fires.
     pub fn set_volume(&self, percent: u8) -> Result<(), BtError> {
         match &*self.backend {
-            Backend::Mock(mock) => mock.set_volume(percent),
+            Backend::Mock(mock) => mock.set_volume_for(percent, None),
             Backend::Dbus(dbus) => dbus.set_volume(percent),
+        }
+    }
+
+    /// Sets the output volume percentage (`0..=100`) on the `BlueALSA` PCM
+    /// stream belonging to `preferred` (falling back to the active/first A2DP
+    /// stream when `preferred` is `None`).
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails, no active PCM stream exists,
+    /// or (in mock mode) an injected fault fires.
+    pub fn set_volume_for(&self, percent: u8, preferred: Option<BtAddress>) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.set_volume_for(percent, preferred),
+            Backend::Dbus(dbus) => dbus.set_volume_for(percent, preferred),
         }
     }
 
@@ -2946,8 +3174,22 @@ impl BluetoothDevice {
     /// or (in mock mode) an injected fault fires.
     pub fn set_mute(&self, muted: bool) -> Result<(), BtError> {
         match &*self.backend {
-            Backend::Mock(mock) => mock.set_mute(muted),
+            Backend::Mock(mock) => mock.set_mute_for(muted, None),
             Backend::Dbus(dbus) => dbus.set_mute(muted),
+        }
+    }
+
+    /// Sets or clears the mute state on the `BlueALSA` PCM stream belonging to
+    /// `preferred` (falling back to the active/first A2DP stream when
+    /// `preferred` is `None`).
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails, no active PCM stream exists,
+    /// or (in mock mode) an injected fault fires.
+    pub fn set_mute_for(&self, muted: bool, preferred: Option<BtAddress>) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.set_mute_for(muted, preferred),
+            Backend::Dbus(dbus) => dbus.set_mute_for(muted, preferred),
         }
     }
 

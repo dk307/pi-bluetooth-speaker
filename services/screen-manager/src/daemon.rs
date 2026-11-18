@@ -617,15 +617,16 @@ pub fn init_shell_with_config(
 
 #[cfg(feature = "ui")]
 fn apply_initial_bt_state(shell: &AppShell, bt: &speaker_bluetooth::BluetoothDevice) {
+    let active = bt.active_device();
     let preferred = match bt.playback_state() {
         Ok(Some(pb)) => {
             shell.apply_bluetooth_playback(&pb);
-            pb.device_address
+            active.or(pb.device_address)
         }
-        Ok(None) => None,
+        Ok(None) => active,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to query initial Bluetooth playback state");
-            None
+            active
         }
     };
     match bt.link_snapshot() {
@@ -914,6 +915,7 @@ const BT_WAIT_SLICE: Duration = Duration::from_millis(100);
 pub struct BtMonitorState {
     last_pb: Option<speaker_bluetooth::BtPlaybackState>,
     last_pcms: Option<Box<[speaker_bluetooth::BlueAlsaPcm]>>,
+    last_active_pcm: Option<speaker_bluetooth::BlueAlsaPcm>,
     last_details: Option<crate::ui::BtLinkDetails>,
     cover: CoverState,
     settle: Option<SettleWindow>,
@@ -1024,13 +1026,18 @@ impl BtMonitorState {
                 return;
             }
         };
-        if self.last_pcms.as_ref() != Some(&snapshot.pcms) {
-            if let Some(active) = speaker_bluetooth::select_active_pcm(&snapshot.pcms) {
+        let active_addr = bt.active_device();
+        let active_pcm =
+            speaker_bluetooth::select_active_pcm_for(&snapshot.pcms, active_addr).cloned();
+        if self.last_pcms.as_ref() != Some(&snapshot.pcms) || self.last_active_pcm != active_pcm {
+            if let Some(ref active) = active_pcm {
                 update.pcm = Some(active.clone());
             }
             self.last_pcms = Some(snapshot.pcms.clone());
+            self.last_active_pcm = active_pcm;
         }
-        let preferred = self.last_pb.as_ref().and_then(|pb| pb.device_address);
+        let preferred =
+            active_addr.or_else(|| self.last_pb.as_ref().and_then(|pb| pb.device_address));
         let details = crate::ui::BtLinkDetails::select(&snapshot, preferred);
         if self.last_details.as_ref() != Some(&details) {
             update.details = Some(details.clone());
@@ -1044,6 +1051,7 @@ impl BtMonitorState {
         self.last_pb = None;
         self.cover.path = None;
         self.last_pcms = None;
+        self.last_active_pcm = None;
         self.last_details = None;
     }
 

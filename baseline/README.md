@@ -28,10 +28,13 @@ baseline/
 │   ├── modules-load.d/
 │   │   ├── snd-aloop.conf         # Autoload ALSA virtual loopback driver
 │   │   └── i2c-dev.conf           # Autoload I2C device nodes
+│   ├── dbus-1/system.d/
+│   │   ├── org.speaker.Bluetooth.conf # D-Bus policy for active-source arbiter (bt-manager)
+│   │   └── org.speaker.CoverArt.conf  # D-Bus policy for BIP cover-art service (bt-manager)
 │   └── systemd/system/
 │       ├── camilladsp.service     # CamillaDSP WebSocket & filtering engine daemon
 │       ├── bluealsa.service       # BlueALSA high-res A2DP audio sink daemon
-│       ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA dmix + MA12070P HW volume sync
+│       ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA dmix (--volume=none --single-audio)
 │       └── bt-agent.service       # Legacy standalone agent (superseded by bt-manager.service)
 ├── alsa/
 │   └── asound.state               # Persisted MA12070P hardware mixer gains & limiter states
