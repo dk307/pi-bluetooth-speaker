@@ -1,5 +1,8 @@
-import { MaterialPalette } from "@material/material.slint";
-import { MaterialStyleMetrics } from "@material/material.slint";
+import {
+    MaterialPalette,
+    MaterialStyleMetrics,
+    TouchScale,
+} from "@material/material.slint";
 
 // Single source of truth for codec specification display: codecs with fixed
 // bitrate/specifications per Bluetooth SIG & Qualcomm specs — Qualcomm aptX HD
@@ -104,31 +107,34 @@ export component TopStatusBar inherits Rectangle {
                 // Rendered only while a Bluetooth device is connected: without a link there is
                 // no negotiated codec to report. The conditional removes the badge from the
                 // layout entirely, so the volume and DIM controls move inwards.
-                if root.bt_connected : Rectangle {
-                    // Fixed size so codec name changes never shift neighbors.
-                    width: 120px;
-                    height: 40px;
-                    background: MaterialPalette.surface;
-                    border-radius: 10px;
-                    border-width: 1px;
-                    border-color: MaterialPalette.outline_variant;
+                if root.bt_connected : VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        // Fixed size so codec name changes never shift neighbors.
+                        width: 120px;
+                        height: 40px;
+                        background: MaterialPalette.surface;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: MaterialPalette.outline_variant;
 
-                    Text {
-                        width: parent.width - 12px;
-                        height: parent.height;
-                        x: (parent.width - self.width) / 2;
-                        text: root.stream_codec;
-                        color: MaterialPalette.primary;
-                        font-size: 16px;
-                        font-weight: 800;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
+                        Text {
+                            width: parent.width - 12px;
+                            height: parent.height;
+                            x: (parent.width - self.width) / 2;
+                            text: root.stream_codec;
+                            color: MaterialPalette.primary;
+                            font-size: 16px * TouchScale.clamped_font_scale;
+                            font-weight: 800;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
 
-                    TouchArea {
-                        clicked => {
-                            root.protocol_clicked();
+                        TouchArea {
+                            clicked => {
+                                root.protocol_clicked();
+                            }
                         }
                     }
                 }
@@ -190,10 +196,10 @@ export component TopStatusBar inherits Rectangle {
                             // The level readout stays visible while muted: it shows
                             // the stored amp level, tinted like the mute icon.
                             Text {
-                                width: 48px;
+                                width: 48px * TouchScale.widget_scale;
                                 text: Math.round(root.volume_value);
                                 color: root.is_muted ? MaterialPalette.error : MaterialPalette.secondary;
-                                font-size: 20px;
+                                font-size: 20px * TouchScale.clamped_font_scale;
                                 font-weight: 800;
                                 vertical-alignment: center;
                             }
@@ -254,7 +260,7 @@ export component TopStatusBar inherits Rectangle {
             height: parent.height;
             text: root.track_or_device;
             color: MaterialPalette.on_surface;
-            font-size: 26px;
+            font-size: 26px * TouchScale.clamped_font_scale;
             font-weight: 800;
             vertical-alignment: center;
             horizontal-alignment: center;

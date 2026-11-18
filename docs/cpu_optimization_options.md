@@ -3,7 +3,7 @@
 Status: **analysis complete, implementation deferred** — recorded so the work can be
 picked up later without re-deriving the measurements.
 
-Target: Raspberry Pi 3 (BCM2837, Cortex-A53), 800×480 panel, Slint `=1.18.1` with
+Target: Raspberry Pi 3 (BCM2837, Cortex-A53), 800×480 panel, Slint `=1.19.0` with
 `backend-linuxkms` + `renderer-femtovg` (default) + `renderer-software` (fallback and
 offscreen test harness).
 
@@ -73,10 +73,10 @@ option 2.**
 ### Option 2 — Cache static subtrees (`cache-rendering-hint`, FemtoVG only)
 
 - **Supported on FemtoVG:** implements `LayerRenderer`
-  (`i-slint-renderer-femtovg-1.18.1/itemrenderer.rs:955`) — snapshots subtrees into GPU
+  (`i-slint-renderer-femtovg-1.19.0/itemrenderer.rs:955`) — snapshots subtrees into GPU
   textures (FBO) that are blitted instead of re-tessellated each frame.
 - **Not supported on software:** no `LayerRenderer` impl in
-  `i-slint-renderer-software-1.18.1` → the hint is a no-op there (docs: "Not all
+  `i-slint-renderer-software-1.19.0` → the hint is a no-op there (docs: "Not all
   rendering backends support this property").
 - **Mutually exclusive with Option 1's payoff:** caching only helps under FemtoVG's
   full-redraw model; with software partial rendering it is irrelevant.

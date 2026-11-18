@@ -1,0 +1,78 @@
+[workspace]
+# This appliance is released as one git-only artifact, never to crates.io.
+git_only = true
+publish = false
+
+# Disable per-package tags and releases by default. `screen-manager` enables
+# them below so the whole appliance gets exactly one shared tag and release.
+git_release_enable = false
+git_tag_enable = false
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+
+# One shared changelog avoids repeating the same commit once per workspace crate.
+changelog_update = false
+changelog_path = "./CHANGELOG.md"
+
+# Only user-visible or corrective changes trigger a release. The release PR's
+# own `chore:` merge commit is deliberately excluded to prevent release loops.
+release_commits = "^(feat|fix|perf|refactor|revert)(\\([^)]*\\))?!?:"
+
+# Only a merged release PR may create the tag and GitHub release.
+release_always = false
+
+semver_check = false
+pr_name = "chore: release v{{ version }}"
+pr_branch_prefix = "release-plz-"
+
+# Treat every workspace member as one appliance release so a change in any
+# crate advances the shared version, tag, binaries, and changelog together.
+[[package]]
+name = "audio-manager"
+version_group = "appliance"
+
+[[package]]
+name = "bt-manager"
+version_group = "appliance"
+
+[[package]]
+name = "screen-manager"
+version_group = "appliance"
+git_tag_enable = true
+git_release_enable = true
+changelog_update = true
+changelog_include = [
+    "audio-manager",
+    "bt-manager",
+    "screen-manager",
+    "speaker-bluetooth",
+    "speaker-common",
+    "speaker-diagnostics",
+    "speaker-dsp",
+    "speaker-hardware",
+    "speaker-title-breaker",
+]
+
+[[package]]
+name = "speaker-bluetooth"
+version_group = "appliance"
+
+[[package]]
+name = "speaker-common"
+version_group = "appliance"
+
+[[package]]
+name = "speaker-diagnostics"
+version_group = "appliance"
+
+[[package]]
+name = "speaker-dsp"
+version_group = "appliance"
+
+[[package]]
+name = "speaker-hardware"
+version_group = "appliance"
+
+[[package]]
+name = "speaker-title-breaker"
+version_group = "appliance"

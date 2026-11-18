@@ -687,7 +687,7 @@ All crates are pinned to their exact latest release version using the `=` prefix
 ```toml
 [package]
 name = "audio-ui"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 authors = ["Audio Appliance Team"]

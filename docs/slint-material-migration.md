@@ -858,7 +858,7 @@ pub fn apply_theme_preset(window: &MainWindow, preset: u8) {
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| Material components don't compile with Slint 1.18.1 | Medium | High | Pin material-components to commit tested with 1.18.1; test in CI |
+| Material components don't compile with Slint 1.19.0 | Medium | High | Pin material-components to commit tested with 1.19.0; test in CI |
 | Metric overrides not respected (cascade order) | Medium | Medium | Import overrides BEFORE `material.slint` in appwindow.slint |
 | Custom SVG icons not colorizing via `Icon` | Low | Medium | `Icon` component uses `colorize: MaterialPalette.on_background` - test with our SVGs |
 | Typography overrides break `MaterialText` layout | Low | Medium | Test all 13 text styles in SettingsView first |
@@ -972,7 +972,7 @@ All changes are additive (new files) or localized (per-view) until Phase 6.
 - **Docs**: https://material.slint.dev/getting-started/
 - **Source**: https://github.com/slint-ui/slint/tree/master/ui-libraries/material
 - **Gallery Example**: https://github.com/slint-ui/slint/tree/master/ui-libraries/material/examples/gallery
-- **Requires**: Slint 1.18+ (project uses 1.18.1 ✓)
+- **Requires**: Slint 1.18+ (project uses 1.19.0 ✓)
 
 ### Integration Pattern (from official docs)
 ```rust

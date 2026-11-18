@@ -250,8 +250,9 @@ fn ui_shell_callbacks_and_debug_formatting() {
     shell.window().invoke_select_theme(1);
     assert_eq!(shell.current_theme(), ThemePreset::MarantzAmber);
 
-    // Invoke cycle theme callback
-    shell.window().invoke_cycle_theme();
+    // Cycle theme via the programmatic API (the Slint cycle_theme callback
+    // chain was removed with the Cycle Next Theme button).
+    let _ = shell.cycle_theme();
     assert_eq!(shell.current_theme(), ThemePreset::CyberpunkNeon);
 }
 
@@ -581,7 +582,7 @@ fn ui_shell_now_playing_callbacks() {
     shell.window().invoke_next_track();
     shell.window().invoke_previous_track();
     shell.window().invoke_volume_changed(60.0);
-    shell.window().invoke_cycle_theme();
+    let _ = shell.cycle_theme();
     shell.window().invoke_source_clicked();
     shell.window().invoke_night_mode_clicked();
 
@@ -733,7 +734,7 @@ fn ui_shell_cover_art_loading_and_error_handling() {
 
 #[cfg(feature = "ui")]
 #[test]
-fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
+fn ui_shell_volume_hud_config_and_amp_auto_popup() {
     use screen_manager::config::{
         CodecHudTimeoutMs, CoreConfig, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
         VolumeStepPercent,
@@ -751,9 +752,9 @@ fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
     assert!(!shell.is_volume_hud_visible());
     assert!(!shell.is_volume_hud_active());
     assert_eq!(shell.volume_hud_opacity(), 0.0);
-    assert_eq!(shell.volume_step_percent(), 2);
-    assert_eq!(shell.volume_hud_timeout_ms(), 4_000);
-    assert_eq!(shell.volume_hud_fade_ms(), 200);
+    assert_eq!(shell.volume_step_percent().value(), 2);
+    assert_eq!(shell.volume_hud_timeout_ms().value(), 4_000);
+    assert_eq!(shell.volume_hud_fade_ms().value(), 200);
 
     // 2. Apply CoreConfig overrides
     let cfg = CoreConfig {
@@ -763,16 +764,17 @@ fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
         volume_hud_timeout_ms: VolumeHudTimeoutMs::new(1_500),
         volume_hud_fade_ms: VolumeHudFadeMs::new(150),
         codec_hud_timeout_ms: CodecHudTimeoutMs::new(10_000),
+        ..CoreConfig::default()
     };
     shell.apply_config(&cfg);
     assert_eq!(shell.current_theme(), ThemePreset::MarantzAmber);
-    assert_eq!(shell.volume_step_percent(), 4);
-    assert_eq!(shell.volume_hud_timeout_ms(), 1_500);
-    assert_eq!(shell.volume_hud_fade_ms(), 150);
+    assert_eq!(shell.volume_step_percent().value(), 4);
+    assert_eq!(shell.volume_hud_timeout_ms().value(), 1_500);
+    assert_eq!(shell.volume_hud_fade_ms().value(), 150);
 
     // Reset step to 2% per user default
-    shell.set_volume_step_percent(2);
-    assert_eq!(shell.volume_step_percent(), 2);
+    shell.set_volume_step_percent(VolumeStepPercent::new(2));
+    assert_eq!(shell.volume_step_percent().value(), 2);
 
     // 3. PCM stream metadata never drives the volume: the level and mute
     // indicator reflect the amp exclusively (apply_amp_volume).
@@ -797,19 +799,44 @@ fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
     assert!(!shell.is_volume_hud_visible());
     assert!(!shell.is_muted());
 
-    // 4. The amp-volume worker publish path drives the shell level and mute.
+    // 4. The initial authoritative amp snapshot drives the shell level and
+    // mute silently; startup must not pop up the Volume HUD.
     shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(64, false));
     assert_eq!(shell.volume(), 64.0);
     assert!(!shell.is_muted());
-    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(64, true));
-    assert!(shell.is_muted());
     assert!(
         !shell.is_volume_hud_visible(),
-        "worker publish must not pop up the Volume HUD"
+        "initial startup amp snapshot must not pop up the Volume HUD"
+    );
+
+    // 5. A subsequent authoritative volume change opens the HUD, regardless
+    // of whether it originated on the screen or from a phone.
+    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(42, false));
+    assert_eq!(shell.volume(), 42.0);
+    assert!(
+        shell.is_volume_hud_visible(),
+        "authoritative external amp volume change must open the Volume HUD"
+    );
+
+    // 6. A mute change also refreshes the same overlay.
+    shell.dismiss_volume_hud();
+    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(42, true));
+    assert!(shell.is_muted());
+    assert!(
+        shell.is_volume_hud_visible(),
+        "authoritative external amp mute change must open the Volume HUD"
+    );
+
+    // An unchanged snapshot must not reopen the overlay.
+    shell.dismiss_volume_hud();
+    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(42, true));
+    assert!(
+        !shell.is_volume_hud_visible(),
+        "unchanged amp snapshot must not reopen the Volume HUD"
     );
 
     // Volume HUD user interaction still covers the marquee area; open it
-    // explicitly since PCM/worker publishes intentionally never auto-open it.
+    // explicitly to verify rendering and dismissal.
     shell.show_volume_hud();
     assert!(shell.is_volume_hud_visible());
     shell.set_track_metadata(
@@ -905,4 +932,317 @@ fn ui_shell_rotary_encoder_volume_and_mute_integration() {
     enc_mock.set_switch_pressed(false);
     assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
     assert!(shell.is_volume_hud_visible());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_touch_scale_and_virtual_keyboard_integration() {
+    use screen_manager::ui::{
+        AppShell, Framebuffer, MainWindow, MaterialStyleMetrics, TouchScale, VirtualKeyboard,
+    };
+    use slint::ComponentHandle;
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+    shell.window().show().expect("Failed to show MainWindow");
+
+    // 1. Default TouchScale: font_scale = 1.15, widget_scale = 1.075
+    assert!((shell.font_scale() - 1.15).abs() < 1e-4);
+    assert!((shell.widget_scale() - 1.075).abs() < 1e-4);
+
+    let metrics = shell.window().global::<MaterialStyleMetrics>();
+    // Thin stroke tokens remain unscaled integer pixels (1px, 2px, 3px).
+    assert!((metrics.get_size_1() - 1.0).abs() < 1e-4);
+    assert!((metrics.get_size_2() - 2.0).abs() < 1e-4);
+    assert!((metrics.get_size_3() - 3.0).abs() < 1e-4);
+    // Damped widget metrics at default 1.15 (widget_scale = 1.075)
+    assert!((metrics.get_size_32() - 38.0 * 1.075).abs() < 1e-2);
+    assert!((metrics.get_size_40() - 46.0 * 1.075).abs() < 1e-2);
+    assert!((metrics.get_padding_16() - 14.0 * 1.075).abs() < 1e-2);
+    assert!((metrics.get_icon_size_24() - 24.0 * 1.075).abs() < 1e-2);
+
+    // 2. Top bar height: fixed 60px on Tab 0, scaled `size_64` on Tabs 1..=5
+    assert_eq!(shell.current_tab(), 0);
+    assert!((shell.window().get_top_bar_height() - 60.0).abs() < 1e-4);
+
+    shell.set_tab(5);
+    assert!((shell.window().get_top_bar_height() - 56.0 * 1.075).abs() < 1e-2);
+
+    // 3. Scale transitions across 1.0..=1.35 and NaN/out-of-bounds clamping
+    shell.set_font_scale(1.0);
+    assert!((shell.font_scale() - 1.0).abs() < 1e-4);
+    assert!((shell.widget_scale() - 1.0).abs() < 1e-4);
+    assert!((shell.window().get_top_bar_height() - 56.0).abs() < 1e-2);
+
+    shell.set_font_scale(1.35);
+    assert!((shell.font_scale() - 1.35).abs() < 1e-4);
+    assert!((shell.widget_scale() - 1.175).abs() < 1e-4);
+    assert!((shell.window().get_top_bar_height() - 56.0 * 1.175).abs() < 1e-2);
+
+    shell.set_font_scale(0.5);
+    assert!((shell.font_scale() - 1.0).abs() < 1e-4);
+    shell.set_font_scale(2.5);
+    assert!((shell.font_scale() - 1.35).abs() < 1e-4);
+    shell.set_font_scale(f32::NAN);
+    assert!((shell.font_scale() - 1.15).abs() < 1e-4);
+
+    // Callback from FontSizeControl slider updates TouchScale with clamping
+    shell.window().invoke_font_scale_changed(1.25);
+    assert!((shell.font_scale() - 1.25).abs() < 1e-4);
+    assert!((shell.widget_scale() - 1.125).abs() < 1e-4);
+    shell.window().invoke_font_scale_changed(f32::NAN);
+    assert!((shell.font_scale() - 1.15).abs() < 1e-4);
+
+    // Guard against NaN injected directly into the Slint global
+    shell
+        .window()
+        .global::<TouchScale>()
+        .set_font_scale(f32::NAN);
+    assert!((shell.font_scale() - 1.0).abs() < 1e-4);
+    shell.set_font_scale(1.15);
+
+    // 4. Render 800x480 Themes & Scale view and Widget Scale Showcase at 1.0, 1.15, 1.35
+    shell.window().set_show_themes(true);
+    for scale in [1.0_f32, 1.15, 1.35] {
+        shell.set_font_scale(scale);
+        shell.window().set_show_widget_preview(false);
+        assert!(
+            fb.render_frame_full_redraw(&window)
+                .expect("render themes view")
+        );
+        shell.window().set_show_widget_preview(true);
+        assert!(
+            fb.render_frame_full_redraw(&window)
+                .expect("render widget showcase")
+        );
+    }
+
+    // 5. VirtualKeyboard lifecycle & app_bar_back hierarchy
+    let vk = shell.window().global::<VirtualKeyboard>();
+    assert!(!vk.get_visible());
+    vk.invoke_open("Speaker Name".into(), "DietPi".into());
+    assert!(vk.get_visible());
+    assert_eq!(vk.get_label().as_str(), "Speaker Name");
+    assert_eq!(vk.get_current_text().as_str(), "DietPi");
+
+    vk.invoke_push_key("X".into());
+    assert_eq!(vk.get_current_text().as_str(), "DietPiX");
+    assert!(
+        fb.render_frame_full_redraw(&window)
+            .expect("render virtual keyboard")
+    );
+
+    // Pressing app_bar_back while VirtualKeyboard is open closes the keyboard first
+    shell.window().invoke_app_bar_back();
+    assert!(!vk.get_visible());
+    assert!(shell.window().get_show_widget_preview());
+
+    // Re-open, clear, and submit
+    vk.invoke_open("Speaker Name".into(), "DietPi".into());
+    vk.invoke_clear();
+    assert_eq!(vk.get_current_text().as_str(), "");
+    vk.invoke_push_key("H".into());
+    vk.invoke_push_key("I".into());
+    vk.invoke_submit();
+    assert!(!vk.get_visible());
+    assert_eq!(vk.get_current_text().as_str(), "HI");
+
+    // Next app_bar_back exits widget preview -> themes -> settings -> Now Playing
+    shell.window().invoke_app_bar_back();
+    assert!(!shell.window().get_show_widget_preview());
+    assert!(shell.window().get_show_themes());
+
+    shell.window().invoke_app_bar_back();
+    assert!(!shell.window().get_show_themes());
+    assert_eq!(shell.current_tab(), 5);
+
+    shell.window().invoke_app_bar_back();
+    assert_eq!(shell.current_tab(), 0);
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_screen_settings_save_round_trip_and_clamping() {
+    use screen_manager::config::{
+        CodecHudTimeoutMs, CoreConfig, FontScale, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
+        VolumeStepPercent,
+    };
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use speaker_common::diag::ScopedTempDir;
+    use std::path::Path;
+
+    /// Polls `path` until the persisted config satisfies `condition`, panicking
+    /// after a generous deadline (CI's ARM runner is slow).
+    fn wait_until_persisted(path: &Path, condition: impl Fn(&CoreConfig) -> bool) -> CoreConfig {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(config) = CoreConfig::load(path)
+                && condition(&config)
+            {
+                return config;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background persist did not complete within 10s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    let _window = Framebuffer::new_mocked()
+        .0
+        .init_platform()
+        .expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    // Saving without a wired config path must fail cleanly, never panic.
+    assert!(shell.save_current_config().unwrap_err().is_invalid_value());
+
+    // Wire a temp JSON path and apply a non-default configuration.
+    let dir = ScopedTempDir::new("screen-settings");
+    let path = dir.path().join("settings.json");
+    shell.wire_config(&path);
+
+    let cfg = CoreConfig {
+        theme: Some(screen_manager::ui::ThemePreset::CyberpunkNeon),
+        marquee_fps: MarqueeFps::FPS_30,
+        volume_step_percent: VolumeStepPercent::new(7),
+        volume_hud_timeout_ms: VolumeHudTimeoutMs::new(5_250),
+        volume_hud_fade_ms: VolumeHudFadeMs::new(650),
+        codec_hud_timeout_ms: CodecHudTimeoutMs::new(45_000),
+        font_scale: FontScale::from_percent(125),
+    };
+    shell.apply_config(&cfg);
+
+    // The window-backed snapshot must mirror the applied config exactly.
+    assert_eq!(shell.current_config(), cfg);
+
+    // Saving persists to the wired path and reloads identically.
+    shell.save_current_config().expect("save must succeed");
+    let reloaded = CoreConfig::load(&path).expect("reload");
+    assert_eq!(reloaded, cfg);
+
+    // UI callbacks clamp out-of-range values into the config domains and
+    // persist each change immediately (no Save step). Persistence runs on a
+    // background thread to avoid blocking the render thread; wait for the
+    // write to complete before asserting disk state.
+    shell.window().invoke_set_volume_step_percent(999);
+    assert_eq!(shell.window().get_volume_step_percent(), 25);
+    // The predicate returning proves the value; keep the binding for intent.
+    let _live = wait_until_persisted(&path, |c| c.volume_step_percent.value() == 25);
+    shell.window().invoke_set_volume_step_percent(-7);
+    assert_eq!(shell.window().get_volume_step_percent(), 1);
+
+    shell.window().invoke_set_volume_hud_timeout_ms(99_999);
+    assert_eq!(shell.window().get_volume_hud_timeout_ms(), 30_000);
+    shell.window().invoke_set_volume_hud_timeout_ms(0);
+    assert_eq!(shell.window().get_volume_hud_timeout_ms(), 250);
+
+    shell.window().invoke_set_volume_hud_fade_ms(9_999);
+    assert_eq!(shell.window().get_volume_hud_fade_ms(), 2_000);
+    shell.window().invoke_set_volume_hud_fade_ms(-1);
+    assert_eq!(shell.window().get_volume_hud_fade_ms(), 0);
+
+    shell.window().invoke_set_codec_hud_timeout_ms(999_999);
+    assert_eq!(shell.window().get_codec_hud_timeout_ms(), 300_000);
+    shell.window().invoke_set_codec_hud_timeout_ms(0);
+    assert_eq!(shell.window().get_codec_hud_timeout_ms(), 250);
+
+    // Marquee fps accepts only 30/60; anything else snaps to the 60 default.
+    shell.window().invoke_set_marquee_fps(45);
+    assert_eq!(shell.marquee_fps().value(), 60);
+    shell.window().invoke_set_marquee_fps(30);
+    assert_eq!(shell.marquee_fps().value(), 30);
+
+    // The clamped state is exactly what live persistence wrote to disk; the
+    // predicate returning proves the match.
+    let clamped = shell.current_config();
+    assert_eq!(clamped.volume_step_percent.value(), 1);
+    assert_eq!(clamped.volume_hud_timeout_ms.value(), 250);
+    assert_eq!(clamped.volume_hud_fade_ms.value(), 0);
+    assert_eq!(clamped.codec_hud_timeout_ms.value(), 250);
+    assert_eq!(clamped.marquee_fps, MarqueeFps::FPS_30);
+    let _saved = wait_until_persisted(&path, |c| c == &clamped);
+
+    // Persisting to an unwritable path logs an error instead of panicking.
+    shell.wire_config(std::path::Path::new("/nonexistent-dir/settings.json"));
+    shell.window().invoke_set_volume_step_percent(2);
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_font_size_slider_touch_interaction() {
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use slint::{ComponentHandle, LogicalPosition};
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+    shell.window().show().expect("Failed to show MainWindow");
+
+    shell.set_tab(5);
+    shell.window().set_show_themes(true);
+    shell.set_font_scale(1.15);
+    assert!(
+        fb.render_frame_full_redraw(&window)
+            .expect("render Screen Settings")
+    );
+
+    // First verify ThemePresetCard at (220, 100) receives taps inside Screen Settings
+    let theme_pos = LogicalPosition::new(220.0, 100.0);
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: theme_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: theme_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert_eq!(
+        shell.current_theme(),
+        screen_manager::ui::ThemePreset::MarantzAmber,
+        "tapping second ThemePresetCard inside ScrollView must switch theme"
+    );
+
+    // Tap the large "A" button (x ≈ 665px, y ≈ 165px) to step up by 0.05.
+    let inc_pos = LogicalPosition::new(665.0, 165.0);
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: inc_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: inc_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert!(
+        shell.font_scale() > 1.15,
+        "tapping large A button must increase font_scale (got {})",
+        shell.font_scale()
+    );
+
+    // Drag across the FontSizeControl slider track (x 250 -> x 600 at y=165) to verify sliding works.
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: LogicalPosition::new(250.0, 165.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(600.0, 165.0),
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: LogicalPosition::new(600.0, 165.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert!(
+        shell.font_scale() > 1.25,
+        "sliding FontSizeControl slider to the right must increase font_scale (got {})",
+        shell.font_scale()
+    );
 }

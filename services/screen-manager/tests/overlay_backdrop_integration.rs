@@ -9,6 +9,7 @@ use std::error::Error;
 use std::rc::Rc;
 use std::time::Duration;
 
+use screen_manager::config::{MAX_VOLUME_HUD_FADE_MS, VolumeHudFadeMs};
 use screen_manager::daemon::sync_overlay_backdrop;
 use screen_manager::ui::{
     AppShell, BACKDROP_BLUR_RADIUS, BackdropAction, Bgrx8888Pixel, Framebuffer, MainWindow,
@@ -326,10 +327,9 @@ fn reopening_an_overlay_mid_fade_keeps_the_published_backdrop() {
     // dismissed again (without this tick the opacity is still at 0.0).
     let _ = render(&mut fb, &window);
 
-    // Stretch the fade to 60 s so the "mid-fade" state is deterministic: no
-    // wall-clock timing (or slow instrumented test runner) can complete the
-    // fade before the reopen assertions run.
-    shell.set_volume_hud_fade_ms(60_000);
+    // Stretch the fade to the maximum allowed duration (2 s) so the "mid-fade"
+    // state is deterministic across the synchronous reopen assertions below.
+    shell.set_volume_hud_fade_ms(VolumeHudFadeMs::new(MAX_VOLUME_HUD_FADE_MS));
 
     // Dismiss: the panel is still rendered (opacity > 0.01), so the overlay
     // must stay active.
@@ -353,7 +353,7 @@ fn reopening_an_overlay_mid_fade_keeps_the_published_backdrop() {
     // after the fade completes with the overlay closed is the backdrop
     // released; the next open then captures a clean scene.
     shell.dismiss_volume_hud();
-    shell.set_volume_hud_fade_ms(0);
+    shell.set_volume_hud_fade_ms(VolumeHudFadeMs::new(0));
     settle();
     sync_overlay_backdrop(&fb, &shell, &mut tracker);
     assert_eq!(
@@ -553,33 +553,45 @@ fn the_scrim_dims_the_published_backdrop() {
 #[test]
 fn the_panel_is_opaque_when_no_backdrop_is_published() {
     let (shell, window, mut fb) = shell_with_window();
-    let overlay_top = OVERLAY_TOP_INSET as usize;
 
     // KMS fallback: no backdrop is ever published, so the panels must render
-    // fully opaque. Switch the tab underneath each open HUD and compare the
-    // whole overlay region: with an opaque panel nothing of the live scene
-    // bleeds through, so every pixel at or below the top bar must be identical
-    // between the two scenes. A translucent panel would let the dimmed live
-    // content ghost through (the regression this guards).
+    // fully opaque. Switch between two screen tabs (same `top_bar_height`,
+    // different top-bar title and viewport body) underneath each open HUD and
+    // compare the whole overlay region: with an opaque panel nothing of the
+    // live scene bleeds through, so every pixel at or below the top bar must
+    // be identical between the two scenes. A translucent panel would let the
+    // dimmed live content ghost through (the regression this guards).
     for open in [AppShell::show_volume_hud, AppShell::show_codec_hud] {
+        shell.window().set_active_tab(1);
         open(&shell);
         settle();
-        let tab_now_playing = render(&mut fb, &window);
+        let top_bar_px = shell.window().get_top_bar_height().ceil();
+        assert!(
+            top_bar_px.is_finite() && top_bar_px >= 0.0,
+            "top_bar_height must be non-negative: {top_bar_px}"
+        );
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "top_bar_px is finite, >= 0.0, and bounded by the 480px window height"
+        )]
+        let overlay_top = top_bar_px as usize;
+        let tab_vu = render(&mut fb, &window);
 
         shell.window().set_active_tab(5);
         settle();
         let tab_settings = render(&mut fb, &window);
 
         // Positive control: the tab switch really changed the scene above the
-        // overlay area (status bar vs app bar), so the comparison below is
+        // overlay area ("VU Meter" vs "Settings"), so the comparison below is
         // meaningful.
         assert_ne!(
-            tab_now_playing[..overlay_top * WIDTH],
+            tab_vu[..overlay_top * WIDTH],
             tab_settings[..overlay_top * WIDTH],
             "the tab switch must change the top bar for this test to be meaningful"
         );
 
-        let ghost = tab_now_playing
+        let ghost = tab_vu
             .iter()
             .zip(tab_settings.iter())
             .enumerate()
@@ -591,7 +603,5 @@ fn the_panel_is_opaque_when_no_backdrop_is_published() {
              published: first differing pixel at {:?}",
             ghost.map(|(i, _)| i)
         );
-
-        shell.window().set_active_tab(0);
     }
 }

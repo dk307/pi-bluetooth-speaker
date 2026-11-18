@@ -42,8 +42,14 @@ pub const MAX_VOLUME_HUD_TIMEOUT_MS: u32 = 30_000;
 /// Production default Volume HUD fade-out duration in milliseconds (`200` ms).
 pub const DEFAULT_VOLUME_HUD_FADE_MS: u32 = 200;
 
+/// Minimum allowed Volume HUD fade-out duration in milliseconds (`0` ms).
+pub const MIN_VOLUME_HUD_FADE_MS: u32 = 0;
+
 /// Maximum allowed Volume HUD fade-out duration in milliseconds (`2_000` ms).
 pub const MAX_VOLUME_HUD_FADE_MS: u32 = 2_000;
+
+/// Stepper increment for the Volume HUD fade duration in milliseconds (`100` ms).
+pub const VOLUME_HUD_FADE_STEP_MS: u32 = 100;
 
 /// Production default Codec HUD auto-dismiss timeout in milliseconds (`30_000` ms).
 pub const DEFAULT_CODEC_HUD_TIMEOUT_MS: u32 = 30_000;
@@ -53,6 +59,25 @@ pub const MIN_CODEC_HUD_TIMEOUT_MS: u32 = 250;
 
 /// Maximum allowed Codec HUD auto-dismiss timeout in milliseconds (`300_000` ms = 5 min).
 pub const MAX_CODEC_HUD_TIMEOUT_MS: u32 = 300_000;
+
+/// Production default touch font scale (`1.15`, stored as `115%`).
+pub const DEFAULT_FONT_SCALE: f32 = 1.15;
+
+/// Minimum allowed touch font scale (`1.0`, stored as `100%`).
+pub const MIN_FONT_SCALE: f32 = 1.0;
+
+/// Maximum allowed touch font scale (`1.35`, stored as `135%`).
+pub const MAX_FONT_SCALE: f32 = 1.35;
+
+const DEFAULT_FONT_SCALE_PCT: u16 = 115;
+const MIN_FONT_SCALE_PCT: u16 = 100;
+const MAX_FONT_SCALE_PCT: u16 = 135;
+
+/// Stepper increment for the Codec HUD timeout in milliseconds (`1_000` ms).
+///
+/// Deliberately distinct from [`MIN_CODEC_HUD_TIMEOUT_MS`]: the step grid is
+/// anchored at 250 + n*1000, not at the domain minimum.
+pub const CODEC_HUD_TIMEOUT_STEP_MS: u32 = 1_000;
 
 /// Allowed marquee scroll rates: 60 is the production default and 30 halves the
 /// render load by scrolling 2 px per 33.3 ms tick at identical on-screen speed.
@@ -346,6 +371,78 @@ impl From<CodecHudTimeoutMs> for u32 {
     }
 }
 
+/// Strongly typed touch font scale factor (`1.00..=1.35`, default `1.15`).
+///
+/// Stored internally as integer percentage (`100..=135`) so [`CoreConfig`]
+/// preserves exact equality (`Eq`) while serializing cleanly as a JSON float.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct FontScale(u16);
+
+impl FontScale {
+    /// Production default font scale (`1.15`).
+    pub const DEFAULT: Self = Self(DEFAULT_FONT_SCALE_PCT);
+
+    /// Const constructor from integer percentage (`100..=135`).
+    ///
+    /// # Panics
+    /// Panics if `percent` is outside `100..=135`.
+    #[must_use]
+    pub const fn from_percent(percent: u16) -> Self {
+        assert!(
+            percent >= MIN_FONT_SCALE_PCT && percent <= MAX_FONT_SCALE_PCT,
+            "font_scale percent out of range 100..=135"
+        );
+        Self(percent)
+    }
+
+    /// Returns the scale factor as a float (`1.00..=1.35`).
+    #[must_use]
+    pub fn value(self) -> f32 {
+        f32::from(self.0) / 100.0
+    }
+
+    /// Returns the scale factor as an integer percentage (`100..=135`).
+    #[must_use]
+    pub const fn percent(self) -> u16 {
+        self.0
+    }
+}
+
+impl Default for FontScale {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl TryFrom<f32> for FontScale {
+    type Error = ConfigError;
+
+    fn try_from(scale: f32) -> Result<Self, Self::Error> {
+        if !scale.is_finite() || !(MIN_FONT_SCALE..=MAX_FONT_SCALE).contains(&scale) {
+            return Err(ConfigError::invalid(format!(
+                "invalid font_scale '{scale}': expected {MIN_FONT_SCALE}..={MAX_FONT_SCALE}"
+            )));
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "scale is finite and in 1.0..=1.35 so (scale * 100.0).round() is in 100..=135"
+        )]
+        let pct = (scale * 100.0)
+            .round()
+            .clamp(f32::from(MIN_FONT_SCALE_PCT), f32::from(MAX_FONT_SCALE_PCT))
+            as u16;
+        Ok(Self::from_percent(pct))
+    }
+}
+
+impl From<FontScale> for f32 {
+    fn from(scale: FontScale) -> Self {
+        scale.value()
+    }
+}
+
 /// Strongly typed appliance configuration persisted as JSON on disk.
 ///
 /// Missing fields deserialize to their defaults, so minimal config files
@@ -368,6 +465,8 @@ pub struct CoreConfig {
     pub volume_hud_fade_ms: VolumeHudFadeMs,
     /// Codec HUD auto-dismiss timeout in milliseconds (`250..=300000`, default `30000`).
     pub codec_hud_timeout_ms: CodecHudTimeoutMs,
+    /// Touch UI font scale factor (`1.0..=1.35`, default `1.15`).
+    pub font_scale: FontScale,
 }
 
 impl CoreConfig {
