@@ -628,23 +628,19 @@ fn worker_publishes_rows_and_dedupes_unchanged_ticks() {
     )
     .expect("first tick publishes rows");
     assert_eq!(update.rows.len(), 1, "paired/connected devices only");
-    // Phone-style discovery (plan §9): the discovery list shows ALL devices
-    // the adapter sees — paired devices in range included — so a phone that
-    // is already bonded never makes "Add Device" look like a stuck scan.
-    assert_eq!(update.discovered.len(), 2, "all devices are discovery rows");
-    assert!(
-        update
-            .discovered
-            .iter()
-            .any(|row| row.paired && row.address == PHONE.to_string()),
-        "the paired phone appears in discovery with its paired status"
+    // Add Device discovery list: only unpaired, unconnected devices so the
+    // dedicated Add Device screen shows new devices to pair.
+    assert_eq!(
+        update.discovered.len(),
+        1,
+        "only unpaired devices in discovery"
     );
     assert!(
         update
             .discovered
             .iter()
-            .any(|row| row.address == PIXEL.to_string()),
-        "the unpaired device appears in discovery"
+            .all(|row| !row.paired && row.address == PIXEL.to_string()),
+        "only the unpaired device appears in discovery"
     );
     assert!(!update.scanning);
     assert_eq!(update.adapter_alias.as_deref(), Some("RaspberryPi-DSP"));

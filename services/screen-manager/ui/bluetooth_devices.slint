@@ -322,11 +322,20 @@ component BtDevicesList inherits Rectangle {
     callback remove(int);
 
     background: transparent;
+    vertical-stretch: 1;
+    min-height: 0px;
+    clip: true;
 
     // Explicit content height: for-loop children do not auto-size their
-    // container. 4 cards = 4*88 + 3*12 = 388 <= 392 -> no overflow by default.
+    // container; include top/bottom list padding so the last card scrolls above
+    // the bottom fade cue.
     function content_height() -> length {
-        BtMetrics.card_height * root.rows.length + BtMetrics.card_gap * Math.max(0, root.rows.length - 1)
+        root.rows.length > 0
+            ? (MaterialStyleMetrics.padding_8
+                + BtMetrics.card_height * root.rows.length
+                + BtMetrics.card_gap * (root.rows.length - 1)
+                + MaterialStyleMetrics.padding_16)
+            : 0px
     }
 
     flick := Flickable {
@@ -343,6 +352,8 @@ component BtDevicesList inherits Rectangle {
             VerticalLayout {
                 alignment: start;
                 spacing: BtMetrics.card_gap;
+                padding-top: MaterialStyleMetrics.padding_8;
+                padding-bottom: MaterialStyleMetrics.padding_16;
                 padding-left: BtMetrics.list_padding_h;
                 padding-right: BtMetrics.list_padding_h;
                 for row[i] in root.rows : BtDeviceCard {

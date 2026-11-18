@@ -1626,13 +1626,13 @@ impl BtMonitorState {
             .filter(|device| device.paired || device.connected)
             .map(|device| device_row(device, active))
             .collect();
-        // Discovery list: ALL devices the adapter sees (phone-style) — paired
-        // devices in range are shown with their Paired/Active status and a
-        // Connect/Disconnect action instead of vanishing, so "Add Device"
-        // never looks like a stuck, empty scan while a phone is in range.
+        // Discovery list: only unpaired, unconnected devices so "Add Device"
+        // presents a dedicated screen of new devices to pair rather than
+        // repeating the paired/connected list.
         let discovered = snapshot
             .devices
             .iter()
+            .filter(|device| !device.paired && !device.connected)
             .map(|device| device_row(device, active))
             .collect();
         BuiltDeviceRows {
