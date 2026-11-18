@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use speaker_bluetooth::connection::{DbusClient, ManagedObjects};
+use speaker_bluetooth::reconciler::UUID_A2DP_SOURCE;
 use speaker_bluetooth::{
     ACTIVE_SOURCE_DBUS_NAME, ACTIVE_SOURCE_OBJECT_PATH, BluetoothDevice, BtAddress,
     device_address_from_path, format_active_device,
@@ -36,6 +37,10 @@ pub struct ArbiterOutcome {
     pub active_changed: Option<Option<BtAddress>>,
     /// `Some(addr)` when a shut-out device should be sent `MediaPlayer1.Pause`.
     pub pause_device: Option<BtAddress>,
+    /// `Some(addr)` when a lingering-paused active device should have its
+    /// A2DP profile disconnected so `bluealsa-aplay --single-audio` releases
+    /// the ALSA slot immediately for a newly playing device.
+    pub release_device: Option<BtAddress>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +56,7 @@ pub struct ActiveSourceState {
     pcms: HashMap<Box<str>, PcmEntry>,
     active: Option<BtAddress>,
     paused_shutout: HashSet<BtAddress>,
+    player_playing: HashMap<BtAddress, bool>,
     seq: u64,
 }
 
@@ -124,7 +130,16 @@ impl ActiveSourceState {
         ArbiterOutcome {
             active_changed,
             pause_device,
+            release_device: None,
         }
+    }
+
+    /// Updates the known AVRCP `MediaPlayer1.Status` (`playing` vs paused/stopped)
+    /// for `device`. When the active device is known to be paused/stopped while
+    /// its A2DP PCM lingers `Running: true`, another device starting playback
+    /// is allowed to take over immediately instead of being shut out.
+    pub fn on_player_status_changed(&mut self, device: BtAddress, playing: bool) {
+        self.player_playing.insert(device, playing);
     }
 
     /// Handles a new A2DP PCM appearing (`InterfacesAdded`).
@@ -213,9 +228,28 @@ impl ActiveSourceState {
                     ArbiterOutcome {
                         active_changed: Some(Some(address)),
                         pause_device: None,
+                        release_device: None,
                     }
                 }
                 Some(current) if current == address => ArbiterOutcome::default(),
+                Some(current) if self.player_playing.get(&current) == Some(&false) => {
+                    // The current active device's AVRCP player is already
+                    // paused/stopped (e.g. a laptop holding its A2DP stream
+                    // open after pause): hand over immediately and release its
+                    // lingering A2DP transport so `--single-audio` unblocks.
+                    self.active = Some(address);
+                    self.paused_shutout.remove(&address);
+                    tracing::info!(
+                        previous = %current,
+                        new_active = %address,
+                        "Active Bluetooth source paused; handing over to newly playing device"
+                    );
+                    ArbiterOutcome {
+                        active_changed: Some(Some(address)),
+                        pause_device: None,
+                        release_device: Some(current),
+                    }
+                }
                 Some(current) => {
                     let pause_device = self.paused_shutout.insert(address).then_some(address);
                     if pause_device.is_some() {
@@ -228,6 +262,7 @@ impl ActiveSourceState {
                     ArbiterOutcome {
                         active_changed: None,
                         pause_device,
+                        release_device: None,
                     }
                 }
             }
@@ -264,6 +299,7 @@ impl ActiveSourceState {
         ArbiterOutcome {
             active_changed: (new_active != prev).then_some(new_active),
             pause_device: None,
+            release_device: None,
         }
     }
 }
@@ -374,7 +410,41 @@ async fn pause_remote_player(conn: &Connection, device: BtAddress) {
     }
 }
 
+async fn release_lingering_a2dp(conn: &Connection, device: BtAddress) {
+    let dev_path = format!(
+        "/org/bluez/hci0/dev_{}",
+        device.to_string().replace(':', "_")
+    );
+    let Ok(builder) = zbus::proxy::Builder::<Proxy<'_>>::new(conn)
+        .destination("org.bluez")
+        .and_then(|b| b.path(dev_path.as_str()))
+        .and_then(|b| b.interface("org.bluez.Device1"))
+    else {
+        return;
+    };
+    let Ok(proxy) = builder.build().await else {
+        return;
+    };
+    match proxy
+        .call_method("DisconnectProfile", &(UUID_A2DP_SOURCE,))
+        .await
+    {
+        Ok(_) => tracing::info!(
+            %device,
+            "Disconnected lingering A2DP profile on paused device so new source can play"
+        ),
+        Err(e) => tracing::warn!(
+            %device,
+            error = %e,
+            "Failed to disconnect lingering A2DP profile on paused device"
+        ),
+    }
+}
+
 async fn apply_outcome(outcome: ArbiterOutcome, ctx: &ArbiterCtx<'_>) {
+    if let Some(addr) = outcome.release_device {
+        release_lingering_a2dp(ctx.control_conn, addr).await;
+    }
     if let Some(new_active) = outcome.active_changed {
         ctx.shared.set(new_active);
         ctx.bt.set_active_source(new_active);
@@ -413,7 +483,14 @@ async fn seed_from_bt(state: &mut ActiveSourceState, ctx: &ArbiterCtx<'_>) {
     apply_outcome(outcome, ctx).await;
 }
 
-fn build_rules() -> Option<(MatchRule<'static>, MatchRule<'static>, MatchRule<'static>)> {
+struct ArbiterRules {
+    props: MatchRule<'static>,
+    added: MatchRule<'static>,
+    removed: MatchRule<'static>,
+    player_props: MatchRule<'static>,
+}
+
+fn build_rules() -> Option<ArbiterRules> {
     let props = MatchRule::builder()
         .sender("org.bluealsa")
         .and_then(|b| b.interface("org.freedesktop.DBus.Properties"))
@@ -432,7 +509,19 @@ fn build_rules() -> Option<(MatchRule<'static>, MatchRule<'static>, MatchRule<'s
         .and_then(|b| b.member("InterfacesRemoved"))
         .map(zbus::match_rule::Builder::build)
         .ok()?;
-    Some((props, added, removed))
+    let player_props = MatchRule::builder()
+        .sender("org.bluez")
+        .and_then(|b| b.interface("org.freedesktop.DBus.Properties"))
+        .and_then(|b| b.member("PropertiesChanged"))
+        .and_then(|b| b.arg0ns("org.bluez.MediaPlayer1"))
+        .map(zbus::match_rule::Builder::build)
+        .ok()?;
+    Some(ArbiterRules {
+        props,
+        added,
+        removed,
+        player_props,
+    })
 }
 
 type DbusIfaces = HashMap<String, HashMap<String, OwnedValue>>;
@@ -446,17 +535,22 @@ struct ArbiterCtx<'a> {
     cover_art: Option<&'a crate::cover_provider::CoverArtShutdown>,
 }
 
+struct ArbiterStreams {
+    props: MessageStream,
+    added: MessageStream,
+    removed: MessageStream,
+    player_props: MessageStream,
+}
+
 async fn drive_arbiter_streams(
     state: &mut ActiveSourceState,
     ctx: &ArbiterCtx<'_>,
-    mut props_stream: MessageStream,
-    mut added_stream: MessageStream,
-    mut removed_stream: MessageStream,
+    mut streams: ArbiterStreams,
 ) {
     loop {
         tokio::select! {
             biased;
-            msg = added_stream.next() => {
+            msg = streams.added.next() => {
                 let Some(Ok(msg)) = msg else { break; };
                 if let Ok((path, ifaces)) = msg.body().deserialize::<(OwnedObjectPath, DbusIfaces)>()
                     && let Some(props) = ifaces.get("org.bluealsa.PCM1")
@@ -469,7 +563,7 @@ async fn drive_arbiter_streams(
                     apply_outcome(outcome, ctx).await;
                 }
             }
-            msg = removed_stream.next() => {
+            msg = streams.removed.next() => {
                 let Some(Ok(msg)) = msg else { break; };
                 if let Ok((path, ifaces)) = msg.body().deserialize::<(OwnedObjectPath, Vec<String>)>()
                     && ifaces.iter().any(|i| i == "org.bluealsa.PCM1")
@@ -478,7 +572,7 @@ async fn drive_arbiter_streams(
                     apply_outcome(outcome, ctx).await;
                 }
             }
-            msg = props_stream.next() => {
+            msg = streams.props.next() => {
                 let Some(Ok(msg)) = msg else { break; };
                 let Some(path) = msg.header().path().map(ToString::to_string) else { continue; };
                 if let Ok((iface, changed, _)) = msg.body().deserialize::<(Box<str>, HashMap<String, Value<'_>>, Vec<String>)>()
@@ -491,6 +585,17 @@ async fn drive_arbiter_streams(
                         let outcome = state.on_pcm_running_changed(&path, running);
                         apply_outcome(outcome, ctx).await;
                     }
+                }
+            }
+            msg = streams.player_props.next() => {
+                let Some(Ok(msg)) = msg else { break; };
+                let Some(path) = msg.header().path().map(ToString::to_string) else { continue; };
+                if let Some(addr) = device_address_from_path(&path)
+                    && let Ok((iface, changed, _)) = msg.body().deserialize::<(Box<str>, HashMap<String, Value<'_>>, Vec<String>)>()
+                    && iface.as_ref() == "org.bluez.MediaPlayer1"
+                    && let Some(status) = changed.get("Status").and_then(|v| <&str>::try_from(v).ok())
+                {
+                    state.on_player_status_changed(addr, status.eq_ignore_ascii_case("playing"));
                 }
             }
         }
@@ -528,7 +633,7 @@ pub async fn run_task(
     let shared = SharedActiveSource::new();
     let mut emitter = publish_active_source(&control_conn, &shared).await;
 
-    let Some((props_rule, added_rule, removed_rule)) = build_rules() else {
+    let Some(rules) = build_rules() else {
         tracing::error!("Failed to build active-source D-Bus match rules");
         return;
     };
@@ -557,11 +662,16 @@ pub async fn run_task(
         }
 
         let streams = tokio::try_join!(
-            MessageStream::for_match_rule(props_rule.clone(), &signal_conn, Some(PROPS_QUEUE)),
-            MessageStream::for_match_rule(added_rule.clone(), &signal_conn, Some(IFACE_QUEUE)),
-            MessageStream::for_match_rule(removed_rule.clone(), &signal_conn, Some(IFACE_QUEUE)),
+            MessageStream::for_match_rule(rules.props.clone(), &signal_conn, Some(PROPS_QUEUE)),
+            MessageStream::for_match_rule(rules.added.clone(), &signal_conn, Some(IFACE_QUEUE)),
+            MessageStream::for_match_rule(rules.removed.clone(), &signal_conn, Some(IFACE_QUEUE)),
+            MessageStream::for_match_rule(
+                rules.player_props.clone(),
+                &signal_conn,
+                Some(IFACE_QUEUE)
+            ),
         );
-        let Ok((props_stream, added_stream, removed_stream)) = streams else {
+        let Ok((props, added, removed, player_props)) = streams else {
             need_reconnect = true;
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
@@ -585,7 +695,17 @@ pub async fn run_task(
             seeded = true;
         }
 
-        drive_arbiter_streams(&mut state, &ctx, props_stream, added_stream, removed_stream).await;
+        drive_arbiter_streams(
+            &mut state,
+            &ctx,
+            ArbiterStreams {
+                props,
+                added,
+                removed,
+                player_props,
+            },
+        )
+        .await;
 
         need_reconnect = true;
         tracing::warn!("Active-source arbiter signal stream ended; reconnecting");

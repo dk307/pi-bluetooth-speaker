@@ -582,6 +582,17 @@ impl CoverArtWorker {
             self.pending_retry = None;
         }
 
+        let device_str = address.to_string();
+        if self
+            .state
+            .get()
+            .device()
+            .is_some_and(|prev| prev != device_str.as_str())
+        {
+            self.clear_published("active playback switched to another device")
+                .await;
+        }
+
         let transport = classify_obex_port(playback.obex_port);
         let mut playback = playback;
         let Some(epoch) = self

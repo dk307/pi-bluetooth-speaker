@@ -34,6 +34,7 @@ fn first_play_wins_and_pauses_shutout_once_per_transition() {
         ArbiterOutcome {
             active_changed: Some(Some(addr_a())),
             pause_device: None,
+            release_device: None,
         }
     );
     assert_eq!(state.active(), Some(addr_a()));
@@ -51,6 +52,7 @@ fn first_play_wins_and_pauses_shutout_once_per_transition() {
         ArbiterOutcome {
             active_changed: None,
             pause_device: Some(addr_b()),
+            release_device: None,
         }
     );
     assert_eq!(state.active(), Some(addr_a()));
@@ -68,8 +70,30 @@ fn first_play_wins_and_pauses_shutout_once_per_transition() {
         ArbiterOutcome {
             active_changed: None,
             pause_device: Some(addr_b()),
+            release_device: None,
         }
     );
+}
+
+#[test]
+fn paused_active_device_with_lingering_pcm_hands_over_to_new_player() {
+    let mut state = ActiveSourceState::new();
+    state.on_pcm_running_changed(PCM_A, true);
+    state.on_player_status_changed(addr_a(), false);
+
+    // Device A's PCM is still Running=true, but its AVRCP player is paused.
+    // Device B starting playback takes over immediately and releases A's
+    // lingering A2DP profile.
+    let out = state.on_pcm_running_changed(PCM_B, true);
+    assert_eq!(
+        out,
+        ArbiterOutcome {
+            active_changed: Some(Some(addr_b())),
+            pause_device: None,
+            release_device: Some(addr_a()),
+        }
+    );
+    assert_eq!(state.active(), Some(addr_b()));
 }
 
 #[test]
@@ -85,6 +109,7 @@ fn release_promotes_still_running_device_or_goes_idle() {
         ArbiterOutcome {
             active_changed: Some(Some(addr_b())),
             pause_device: None,
+            release_device: None,
         }
     );
     assert_eq!(state.active(), Some(addr_b()));
@@ -96,6 +121,7 @@ fn release_promotes_still_running_device_or_goes_idle() {
         ArbiterOutcome {
             active_changed: Some(None),
             pause_device: None,
+            release_device: None,
         }
     );
     assert_eq!(state.active(), None);
@@ -118,6 +144,7 @@ fn promotion_prefers_recent_client_delay_and_ignores_hfp() {
         ArbiterOutcome {
             active_changed: Some(Some(addr_b())),
             pause_device: None,
+            release_device: None,
         }
     );
 }
@@ -137,6 +164,7 @@ fn seed_handles_zero_one_and_two_running_pcms() {
         ArbiterOutcome {
             active_changed: Some(Some(addr_a())),
             pause_device: None,
+            release_device: None,
         }
     );
 

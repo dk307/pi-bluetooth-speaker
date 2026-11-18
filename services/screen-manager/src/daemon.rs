@@ -834,7 +834,8 @@ pub fn publish_playback_state(
     cover: &mut CoverState,
     settle: &mut Option<SettleWindow>,
 ) {
-    match bt.playback_state() {
+    let fallback_addr = last_pb.as_ref().and_then(|p| p.device_address);
+    match bt.playback_state_for(fallback_addr) {
         Ok(Some(ref pb)) => {
             // Force-publish one authoritative snapshot after the settle window
             // expires: if the command failed silently (or the peer never changed
@@ -847,6 +848,8 @@ pub fn publish_playback_state(
                 *settle = None;
                 *last_pb = None;
             }
+            let device_changed =
+                last_pb.as_ref().and_then(|p| p.device_address) != pb.device_address;
             let settling = settle.as_ref().is_some_and(|w| w.suppresses(pb));
             if !settling && last_pb.as_ref() != Some(pb) {
                 update.playback = Some(pb.clone());
@@ -863,7 +866,13 @@ pub fn publish_playback_state(
             let retry_due = cover
                 .failed_since
                 .is_some_and(|t| t.elapsed() >= COVER_DECODE_RETRY);
-            if (cover.path != cover_path || retry_due)
+            if cover_path.is_none() && device_changed && cover.path.is_some() {
+                // Switched to a device without cover art (e.g. a laptop with
+                // no BIP service): clear the previous device's artwork so the
+                // old phone's cover never lingers on top of the new track.
+                update.cover = Some(None);
+                *cover = CoverState::default();
+            } else if (cover.path != cover_path || retry_due)
                 && let Some(path) = cover_path.as_ref()
             {
                 if let Some(buffer) = decode_cover_buffer(path) {

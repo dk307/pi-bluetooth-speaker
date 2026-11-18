@@ -1718,13 +1718,20 @@ impl DbusClient {
     /// (a detached worker fetches into the disk cache and a later poll picks
     /// the file up), so a slow OBEX transfer never blocks track metadata.
     pub(crate) fn playback_state(&self) -> Result<Option<BtPlaybackState>, BtError> {
+        self.playback_state_for(None)
+    }
+
+    pub(crate) fn playback_state_for(
+        &self,
+        preferred: Option<BtAddress>,
+    ) -> Result<Option<BtPlaybackState>, BtError> {
         let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
             .destination("org.bluez")
             .and_then(|b| b.path("/"))
             .and_then(zbus::blocking::proxy::Builder::build)?;
         let objects = proxy.get_managed_objects()?;
-        let preferred = self.read_active_device();
-        let (_, _, playback) = Self::parse_bluez_all_for(&objects, None, preferred)?;
+        let effective = self.read_active_device().or(preferred);
+        let (_, _, playback) = Self::parse_bluez_all_for(&objects, None, effective)?;
         Ok(playback)
     }
 
@@ -2990,10 +2997,22 @@ impl BluetoothDevice {
     /// # Errors
     /// Returns [`BtError`] if querying fails.
     pub fn playback_state(&self) -> Result<Option<BtPlaybackState>, BtError> {
+        self.playback_state_for(None)
+    }
+
+    /// Returns the media player playback state, preferring the arbitrated
+    /// `ActiveDevice` first and falling back to `fallback` when idle.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if querying fails.
+    pub fn playback_state_for(
+        &self,
+        fallback: Option<BtAddress>,
+    ) -> Result<Option<BtPlaybackState>, BtError> {
         match &*self.backend {
             Backend::Mock(mock) => mock.playback_state(),
             Backend::Dbus(dbus) => {
-                let mut playback = dbus.playback_state()?;
+                let mut playback = dbus.playback_state_for(fallback)?;
                 dbus.resolve_cover_art(&mut playback);
                 Ok(playback)
             }
