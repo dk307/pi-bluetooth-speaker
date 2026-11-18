@@ -4,7 +4,6 @@
 use bt_manager::active_source::{
     ActiveSourceState, ArbiterOutcome, SharedActiveSource, serve_active_source_on,
 };
-use speaker_bluetooth::connection::DbusClient;
 use speaker_bluetooth::{
     ACTIVE_DEVICE_PROPERTY, ACTIVE_SOURCE_DBUS_NAME, ACTIVE_SOURCE_INTERFACE,
     ACTIVE_SOURCE_OBJECT_PATH, BluetoothDevice, BtAddress, device_address_from_path,
@@ -173,18 +172,40 @@ fn mock_device_tracks_active_source_and_targets_volume() {
     assert_eq!(bt.active_device(), Some(addr_b()));
 }
 
+struct PrivateDbusDaemon {
+    child: std::process::Child,
+    address: String,
+}
+
+impl PrivateDbusDaemon {
+    fn spawn() -> Self {
+        let mut child = std::process::Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("dbus-daemon must be installed for D-Bus integration tests");
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut address = String::new();
+        std::io::BufRead::read_line(&mut reader, &mut address).unwrap();
+        Self {
+            child,
+            address: address.trim().to_string(),
+        }
+    }
+}
+
+impl Drop for PrivateDbusDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 #[tokio::test]
 async fn dbus_active_device_property_round_trips_on_private_bus() {
-    let mut daemon = std::process::Command::new("dbus-daemon")
-        .args(["--session", "--nofork", "--print-address=1"])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .expect("dbus-daemon must be installed for D-Bus integration tests");
-    let stdout = daemon.stdout.take().unwrap();
-    let mut reader = std::io::BufReader::new(stdout);
-    let mut addr = String::new();
-    std::io::BufRead::read_line(&mut reader, &mut addr).unwrap();
-    let addr = addr.trim().to_string();
+    let daemon = PrivateDbusDaemon::spawn();
+    let addr = daemon.address.clone();
 
     let server_conn = zbus::connection::Builder::address(addr.as_str())
         .unwrap()
@@ -216,9 +237,8 @@ async fn dbus_active_device_property_round_trips_on_private_bus() {
     assert_eq!(parse_active_device(&prop), Some(addr_a()));
 
     // Blocking client reads the same property.
-    let addr_for_blocking = addr.clone();
     let read_back = tokio::task::spawn_blocking(move || {
-        let blocking = zbus::blocking::connection::Builder::address(addr_for_blocking.as_str())
+        let blocking = zbus::blocking::connection::Builder::address(addr.as_str())
             .unwrap()
             .build()
             .unwrap();
@@ -228,8 +248,4 @@ async fn dbus_active_device_property_round_trips_on_private_bus() {
     .await
     .unwrap();
     assert_eq!(read_back, Some(addr_a()));
-
-    let _ = daemon.kill();
-    let _ = daemon.wait();
-    let _ = DbusClient::extract_mac_from_pcm_path(PCM_A);
 }

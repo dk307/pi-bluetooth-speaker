@@ -369,7 +369,7 @@ async fn pause_remote_player(conn: &Connection, device: BtAddress) {
     match proxy.call_method("Pause", &()).await {
         Ok(_) => tracing::info!(%device, path = %player_path, "Paused shut-out Bluetooth player"),
         Err(e) => {
-            tracing::debug!(%device, path = %player_path, error = %e, "Failed to pause shut-out player");
+            tracing::warn!(%device, path = %player_path, error = %e, "Failed to pause shut-out player");
         }
     }
 }
@@ -378,7 +378,9 @@ async fn apply_outcome(outcome: ArbiterOutcome, ctx: &ArbiterCtx<'_>) {
     if let Some(new_active) = outcome.active_changed {
         ctx.shared.set(new_active);
         ctx.bt.set_active_source(new_active);
-        let _ = ctx.active_tx.send(new_active);
+        if ctx.active_tx.send(new_active).is_err() {
+            tracing::warn!(device = ?new_active, "Volume sync active-device receiver dropped");
+        }
         if let Some(cover_art) = ctx.cover_art {
             cover_art.wake();
         }
@@ -388,8 +390,9 @@ async fn apply_outcome(outcome: ArbiterOutcome, ctx: &ArbiterCtx<'_>) {
                 .object_server()
                 .interface::<_, ActiveSourceIface>(ACTIVE_SOURCE_OBJECT_PATH)
                 .await
+            && let Err(e) = iface_ref.get().await.active_device_changed(emitter).await
         {
-            let _ = iface_ref.get().await.active_device_changed(emitter).await;
+            tracing::warn!(error = %e, "Failed to emit ActiveDevice D-Bus property change");
         }
     }
     if let Some(addr) = outcome.pause_device {
@@ -553,19 +556,6 @@ pub async fn run_task(
             }
         }
 
-        let ctx = ArbiterCtx {
-            bt: &bt,
-            shared: &shared,
-            emitter: emitter.as_ref(),
-            active_tx: &active_tx,
-            control_conn: &control_conn,
-            cover_art: cover_art.as_ref(),
-        };
-        if !seeded {
-            seed_from_bt(&mut state, &ctx).await;
-            seeded = true;
-        }
-
         let streams = tokio::try_join!(
             MessageStream::for_match_rule(props_rule.clone(), &signal_conn, Some(PROPS_QUEUE)),
             MessageStream::for_match_rule(added_rule.clone(), &signal_conn, Some(IFACE_QUEUE)),
@@ -578,6 +568,22 @@ pub async fn run_task(
             continue;
         };
         backoff = RECONNECT_BACKOFF_BASE;
+
+        // Subscribe BEFORE seeding so no `Running` / `InterfacesAdded` /
+        // `InterfacesRemoved` signal can be missed between snapshot and stream
+        // registration (subscribe-then-snapshot).
+        let ctx = ArbiterCtx {
+            bt: &bt,
+            shared: &shared,
+            emitter: emitter.as_ref(),
+            active_tx: &active_tx,
+            control_conn: &control_conn,
+            cover_art: cover_art.as_ref(),
+        };
+        if !seeded {
+            seed_from_bt(&mut state, &ctx).await;
+            seeded = true;
+        }
 
         drive_arbiter_streams(&mut state, &ctx, props_stream, added_stream, removed_stream).await;
 
