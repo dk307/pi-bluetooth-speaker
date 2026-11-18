@@ -22,6 +22,7 @@ use crate::config::{
     VolumeStepPercent,
 };
 
+use super::backdrop::OVERLAY_TOP_INSET;
 use super::generated::{AppTheme, MainWindow, MarqueeCompose, TouchScale};
 use super::theme::ThemePreset;
 
@@ -285,6 +286,10 @@ impl AppShell {
             )),
         };
 
+        // One-shot seed, not runtime config: the blur pipeline crops at
+        // OVERLAY_TOP_INSET, so the overlay geometry in Slint must follow the
+        // same constant (the `60px` literal in appwindow.slint is preview-only).
+        shell.window.set_overlay_top_inset(OVERLAY_TOP_INSET as f32);
         shell.set_volume_step_percent(VolumeStepPercent::DEFAULT);
         shell.set_volume_hud_timeout_ms(VolumeHudTimeoutMs::DEFAULT);
         shell.set_volume_hud_fade_ms(VolumeHudFadeMs::DEFAULT);
@@ -438,6 +443,30 @@ impl AppShell {
     /// Immediately begins dismissing (fading out) the codec information overlay.
     pub fn dismiss_codec_hud(&self) {
         self.window.invoke_dismiss_codec_hud();
+    }
+
+    /// Publishes the blurred snapshot that the overlay panels render behind
+    /// themselves, replacing the previous screen with a frosted backdrop.
+    ///
+    /// Publishing a non-empty image also marks the backdrop as available, which
+    /// weakens the HUD scrim (the blur provides the separation); publishing an
+    /// empty image (the release path) restores full scrim dimming.
+    pub fn set_overlay_backdrop(&self, backdrop: slint::Image) {
+        let available = backdrop.size().width > 0;
+        self.window.set_overlay_backdrop(backdrop);
+        self.window.set_overlay_backdrop_available(available);
+    }
+
+    /// Returns `true` while the Volume HUD overlay owns the keyboard focus.
+    #[must_use]
+    pub fn volume_hud_has_focus(&self) -> bool {
+        self.window.get_volume_hud_has_focus()
+    }
+
+    /// Returns `true` while the codec information overlay owns the keyboard focus.
+    #[must_use]
+    pub fn codec_hud_has_focus(&self) -> bool {
+        self.window.get_codec_hud_has_focus()
     }
 
     /// Returns the Codec HUD auto-dismiss timeout.
@@ -1101,6 +1130,68 @@ impl AppShell {
     fn setup_callbacks(&self) {
         self.setup_navigation_callbacks();
         self.setup_transport_callbacks();
+        self.setup_overlay_backdrop_callback();
+    }
+
+    fn setup_overlay_backdrop_callback(&self) {
+        let win_weak = self.window.as_weak();
+        self.window.on_prepare_overlay_backdrop(move || {
+            let Some(win) = win_weak.upgrade() else {
+                return;
+            };
+            let top_inset = win.get_top_bar_height().round();
+            let top_inset = if top_inset.is_finite() && top_inset >= 0.0 {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "top_inset is finite, >= 0.0, and bounded by the window height"
+                )]
+                {
+                    top_inset as u32
+                }
+            } else {
+                OVERLAY_TOP_INSET
+            };
+            let snapshot = match win.window().take_snapshot() {
+                Ok(snapshot) => snapshot,
+                Err(err) => {
+                    tracing::debug!(
+                        error = %err,
+                        "Window snapshot unavailable for overlay backdrop; using scrim dimming"
+                    );
+                    return;
+                }
+            };
+            match super::backdrop::blur_full_rgba_backdrop(
+                snapshot.as_bytes(),
+                snapshot.width(),
+                snapshot.height(),
+                top_inset,
+                super::backdrop::BACKDROP_BLUR_RADIUS,
+                super::backdrop::OUTSIDE_BLUR_RADIUS,
+            ) {
+                Ok(blurred) => {
+                    let mut buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(
+                        blurred.width,
+                        blurred.height,
+                    );
+                    buffer.make_mut_bytes().copy_from_slice(&blurred.pixels);
+                    win.set_overlay_backdrop(slint::Image::from_rgba8_premultiplied(buffer));
+                    win.set_overlay_backdrop_available(true);
+                    tracing::debug!(
+                        width = blurred.width,
+                        height = blurred.height,
+                        "Captured blurred overlay backdrop from window snapshot"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "Failed to blur window snapshot; falling back to scrim dimming"
+                    );
+                }
+            }
+        });
     }
 
     fn setup_settings_callbacks(&self) {

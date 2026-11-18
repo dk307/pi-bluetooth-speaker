@@ -18,12 +18,18 @@ mod generated {
     slint::include_modules!();
 }
 
+pub(crate) mod backdrop;
 pub mod boot;
 pub(crate) mod framebuffer;
 pub mod runtime;
 pub(crate) mod shell;
 pub(crate) mod theme;
 
+#[doc(inline)]
+pub use backdrop::{
+    BACKDROP_BLUR_RADIUS, BackdropError, BlurredBackdrop, OUTSIDE_BLUR_RADIUS, OVERLAY_TOP_INSET,
+    blur_full_rgba_backdrop, blur_premultiplied_rgba,
+};
 #[doc(inline)]
 pub use boot::{BootCheckId, BootCheckStatus, BootCheckUpdate, BootProbe};
 #[doc(inline)]

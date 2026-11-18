@@ -312,6 +312,15 @@ impl Session {
                 shell_sync.wire_bluetooth_transport(&commands_sync);
             }
             daemon::apply_shared_bt_state(&shell_sync, &shared);
+            // Release the frozen backdrop once both overlays (and their fade-out)
+            // have finished closing so the next open captures a fresh snapshot.
+            if shell_sync.window().get_overlay_backdrop_available()
+                && !shell_sync.is_volume_hud_active()
+                && !shell_sync.is_codec_hud_active()
+            {
+                shell_sync.set_overlay_backdrop(slint::Image::default());
+                tracing::debug!("Cleared overlay backdrop");
+            }
         });
 
         // Physical EC12 encoder only exists on the live appliance (mocked
