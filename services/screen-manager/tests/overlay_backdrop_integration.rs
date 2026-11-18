@@ -13,8 +13,8 @@ use screen_manager::config::{MAX_VOLUME_HUD_FADE_MS, VolumeHudFadeMs};
 use screen_manager::daemon::sync_overlay_backdrop;
 use screen_manager::ui::{
     AppShell, BACKDROP_BLUR_RADIUS, BackdropAction, Bgrx8888Pixel, Framebuffer, MainWindow,
-    OVERLAY_TOP_INSET, OverlayBackdropTracker, bgrx_to_rgba, blur_premultiplied_rgba, blur_region,
-    blur_rgba_region,
+    OUTSIDE_BLUR_RADIUS, OVERLAY_TOP_INSET, OverlayBackdropTracker, bgrx_to_rgba,
+    blur_full_rgba_backdrop, blur_premultiplied_rgba, blur_region, blur_rgba_region,
 };
 use slint::platform::software_renderer::MinimalSoftwareWindow;
 use slint::platform::{PointerEventButton, WindowEvent};
@@ -462,7 +462,7 @@ fn the_blurred_backdrop_is_rendered_behind_the_overlay() {
     // a magenta-dominant pixel proves that the backdrop reached the framebuffer.
     let backdrop = solid_image(
         u32::try_from(WIDTH).expect("width fits in u32"),
-        u32::try_from(HEIGHT - OVERLAY_TOP_INSET as usize).expect("height fits in u32"),
+        u32::try_from(HEIGHT).expect("height fits in u32"),
         [255, 0, 255, 255],
     );
 
@@ -492,11 +492,11 @@ fn the_blurred_backdrop_is_rendered_behind_the_overlay() {
         after.blue
     );
 
-    // The top bar stays untouched: the backdrop only covers the viewport area.
+    // The top bar outside the overlay also receives the published backdrop.
     let bar = 30 * WIDTH + 20;
-    assert_eq!(
+    assert_ne!(
         with_backdrop[bar], without_backdrop[bar],
-        "the blurred backdrop must not cover the top status bar"
+        "the blurred backdrop must also cover the area outside the overlay"
     );
 }
 
@@ -516,7 +516,7 @@ fn the_scrim_dims_the_published_backdrop() {
     // (the regression this guards), the opaque image would hide the scrim and
     // the lift would be the full 0.25 * 255 ≈ 64 instead.
     let w = u32::try_from(WIDTH).expect("width fits in u32");
-    let h = u32::try_from(HEIGHT - OVERLAY_TOP_INSET as usize).expect("height fits in u32");
+    let h = u32::try_from(HEIGHT).expect("height fits in u32");
     let white = solid_image(w, h, [255, 255, 255, 255]);
     let black = solid_image(w, h, [0, 0, 0, 255]);
 
@@ -637,5 +637,50 @@ fn blur_rgba_region_crops_blurs_and_validates_geometry() {
     assert!(
         mid_r > 20 && mid_r < 200,
         "expected smoothed edge, got {mid_r}"
+    );
+}
+
+#[test]
+fn blur_full_rgba_backdrop_blurs_outside_more_than_inside() {
+    let err = blur_full_rgba_backdrop(&[0u8; 16], 10, 10, 2, 1, 2)
+        .expect_err("short RGBA buffer must be rejected");
+    assert!(err.is_geometry());
+
+    let valid = vec![255u8; 10 * 10 * 4];
+    let err = blur_full_rgba_backdrop(&valid, 10, 10, 11, 1, 2)
+        .expect_err("top inset exceeding frame height must be rejected");
+    assert!(err.is_geometry());
+
+    const {
+        assert!(OUTSIDE_BLUR_RADIUS > BACKDROP_BLUR_RADIUS);
+    }
+
+    let mut frame = vec![0u8; 64 * 40 * 4];
+    for y in 0..40 {
+        for x in 0..64 {
+            let idx = (y * 64 + x) * 4;
+            frame[idx] = if x < 32 { 220 } else { 20 };
+            frame[idx + 3] = 255;
+        }
+    }
+    let blurred = blur_full_rgba_backdrop(
+        &frame,
+        64,
+        40,
+        12,
+        BACKDROP_BLUR_RADIUS,
+        OUTSIDE_BLUR_RADIUS,
+    )
+    .expect("valid full RGBA backdrop blur");
+    assert_eq!(blurred.width, 64);
+    assert_eq!(blurred.height, 40);
+
+    // Away from the edge (x = 18, 14px left of the step), the larger outside
+    // radius spreads darkness farther than the smaller inside radius.
+    let outside_r = blurred.pixels[(6 * 64 + 18) * 4];
+    let inside_r = blurred.pixels[(26 * 64 + 18) * 4];
+    assert!(
+        outside_r < inside_r,
+        "outside region (r={OUTSIDE_BLUR_RADIUS}) must blur more than inside (r={BACKDROP_BLUR_RADIUS}): outside={outside_r}, inside={inside_r}"
     );
 }

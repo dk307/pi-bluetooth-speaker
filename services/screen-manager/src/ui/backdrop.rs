@@ -25,8 +25,11 @@ use super::framebuffer::Bgrx8888Pixel;
 /// backdrop snapshot starts at this row.
 pub const OVERLAY_TOP_INSET: u32 = 60;
 
-/// Blur radius, in pixels, applied to the captured backdrop.
-pub const BACKDROP_BLUR_RADIUS: u32 = 10;
+/// Blur radius, in pixels, applied to the backdrop behind the overlay panel.
+pub const BACKDROP_BLUR_RADIUS: u32 = 20;
+
+/// Blur radius, in pixels, applied to the area outside the overlay panel (the top bar).
+pub const OUTSIDE_BLUR_RADIUS: u32 = 32;
 
 /// A blurred, premultiplied RGBA snapshot of the screen region covered by an overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +144,69 @@ pub fn blur_rgba_region(
         width,
         height,
         pixels: cropped,
+    })
+}
+
+/// Blurs a full-frame RGBA8 snapshot, applying `outside_radius` to the area
+/// outside the overlay (`0..top_inset`) and `inside_radius` to the area behind
+/// the overlay (`top_inset..frame_height`).
+///
+/// `rgba` must hold exactly `frame_width * frame_height * 4` bytes.
+///
+/// # Errors
+///
+/// Returns [`BackdropError::geometry`] when the buffer length does not match the
+/// announced geometry or when `top_inset > frame_height`, and
+/// [`BackdropError::blur`] when the blur backend rejects either region.
+pub fn blur_full_rgba_backdrop(
+    rgba: &[u8],
+    frame_width: u32,
+    frame_height: u32,
+    top_inset: u32,
+    inside_radius: u32,
+    outside_radius: u32,
+) -> Result<BlurredBackdrop, BackdropError> {
+    let expected = (frame_width as usize) * (frame_height as usize) * 4;
+    if rgba.len() != expected {
+        return Err(BackdropError::geometry(
+            format!("{expected} bytes"),
+            format!("captured frame has {} bytes", rgba.len()),
+        ));
+    }
+    if top_inset > frame_height {
+        return Err(BackdropError::geometry(
+            format!("top inset <= {frame_height}"),
+            format!("top inset {top_inset} exceeds frame height {frame_height}"),
+        ));
+    }
+
+    let mut full = rgba.to_vec();
+    for alpha in full.iter_mut().skip(3).step_by(4) {
+        *alpha = 255;
+    }
+
+    let split_byte = top_inset as usize * frame_width as usize * 4;
+    if top_inset > 0 {
+        blur_premultiplied_rgba(
+            &mut full[..split_byte],
+            frame_width,
+            top_inset,
+            outside_radius,
+        )?;
+    }
+    if top_inset < frame_height {
+        blur_premultiplied_rgba(
+            &mut full[split_byte..],
+            frame_width,
+            frame_height - top_inset,
+            inside_radius,
+        )?;
+    }
+
+    Ok(BlurredBackdrop {
+        width: frame_width,
+        height: frame_height,
+        pixels: full,
     })
 }
 

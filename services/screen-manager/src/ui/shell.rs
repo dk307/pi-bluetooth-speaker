@@ -1133,12 +1133,13 @@ impl AppShell {
                     return;
                 }
             };
-            match super::backdrop::blur_rgba_region(
+            match super::backdrop::blur_full_rgba_backdrop(
                 snapshot.as_bytes(),
                 snapshot.width(),
                 snapshot.height(),
                 top_inset,
                 super::backdrop::BACKDROP_BLUR_RADIUS,
+                super::backdrop::OUTSIDE_BLUR_RADIUS,
             ) {
                 Ok(blurred) => {
                     let mut buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(

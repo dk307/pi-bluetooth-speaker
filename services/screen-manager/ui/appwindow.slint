@@ -358,30 +358,30 @@ export component MainWindow inherits Window {
             }
         }
 
-        // Blurred backdrop — the frozen, blurred snapshot of the screen that the
-        // overlay is covering. It sits directly on the background, BELOW the
-        // scrim, so the scrim's 0.25 dimming renders on top of the blur. Published
-        // by Rust when an overlay opens. By design it is not refreshed while the
-        // overlay stays open: content changes underneath only appear after a reopen.
+        // Blurred backdrop — the frozen, blurred snapshot of the entire screen
+        // (including the top bar outside the overlay, blurred more strongly).
+        // It sits directly on the background, BELOW the scrim, so the scrim's
+        // 0.25 dimming renders on top of the blur. Published by Rust when an
+        // overlay opens. By design it is not refreshed while the overlay stays
+        // open: content changes underneath only appear after a reopen.
         hud_backdrop := Image {
-            y: root.top_bar_height;
+            y: 0;
             width: 100%;
-            height: parent.height - root.top_bar_height;
+            height: 100%;
             source: root.overlay_backdrop;
             opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity);
             visible: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) > 0.01;
         }
 
-        // HUD scrim (above the backdrop) — covers only the viewport area below
-        // the top-bar slot: an overlay overlays content, never the top bar.
-        // The dimming adapts to backdrop availability: 0.25 when a blurred
-        // backdrop is published (the blur provides most of the separation),
-        // falling back to the pre-backdrop 0.55 when none is — e.g. on the KMS
-        // backend, where no CPU-readable scanout exists to blur.
+        // HUD scrim (above the backdrop) — dims the entire screen behind the
+        // overlay (including the top bar outside the overlay). The dimming
+        // adapts to backdrop availability: 0.25 when a blurred backdrop is
+        // published (the blur provides most of the separation), falling back
+        // to the pre-backdrop 0.55 when none is — e.g. if snapshot capture fails.
         hud_scrim := Rectangle {
-            y: root.top_bar_height;
+            y: 0;
             width: 100%;
-            height: parent.height - root.top_bar_height;
+            height: 100%;
             background: #000000;
             opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity)
                 * (root.overlay_backdrop_available ? 0.25 : 0.55);
