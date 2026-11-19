@@ -1315,9 +1315,7 @@ where
         let mut params = vec![0u8; param_len];
         tokio::time::timeout(SDP_QUERY_TIMEOUT, stream.read_exact(&mut params))
             .await
-            .map_err(|e| {
-                BipError::sdp_lookup_details(format!("SDP response body timed out: {e}"))
-            })?
+            .map_err(|e| BipError::sdp_lookup_details(format!("SDP response body timed out: {e}")))?
             .map_err(|e| {
                 BipError::sdp_lookup_details(format!("SDP response body read failed: {e}"))
             })?;
@@ -1431,8 +1429,9 @@ fn read_sdp_element(input: &[u8]) -> Result<(SdpElement<'_>, &[u8]), BipError> {
                 .split_at_checked(4)
                 .ok_or_else(|| BipError::sdp_lookup_details("truncated SDP 4-byte length"))?;
             let len = u32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
-            let len_usize = usize::try_from(len)
-                .map_err(|e| BipError::sdp_lookup_details(format!("SDP element length overflow: {e}")))?;
+            let len_usize = usize::try_from(len).map_err(|e| {
+                BipError::sdp_lookup_details(format!("SDP element length overflow: {e}"))
+            })?;
             (len_usize, rest)
         }
         _ => unreachable!("size_idx is masked to 3 bits"),

@@ -984,9 +984,10 @@ pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
                 .build())
         },
         |message| {
-            let Ok((_, changed, _)) = message
-                .body()
-                .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+            let Ok((_, changed, _)) =
+                message
+                    .body()
+                    .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
             else {
                 return false;
             };
@@ -1011,13 +1012,17 @@ pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
                 .build())
         },
         |message| {
-            let Ok((_, changed, _)) = message
-                .body()
-                .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+            let Ok((_, changed, _)) =
+                message
+                    .body()
+                    .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
             else {
                 return false;
             };
-            changed.get("Connected").and_then(|v| bool::try_from(v).ok()) == Some(true)
+            changed
+                .get("Connected")
+                .and_then(|v| bool::try_from(v).ok())
+                == Some(true)
                 || changed
                     .get("ServicesResolved")
                     .and_then(|v| bool::try_from(v).ok())
