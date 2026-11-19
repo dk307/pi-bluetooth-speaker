@@ -104,6 +104,36 @@ fn catalog_step_and_toggle_helpers_clamp_and_format() {
     assert_eq!(state.value_text, "2 %");
     assert!(state.can_decrease);
     assert!(state.can_increase);
+
+    // Exercise upper-bound and lower-bound clamping for every Stepper setting.
+    for desc in SETTINGS_CATALOG {
+        let SettingControl::Stepper { min, max, step, .. } = desc.control else {
+            continue;
+        };
+        let steps_to_max = ((max - min) / step) + 5;
+        let mut c = CoreConfig::default();
+        for _ in 0..steps_to_max {
+            assert!(apply_step(&mut c, desc.id, 1));
+        }
+        let at_max = row_state(&c, desc);
+        assert!(!at_max.can_increase, "{:?} should clamp at max", desc.id);
+        assert!(
+            at_max.can_decrease,
+            "{:?} should allow decrease at max",
+            desc.id
+        );
+
+        for _ in 0..steps_to_max {
+            assert!(apply_step(&mut c, desc.id, -1));
+        }
+        let at_min = row_state(&c, desc);
+        assert!(!at_min.can_decrease, "{:?} should clamp at min", desc.id);
+        assert!(
+            at_min.can_increase,
+            "{:?} should allow increase at min",
+            desc.id
+        );
+    }
 }
 
 #[test]

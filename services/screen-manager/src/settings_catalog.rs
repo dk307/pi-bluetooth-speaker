@@ -51,6 +51,16 @@ pub enum SettingId {
 }
 
 impl SettingId {
+    /// All variants of [`SettingId`], used to prove catalog completeness at compile time.
+    pub const ALL: [Self; 6] = [
+        Self::TitleDisplayMode,
+        Self::MarqueeFps,
+        Self::VolumeStepPercent,
+        Self::VolumeHudTimeoutMs,
+        Self::VolumeHudFadeMs,
+        Self::CodecHudTimeoutMs,
+    ];
+
     /// Stable slug key used to identify this setting across the Rust/Slint boundary.
     #[must_use]
     pub const fn key(self) -> &'static str {
@@ -67,15 +77,10 @@ impl SettingId {
     /// Parses a setting slug key back into [`SettingId`], returning `None` if unknown.
     #[must_use]
     pub fn from_key(key: &str) -> Option<Self> {
-        match key {
-            "title_display_mode" => Some(Self::TitleDisplayMode),
-            "marquee_fps" => Some(Self::MarqueeFps),
-            "volume_step_percent" => Some(Self::VolumeStepPercent),
-            "volume_hud_timeout_ms" => Some(Self::VolumeHudTimeoutMs),
-            "volume_hud_fade_ms" => Some(Self::VolumeHudFadeMs),
-            "codec_hud_timeout_ms" => Some(Self::CodecHudTimeoutMs),
-            _ => None,
-        }
+        SETTINGS_CATALOG
+            .iter()
+            .find(|desc| desc.key() == key)
+            .map(|desc| desc.id)
     }
 }
 
@@ -196,6 +201,8 @@ pub const SETTINGS_CATALOG: &[SettingDescriptor] = &[
 ];
 
 const _: () = {
+    assert!(SETTINGS_CATALOG.len() == SettingId::ALL.len());
+
     let mut i = 0;
     while i < SETTINGS_CATALOG.len() {
         let desc = &SETTINGS_CATALOG[i];
@@ -204,6 +211,25 @@ const _: () = {
             assert!(step > 0, "stepper step must be positive");
         }
         i += 1;
+    }
+
+    // Prove every SettingId variant appears exactly once in SETTINGS_CATALOG.
+    let mut v = 0;
+    while v < SettingId::ALL.len() {
+        let target = SettingId::ALL[v];
+        let mut count = 0usize;
+        let mut j = 0;
+        while j < SETTINGS_CATALOG.len() {
+            if SETTINGS_CATALOG[j].id as u8 == target as u8 {
+                count += 1;
+            }
+            j += 1;
+        }
+        assert!(
+            count == 1,
+            "every SettingId must appear once in SETTINGS_CATALOG"
+        );
+        v += 1;
     }
 };
 
