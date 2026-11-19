@@ -969,6 +969,97 @@ const SIGNAL_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 ///
 /// Subscribes and listens until the connection dies or the process exits.
 pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
+    // 1. Wake on MediaPlayer1.Track changes (new track / ImgHandle updates).
+    spawn_bluez_signal_loop(
+        connection.clone(),
+        Arc::clone(&wake),
+        "track",
+        || {
+            Ok(zbus::MatchRule::builder()
+                .msg_type(zbus::message::Type::Signal)
+                .sender("org.bluez")?
+                .interface("org.freedesktop.DBus.Properties")?
+                .member("PropertiesChanged")?
+                .arg0ns("org.bluez.MediaPlayer1")?
+                .build())
+        },
+        |message| {
+            let Ok((_, changed, _)) = message
+                .body()
+                .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+            else {
+                return false;
+            };
+            changed.contains_key("Track")
+        },
+    );
+
+    // 2. Wake immediately on Device1 Connected / ServicesResolved so the BIP
+    //    session is established BEFORE BlueZ queries GetElementAttributes
+    //    (AOSP omits ImgHandle unless a BIP session is already open).
+    spawn_bluez_signal_loop(
+        connection.clone(),
+        Arc::clone(&wake),
+        "device-connect",
+        || {
+            Ok(zbus::MatchRule::builder()
+                .msg_type(zbus::message::Type::Signal)
+                .sender("org.bluez")?
+                .interface("org.freedesktop.DBus.Properties")?
+                .member("PropertiesChanged")?
+                .arg0ns("org.bluez.Device1")?
+                .build())
+        },
+        |message| {
+            let Ok((_, changed, _)) = message
+                .body()
+                .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+            else {
+                return false;
+            };
+            changed.get("Connected").and_then(|v| bool::try_from(v).ok()) == Some(true)
+                || changed
+                    .get("ServicesResolved")
+                    .and_then(|v| bool::try_from(v).ok())
+                    == Some(true)
+        },
+    );
+
+    // 3. Wake when BlueZ publishes a new MediaPlayer1 object.
+    spawn_bluez_signal_loop(
+        connection,
+        wake,
+        "interfaces-added",
+        || {
+            Ok(zbus::MatchRule::builder()
+                .msg_type(zbus::message::Type::Signal)
+                .sender("org.bluez")?
+                .interface("org.freedesktop.DBus.ObjectManager")?
+                .member("InterfacesAdded")?
+                .build())
+        },
+        |message| {
+            let Ok((_, ifaces)) = message.body().deserialize::<(
+                zbus::zvariant::OwnedObjectPath,
+                HashMap<String, HashMap<String, OwnedValue>>,
+            )>() else {
+                return false;
+            };
+            ifaces.contains_key("org.bluez.MediaPlayer1")
+        },
+    );
+}
+
+fn spawn_bluez_signal_loop<F, P>(
+    connection: zbus::Connection,
+    wake: Arc<Notify>,
+    label: &'static str,
+    build_rule: F,
+    should_wake: P,
+) where
+    F: Fn() -> Result<zbus::MatchRule<'static>, zbus::Error> + Send + 'static,
+    P: Fn(&zbus::Message) -> bool + Send + 'static,
+{
     tokio::spawn(async move {
         let mut failures: u32 = 0;
         let delay = |failures: u32| {
@@ -978,21 +1069,10 @@ pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
                 .min(SIGNAL_RECONNECT_MAX_BACKOFF)
         };
         loop {
-            // All rule-builder setters are fallible; the closure gives them
-            // a `?` context inside the reconnect loop (no task-local `?`).
-            let build_rule = || -> Result<_, zbus::Error> {
-                Ok(zbus::MatchRule::builder()
-                    .msg_type(zbus::message::Type::Signal)
-                    .sender("org.bluez")?
-                    .interface("org.freedesktop.DBus.Properties")?
-                    .member("PropertiesChanged")?
-                    .arg0ns("org.bluez.MediaPlayer1")?
-                    .build())
-            };
             let rule = match build_rule() {
                 Ok(rule) => rule,
                 Err(e) => {
-                    tracing::error!(error = %e, "track signal match rule failed to build");
+                    tracing::error!(signal = label, error = %e, "signal match rule failed to build");
                     return;
                 }
             };
@@ -1001,9 +1081,10 @@ pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
                     Ok(stream) => stream,
                     Err(e) => {
                         tracing::warn!(
+                            signal = label,
                             error = %e,
                             retry_in_ms = delay(failures).as_millis() as u64,
-                            "track signal subscription failed; reconnecting after backoff"
+                            "signal subscription failed; reconnecting after backoff"
                         );
                         tokio::time::sleep(delay(failures)).await;
                         failures = failures.saturating_add(1);
@@ -1014,35 +1095,24 @@ pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
                 match stream.next().await {
                     Some(Ok(message)) => {
                         failures = 0;
-                        // PropertiesChanged body: (interface, changed, invalidated)
-                        match message
-                            .body()
-                            .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
-                        {
-                            Ok((_, changed, _)) if changed.contains_key("Track") => {
-                                wake.notify_one();
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::debug!(
-                                    error = %e,
-                                    "ignoring malformed `BlueZ` PropertiesChanged"
-                                );
-                            }
+                        if should_wake(&message) {
+                            wake.notify_one();
                         }
                     }
                     Some(Err(e)) => {
                         tracing::warn!(
+                            signal = label,
                             error = %e,
                             retry_in_ms = delay(failures).as_millis() as u64,
-                            "track signal stream failed; reconnecting after backoff"
+                            "signal stream failed; reconnecting after backoff"
                         );
                         break;
                     }
                     None => {
                         tracing::warn!(
+                            signal = label,
                             retry_in_ms = delay(failures).as_millis() as u64,
-                            "track signal stream closed; reconnecting after backoff"
+                            "signal stream closed; reconnecting after backoff"
                         );
                         break;
                     }

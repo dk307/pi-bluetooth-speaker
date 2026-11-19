@@ -142,6 +142,13 @@ impl BipError {
     }
 
     #[must_use]
+    pub fn sdp_lookup_details(details: impl Into<Box<str>>) -> Self {
+        Self::new(BipErrorKind::SdpLookup {
+            details: details.into(),
+        })
+    }
+
+    #[must_use]
     pub fn service_not_found(address: impl Into<Box<str>>) -> Self {
         Self::new(BipErrorKind::ServiceNotFound {
             address: address.into(),
@@ -344,6 +351,16 @@ mod bip_socket_core {
 
     #[async_trait::async_trait]
     pub trait BipSocketCore: Send + Sync {
+        /// SDP lookup of the AVRCP Target (`0x110C`) `AdditionalProtocolDescriptorLists`
+        /// (`0x000d`) OBEX L2CAP PSM (`None` when absent).
+        #[expect(
+            clippy::double_must_use,
+            reason = "async_trait adds #[must_use] to the boxed-future signature while the Result output is already must_use"
+        )]
+        async fn sdp_avrcp_obex_l2cap_psm(&self, _address: &str) -> Result<Option<u16>, BipError> {
+            Ok(None)
+        }
+
         /// SDP lookup of the BIP Image Pull RFCOMM channel (`None` when the
         /// device publishes no such service record).
         #[expect(
@@ -387,6 +404,10 @@ pub(crate) struct BluerSocketCore;
 
 #[async_trait::async_trait]
 impl BipSocketCore for BluerSocketCore {
+    async fn sdp_avrcp_obex_l2cap_psm(&self, address: &str) -> Result<Option<u16>, BipError> {
+        query_avrcp_obex_l2cap_psm(address).await
+    }
+
     async fn sdp_bip_rfcomm_channel(&self, address: &str) -> Result<Option<u8>, BipError> {
         bluesdp::query_rfcomm_channel(address, bluesdp::Uuid16(BIP_IMAGE_PULL_UUID16))
             .await
@@ -503,18 +524,33 @@ impl BipChannel for RfcommBipChannel {
     async fn open(&self, address: &BtAddress) -> Result<BipStream, BipError> {
         let canonical = address.to_string();
         let started = Instant::now();
-        let channel = if let Some(channel) = self.known_channel {
+        if let Some(channel) = self.known_channel {
             tracing::debug!(
                 address = %canonical,
                 channel,
                 "using known BIP RFCOMM channel (BlueZ ObexPort)"
             );
-            channel
-        } else {
-            tracing::debug!(address = %canonical, "SDP: querying BIP Image Pull service record");
-            let sdp_result = self.core.sdp_bip_rfcomm_channel(&canonical).await?;
-            resolve_sdp_channel(&canonical, started.elapsed().as_millis() as u64, sdp_result)?
-        };
+            return self.core.connect_rfcomm(address, channel).await;
+        }
+
+        tracing::debug!(
+            address = %canonical,
+            "SDP: querying AVRCP Target (0x110C) for OBEX L2CAP PSM"
+        );
+        if let Some(psm) = self.core.sdp_avrcp_obex_l2cap_psm(&canonical).await? {
+            tracing::info!(
+                address = %canonical,
+                psm,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "SDP resolved AVRCP Cover Art OBEX L2CAP PSM"
+            );
+            return self.core.connect_l2cap(address, psm).await;
+        }
+
+        tracing::debug!(address = %canonical, "SDP: querying BIP Image Pull service record");
+        let sdp_result = self.core.sdp_bip_rfcomm_channel(&canonical).await?;
+        let channel =
+            resolve_sdp_channel(&canonical, started.elapsed().as_millis() as u64, sdp_result)?;
         self.core.connect_rfcomm(address, channel).await
     }
 }
@@ -1209,5 +1245,473 @@ fn map_obex_failure(operation: &'static str, error: ObexError) -> BipError {
     } else {
         tracing::warn!(operation, error = %error, "BIP operation failed");
         BipError::obex(error)
+    }
+}
+
+const SDP_PSM: u16 = 0x0001;
+const SDP_PDU_ERROR_RESPONSE: u8 = 0x01;
+const SDP_PDU_SERVICE_SEARCH_ATTR_REQ: u8 = 0x06;
+const SDP_PDU_SERVICE_SEARCH_ATTR_RSP: u8 = 0x07;
+const SDP_AVRCP_TARGET_UUID16: u16 = 0x110C;
+const SDP_ATTR_ADDITIONAL_PROTO_DESC_LISTS: u16 = 0x000D;
+const SDP_UUID16_L2CAP: u16 = 0x0100;
+const SDP_UUID16_OBEX: u16 = 0x0008;
+const SDP_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn query_avrcp_obex_l2cap_psm(address: &str) -> Result<Option<u16>, BipError> {
+    let bt_addr: BtAddress = address
+        .parse()
+        .map_err(|e| BipError::sdp_lookup_details(format!("invalid BT address {address}: {e}")))?;
+    let socket_addr = bluer::l2cap::SocketAddr::new(
+        bluer::Address(*bt_addr.as_bytes()),
+        bluer::AddressType::BrEdr,
+        SDP_PSM,
+    );
+    let mut stream = tokio::time::timeout(
+        SDP_QUERY_TIMEOUT,
+        bluer::l2cap::Stream::connect(socket_addr),
+    )
+    .await
+    .map_err(|e| BipError::sdp_lookup_details(format!("SDP L2CAP connect timed out: {e}")))?
+    .map_err(|e| BipError::sdp_lookup_details(format!("SDP L2CAP connect failed: {e}")))?;
+
+    query_avrcp_obex_l2cap_psm_on(&mut stream).await
+}
+
+async fn query_avrcp_obex_l2cap_psm_on<S>(stream: &mut S) -> Result<Option<u16>, BipError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut transaction_id: u16 = 0;
+    let mut continuation: Vec<u8> = Vec::new();
+    let mut attribute_bytes: Vec<u8> = Vec::new();
+
+    loop {
+        let req = build_sdp_service_search_attr_req(
+            transaction_id,
+            SDP_AVRCP_TARGET_UUID16,
+            SDP_ATTR_ADDITIONAL_PROTO_DESC_LISTS,
+            &continuation,
+        );
+        tokio::time::timeout(SDP_QUERY_TIMEOUT, stream.write_all(&req))
+            .await
+            .map_err(|e| BipError::sdp_lookup_details(format!("SDP request write timed out: {e}")))?
+            .map_err(|e| BipError::sdp_lookup_details(format!("SDP request write failed: {e}")))?;
+
+        let mut hdr = [0u8; 5];
+        tokio::time::timeout(SDP_QUERY_TIMEOUT, stream.read_exact(&mut hdr))
+            .await
+            .map_err(|e| {
+                BipError::sdp_lookup_details(format!("SDP response header timed out: {e}"))
+            })?
+            .map_err(|e| {
+                BipError::sdp_lookup_details(format!("SDP response header read failed: {e}"))
+            })?;
+
+        let pdu_id = hdr[0];
+        let param_len = u16::from_be_bytes([hdr[3], hdr[4]]) as usize;
+        let mut params = vec![0u8; param_len];
+        tokio::time::timeout(SDP_QUERY_TIMEOUT, stream.read_exact(&mut params))
+            .await
+            .map_err(|e| {
+                BipError::sdp_lookup_details(format!("SDP response body timed out: {e}"))
+            })?
+            .map_err(|e| {
+                BipError::sdp_lookup_details(format!("SDP response body read failed: {e}"))
+            })?;
+
+        if pdu_id == SDP_PDU_ERROR_RESPONSE {
+            return Err(BipError::sdp_lookup_details(
+                "SDP server returned ErrorResponse",
+            ));
+        }
+        if pdu_id != SDP_PDU_SERVICE_SEARCH_ATTR_RSP {
+            return Err(BipError::sdp_lookup_details(format!(
+                "unexpected SDP PDU id 0x{pdu_id:02x}"
+            )));
+        }
+
+        let (chunk, next_cont) = parse_sdp_service_search_attr_rsp_params(&params)?;
+        attribute_bytes.extend_from_slice(chunk);
+        if next_cont.is_empty() {
+            break;
+        }
+        continuation = next_cont.to_vec();
+        transaction_id = transaction_id.wrapping_add(1);
+    }
+
+    parse_avrcp_obex_l2cap_psm_from_attr_lists(&attribute_bytes)
+}
+
+fn build_sdp_service_search_attr_req(
+    transaction_id: u16,
+    service_uuid16: u16,
+    attr_id: u16,
+    continuation: &[u8],
+) -> Vec<u8> {
+    let cont_len = u8::try_from(continuation.len()).unwrap_or(0);
+    let param_len = 13u16.saturating_add(u16::from(cont_len));
+    let mut buf = Vec::with_capacity(5 + usize::from(param_len));
+    buf.push(SDP_PDU_SERVICE_SEARCH_ATTR_REQ);
+    buf.extend_from_slice(&transaction_id.to_be_bytes());
+    buf.extend_from_slice(&param_len.to_be_bytes());
+    // ServiceSearchPattern: Sequence [ UUID16(service_uuid16) ]
+    buf.extend_from_slice(&[0x35, 0x03, 0x19]);
+    buf.extend_from_slice(&service_uuid16.to_be_bytes());
+    // MaximumAttributeByteCount
+    buf.extend_from_slice(&0xFFFFu16.to_be_bytes());
+    // AttributeIDList: Sequence [ Uint16(attr_id) ]
+    buf.extend_from_slice(&[0x35, 0x03, 0x09]);
+    buf.extend_from_slice(&attr_id.to_be_bytes());
+    // ContinuationState
+    buf.push(cont_len);
+    buf.extend_from_slice(&continuation[..usize::from(cont_len)]);
+    buf
+}
+
+fn parse_sdp_service_search_attr_rsp_params(params: &[u8]) -> Result<(&[u8], &[u8]), BipError> {
+    let (len_bytes, rest) = params.split_at_checked(2).ok_or_else(|| {
+        BipError::sdp_lookup_details("SDP response missing AttributeListsByteCount")
+    })?;
+    let attr_len = usize::from(u16::from_be_bytes([len_bytes[0], len_bytes[1]]));
+    let (attr_bytes, cont_part) = rest
+        .split_at_checked(attr_len)
+        .ok_or_else(|| BipError::sdp_lookup_details("SDP response truncated AttributeLists"))?;
+    let (&cont_len, cont_bytes) = cont_part
+        .split_first()
+        .ok_or_else(|| BipError::sdp_lookup_details("SDP response missing ContinuationState"))?;
+    if cont_bytes.len() < usize::from(cont_len) {
+        return Err(BipError::sdp_lookup_details(
+            "SDP response truncated ContinuationState",
+        ));
+    }
+    Ok((attr_bytes, &cont_bytes[..usize::from(cont_len)]))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SdpElement<'a> {
+    Uint(u64),
+    Uuid16(u16),
+    Sequence(&'a [u8]),
+    Other,
+}
+
+fn read_sdp_element(input: &[u8]) -> Result<(SdpElement<'_>, &[u8]), BipError> {
+    let (&desc, after_desc) = input
+        .split_first()
+        .ok_or_else(|| BipError::sdp_lookup_details("unexpected EOF in SDP DataElement"))?;
+    let type_desc = desc >> 3;
+    let size_idx = desc & 0x07;
+
+    let (payload_len, after_len) = match size_idx {
+        0 => (usize::from(type_desc != 0), after_desc),
+        1 => (2, after_desc),
+        2 => (4, after_desc),
+        3 => (8, after_desc),
+        4 => (16, after_desc),
+        5 => {
+            let (&len, rest) = after_desc
+                .split_first()
+                .ok_or_else(|| BipError::sdp_lookup_details("truncated SDP 1-byte length"))?;
+            (usize::from(len), rest)
+        }
+        6 => {
+            let (len_bytes, rest) = after_desc
+                .split_at_checked(2)
+                .ok_or_else(|| BipError::sdp_lookup_details("truncated SDP 2-byte length"))?;
+            (
+                usize::from(u16::from_be_bytes([len_bytes[0], len_bytes[1]])),
+                rest,
+            )
+        }
+        7 => {
+            let (len_bytes, rest) = after_desc
+                .split_at_checked(4)
+                .ok_or_else(|| BipError::sdp_lookup_details("truncated SDP 4-byte length"))?;
+            let len = u32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
+            let len_usize = usize::try_from(len)
+                .map_err(|e| BipError::sdp_lookup_details(format!("SDP element length overflow: {e}")))?;
+            (len_usize, rest)
+        }
+        _ => unreachable!("size_idx is masked to 3 bits"),
+    };
+
+    let (payload, rest) = after_len
+        .split_at_checked(payload_len)
+        .ok_or_else(|| BipError::sdp_lookup_details("truncated SDP element payload"))?;
+
+    let elem = match type_desc {
+        // Unsigned int
+        1 => {
+            let mut val = 0u64;
+            for &b in payload {
+                val = (val << 8) | u64::from(b);
+            }
+            SdpElement::Uint(val)
+        }
+        // UUID
+        3 if payload.len() == 2 => SdpElement::Uuid16(u16::from_be_bytes([payload[0], payload[1]])),
+        // DataElementSequence or DataElementAlternative
+        6 | 7 => SdpElement::Sequence(payload),
+        _ => SdpElement::Other,
+    };
+
+    Ok((elem, rest))
+}
+
+fn parse_avrcp_obex_l2cap_psm_from_attr_lists(
+    attr_lists_bytes: &[u8],
+) -> Result<Option<u16>, BipError> {
+    if attr_lists_bytes.is_empty() {
+        return Ok(None);
+    }
+    let (top_elem, _) = read_sdp_element(attr_lists_bytes)?;
+    let SdpElement::Sequence(mut records) = top_elem else {
+        return Ok(None);
+    };
+
+    while !records.is_empty() {
+        let (rec_elem, next_records) = read_sdp_element(records)?;
+        records = next_records;
+        let SdpElement::Sequence(mut attrs) = rec_elem else {
+            continue;
+        };
+
+        while !attrs.is_empty() {
+            let (id_elem, after_id) = read_sdp_element(attrs)?;
+            let (val_elem, next_attrs) = read_sdp_element(after_id)?;
+            attrs = next_attrs;
+            if matches!(id_elem, SdpElement::Uint(v) if v == u64::from(SDP_ATTR_ADDITIONAL_PROTO_DESC_LISTS))
+                && let SdpElement::Sequence(add_lists) = val_elem
+                && let Some(psm) = extract_obex_l2cap_psm(add_lists)?
+            {
+                return Ok(Some(psm));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn extract_obex_l2cap_psm(mut add_lists: &[u8]) -> Result<Option<u16>, BipError> {
+    while !add_lists.is_empty() {
+        let (stack_elem, next_lists) = read_sdp_element(add_lists)?;
+        add_lists = next_lists;
+        let SdpElement::Sequence(mut stack) = stack_elem else {
+            continue;
+        };
+
+        let mut has_obex = false;
+        let mut l2cap_psm: Option<u16> = None;
+
+        while !stack.is_empty() {
+            let (proto_elem, next_stack) = read_sdp_element(stack)?;
+            stack = next_stack;
+            let SdpElement::Sequence(mut fields) = proto_elem else {
+                continue;
+            };
+            if fields.is_empty() {
+                continue;
+            }
+            let (uuid_elem, rest_fields) = read_sdp_element(fields)?;
+            fields = rest_fields;
+            match uuid_elem {
+                SdpElement::Uuid16(SDP_UUID16_OBEX) => has_obex = true,
+                SdpElement::Uuid16(SDP_UUID16_L2CAP) if !fields.is_empty() => {
+                    let (psm_elem, _) = read_sdp_element(fields)?;
+                    if let SdpElement::Uint(v) = psm_elem
+                        && let Ok(psm) = u16::try_from(v)
+                        && psm > 0
+                    {
+                        l2cap_psm = Some(psm);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if has_obex && let Some(psm) = l2cap_psm {
+            return Ok(Some(psm));
+        }
+    }
+
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn parses_pixel_0x110c_additional_protocol_descriptor_lists_psm_4097() -> Result<(), String> {
+        // Real AdditionalProtocolDescriptorLists (0x000d) bytes from Pixel 10 Pro XL 0x110C record:
+        // Sequence [
+        //   Sequence [ (L2CAP, 0x001b), (AVCTP, 0x0104) ],
+        //   Sequence [ (L2CAP, 0x1001), (OBEX) ]
+        // ]
+        let attr_lists: &[u8] = &[
+            0x35, 0x28, // top Sequence (40 bytes)
+            0x35, 0x26, // record 0 Sequence (38 bytes)
+            0x09, 0x00, 0x0D, // attr id 0x000D
+            0x35, 0x21, // attr value Sequence (33 bytes)
+            // Stack 1: AVCTP browsing (L2CAP 0x001b, AVCTP 0x0104)
+            0x35, 0x10, 0x35, 0x06, 0x19, 0x01, 0x00, 0x09, 0x00, 0x1B, 0x35, 0x06, 0x19, 0x00,
+            0x17, 0x09, 0x01, 0x04, // Stack 2: Cover Art BIP (L2CAP 0x1001, OBEX)
+            0x35, 0x0D, 0x35, 0x06, 0x19, 0x01, 0x00, 0x09, 0x10, 0x01, 0x35, 0x03, 0x19, 0x00,
+            0x08,
+        ];
+
+        let psm =
+            parse_avrcp_obex_l2cap_psm_from_attr_lists(attr_lists).map_err(|e| e.to_string())?;
+        assert_eq!(psm, Some(4097));
+        Ok(())
+    }
+
+    #[test]
+    fn returns_none_when_no_obex_stack_in_additional_protocols() -> Result<(), String> {
+        let attr_lists: &[u8] = &[
+            0x35, 0x19, // top Sequence (25 bytes)
+            0x35, 0x17, // record 0 Sequence (23 bytes)
+            0x09, 0x00, 0x0D, // attr id 0x000D
+            0x35, 0x12, // attr value Sequence (18 bytes)
+            0x35, 0x10, 0x35, 0x06, 0x19, 0x01, 0x00, 0x09, 0x00, 0x1B, 0x35, 0x06, 0x19, 0x00,
+            0x17, 0x09, 0x01, 0x04,
+        ];
+
+        let psm =
+            parse_avrcp_obex_l2cap_psm_from_attr_lists(attr_lists).map_err(|e| e.to_string())?;
+        assert_eq!(psm, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sdp_query_on_stream_handles_continuation_and_extracts_psm() -> Result<(), String> {
+        let (mut client, mut server) = tokio::io::duplex(512);
+        let server_task = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut req1 = [0u8; 18];
+            let _ = server.read_exact(&mut req1).await;
+            // Page 1: first 10 bytes of attr_lists + 1-byte continuation [0x01]
+            let part1: &[u8] = &[0x35, 0x28, 0x35, 0x26, 0x09, 0x00, 0x0D, 0x35, 0x21, 0x35];
+            let mut rsp1 = vec![0x07, 0x00, 0x00, 0x00, 14, 0x00, 10];
+            rsp1.extend_from_slice(part1);
+            rsp1.extend_from_slice(&[0x01, 0xAA]);
+            let _ = server.write_all(&rsp1).await;
+
+            let mut req2 = [0u8; 19];
+            let _ = server.read_exact(&mut req2).await;
+            let part2: &[u8] = &[
+                0x10, 0x35, 0x06, 0x19, 0x01, 0x00, 0x09, 0x00, 0x1B, 0x35, 0x06, 0x19, 0x00, 0x17,
+                0x09, 0x01, 0x04, 0x35, 0x0D, 0x35, 0x06, 0x19, 0x01, 0x00, 0x09, 0x10, 0x01, 0x35,
+                0x03, 0x19, 0x00, 0x08,
+            ];
+            let param_len = u16::try_from(3 + part2.len()).unwrap_or(0);
+            let mut rsp2 = vec![0x07, 0x00, 0x01];
+            rsp2.extend_from_slice(&param_len.to_be_bytes());
+            rsp2.extend_from_slice(&(u16::try_from(part2.len()).unwrap_or(0)).to_be_bytes());
+            rsp2.extend_from_slice(part2);
+            rsp2.push(0x00);
+            let _ = server.write_all(&rsp2).await;
+        });
+
+        let psm = query_avrcp_obex_l2cap_psm_on(&mut client)
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = server_task.await;
+        assert_eq!(psm, Some(4097));
+        Ok(())
+    }
+
+    struct MockFallbackCore {
+        l2cap_psm: Option<u16>,
+        rfcomm_channel: Option<u8>,
+        opened: std::sync::Mutex<Vec<&'static str>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BipSocketCore for MockFallbackCore {
+        async fn sdp_avrcp_obex_l2cap_psm(&self, _address: &str) -> Result<Option<u16>, BipError> {
+            Ok(self.l2cap_psm)
+        }
+
+        async fn sdp_bip_rfcomm_channel(&self, _address: &str) -> Result<Option<u8>, BipError> {
+            Ok(self.rfcomm_channel)
+        }
+
+        async fn connect_rfcomm(
+            &self,
+            _address: &BtAddress,
+            _channel: u8,
+        ) -> Result<BipStream, BipError> {
+            if let Ok(mut guard) = self.opened.lock() {
+                guard.push("rfcomm");
+            }
+            let (a, _b) = tokio::io::duplex(64);
+            Ok(Box::new(a))
+        }
+
+        async fn connect_l2cap(
+            &self,
+            _address: &BtAddress,
+            _psm: u16,
+        ) -> Result<BipStream, BipError> {
+            if let Ok(mut guard) = self.opened.lock() {
+                guard.push("l2cap");
+            }
+            let (a, _b) = tokio::io::duplex(64);
+            Ok(Box::new(a))
+        }
+    }
+
+    #[tokio::test]
+    async fn sdp_fallback_prefers_avrcp_l2cap_psm_over_rfcomm() -> Result<(), String> {
+        let core = Arc::new(MockFallbackCore {
+            l2cap_psm: Some(4097),
+            rfcomm_channel: Some(12),
+            opened: std::sync::Mutex::new(Vec::new()),
+        });
+        let channel =
+            RfcommBipChannel::with_core(None, Arc::clone(&core) as Arc<dyn BipSocketCore>);
+        let addr: BtAddress = "30:E0:44:67:38:A2".parse().map_err(|e| format!("{e:?}"))?;
+        let _stream = channel.open(&addr).await.map_err(|e| e.to_string())?;
+        let opened = core.opened.lock().map_err(|e| e.to_string())?.clone();
+        assert_eq!(opened, vec!["l2cap"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sdp_fallback_uses_rfcomm_when_l2cap_psm_absent() -> Result<(), String> {
+        let core = Arc::new(MockFallbackCore {
+            l2cap_psm: None,
+            rfcomm_channel: Some(7),
+            opened: std::sync::Mutex::new(Vec::new()),
+        });
+        let channel =
+            RfcommBipChannel::with_core(None, Arc::clone(&core) as Arc<dyn BipSocketCore>);
+        let addr: BtAddress = "30:E0:44:67:38:A2".parse().map_err(|e| format!("{e:?}"))?;
+        let _stream = channel.open(&addr).await.map_err(|e| e.to_string())?;
+        let opened = core.opened.lock().map_err(|e| e.to_string())?.clone();
+        assert_eq!(opened, vec!["rfcomm"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sdp_fallback_errors_when_both_l2cap_and_rfcomm_absent() -> Result<(), String> {
+        let core = Arc::new(MockFallbackCore {
+            l2cap_psm: None,
+            rfcomm_channel: None,
+            opened: std::sync::Mutex::new(Vec::new()),
+        });
+        let channel = RfcommBipChannel::with_core(None, core);
+        let addr: BtAddress = "30:E0:44:67:38:A2".parse().map_err(|e| format!("{e:?}"))?;
+        let Err(err) = channel.open(&addr).await else {
+            return Err("expected ServiceNotFound error".to_string());
+        };
+        assert!(err.is_service_not_found());
+        Ok(())
     }
 }
