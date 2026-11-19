@@ -1202,3 +1202,64 @@ async fn sdp_fallback_uses_rfcomm_when_l2cap_sdp_or_connect_fails() -> Result<()
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn psm_cache_hits_negative_hits_evicts_and_ignores_errors() -> Result<(), String> {
+    use bt_manager::bip_direct::AvrcpObexPsmCache;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let cache = AvrcpObexPsmCache::new();
+    let addr: BtAddress = "30:E0:44:67:38:A2".parse().map_err(|e| format!("{e:?}"))?;
+    let calls = AtomicUsize::new(0);
+
+    // 1. Errors are not cached.
+    let err = cache
+        .resolve_or_query(&addr, || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Err(BipError::sdp_lookup_details("transient fault"))
+        })
+        .await
+        .expect_err("error must propagate");
+    assert!(err.to_string().contains("transient fault"));
+    assert_eq!(cache.get(&addr), None);
+
+    // 2. Miss -> query -> positive hit.
+    let psm = cache
+        .resolve_or_query(&addr, || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(4097))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    assert_eq!(psm, Some(4097));
+    let psm2 = cache
+        .resolve_or_query(&addr, || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(9999))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    assert_eq!(psm2, Some(4097));
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+    // 3. Eviction clears entry -> re-queries and caches negative Ok(None) too.
+    cache.evict(&addr);
+    let none1 = cache
+        .resolve_or_query(&addr, || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(None)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    assert_eq!(none1, None);
+    let none2 = cache
+        .resolve_or_query(&addr, || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(4097))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    assert_eq!(none2, None);
+    assert_eq!(calls.load(Ordering::Relaxed), 3);
+    Ok(())
+}

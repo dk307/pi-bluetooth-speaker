@@ -149,6 +149,17 @@ impl BipError {
     }
 
     #[must_use]
+    pub fn sdp_lookup_with_source(
+        details: impl Into<Box<str>>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::new(BipErrorKind::SdpLookup {
+            details: details.into(),
+        })
+        .with_source(source)
+    }
+
+    #[must_use]
     pub fn service_not_found(address: impl Into<Box<str>>) -> Self {
         Self::new(BipErrorKind::ServiceNotFound {
             address: address.into(),
@@ -398,12 +409,74 @@ pub(crate) use bip_socket_core::BipSocketCore;
 #[cfg(any(test, feature = "test-util"))]
 pub use bip_socket_core::BipSocketCore;
 
-/// Process-wide cache of SDP-resolved AVRCP `0x110C` OBEX L2CAP PSMs per peer
-/// address so reconnects skip the ~60ms L2CAP SDP round-trip; evicted on
-/// `connect_l2cap` failure so a re-registered PSM triggers a fresh SDP lookup.
-static AVRCP_OBEX_PSM_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<BtAddress, u16>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+/// Cache of SDP-resolved AVRCP `0x110C` OBEX L2CAP PSMs per peer address.
+///
+/// Caches both `Some(psm)` and negative `None` results so reconnects skip the
+/// ~60ms SDP round-trip; evicted on `connect_l2cap` failure.
+#[derive(Debug, Default)]
+pub struct AvrcpObexPsmCache {
+    entries: std::sync::Mutex<std::collections::HashMap<BtAddress, Option<u16>>>,
+}
+
+impl AvrcpObexPsmCache {
+    /// Creates an empty cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns `Some(cached)` on cache hit, or `None` on cache miss.
+    #[must_use]
+    pub fn get(&self, address: &BtAddress) -> Option<Option<u16>> {
+        self.entries
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(address).copied())
+    }
+
+    /// Stores a resolved result (`Some(psm)` or negative `None`) for `address`.
+    pub fn insert(&self, address: BtAddress, psm: Option<u16>) {
+        if let Ok(mut guard) = self.entries.lock() {
+            guard.insert(address, psm);
+        }
+    }
+
+    /// Evicts any cached entry for `address` (e.g. after `connect_l2cap` fails).
+    pub fn evict(&self, address: &BtAddress) {
+        if let Ok(mut guard) = self.entries.lock() {
+            guard.remove(address);
+        }
+    }
+
+    /// Resolves the PSM via `cache`, running `query` only on a cache miss.
+    ///
+    /// # Errors
+    /// Propagates any [`BipError`] returned by `query` without caching the error.
+    pub async fn resolve_or_query<F, Fut>(
+        &self,
+        address: &BtAddress,
+        query: F,
+    ) -> Result<Option<u16>, BipError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Option<u16>, BipError>>,
+    {
+        if let Some(cached) = self.get(address) {
+            tracing::debug!(
+                address = %address,
+                psm = ?cached,
+                "using cached AVRCP Cover Art OBEX L2CAP PSM"
+            );
+            return Ok(cached);
+        }
+        let resolved = query().await?;
+        self.insert(*address, resolved);
+        Ok(resolved)
+    }
+}
+
+static AVRCP_OBEX_PSM_CACHE: std::sync::LazyLock<AvrcpObexPsmCache> =
+    std::sync::LazyLock::new(AvrcpObexPsmCache::new);
 
 /// Production [`BipSocketCore`]: real bluer sockets and real SDP queries.
 #[derive(Debug, Default, Clone, Copy)]
@@ -412,21 +485,12 @@ pub(crate) struct BluerSocketCore;
 #[async_trait::async_trait]
 impl BipSocketCore for BluerSocketCore {
     async fn sdp_avrcp_obex_l2cap_psm(&self, address: &str) -> Result<Option<u16>, BipError> {
-        if let Ok(bt_addr) = address.parse::<BtAddress>()
-            && let Ok(guard) = AVRCP_OBEX_PSM_CACHE.lock()
-            && let Some(&psm) = guard.get(&bt_addr)
-        {
-            tracing::debug!(address, psm, "using cached AVRCP Cover Art OBEX L2CAP PSM");
-            return Ok(Some(psm));
-        }
-        let resolved = query_avrcp_obex_l2cap_psm(address).await?;
-        if let Some(psm) = resolved
-            && let Ok(bt_addr) = address.parse::<BtAddress>()
-            && let Ok(mut guard) = AVRCP_OBEX_PSM_CACHE.lock()
-        {
-            guard.insert(bt_addr, psm);
-        }
-        Ok(resolved)
+        let bt_addr: BtAddress = address.parse().map_err(|e| {
+            BipError::sdp_lookup_with_source(format!("invalid BT address {address}: {e}"), e)
+        })?;
+        AVRCP_OBEX_PSM_CACHE
+            .resolve_or_query(&bt_addr, || query_avrcp_obex_l2cap_psm(address))
+            .await
     }
 
     async fn sdp_bip_rfcomm_channel(&self, address: &str) -> Result<Option<u8>, BipError> {
@@ -461,9 +525,7 @@ impl BipSocketCore for BluerSocketCore {
         let stream = match socket.connect(socket_addr).await {
             Ok(stream) => stream,
             Err(e) => {
-                if let Ok(mut guard) = AVRCP_OBEX_PSM_CACHE.lock() {
-                    guard.remove(address);
-                }
+                AVRCP_OBEX_PSM_CACHE.evict(address);
                 return Err(l2cap_step_err("connect")(e));
             }
         };
@@ -1304,10 +1366,14 @@ const SDP_UUID16_L2CAP: u16 = 0x0100;
 const SDP_UUID16_OBEX: u16 = 0x0008;
 const SDP_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+// `bluesdp = "0.1.1"` only exports `query_rfcomm_channel` (hardcoded to
+// `0x0004` ProtocolDescriptorList + RFCOMM `0x0003`) with private `codec` and
+// `transport` modules, so querying `0x110C` `AdditionalProtocolDescriptorLists`
+// (`0x000d`) requires this bounded L2CAP SDP helper.
 async fn query_avrcp_obex_l2cap_psm(address: &str) -> Result<Option<u16>, BipError> {
-    let bt_addr: BtAddress = address
-        .parse()
-        .map_err(|e| BipError::sdp_lookup_details(format!("invalid BT address {address}: {e}")))?;
+    let bt_addr: BtAddress = address.parse().map_err(|e| {
+        BipError::sdp_lookup_with_source(format!("invalid BT address {address}: {e}"), e)
+    })?;
     let socket_addr = bluer::l2cap::SocketAddr::new(
         bluer::Address(*bt_addr.as_bytes()),
         bluer::AddressType::BrEdr,
@@ -1318,8 +1384,8 @@ async fn query_avrcp_obex_l2cap_psm(address: &str) -> Result<Option<u16>, BipErr
         bluer::l2cap::Stream::connect(socket_addr),
     )
     .await
-    .map_err(|e| BipError::sdp_lookup_details(format!("SDP L2CAP connect timed out: {e}")))?
-    .map_err(|e| BipError::sdp_lookup_details(format!("SDP L2CAP connect failed: {e}")))?;
+    .map_err(|e| BipError::sdp_lookup_with_source(format!("SDP L2CAP connect timed out: {e}"), e))?
+    .map_err(|e| BipError::sdp_lookup_with_source(format!("SDP L2CAP connect failed: {e}"), e))?;
 
     query_avrcp_obex_l2cap_psm_on(&mut stream).await
 }
@@ -1332,44 +1398,44 @@ async fn query_avrcp_obex_l2cap_psm_on<S>(stream: &mut S) -> Result<Option<u16>,
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    tokio::time::timeout(SDP_QUERY_TIMEOUT, query_avrcp_obex_l2cap_psm_inner(stream))
+        .await
+        .map_err(|e| BipError::sdp_lookup_with_source(format!("SDP exchange timed out: {e}"), e))?
+}
+
+async fn query_avrcp_obex_l2cap_psm_inner<S>(stream: &mut S) -> Result<Option<u16>, BipError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut transaction_id: u16 = 0;
     let mut continuation: Vec<u8> = Vec::new();
     let mut attribute_bytes: Vec<u8> = Vec::new();
 
-    for page in 0..MAX_SDP_CONTINUATION_PAGES {
+    for _page in 0..MAX_SDP_CONTINUATION_PAGES {
         let req = build_sdp_service_search_attr_req(
             transaction_id,
             SDP_AVRCP_TARGET_UUID16,
             SDP_ATTR_ADDITIONAL_PROTO_DESC_LISTS,
             &continuation,
         );
-        tokio::time::timeout(SDP_QUERY_TIMEOUT, stream.write_all(&req))
-            .await
-            .map_err(|e| BipError::sdp_lookup_details(format!("SDP request write timed out: {e}")))?
-            .map_err(|e| BipError::sdp_lookup_details(format!("SDP request write failed: {e}")))?;
+        stream.write_all(&req).await.map_err(|e| {
+            BipError::sdp_lookup_with_source(format!("SDP request write failed: {e}"), e)
+        })?;
 
         let mut hdr = [0u8; 5];
-        tokio::time::timeout(SDP_QUERY_TIMEOUT, stream.read_exact(&mut hdr))
-            .await
-            .map_err(|e| {
-                BipError::sdp_lookup_details(format!("SDP response header timed out: {e}"))
-            })?
-            .map_err(|e| {
-                BipError::sdp_lookup_details(format!("SDP response header read failed: {e}"))
-            })?;
+        stream.read_exact(&mut hdr).await.map_err(|e| {
+            BipError::sdp_lookup_with_source(format!("SDP response header read failed: {e}"), e)
+        })?;
 
         let pdu_id = hdr[0];
         let rsp_tid = u16::from_be_bytes([hdr[1], hdr[2]]);
         let param_len = u16::from_be_bytes([hdr[3], hdr[4]]) as usize;
         let mut params = vec![0u8; param_len];
-        tokio::time::timeout(SDP_QUERY_TIMEOUT, stream.read_exact(&mut params))
-            .await
-            .map_err(|e| BipError::sdp_lookup_details(format!("SDP response body timed out: {e}")))?
-            .map_err(|e| {
-                BipError::sdp_lookup_details(format!("SDP response body read failed: {e}"))
-            })?;
+        stream.read_exact(&mut params).await.map_err(|e| {
+            BipError::sdp_lookup_with_source(format!("SDP response body read failed: {e}"), e)
+        })?;
 
         if rsp_tid != transaction_id {
             return Err(BipError::sdp_lookup_details(format!(
@@ -1400,11 +1466,6 @@ where
         if next_cont.len() > MAX_SDP_CONTINUATION_STATE_LEN {
             return Err(BipError::sdp_lookup_details(
                 "SDP continuation state exceeded 16-byte spec limit",
-            ));
-        }
-        if page + 1 == MAX_SDP_CONTINUATION_PAGES {
-            return Err(BipError::sdp_lookup_details(
-                "SDP response exceeded maximum continuation pages",
             ));
         }
         continuation = next_cont.to_vec();
