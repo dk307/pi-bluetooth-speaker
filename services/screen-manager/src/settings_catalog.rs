@@ -309,15 +309,12 @@ pub fn apply_toggle(config: &mut CoreConfig, id: SettingId, right_selected: bool
 fn stepper_value(config: &CoreConfig, id: SettingId) -> i32 {
     match id {
         SettingId::VolumeStepPercent => i32::from(config.volume_step_percent.value()),
-        SettingId::VolumeHudTimeoutMs => {
-            i32::try_from(config.volume_hud_timeout_ms.value()).unwrap_or(i32::MAX)
-        }
-        SettingId::VolumeHudFadeMs => {
-            i32::try_from(config.volume_hud_fade_ms.value()).unwrap_or(i32::MAX)
-        }
-        SettingId::CodecHudTimeoutMs => {
-            i32::try_from(config.codec_hud_timeout_ms.value()).unwrap_or(i32::MAX)
-        }
+        SettingId::VolumeHudTimeoutMs => i32::try_from(config.volume_hud_timeout_ms.value())
+            .expect("validated volume_hud_timeout_ms fits in i32"),
+        SettingId::VolumeHudFadeMs => i32::try_from(config.volume_hud_fade_ms.value())
+            .expect("validated volume_hud_fade_ms fits in i32"),
+        SettingId::CodecHudTimeoutMs => i32::try_from(config.codec_hud_timeout_ms.value())
+            .expect("validated codec_hud_timeout_ms fits in i32"),
         SettingId::TitleDisplayMode | SettingId::MarqueeFps => 0,
     }
 }
@@ -329,27 +326,30 @@ fn set_stepper_value(config: &mut CoreConfig, id: SettingId, value: i32) -> bool
                 i32::from(MIN_VOLUME_STEP_PERCENT),
                 i32::from(MAX_VOLUME_STEP_PERCENT),
             ))
-            .unwrap_or(MIN_VOLUME_STEP_PERCENT);
+            .expect("clamped volume_step_percent fits in u8");
             config.volume_step_percent = VolumeStepPercent::new(clamped);
             true
         }
         SettingId::VolumeHudTimeoutMs => {
-            let clamped = u32::try_from(value.max(0))
-                .unwrap_or_default()
+            let clamped = value
+                .max(0)
+                .cast_unsigned()
                 .clamp(MIN_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_TIMEOUT_MS);
             config.volume_hud_timeout_ms = VolumeHudTimeoutMs::new(clamped);
             true
         }
         SettingId::VolumeHudFadeMs => {
-            let clamped = u32::try_from(value.max(0))
-                .unwrap_or_default()
+            let clamped = value
+                .max(0)
+                .cast_unsigned()
                 .clamp(MIN_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_FADE_MS);
             config.volume_hud_fade_ms = VolumeHudFadeMs::new(clamped);
             true
         }
         SettingId::CodecHudTimeoutMs => {
-            let clamped = u32::try_from(value.max(0))
-                .unwrap_or_default()
+            let clamped = value
+                .max(0)
+                .cast_unsigned()
                 .clamp(MIN_CODEC_HUD_TIMEOUT_MS, MAX_CODEC_HUD_TIMEOUT_MS);
             config.codec_hud_timeout_ms = CodecHudTimeoutMs::new(clamped);
             true

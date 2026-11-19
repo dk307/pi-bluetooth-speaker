@@ -1181,7 +1181,10 @@ fn ui_shell_generic_settings_callbacks_clamp_and_sync_models() {
     assert_eq!(shell.window().get_volume_hud_fade_ms(), 0);
     assert_eq!(shell.window().get_codec_hud_timeout_ms(), 250);
 
-    // Toggle Marquee FPS (30/60) and Title display mode (Marquee/Split).
+    // Toggle Marquee FPS (30/60) and Title display mode (Marquee/Split), and
+    // verify programmatic setter syncs the model too.
+    shell.set_marquee_fps(MarqueeFps::FPS_60);
+    assert_eq!(shell.marquee_fps().value(), 60);
     shell
         .window()
         .invoke_setting_toggle("marquee_fps".into(), false);
