@@ -1034,6 +1034,7 @@ fn ui_shell_touch_scale_and_virtual_keyboard_integration() {
     shell.set_font_scale(1.15);
 
     // 4. Render 800x480 Themes & Scale view and Widget Scale Showcase at 1.0, 1.15, 1.35
+    assert!(!shell.window().get_show_advanced());
     shell.window().set_show_themes(true);
     for scale in [1.0_f32, 1.15, 1.35] {
         shell.set_font_scale(scale);
@@ -1090,6 +1091,138 @@ fn ui_shell_touch_scale_and_virtual_keyboard_integration() {
 
     shell.window().invoke_app_bar_back();
     assert_eq!(shell.current_tab(), 0);
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_advanced_settings_subscreen_hidden_by_default_and_scrollable() {
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+
+    let (mut fb, _) = Framebuffer::new_mocked();
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    assert!(!shell.window().get_show_advanced());
+    shell.set_tab(5);
+    shell.window().set_show_themes(true);
+    assert!(
+        fb.render_frame_full_redraw(&window)
+            .expect("render Screen Settings without Advanced")
+    );
+
+    shell.window().set_show_advanced(true);
+    assert!(
+        fb.render_frame_full_redraw(&window)
+            .expect("render scrollable Advanced sub-screen")
+    );
+
+    // Back exits Advanced -> Screen Settings -> Settings hub.
+    shell.window().invoke_app_bar_back();
+    assert!(!shell.window().get_show_advanced());
+    assert!(shell.window().get_show_themes());
+
+    shell.window().invoke_app_bar_back();
+    assert!(!shell.window().get_show_themes());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_generic_settings_callbacks_clamp_and_sync_models() {
+    use screen_manager::config::{CoreConfig, MarqueeFps};
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use slint::Model;
+    use speaker_common::diag::ScopedTempDir;
+
+    let _window = Framebuffer::new_mocked()
+        .0
+        .init_platform()
+        .expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    let dir = ScopedTempDir::new("generic-settings");
+    let path = dir.path().join("settings.json");
+    shell.wire_config(&path);
+
+    // Unknown IDs are ignored gracefully.
+    shell.window().invoke_setting_step("nonexistent".into(), 1);
+    shell
+        .window()
+        .invoke_setting_toggle("nonexistent".into(), true);
+
+    // Step volume_step_percent up from default (2 -> 3) and then down to min (1).
+    shell
+        .window()
+        .invoke_setting_step("volume_step_percent".into(), 1);
+    assert_eq!(shell.window().get_volume_step_percent(), 3);
+    for _ in 0..5 {
+        shell
+            .window()
+            .invoke_setting_step("volume_step_percent".into(), -1);
+    }
+    assert_eq!(shell.window().get_volume_step_percent(), 1);
+
+    // Step HUD values down to their minimums (bounds clamping at min).
+    for _ in 0..25 {
+        shell
+            .window()
+            .invoke_setting_step("volume_hud_timeout_ms".into(), -1);
+        shell
+            .window()
+            .invoke_setting_step("volume_hud_fade_ms".into(), -1);
+    }
+    for _ in 0..50 {
+        shell
+            .window()
+            .invoke_setting_step("codec_hud_timeout_ms".into(), -1);
+    }
+    assert_eq!(shell.window().get_volume_hud_timeout_ms(), 250);
+    assert_eq!(shell.window().get_volume_hud_fade_ms(), 0);
+    assert_eq!(shell.window().get_codec_hud_timeout_ms(), 250);
+
+    // Toggle Marquee FPS (30/60) and Title display mode (Marquee/Split), and
+    // verify programmatic setter syncs the model too.
+    shell.set_marquee_fps(MarqueeFps::FPS_60);
+    assert_eq!(shell.marquee_fps().value(), 60);
+    shell
+        .window()
+        .invoke_setting_toggle("marquee_fps".into(), false);
+    assert_eq!(shell.marquee_fps().value(), 30);
+    shell
+        .window()
+        .invoke_setting_toggle("title_display_mode".into(), true);
+    assert_eq!(
+        shell.title_display_mode(),
+        screen_manager::config::TitleDisplayMode::Split
+    );
+
+    // Verify basic_settings and advanced_settings models reflect the updated state.
+    let basic_rows = shell.window().get_basic_settings();
+    assert_eq!(basic_rows.row_count(), 1);
+    let title_row = basic_rows.row_data(0).expect("title_display_mode row");
+    assert_eq!(title_row.id.as_str(), "title_display_mode");
+    assert!(!title_row.is_advanced);
+    assert!(title_row.right_selected);
+
+    let adv_rows = shell.window().get_advanced_settings();
+    assert_eq!(adv_rows.row_count(), 5);
+    let vol_row = adv_rows.row_data(1).expect("volume_step_percent row");
+    assert_eq!(vol_row.id.as_str(), "volume_step_percent");
+    assert!(vol_row.is_advanced);
+    assert!(!vol_row.can_decrease);
+    assert!(vol_row.can_increase);
+
+    let clamped = shell.current_config();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if CoreConfig::load(&path).is_ok_and(|c| c == clamped) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(CoreConfig::load(&path).expect("persisted"), clamped);
+    assert_eq!(clamped.marquee_fps, MarqueeFps::FPS_30);
 }
 
 #[cfg(feature = "ui")]
@@ -1156,67 +1289,18 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     let reloaded = CoreConfig::load(&path).expect("reload");
     assert_eq!(reloaded, cfg);
 
-    // UI callbacks clamp out-of-range values into the config domains and
-    // persist each change immediately (no Save step). Persistence runs on a
-    // background thread to avoid blocking the render thread; wait for the
-    // write to complete before asserting disk state.
-    shell.window().invoke_set_volume_step_percent(999);
-    assert_eq!(shell.window().get_volume_step_percent(), 25);
-    // The predicate returning proves the value; keep the binding for intent.
-    let _live = wait_until_persisted(&path, |c| c.volume_step_percent.value() == 25);
-    shell.window().invoke_set_volume_step_percent(-7);
-    assert_eq!(shell.window().get_volume_step_percent(), 1);
-
-    shell.window().invoke_set_volume_hud_timeout_ms(99_999);
-    assert_eq!(shell.window().get_volume_hud_timeout_ms(), 30_000);
-    shell.window().invoke_set_volume_hud_timeout_ms(0);
-    assert_eq!(shell.window().get_volume_hud_timeout_ms(), 250);
-
-    shell.window().invoke_set_volume_hud_fade_ms(9_999);
-    assert_eq!(shell.window().get_volume_hud_fade_ms(), 2_000);
-    shell.window().invoke_set_volume_hud_fade_ms(-1);
-    assert_eq!(shell.window().get_volume_hud_fade_ms(), 0);
-
-    shell.window().invoke_set_codec_hud_timeout_ms(999_999);
-    assert_eq!(shell.window().get_codec_hud_timeout_ms(), 300_000);
-    shell.window().invoke_set_codec_hud_timeout_ms(0);
-    assert_eq!(shell.window().get_codec_hud_timeout_ms(), 250);
-
-    // Marquee fps accepts only 30/60; anything else snaps to the 60 default.
-    shell.window().invoke_set_marquee_fps(45);
-    assert_eq!(shell.marquee_fps().value(), 60);
-    shell.window().invoke_set_marquee_fps(30);
-    assert_eq!(shell.marquee_fps().value(), 30);
-
-    // Title display mode toggles between Split and Marquee and persists.
-    shell.window().invoke_set_title_split_mode(false);
-    assert_eq!(
-        shell.title_display_mode(),
-        screen_manager::config::TitleDisplayMode::Marquee
-    );
-    shell.window().invoke_set_title_split_mode(true);
-    assert_eq!(
-        shell.title_display_mode(),
-        screen_manager::config::TitleDisplayMode::Split
-    );
-
-    // The clamped state is exactly what live persistence wrote to disk; the
-    // predicate returning proves the match.
-    let clamped = shell.current_config();
-    assert_eq!(clamped.volume_step_percent.value(), 1);
-    assert_eq!(clamped.volume_hud_timeout_ms.value(), 250);
-    assert_eq!(clamped.volume_hud_fade_ms.value(), 0);
-    assert_eq!(clamped.codec_hud_timeout_ms.value(), 250);
-    assert_eq!(clamped.marquee_fps, MarqueeFps::FPS_30);
-    assert_eq!(
-        clamped.title_display_mode,
-        screen_manager::config::TitleDisplayMode::Split
-    );
-    let _saved = wait_until_persisted(&path, |c| c == &clamped);
+    // Stepper callback persists asynchronously to disk.
+    shell
+        .window()
+        .invoke_setting_step("volume_step_percent".into(), 1);
+    assert_eq!(shell.window().get_volume_step_percent(), 8);
+    let _live = wait_until_persisted(&path, |c| c.volume_step_percent.value() == 8);
 
     // Persisting to an unwritable path logs an error instead of panicking.
     shell.wire_config(std::path::Path::new("/nonexistent-dir/settings.json"));
-    shell.window().invoke_set_volume_step_percent(2);
+    shell
+        .window()
+        .invoke_setting_step("volume_step_percent".into(), 1);
 }
 
 #[cfg(feature = "ui")]
