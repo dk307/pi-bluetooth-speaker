@@ -604,6 +604,7 @@ export component BluetoothDevicesScreen inherits Rectangle {
     in property <string> bt_delete_device_name;
     in-out property <bool> bt_toast_visible: false;
     in property <string> bt_toast_text;
+    in property <int> bt_toast_seq: 0;
     in property <string> bt_pending_address: "";
 
     callback bt_add_device_clicked();
@@ -652,6 +653,12 @@ export component BluetoothDevicesScreen inherits Rectangle {
         }
     }
     changed bt_toast_text => {
+        if (root.bt_toast_visible) {
+            toast_timer.running = false;
+            toast_timer.running = true;
+        }
+    }
+    changed bt_toast_seq => {
         if (root.bt_toast_visible) {
             toast_timer.running = false;
             toast_timer.running = true;

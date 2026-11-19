@@ -310,6 +310,7 @@ fn apply_bt_devices_shows_toast_and_dedupes_identical_publishes() {
     });
     assert!(w.get_bt_toast_visible());
     assert_eq!(w.get_bt_toast_text().as_str(), "Pairing timed out");
+    let seq1 = w.get_bt_toast_seq();
 
     // The sentinel proves the second identical publish never reached Slint.
     w.set_bt_devices_mode(99);
@@ -318,6 +319,11 @@ fn apply_bt_devices_shows_toast_and_dedupes_identical_publishes() {
         ..BtDevicesUpdate::default()
     });
     assert_eq!(w.get_bt_devices_mode(), 99, "identical update is deduped");
+    assert_ne!(
+        w.get_bt_toast_seq(),
+        seq1,
+        "repeated one-shot toast bumps bt_toast_seq to restart the auto-hide timer"
+    );
 }
 
 #[test]

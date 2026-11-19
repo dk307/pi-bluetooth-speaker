@@ -219,6 +219,7 @@ export component MainWindow inherits Window {
     in-out property <string> bt_delete_address: "";
     in-out property <bool> bt_toast_visible: false;
     in-out property <string> bt_toast_text: "";
+    in-out property <int> bt_toast_seq: 0;
     in-out property <string> bt_pending_address: "";
     // Single source of truth for the artist/album composite shown in the second marquee,
     // shared by the declarative binding and the Rust-side strip rasterizer.
@@ -430,6 +431,7 @@ export component MainWindow inherits Window {
             bt_delete_device_name: root.bt_delete_device_name;
             bt_toast_visible <=> root.bt_toast_visible;
             bt_toast_text: root.bt_toast_text;
+            bt_toast_seq: root.bt_toast_seq;
             bt_pending_address: root.bt_pending_address;
             bt_add_device_clicked => { root.bt_add_device_clicked(); }
             bt_cancel_scan_clicked => { root.bt_cancel_scan_clicked(); }

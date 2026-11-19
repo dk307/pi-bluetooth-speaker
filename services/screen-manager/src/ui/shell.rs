@@ -1123,6 +1123,7 @@ impl AppShell {
             }
             w.set_bt_toast_text(text.to_string().into());
             w.set_bt_toast_visible(true);
+            w.set_bt_toast_seq(w.get_bt_toast_seq().wrapping_add(1));
         }
     }
 
