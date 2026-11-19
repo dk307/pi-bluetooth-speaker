@@ -1272,3 +1272,73 @@ async fn psm_cache_hits_negative_hits_evicts_and_ignores_errors() -> Result<(), 
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn sdp_query_rejects_malformed_and_error_responses() -> Result<(), String> {
+    use tokio::io::AsyncReadExt;
+
+    let cases: &[(&[u8], &str)] = &[
+        // Transaction ID mismatch (0x0001 != 0x0000)
+        (
+            &[0x07, 0x00, 0x01, 0x00, 0x03, 0x00, 0x00, 0x00],
+            "mismatch",
+        ),
+        // SDP ErrorResponse PDU (0x01)
+        (&[0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01], "ErrorResponse"),
+        // Unexpected PDU ID (0x02)
+        (&[0x02, 0x00, 0x00, 0x00, 0x00], "unexpected SDP PDU"),
+        // Truncated AttributeListsByteCount
+        (
+            &[0x07, 0x00, 0x00, 0x00, 0x01, 0x00],
+            "AttributeListsByteCount",
+        ),
+        // Truncated AttributeLists body (claims 4 bytes, only 1)
+        (
+            &[0x07, 0x00, 0x00, 0x00, 0x03, 0x00, 0x04, 0x35],
+            "truncated AttributeLists",
+        ),
+        // Missing ContinuationState byte
+        (
+            &[0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00],
+            "missing ContinuationState",
+        ),
+        // ContinuationState > 16 bytes
+        (
+            &[
+                0x07, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0,
+            ],
+            "16-byte spec limit",
+        ),
+    ];
+
+    for (rsp, expected_substr) in cases {
+        let (mut client, mut server) = tokio::io::duplex(256);
+        let rsp_vec = rsp.to_vec();
+        let server_task = tokio::spawn(async move {
+            let mut req = [0u8; 18];
+            let _ = server.read_exact(&mut req).await;
+            let _ = server.write_all(&rsp_vec).await;
+        });
+
+        let Err(err) =
+            bt_manager::bip_direct::test_query_avrcp_obex_l2cap_psm_on(&mut client).await
+        else {
+            return Err(format!("expected error containing '{expected_substr}'"));
+        };
+        let _ = server_task.await;
+        assert!(
+            err.to_string().contains(expected_substr),
+            "expected '{expected_substr}' in '{err}'"
+        );
+    }
+
+    // Truncated SDP DataElement payload in attr list parser
+    let Err(err) = bt_manager::bip_direct::test_parse_avrcp_obex_l2cap_psm_from_attr_lists(&[
+        0x35, 0x10, 0x35,
+    ]) else {
+        return Err("expected truncated SDP element error".to_string());
+    };
+    assert!(err.to_string().contains("truncated"));
+    Ok(())
+}

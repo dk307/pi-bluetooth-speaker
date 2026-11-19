@@ -513,7 +513,7 @@ impl BipSocketCore for BluerSocketCore {
             BipError::sdp_lookup_with_source(format!("invalid BT address {address}: {e}"), e)
         })?;
         AVRCP_OBEX_PSM_CACHE
-            .resolve_or_query(&bt_addr, || query_avrcp_obex_l2cap_psm(address))
+            .resolve_or_query(&bt_addr, || query_avrcp_obex_l2cap_psm(&bt_addr))
             .await
     }
 
@@ -1394,24 +1394,22 @@ const SDP_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 // `0x0004` ProtocolDescriptorList + RFCOMM `0x0003`) with private `codec` and
 // `transport` modules, so querying `0x110C` `AdditionalProtocolDescriptorLists`
 // (`0x000d`) requires this bounded L2CAP SDP helper.
-async fn query_avrcp_obex_l2cap_psm(address: &str) -> Result<Option<u16>, BipError> {
-    let bt_addr: BtAddress = address.parse().map_err(|e| {
-        BipError::sdp_lookup_with_source(format!("invalid BT address {address}: {e}"), e)
-    })?;
+async fn query_avrcp_obex_l2cap_psm(bt_addr: &BtAddress) -> Result<Option<u16>, BipError> {
     let socket_addr = bluer::l2cap::SocketAddr::new(
         bluer::Address(*bt_addr.as_bytes()),
         bluer::AddressType::BrEdr,
         SDP_PSM,
     );
-    let mut stream = tokio::time::timeout(
-        SDP_QUERY_TIMEOUT,
-        bluer::l2cap::Stream::connect(socket_addr),
-    )
+    tokio::time::timeout(SDP_QUERY_TIMEOUT, async {
+        let mut stream = bluer::l2cap::Stream::connect(socket_addr)
+            .await
+            .map_err(|e| {
+                BipError::sdp_lookup_with_source(format!("SDP L2CAP connect failed: {e}"), e)
+            })?;
+        query_avrcp_obex_l2cap_psm_inner(&mut stream).await
+    })
     .await
-    .map_err(|e| BipError::sdp_lookup_with_source(format!("SDP L2CAP connect timed out: {e}"), e))?
-    .map_err(|e| BipError::sdp_lookup_with_source(format!("SDP L2CAP connect failed: {e}"), e))?;
-
-    query_avrcp_obex_l2cap_psm_on(&mut stream).await
+    .map_err(|e| BipError::sdp_lookup_with_source(format!("SDP L2CAP query timed out: {e}"), e))?
 }
 
 const MAX_SDP_CONTINUATION_PAGES: usize = 16;
@@ -1512,9 +1510,7 @@ fn build_sdp_service_search_attr_req(
             "SDP continuation state exceeded 16-byte spec limit",
         ));
     }
-    let cont_len = u8::try_from(continuation.len()).map_err(|e| {
-        BipError::sdp_lookup_with_source("SDP continuation state length overflow", e)
-    })?;
+    let cont_len = continuation.len() as u8;
     let param_len = 13u16.saturating_add(u16::from(cont_len));
     let mut buf = Vec::with_capacity(5 + usize::from(param_len));
     buf.push(SDP_PDU_SERVICE_SEARCH_ATTR_REQ);

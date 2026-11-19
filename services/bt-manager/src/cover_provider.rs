@@ -953,8 +953,9 @@ const SIGNAL_RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
 /// lifetime; the retry period doubles per failure up to this cap.
 const SIGNAL_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
-/// Subscribes to `BlueZ` `MediaPlayer1` `Track` changes on an existing async
-/// connection and wakes the worker for each one.
+/// Subscribes to `BlueZ` `MediaPlayer1` `Track` changes and `ObjectManager`
+/// `MediaPlayer1` `InterfacesAdded`/`InterfacesRemoved` signals on an existing
+/// async connection and wakes the worker for each one.
 ///
 /// Split from [`spawn_track_signal_listener`] so integration tests can
 /// inject a private-bus connection; the spawned task lives for the lifetime
@@ -983,15 +984,15 @@ pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
                 .arg0ns("org.bluez.MediaPlayer1")?
                 .build())
         },
-        |message| {
-            let Ok((_, changed, _)) =
-                message
-                    .body()
-                    .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
-            else {
-                return false;
-            };
-            changed.contains_key("Track")
+        |message| match message
+            .body()
+            .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+        {
+            Ok((_, changed, _)) => changed.contains_key("Track"),
+            Err(e) => {
+                tracing::debug!(error = %e, "ignoring malformed `BlueZ` PropertiesChanged");
+                false
+            }
         },
     );
 
@@ -1008,14 +1009,15 @@ pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
                 .member("InterfacesAdded")?
                 .build())
         },
-        |message| {
-            let Ok((_, ifaces)) = message.body().deserialize::<(
-                zbus::zvariant::OwnedObjectPath,
-                HashMap<String, HashMap<String, OwnedValue>>,
-            )>() else {
-                return false;
-            };
-            ifaces.contains_key("org.bluez.MediaPlayer1")
+        |message| match message.body().deserialize::<(
+            zbus::zvariant::OwnedObjectPath,
+            HashMap<String, HashMap<String, OwnedValue>>,
+        )>() {
+            Ok((_, ifaces)) => ifaces.contains_key("org.bluez.MediaPlayer1"),
+            Err(e) => {
+                tracing::debug!(error = %e, "ignoring malformed `BlueZ` InterfacesAdded");
+                false
+            }
         },
     );
 
@@ -1033,14 +1035,15 @@ pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
                 .member("InterfacesRemoved")?
                 .build())
         },
-        |message| {
-            let Ok((_, ifaces)) = message
-                .body()
-                .deserialize::<(zbus::zvariant::OwnedObjectPath, Vec<String>)>()
-            else {
-                return false;
-            };
-            ifaces.iter().any(|iface| iface == "org.bluez.MediaPlayer1")
+        |message| match message
+            .body()
+            .deserialize::<(zbus::zvariant::OwnedObjectPath, Vec<String>)>()
+        {
+            Ok((_, ifaces)) => ifaces.iter().any(|iface| iface == "org.bluez.MediaPlayer1"),
+            Err(e) => {
+                tracing::debug!(error = %e, "ignoring malformed `BlueZ` InterfacesRemoved");
+                false
+            }
         },
     );
 }
