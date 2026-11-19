@@ -1586,6 +1586,12 @@ impl BtMonitorState {
     ) {
         session.terminal = Some(terminal.clone());
         self.devices.staged_pairing = Some(terminal.clone());
+        if matches!(terminal, PairingStatus::Paired { .. })
+            && let Some(adapter) = self.resolve_adapter_id(bt)
+            && let Err(e) = bt.set_trusted(&adapter, session.addr, true)
+        {
+            tracing::warn!(device = %session.addr, error = %e, "Failed to mark paired device Trusted");
+        }
         if let PairingStatus::Failed { message } = terminal {
             self.devices.staged_toast = Some(message.clone());
         }
