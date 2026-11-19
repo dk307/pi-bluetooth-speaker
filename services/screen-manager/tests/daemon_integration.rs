@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "ui")]
 use screen_manager::daemon::{
-    BT_COMMAND_SETTLE, BT_KEEP_ALIVE, BT_PLAYING_POLL, BtMonitorState, BtSharedUpdate,
-    COVER_DECODE_RETRY, CoverState, SettleKind, SettleWindow, ShellInit, TARGET_COVER_SIZE,
-    decode_cover_buffer, finish_boot_worker, init_shell, publish_playback_state, report_display,
-    run_app, run_ui_display,
+    BT_COMMAND_SETTLE, BT_KEEP_ALIVE, BT_PAIRING_TIMEOUT, BT_PLAYING_POLL, BtMonitorState,
+    BtSharedUpdate, COVER_DECODE_RETRY, CoverState, SettleKind, SettleWindow, ShellInit,
+    TARGET_COVER_SIZE, decode_cover_buffer, finish_boot_worker, init_shell, publish_playback_state,
+    report_display, run_app, run_ui_display,
 };
 use screen_manager::daemon::{
     CoreCliOptions, ScreenTarget, headless_requested, parse_cli_args_from, parse_preview_secs,
@@ -683,7 +683,10 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
     );
     assert!(bt_mock.is_some());
     assert!(shell_mock.is_playing());
-    assert_eq!(shell_mock.current_tab(), 2);
+    // Tab 2 is retired (plan A6): `--tab bt|bluetooth|2` opens the full-screen
+    // devices view instead of selecting a dock tab, so the active tab stays 0.
+    assert_eq!(shell_mock.current_tab(), 0);
+    assert!(shell_mock.window().get_bt_devices_open());
 }
 
 #[cfg(feature = "ui")]
@@ -725,12 +728,14 @@ fn bootstrap_worker_publishes_state_without_touching_the_ui_thread() {
 
     // The injected mock connection stands in for the blocking system-bus
     // connect: the worker runs it off the render thread and publishes the
-    // resulting state through the shared update channel.
+    // resulting state through the shared update channel. Cloned (not moved)
+    // because the retry loop may invoke the factory more than once.
     let (mock_bt, _mock_ctrl) = speaker_bluetooth::BluetoothDevice::new_mocked();
     let worker = screen_manager::daemon::spawn_bt_bootstrap_worker(
-        || Ok(mock_bt),
+        move || Ok(mock_bt.clone()),
         &shared,
         &commands,
+        &speaker_bluetooth::DeviceCommandQueue::new(),
         &running,
         &connected,
     )
@@ -751,7 +756,51 @@ fn bootstrap_worker_publishes_state_without_touching_the_ui_thread() {
 
 #[cfg(feature = "ui")]
 #[test]
-fn bootstrap_worker_reports_connect_failure_without_publishing_state() {
+fn apply_initial_bt_state_leaves_shell_at_defaults_when_no_playback_snapshot() {
+    use screen_manager::ui::MainWindow;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    let main_window = MainWindow::new().unwrap();
+    let ShellInit { shell, .. } = init_shell(main_window, false, None, None, 60);
+
+    // A mock with no playback snapshot (the `Ok(None)` arm): the shell keeps
+    // its placeholder defaults instead of flashing empty state.
+    let (bt, mock_ctrl) = speaker_bluetooth::BluetoothDevice::new_mocked();
+    mock_ctrl.set_playback(None);
+    screen_manager::daemon::apply_initial_bt_state(&shell, &bt);
+    assert_eq!(
+        shell.window().get_track_title().as_str(),
+        "Waiting for Bluetooth Connection..."
+    );
+    assert!(!shell.is_playing());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn apply_initial_bt_state_survives_query_faults() {
+    use screen_manager::ui::MainWindow;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    let main_window = MainWindow::new().unwrap();
+    let ShellInit { shell, .. } = init_shell(main_window, false, None, None, 60);
+
+    // Faulted mock: playback query AND link snapshot both fail — the shell
+    // must stay at its defaults (best-effort logging, never a panic).
+    let (bt, mock_ctrl) = speaker_bluetooth::BluetoothDevice::new_mocked();
+    mock_ctrl.set_fault(Some("injected bus failure".into()));
+    screen_manager::daemon::apply_initial_bt_state(&shell, &bt);
+    assert_eq!(
+        shell.window().get_track_title().as_str(),
+        "Waiting for Bluetooth Connection..."
+    );
+    assert!(!shell.is_playing());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn bootstrap_worker_retries_failed_connect_and_publishes_toast() {
     use screen_manager::ui::MainWindow;
     use std::sync::atomic::AtomicBool;
 
@@ -763,18 +812,35 @@ fn bootstrap_worker_reports_connect_failure_without_publishing_state() {
     let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
     let running = Arc::new(AtomicBool::new(true));
     let connected = Arc::new(AtomicBool::new(false));
+    let device_commands = speaker_bluetooth::DeviceCommandQueue::new();
 
-    // A failed connection is reported at WARN on the worker thread: no state
-    // is published and the connected flag stays down, so the UI never wires
-    // the transport callbacks.
-    let worker = screen_manager::daemon::spawn_bt_bootstrap_worker(
+    // A failed connection must not orphan the devices command queue: the
+    // worker retries with a short test-injected backoff, drains commands
+    // queued while the bus is down, and publishes a toast so the screen can
+    // surface the failure instead of silently doing nothing.
+    device_commands.push(speaker_bluetooth::DeviceCommand::Refresh);
+    let worker = screen_manager::daemon::spawn_bt_bootstrap_worker_with_retry(
         || Err(speaker_bluetooth::BtError::dbus("no system bus")),
         &shared,
         &commands,
+        &device_commands,
         &running,
         &connected,
+        Duration::from_millis(25),
     )
     .expect("bt-bootstrap thread spawns");
+
+    // The failure toast is published through the shared update channel.
+    wait_for(|| {
+        shared.lock().is_ok_and(|state| {
+            state
+                .devices
+                .as_ref()
+                .is_some_and(|update| update.toast.is_some())
+        })
+    });
+
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
     worker.join().expect("bt-bootstrap worker exits cleanly");
 
     assert!(
@@ -783,8 +849,11 @@ fn bootstrap_worker_reports_connect_failure_without_publishing_state() {
     );
     let state = shared.lock().expect("shared state lock");
     assert!(
-        state.playback.is_none() && state.details.is_none(),
-        "failed connect must not publish any state"
+        state.playback.is_none()
+            && state.pcm.is_none()
+            && state.cover.is_none()
+            && state.amp_volume.is_none(),
+        "failed connect must not publish playback/link state"
     );
 }
 
@@ -1023,10 +1092,17 @@ fn bt_monitor_state_commands_settle_and_commit() {
     let (bt, mock) = BluetoothDevice::new_mocked();
     let shared = Mutex::new(BtSharedUpdate::default());
     let commands = TransportCommandQueue::new();
+    let device_commands = speaker_bluetooth::DeviceCommandQueue::new();
     let mut state = BtMonitorState::default();
 
     // Initial tick populates last_pb, last_pcms, and shared state.
-    assert!(state.poll_tick(&bt, &shared, &commands));
+    assert!(state.poll_tick(
+        &bt,
+        &shared,
+        &commands,
+        &device_commands,
+        BT_PAIRING_TIMEOUT
+    ));
     assert!(state.has_playback());
     assert_eq!(state.keep_alive_interval(), BT_PLAYING_POLL);
     assert!(shared.lock().unwrap().playback.is_some());
@@ -1034,7 +1110,13 @@ fn bt_monitor_state_commands_settle_and_commit() {
 
     // Arm seek settle window, then toggle settle window, and exercise all commands.
     commands.push(TransportCommand::Seek(45_000));
-    assert!(state.poll_tick(&bt, &shared, &commands));
+    assert!(state.poll_tick(
+        &bt,
+        &shared,
+        &commands,
+        &device_commands,
+        BT_PAIRING_TIMEOUT
+    ));
     assert!(matches!(
         state.settle().map(|s| &s.kind),
         Some(SettleKind::Seek { target_ms: 45_000 })
@@ -1043,7 +1125,13 @@ fn bt_monitor_state_commands_settle_and_commit() {
     commands.push(TransportCommand::TogglePlayPause);
     commands.push(TransportCommand::NextTrack);
     commands.push(TransportCommand::PreviousTrack);
-    assert!(state.poll_tick(&bt, &shared, &commands));
+    assert!(state.poll_tick(
+        &bt,
+        &shared,
+        &commands,
+        &device_commands,
+        BT_PAIRING_TIMEOUT
+    ));
     assert!(matches!(
         state.settle().map(|s| &s.kind),
         Some(SettleKind::Toggle { .. })
@@ -1057,7 +1145,13 @@ fn bt_monitor_state_commands_settle_and_commit() {
     // Fault injection on transport commands logs warning without panicking.
     mock.set_fault(Some("dbus transport fault".into()));
     commands.push(TransportCommand::NextTrack);
-    assert!(state.poll_tick(&bt, &shared, &commands));
+    assert!(state.poll_tick(
+        &bt,
+        &shared,
+        &commands,
+        &device_commands,
+        BT_PAIRING_TIMEOUT
+    ));
     mock.set_fault(None);
 
     // Reset dedup helper clears cached snapshots.
@@ -1079,9 +1173,9 @@ fn bt_monitor_state_commands_settle_and_commit() {
         BtSharedUpdate {
             playback: Some(playback(None, false)),
             pcm: None,
-            details: Some(screen_manager::ui::BtLinkDetails::default()),
             cover: Some(None),
             amp_volume: None,
+            devices: None,
         },
     );
     let recovered = poisoned
@@ -1089,35 +1183,36 @@ fn bt_monitor_state_commands_settle_and_commit() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(recovered.playback.is_some());
     assert!(recovered.cover.is_some());
-    assert!(recovered.details.is_some());
 }
 
 #[cfg(feature = "ui")]
 #[test]
-fn publish_link_state_stages_details_once_and_resets() {
+fn publish_link_state_stages_pcm_once_and_resets() {
     use speaker_bluetooth::BluetoothDevice;
 
     let (bt, _mock) = BluetoothDevice::new_mocked();
     let mut state = BtMonitorState::default();
 
     let mut first = BtSharedUpdate::default();
-    state.publish_link_state(&bt, &mut first);
-    let details = first.details.expect("first tick publishes details");
+    let _ = state.publish_link_state(&bt, &mut first);
+    assert!(first.pcm.is_some());
+    let details = state.last_details().expect("first tick caches details");
     assert!(details.device.is_some());
     assert!(details.pcm.is_some());
-    assert!(first.pcm.is_some());
 
     // Unchanged snapshot is deduplicated.
     let mut second = BtSharedUpdate::default();
-    state.publish_link_state(&bt, &mut second);
-    assert!(second.details.is_none());
+    let _ = state.publish_link_state(&bt, &mut second);
     assert!(second.pcm.is_none());
+    assert!(state.last_details().is_some());
 
     // A dedup reset forces a full republish.
     state.reset_dedup();
+    assert!(state.last_details().is_none());
     let mut third = BtSharedUpdate::default();
-    state.publish_link_state(&bt, &mut third);
-    assert!(third.details.is_some());
+    let _ = state.publish_link_state(&bt, &mut third);
+    assert!(third.pcm.is_some());
+    assert!(state.last_details().is_some());
 }
 
 #[cfg(feature = "ui")]
@@ -1129,8 +1224,7 @@ fn publish_link_state_keeps_state_on_query_fault() {
     mock.set_fault(Some("link fault".into()));
     let mut state = BtMonitorState::default();
     let mut update = BtSharedUpdate::default();
-    state.publish_link_state(&bt, &mut update);
-    assert!(update.details.is_none());
+    assert!(state.publish_link_state(&bt, &mut update).is_none());
     assert!(state.last_details().is_none());
 }
 
@@ -1141,13 +1235,14 @@ fn publish_link_state_clears_details_on_disconnect() {
 
     let (bt, mock) = BluetoothDevice::new_mocked();
     let mut state = BtMonitorState::default();
-    state.publish_link_state(&bt, &mut BtSharedUpdate::default());
+    let _ = state.publish_link_state(&bt, &mut BtSharedUpdate::default());
 
     mock.clear_devices();
     mock.clear_pcms();
-    let mut update = BtSharedUpdate::default();
-    state.publish_link_state(&bt, &mut update);
-    let details = update.details.expect("disconnect republishes details");
+    let _ = state.publish_link_state(&bt, &mut BtSharedUpdate::default());
+    let details = state
+        .last_details()
+        .expect("disconnect republishes details");
     assert!(details.device.is_none());
     assert!(details.pcm.is_none());
 }

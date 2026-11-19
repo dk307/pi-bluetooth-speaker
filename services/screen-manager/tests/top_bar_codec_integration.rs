@@ -5,11 +5,12 @@
 
 use std::rc::Rc;
 
-use screen_manager::ui::{AppShell, Bgrx8888Pixel, BtLinkDetails, Framebuffer, MainWindow};
+use screen_manager::ui::{
+    AppShell, Bgrx8888Pixel, BtDeviceRow, BtDevicesUpdate, Framebuffer, MainWindow,
+};
 use slint::platform::software_renderer::MinimalSoftwareWindow;
 use slint::platform::{PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition};
-use speaker_bluetooth::BluetoothDevice;
 
 /// Width of the appliance panel.
 const WIDTH: usize = Framebuffer::DEFAULT_WIDTH as usize;
@@ -38,15 +39,24 @@ fn shell_with_window() -> (AppShell, Rc<MinimalSoftwareWindow>, Framebuffer) {
 }
 
 /// Connects (or disconnects) the mocked Bluetooth device.
+///
+/// Publishes a single devices row through the worker-update path: the
+/// status-bar connected indicator is derived from the devices rows since
+/// the tab-2 details screen was retired (plan A6).
 fn set_connected(shell: &AppShell, connected: bool) {
-    if connected {
-        let (bt, _mock) = BluetoothDevice::new_mocked();
-        let snapshot = bt.link_snapshot().expect("snapshot");
-        let details = BtLinkDetails::select(&snapshot, None);
-        shell.apply_bt_link_details(&details);
-    } else {
-        shell.apply_bt_link_details(&BtLinkDetails::default());
-    }
+    let row = BtDeviceRow {
+        address: "AA:BB:CC:DD:EE:FF".into(),
+        name: "Pixel 8".into(),
+        subtitle: "Phone · AA:BB:CC:DD:EE:FF".into(),
+        status: if connected { "Active" } else { "Paired" }.into(),
+        icon: "phone".into(),
+        connected,
+        paired: true,
+    };
+    shell.apply_bt_devices(BtDevicesUpdate {
+        rows: vec![row],
+        ..BtDevicesUpdate::default()
+    });
     assert_eq!(
         shell.window().get_bt_connected(),
         connected,

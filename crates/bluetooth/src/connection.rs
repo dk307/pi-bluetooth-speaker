@@ -27,6 +27,7 @@ use crate::cover_service::CoverSnapshot;
 use speaker_common::runtime::FromJoinError;
 
 use crate::cover_art::{COVER_ART_CACHE_DIR, cover_art_cached_path_in};
+use crate::device_admin::{self, AdminAction};
 use crate::transport::{
     BlueAlsaPcm, BtPlaybackState, apply_mute_to_volume_bytes, decode_pcm_format,
     encode_volume_bytes, format_volume_bytes,
@@ -1258,7 +1259,7 @@ impl DbusClient {
     /// The `Drop` impl drains the slot and closes the connection to release
     /// the parked listener thread; reaching this method afterwards is a
     /// use-after-drop bug, so panicking is the correct behavior.
-    fn conn(&self) -> BlockingConnection {
+    pub(crate) fn conn(&self) -> BlockingConnection {
         self.conn_slot
             .lock()
             .unwrap()
@@ -2139,6 +2140,17 @@ impl DbusClient {
 // In-Memory Mock Controller (M-MOCKABLE-SYSCALLS)
 // ============================================================================
 
+/// BlueZ-shaped error for a device object path that does not exist on the bus.
+///
+/// The mock produces the same `org.bluez.Error.DoesNotExist` summary as the
+/// physical backend so [`crate::device_admin::device_action_message`] maps
+/// both identically (symmetric mock error fidelity).
+fn device_not_found() -> BtError {
+    BtError::new(BtErrorKind::Dbus {
+        details: "org.bluez.Error.DoesNotExist: No such device".into(),
+    })
+}
+
 /// Controllable in-memory mock for [`BluetoothDevice`].
 #[derive(Debug, Clone)]
 pub struct BluetoothDeviceMock {
@@ -2156,6 +2168,7 @@ struct MockState {
     active_device: Option<BtAddress>,
     fault: Option<Box<str>>,
     cache_dir: std::path::PathBuf,
+    last_admin_action: Option<AdminAction>,
 }
 
 impl BluetoothDeviceMock {
@@ -2235,6 +2248,7 @@ impl BluetoothDeviceMock {
             active_device: None,
             fault: None,
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
+            last_admin_action: None,
         };
 
         Self {
@@ -2717,6 +2731,146 @@ impl BluetoothDeviceMock {
         let adapter = Self::get_adapter_mut(&mut state, target_adapter)?;
         adapter.pairable = pairable;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Device administration (effects mirror the physical `BlueZ` backend so
+    // tests cannot pass on hosts whose mock state would fail on real hardware)
+    // -----------------------------------------------------------------------
+
+    /// Write-locks the mock state, failing fast on an injected fault.
+    fn admin_lock(&self) -> Result<std::sync::RwLockWriteGuard<'_, MockState>, BtError> {
+        let state = self.state.write().expect("mock lock poisoned");
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        Ok(state)
+    }
+
+    fn start_discovery(&self, adapter: &str) -> Result<(), BtError> {
+        let mut state = self.admin_lock()?;
+        let adapter = Self::get_adapter_mut(&mut state, Some(adapter))?;
+        adapter.discovering = true;
+        state.last_admin_action = Some(AdminAction::StartDiscovery);
+        self.change_flag.notify();
+        Ok(())
+    }
+
+    fn stop_discovery(&self, adapter: &str) -> Result<(), BtError> {
+        let mut state = self.admin_lock()?;
+        let adapter = Self::get_adapter_mut(&mut state, Some(adapter))?;
+        adapter.discovering = false;
+        state.last_admin_action = Some(AdminAction::StopDiscovery);
+        self.change_flag.notify();
+        Ok(())
+    }
+
+    fn connect_device(&self, adapter: &str, addr: BtAddress) -> Result<(), BtError> {
+        let mut state = self.admin_lock()?;
+        Self::get_adapter_mut(&mut state, Some(adapter))?;
+        let device = state
+            .devices
+            .iter_mut()
+            .find(|d| d.address == addr)
+            .ok_or_else(device_not_found)?;
+        device.connected = true;
+        state.last_admin_action = Some(AdminAction::Connect);
+        self.change_flag.notify();
+        Ok(())
+    }
+
+    fn disconnect_device(&self, adapter: &str, addr: BtAddress) -> Result<(), BtError> {
+        let mut state = self.admin_lock()?;
+        Self::get_adapter_mut(&mut state, Some(adapter))?;
+        let device = state
+            .devices
+            .iter_mut()
+            .find(|d| d.address == addr)
+            .ok_or_else(device_not_found)?;
+        device.connected = false;
+        state.last_admin_action = Some(AdminAction::Disconnect);
+        self.change_flag.notify();
+        Ok(())
+    }
+
+    fn pair_device(&self, adapter: &str, addr: BtAddress) -> Result<(), BtError> {
+        let mut state = self.admin_lock()?;
+        Self::get_adapter_mut(&mut state, Some(adapter))?;
+        let device = state
+            .devices
+            .iter_mut()
+            .find(|d| d.address == addr)
+            .ok_or_else(device_not_found)?;
+        device.paired = true;
+        state.last_admin_action = Some(AdminAction::Pair);
+        self.change_flag.notify();
+        Ok(())
+    }
+
+    fn cancel_pairing(&self, adapter: &str, addr: BtAddress) -> Result<(), BtError> {
+        let mut state = self.admin_lock()?;
+        Self::get_adapter_mut(&mut state, Some(adapter))?;
+        state
+            .devices
+            .iter()
+            .find(|d| d.address == addr)
+            .ok_or_else(device_not_found)?;
+        state.last_admin_action = Some(AdminAction::CancelPairing);
+        self.change_flag.notify();
+        Ok(())
+    }
+
+    fn remove_device(&self, adapter: &str, addr: BtAddress) -> Result<(), BtError> {
+        let mut state = self.admin_lock()?;
+        Self::get_adapter_mut(&mut state, Some(adapter))?;
+        let before = state.devices.len();
+        state.devices.retain(|d| d.address != addr);
+        if state.devices.len() == before {
+            return Err(device_not_found());
+        }
+        state.last_admin_action = Some(AdminAction::Remove);
+        self.change_flag.notify();
+        Ok(())
+    }
+
+    fn set_trusted(&self, adapter: &str, addr: BtAddress, trusted: bool) -> Result<(), BtError> {
+        let mut state = self.admin_lock()?;
+        Self::get_adapter_mut(&mut state, Some(adapter))?;
+        let device = state
+            .devices
+            .iter_mut()
+            .find(|d| d.address == addr)
+            .ok_or_else(device_not_found)?;
+        device.trusted = trusted;
+        state.last_admin_action = Some(AdminAction::SetTrusted);
+        self.change_flag.notify();
+        Ok(())
+    }
+
+    /// Returns the last device-admin action applied to the mock.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    #[must_use]
+    pub fn last_admin_action(&self) -> Option<AdminAction> {
+        self.state
+            .read()
+            .expect("mock lock poisoned")
+            .last_admin_action
+    }
+
+    /// Returns whether discovery is active on the mock adapter.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    #[must_use]
+    pub fn discovering(&self) -> bool {
+        self.state
+            .read()
+            .expect("mock lock poisoned")
+            .adapter
+            .as_ref()
+            .is_some_and(|a| a.discovering)
     }
 
     fn read_status_for_adapter(
@@ -3340,6 +3494,103 @@ impl BluetoothDevice {
     /// Returns [`BtError`] if the pairable command fails.
     pub fn set_pairable(&self, pairable: bool) -> Result<(), BtError> {
         self.set_pairable_for_adapter(None, pairable)
+    }
+
+    /// Starts Bluetooth inquiry on `adapter`.
+    ///
+    /// # Errors
+    /// Returns [`BtError::adapter_not_found`] when the adapter is absent, or
+    /// the underlying `BlueZ` failure otherwise.
+    pub fn start_discovery(&self, adapter: &str) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.start_discovery(adapter),
+            Backend::Dbus(dbus) => device_admin::start_discovery(&dbus.conn(), adapter),
+        }
+    }
+
+    /// Stops Bluetooth inquiry on `adapter`.
+    ///
+    /// # Errors
+    /// Returns [`BtError::adapter_not_found`] when the adapter is absent, or
+    /// the underlying `BlueZ` failure otherwise.
+    pub fn stop_discovery(&self, adapter: &str) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.stop_discovery(adapter),
+            Backend::Dbus(dbus) => device_admin::stop_discovery(&dbus.conn(), adapter),
+        }
+    }
+
+    /// Connects to device `addr` known to `adapter`.
+    ///
+    /// # Errors
+    /// Returns the underlying `BlueZ` failure, including `DoesNotExist` when
+    /// the device object is unknown to `BlueZ`.
+    pub fn connect_device(&self, adapter: &str, addr: BtAddress) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.connect_device(adapter, addr),
+            Backend::Dbus(dbus) => device_admin::connect_device(&dbus.conn(), adapter, addr),
+        }
+    }
+
+    /// Disconnects device `addr` from `adapter`.
+    ///
+    /// # Errors
+    /// Returns the underlying `BlueZ` failure.
+    pub fn disconnect_device(&self, adapter: &str, addr: BtAddress) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.disconnect_device(adapter, addr),
+            Backend::Dbus(dbus) => device_admin::disconnect_device(&dbus.conn(), adapter, addr),
+        }
+    }
+
+    /// Pairs with device `addr`; blocks until pairing settles.
+    ///
+    /// # Errors
+    /// Returns the underlying `BlueZ` pairing failure.
+    pub fn pair_device(&self, adapter: &str, addr: BtAddress) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.pair_device(adapter, addr),
+            Backend::Dbus(dbus) => device_admin::pair_device(&dbus.conn(), adapter, addr),
+        }
+    }
+
+    /// Cancels an in-flight pairing attempt with device `addr`.
+    ///
+    /// # Errors
+    /// Returns the underlying `BlueZ` failure.
+    pub fn cancel_pairing(&self, adapter: &str, addr: BtAddress) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.cancel_pairing(adapter, addr),
+            Backend::Dbus(dbus) => device_admin::cancel_pairing(&dbus.conn(), adapter, addr),
+        }
+    }
+
+    /// Removes paired device `addr` from `adapter`'s `BlueZ` device cache.
+    ///
+    /// # Errors
+    /// Returns [`BtError::adapter_not_found`] when the adapter is absent, or
+    /// the underlying `BlueZ` failure otherwise.
+    pub fn remove_device(&self, adapter: &str, addr: BtAddress) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.remove_device(adapter, addr),
+            Backend::Dbus(dbus) => device_admin::remove_device(&dbus.conn(), adapter, addr),
+        }
+    }
+
+    /// Sets the `Trusted` property on device `addr` for auto-reconnect parity.
+    ///
+    /// # Errors
+    /// Returns the underlying `BlueZ` failure.
+    pub fn set_trusted(
+        &self,
+        adapter: &str,
+        addr: BtAddress,
+        trusted: bool,
+    ) -> Result<(), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.set_trusted(adapter, addr, trusted),
+            Backend::Dbus(dbus) => device_admin::set_trusted(&dbus.conn(), adapter, addr, trusted),
+        }
     }
 }
 

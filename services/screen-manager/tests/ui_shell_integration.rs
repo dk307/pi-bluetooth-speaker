@@ -531,6 +531,36 @@ fn ui_shell_cover_art_and_pcm_stream_updates() {
     assert_eq!(shell.window().get_stream_codec(), "LDAC");
     assert_eq!(shell.window().get_stream_sample_rate(), "96 kHz");
     assert_eq!(shell.window().get_stream_bit_depth(), "24-bit");
+    // The codec-HUD summary line follows the active stream: `96 kHz •
+    // 24-bit • Stereo` for this PCM, and the missing delay renders the
+    // placeholder.
+    assert_eq!(
+        shell.window().get_bt_stream_format(),
+        "96 kHz • 24-bit • Stereo"
+    );
+    assert_eq!(shell.window().get_bt_delay_text(), "—");
+
+    // A non-1000-multiple rate keeps one decimal; mono and multichannel
+    // labels cover the remaining channel arms; a present delay is shown.
+    pcm.sampling_rate = 44_100;
+    pcm.channels = 1;
+    pcm.delay = Some("42 ms".into());
+    shell.apply_pcm_stream(&pcm);
+    // The top-bar badge keeps its integer-kHz rounding; only the codec-HUD
+    // summary line carries the precise rate.
+    assert_eq!(shell.window().get_stream_sample_rate(), "44 kHz");
+    assert_eq!(
+        shell.window().get_bt_stream_format(),
+        "44.1 kHz • 24-bit • Mono"
+    );
+    assert_eq!(shell.window().get_bt_delay_text(), "42 ms");
+
+    pcm.channels = 5;
+    shell.apply_pcm_stream(&pcm);
+    assert_eq!(
+        shell.window().get_bt_stream_format(),
+        "44.1 kHz • 24-bit • 5 ch"
+    );
     // PCM volume/mute are phone-owned stream metadata; the shell level and
     // mute indicator reflect the amp exclusively (apply_amp_volume) and are
     // untouched by PCM pushes (75 % is the Slint default level).

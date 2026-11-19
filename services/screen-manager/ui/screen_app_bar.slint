@@ -22,6 +22,13 @@ component CenteredAppBar inherits Rectangle {
     in property <image> trailing_icon;
     in property <string> trailing_tooltip: "Back";
     callback trailing_clicked();
+    // Optional secondary action icon, positioned NEXT TO the trailing icon
+    // (left of it) — used by overlays whose primary action (e.g. the devices
+    // screen's Add Device) lives in the app bar alongside Close.
+    in property <bool> has_action: false;
+    in property <image> action_icon;
+    in property <string> action_tooltip: "";
+    callback action_clicked();
 
     background: MaterialPalette.surface_container;
 
@@ -40,7 +47,26 @@ component CenteredAppBar inherits Rectangle {
         overflow: elide;
         horizontal-alignment: center;
         vertical-alignment: center;
-        width: parent.width - 2 * (MaterialStyleMetrics.size_40 + MaterialStyleMetrics.padding_24);
+        width: parent.width - 2 * (MaterialStyleMetrics.size_40 + MaterialStyleMetrics.padding_24)
+               - (root.has_action ? MaterialStyleMetrics.size_40 + 8px : 0px);
+    }
+
+    // Secondary action icon (Add Device): directly left of the trailing icon,
+    // sharing its 40px circle footprint and right margin so the pair reads as
+    // one control cluster against the bar surface.
+    if root.has_action: Rectangle {
+        x: parent.width - 2 * self.width - 12px - 8px;
+        y: (parent.height - self.height) / 2;
+        width: MaterialStyleMetrics.size_40;
+        height: MaterialStyleMetrics.size_40;
+
+        FilledIconButton {
+            width: 100%;
+            height: 100%;
+            icon: root.action_icon;
+            tooltip: root.action_tooltip;
+            clicked => { root.action_clicked(); }
+        }
     }
 
     // Trailing action icon (Back / Close): filled primary circle, right-most

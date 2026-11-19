@@ -273,6 +273,7 @@ impl Session {
             bt,
             commands,
             amp_commands,
+            device_commands,
         } = init;
         let shell = Rc::new(shell);
         let bg_running = Arc::new(AtomicBool::new(true));
@@ -290,11 +291,20 @@ impl Session {
                     speaker_bluetooth::BluetoothDevice::new_blocking,
                     &shared,
                     &commands,
+                    &device_commands,
                     &bg_running,
                     &bt_connected,
                 )
             },
-            |device| daemon::spawn_bt_monitor_worker(device, &shared, &commands, &bg_running),
+            |device| {
+                daemon::spawn_bt_monitor_worker(
+                    device,
+                    &shared,
+                    &commands,
+                    &device_commands,
+                    &bg_running,
+                )
+            },
         ));
 
         // Periodic reconciliation of worker-published Bluetooth/amp state.
