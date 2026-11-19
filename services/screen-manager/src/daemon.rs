@@ -941,8 +941,9 @@ struct BtDevicesMonitorState {
     last_rows: Vec<BtDeviceRow>,
     /// Last published discovered rows.
     last_discovered: Vec<BtDeviceRow>,
-    /// Last published discovery-spinner flag.
-    last_scanning: bool,
+    /// Last published discovery-spinner flag (`None` = invalidated by
+    /// `clear_row_dedup` so the next successful snapshot re-publishes rows).
+    last_scanning: Option<bool>,
     /// Last published adapter alias (subtitle source).
     last_alias: Option<Box<str>>,
     /// Cached `BlueZ` adapter id (`hciN`) for adapter-scoped admin calls.
@@ -961,13 +962,13 @@ struct BtDevicesMonitorState {
 
 #[cfg(feature = "ui")]
 impl BtDevicesMonitorState {
-    /// Clears row/alias/scanning dedup so the next tick re-publishes the
-    /// full screen state; staged events and the adapter-id cache survive.
+    /// Marks row/alias/scanning dedup dirty so the next successful snapshot
+    /// re-publishes full screen state without erasing `last_rows` /
+    /// `last_discovered` (a transient snapshot failure right after reset still
+    /// preserves the last known rows).
     fn clear_row_dedup(&mut self) {
-        self.last_rows.clear();
-        self.last_discovered.clear();
         self.last_alias = None;
-        self.last_scanning = false;
+        self.last_scanning = None;
     }
 }
 
@@ -1671,8 +1672,8 @@ impl BtMonitorState {
                 self.devices.last_discovered = built.discovered;
                 changed = true;
             }
-            if built.scanning != self.devices.last_scanning {
-                self.devices.last_scanning = built.scanning;
+            if self.devices.last_scanning != Some(built.scanning) {
+                self.devices.last_scanning = Some(built.scanning);
                 changed = true;
             }
             let staged_alias = match built.alias {
@@ -1726,7 +1727,7 @@ impl BtMonitorState {
         update.devices = Some(BtDevicesUpdate {
             rows: self.devices.last_rows.clone(),
             discovered: self.devices.last_discovered.clone(),
-            scanning: self.devices.last_scanning,
+            scanning: self.devices.last_scanning.unwrap_or(false),
             pairing,
             toast,
             adapter_alias,

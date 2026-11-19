@@ -1054,47 +1054,63 @@ impl AppShell {
             w.set_bt_connected(connected);
         }
 
+        if update.action_settled || update.toast.is_some() {
+            w.set_bt_pending_address(String::new().into());
+        }
+
+        let screen_open = w.get_bt_devices_open();
+
         // Terminal pairings clear the pairing code so a previous device's
-        // passkey can never linger on screen (stale-code lesson).
+        // passkey can never linger on screen (stale-code lesson). When the
+        // overlay is closed, clear spinner/code without mutating mode or
+        // raising a stale toast upon reopen.
         if let Some(pairing) = &update.pairing {
             use speaker_bluetooth::PairingStatus;
             match pairing {
                 PairingStatus::Connecting { name } => {
-                    w.set_bt_devices_mode(2);
-                    w.set_bt_pair_device_name(name.to_string().into());
-                    w.set_bt_pair_code(String::new().into());
-                    w.set_bt_pair_spinning(true);
+                    if screen_open {
+                        w.set_bt_devices_mode(2);
+                        w.set_bt_pair_device_name(name.to_string().into());
+                        w.set_bt_pair_code(String::new().into());
+                        w.set_bt_pair_spinning(true);
+                    }
                 }
                 PairingStatus::AwaitingConfirmation { name, passkey } => {
-                    w.set_bt_devices_mode(2);
-                    w.set_bt_pair_device_name(name.to_string().into());
-                    w.set_bt_pair_code(super::pairing_code_text(*passkey).into());
-                    w.set_bt_pair_spinning(true);
+                    if screen_open {
+                        w.set_bt_devices_mode(2);
+                        w.set_bt_pair_device_name(name.to_string().into());
+                        w.set_bt_pair_code(super::pairing_code_text(*passkey).into());
+                        w.set_bt_pair_spinning(true);
+                    }
                 }
                 PairingStatus::Paired { .. } => {
-                    w.set_bt_devices_mode(0);
+                    if screen_open {
+                        w.set_bt_devices_mode(0);
+                    }
                     w.set_bt_pair_spinning(false);
                     w.set_bt_pair_code(String::new().into());
                 }
                 PairingStatus::Failed { message } => {
                     tracing::info!(message = %message, "Bluetooth pairing failed");
-                    w.set_bt_devices_mode(1);
+                    if screen_open {
+                        w.set_bt_devices_mode(1);
+                    }
                     w.set_bt_pair_spinning(false);
                     w.set_bt_pair_code(String::new().into());
                 }
                 PairingStatus::TimedOut | PairingStatus::Cancelled => {
-                    w.set_bt_devices_mode(1);
+                    if screen_open {
+                        w.set_bt_devices_mode(1);
+                    }
                     w.set_bt_pair_spinning(false);
                     w.set_bt_pair_code(String::new().into());
                 }
             }
         }
 
-        if update.action_settled || update.toast.is_some() {
-            w.set_bt_pending_address(String::new().into());
-        }
-
-        if let Some(text) = &update.toast {
+        if let Some(text) = &update.toast
+            && screen_open
+        {
             // A refusal toast published WITHOUT a pairing session (agent
             // registration failure, no adapter, pairing-thread spawn failure)
             // must converge the optimistic pairing flip from on_bt_row_action;

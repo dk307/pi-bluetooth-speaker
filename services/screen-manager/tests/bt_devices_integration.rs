@@ -239,6 +239,7 @@ fn apply_bt_devices_publishes_rows_subtitle_and_scanning() {
 fn apply_bt_devices_maps_pairing_transitions() {
     let (shell, _window) = shell_with_window();
     let w = shell.window();
+    w.set_bt_devices_open(true);
 
     shell.apply_bt_devices(BtDevicesUpdate {
         pairing: Some(PairingStatus::Connecting {
@@ -301,6 +302,7 @@ fn apply_bt_devices_maps_pairing_transitions() {
 fn apply_bt_devices_shows_toast_and_dedupes_identical_publishes() {
     let (shell, _window) = shell_with_window();
     let w = shell.window();
+    w.set_bt_devices_open(true);
 
     shell.apply_bt_devices(BtDevicesUpdate {
         toast: Some("Pairing timed out".into()),
@@ -1233,4 +1235,72 @@ fn row_action_sets_pending_address_and_clears_when_settled() {
         ..BtDevicesUpdate::default()
     });
     assert_eq!(shell.window().get_bt_pending_address().as_str(), "");
+}
+
+#[test]
+fn closed_screen_ignores_mode_and_toast_transitions() {
+    let (shell, _window) = shell_with_window();
+    let w = shell.window();
+    w.set_bt_devices_open(true);
+    w.set_bt_toast_text("Old toast".into());
+    w.set_bt_toast_visible(true);
+    w.invoke_close_bt_devices();
+    assert!(!w.get_bt_devices_open());
+    assert!(!w.get_bt_toast_visible());
+    assert_eq!(w.get_bt_toast_text().as_str(), "");
+
+    // A pairing failure + toast landing while the overlay is closed must not
+    // flip bt_devices_mode to 1 or leave a stale toast visible upon reopen.
+    shell.apply_bt_devices(BtDevicesUpdate {
+        pairing: Some(PairingStatus::Failed {
+            message: "Pairing failed".into(),
+        }),
+        toast: Some("Pairing failed".into()),
+        ..BtDevicesUpdate::default()
+    });
+    assert_eq!(w.get_bt_devices_mode(), 0);
+    assert!(!w.get_bt_toast_visible());
+    assert!(!w.get_bt_pair_spinning());
+}
+
+#[test]
+fn reset_dedup_followed_by_snapshot_error_keeps_last_rows() {
+    let (bt, mock) = BluetoothDevice::new_mocked();
+    let shared = Mutex::new(BtSharedUpdate::default());
+    let transport = TransportCommandQueue::new();
+    let commands = DeviceCommandQueue::new();
+    let mut state = BtMonitorState::default();
+
+    let first = tick(
+        &mut state,
+        &bt,
+        &shared,
+        &transport,
+        &commands,
+        BT_PAIRING_TIMEOUT,
+    )
+    .expect("first tick publishes rows");
+    assert_eq!(first.rows.len(), 1);
+
+    // Mid-query command arrival triggers reset_dedup(); a subsequent snapshot
+    // failure with a staged action failure must keep last known rows intact.
+    state.reset_dedup();
+    mock.set_fault(Some("bus offline".into()));
+    commands.push(DeviceCommand::Connect(PHONE));
+    let failed = tick(
+        &mut state,
+        &bt,
+        &shared,
+        &transport,
+        &commands,
+        BT_PAIRING_TIMEOUT,
+    )
+    .expect("staged toast/action_settled publishes");
+    assert_eq!(
+        failed.rows.len(),
+        1,
+        "reset_dedup + snapshot failure must not blank last known rows"
+    );
+    assert!(failed.toast.is_some());
+    assert!(failed.action_settled);
 }
