@@ -11,19 +11,23 @@ use std::fmt::{self, Debug, Formatter};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use slint::{ComponentHandle, Model};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::config::{
-    CodecHudTimeoutMs, CoreConfig, DEFAULT_FONT_SCALE, DEFAULT_MARQUEE_FPS,
-    DEFAULT_VOLUME_STEP_PERCENT, FontScale, MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE,
-    MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_STEP_PERCENT,
-    MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE, MIN_VOLUME_HUD_FADE_MS, MIN_VOLUME_HUD_TIMEOUT_MS,
+    CodecHudTimeoutMs, CoreConfig, DEFAULT_FONT_SCALE, DEFAULT_VOLUME_STEP_PERCENT, FontScale,
+    MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
+    MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE, MIN_VOLUME_HUD_TIMEOUT_MS,
     MIN_VOLUME_STEP_PERCENT, MarqueeFps, TitleDisplayMode, VolumeHudFadeMs, VolumeHudTimeoutMs,
     VolumeStepPercent,
 };
+use crate::settings_catalog::{
+    SETTINGS_CATALOG, SettingControl, SettingId, SettingTier, apply_step, apply_toggle, row_state,
+};
 
 use super::backdrop::OVERLAY_TOP_INSET;
-use super::generated::{AppTheme, MainWindow, MarqueeCompose, TouchScale};
+use super::generated::{
+    AppTheme, MainWindow, MarqueeCompose, SettingControlKind, SettingRowItem, TouchScale,
+};
 use super::theme::ThemePreset;
 
 /// Tracks cumulative [`speaker_hardware::EncoderStatus`] counters and translates
@@ -179,9 +183,16 @@ fn pcm_bit_depth(format: &str) -> &'static str {
     }
 }
 
+#[derive(Clone)]
+struct SettingsModels {
+    basic: Rc<VecModel<SettingRowItem>>,
+    advanced: Rc<VecModel<SettingRowItem>>,
+}
+
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
+    settings_models: SettingsModels,
     config_path: Rc<RefCell<Option<PathBuf>>>,
     persist_tx: Rc<RefCell<Option<std::sync::mpsc::Sender<CoreConfig>>>>,
     last_amp_volume: Cell<Option<crate::volume::AmpVolumeState>>,
@@ -222,8 +233,23 @@ impl AppShell {
     /// Initializes an [`AppShell`] controller wrapping a [`MainWindow`] component.
     #[must_use]
     pub fn new(window: MainWindow) -> Self {
+        let default_cfg = CoreConfig::default();
+        let settings_models = SettingsModels {
+            basic: Rc::new(VecModel::from(Self::build_setting_rows(
+                &default_cfg,
+                SettingTier::Basic,
+            ))),
+            advanced: Rc::new(VecModel::from(Self::build_setting_rows(
+                &default_cfg,
+                SettingTier::Advanced,
+            ))),
+        };
+        window.set_basic_settings(ModelRc::from(Rc::clone(&settings_models.basic)));
+        window.set_advanced_settings(ModelRc::from(Rc::clone(&settings_models.advanced)));
+
         let shell = Self {
             window,
+            settings_models,
             config_path: Rc::new(RefCell::new(None)),
             persist_tx: Rc::new(RefCell::new(None)),
             last_amp_volume: Cell::new(None),
@@ -246,6 +272,7 @@ impl AppShell {
         shell.set_volume_hud_timeout_ms(VolumeHudTimeoutMs::DEFAULT);
         shell.set_volume_hud_fade_ms(VolumeHudFadeMs::DEFAULT);
         shell.set_codec_hud_timeout_ms(CodecHudTimeoutMs::DEFAULT);
+        shell.sync_settings_model();
         shell.setup_callbacks();
         shell.apply_theme(ThemePreset::default());
         shell
@@ -254,15 +281,89 @@ impl AppShell {
     /// Applies runtime parameters from [`CoreConfig`] (theme, marquee fps, title display mode,
     /// volume step, Volume HUD timeout/fade durations, and Codec HUD timeout) to this shell.
     pub fn apply_config(&self, config: &CoreConfig) {
-        self.set_marquee_fps(config.marquee_fps);
-        self.set_title_display_mode(config.title_display_mode);
-        self.set_volume_step_percent(config.volume_step_percent);
-        self.set_volume_hud_timeout_ms(config.volume_hud_timeout_ms);
-        self.set_volume_hud_fade_ms(config.volume_hud_fade_ms);
-        self.set_codec_hud_timeout_ms(config.codec_hud_timeout_ms);
+        Self::apply_config_to_window(&self.window, config);
+        Self::sync_settings_models_for(&self.window, &self.settings_models);
         self.set_font_scale(config.font_scale.value());
         if let Some(theme) = config.theme {
             self.apply_theme(theme);
+        }
+    }
+
+    fn apply_config_to_window(window: &MainWindow, config: &CoreConfig) {
+        window
+            .global::<MarqueeCompose>()
+            .set_marquee_fps(Self::slint_i32(config.marquee_fps.value(), "marquee_fps"));
+        window.set_title_split_mode(config.title_display_mode.is_split());
+        window.set_volume_step_percent(i32::from(config.volume_step_percent.value()));
+        window.set_volume_hud_timeout_ms(Self::slint_i32(
+            config.volume_hud_timeout_ms.value(),
+            "volume_hud_timeout_ms",
+        ));
+        window.set_volume_hud_fade_ms(Self::slint_i32(
+            config.volume_hud_fade_ms.value(),
+            "volume_hud_fade_ms",
+        ));
+        window.set_codec_hud_timeout_ms(Self::slint_i32(
+            config.codec_hud_timeout_ms.value(),
+            "codec_hud_timeout_ms",
+        ));
+    }
+
+    fn build_setting_rows(config: &CoreConfig, tier: SettingTier) -> Vec<SettingRowItem> {
+        SETTINGS_CATALOG
+            .iter()
+            .filter(|desc| desc.tier == tier)
+            .map(|desc| {
+                let state = row_state(config, desc);
+                let (kind, left_label, right_label) = match desc.control {
+                    SettingControl::Stepper { .. } => (
+                        SettingControlKind::Stepper,
+                        slint::SharedString::new(),
+                        slint::SharedString::new(),
+                    ),
+                    SettingControl::TwoOption {
+                        left_label,
+                        right_label,
+                    } => (
+                        SettingControlKind::TwoOption,
+                        left_label.into(),
+                        right_label.into(),
+                    ),
+                };
+                SettingRowItem {
+                    id: desc.key().into(),
+                    label: desc.label.into(),
+                    is_advanced: desc.is_advanced(),
+                    kind,
+                    value_text: state.value_text.into(),
+                    can_decrease: state.can_decrease,
+                    can_increase: state.can_increase,
+                    left_label,
+                    right_label,
+                    right_selected: state.right_selected,
+                }
+            })
+            .collect()
+    }
+
+    fn sync_settings_model(&self) {
+        Self::sync_settings_models_for(&self.window, &self.settings_models);
+    }
+
+    fn sync_settings_models_for(window: &MainWindow, models: &SettingsModels) {
+        let config = Self::config_from_window(window);
+        for (tier, model) in [
+            (SettingTier::Basic, &models.basic),
+            (SettingTier::Advanced, &models.advanced),
+        ] {
+            for (idx, row) in Self::build_setting_rows(&config, tier)
+                .into_iter()
+                .enumerate()
+            {
+                if idx < model.row_count() {
+                    model.set_row_data(idx, row);
+                }
+            }
         }
     }
 
@@ -278,6 +379,7 @@ impl AppShell {
     /// construction; the validated value is written to the Slint property verbatim.
     pub fn set_volume_step_percent(&self, step: VolumeStepPercent) {
         self.window.set_volume_step_percent(i32::from(step.value()));
+        self.sync_settings_model();
     }
 
     /// Returns the selected marquee scroll rate in fps (`30` or `60`).
@@ -294,6 +396,7 @@ impl AppShell {
         self.window
             .global::<MarqueeCompose>()
             .set_marquee_fps(Self::slint_i32(fps.value(), "marquee_fps"));
+        self.sync_settings_model();
     }
 
     /// Returns the active track title display mode (`Marquee` or `Split`).
@@ -305,6 +408,7 @@ impl AppShell {
     /// Sets the track title display mode (`Marquee` or `Split`).
     pub fn set_title_display_mode(&self, mode: TitleDisplayMode) {
         self.window.set_title_split_mode(mode.is_split());
+        self.sync_settings_model();
     }
 
     /// Returns the Volume HUD auto-dismiss timeout.
@@ -323,6 +427,7 @@ impl AppShell {
             timeout_ms.value(),
             "volume_hud_timeout_ms",
         ));
+        self.sync_settings_model();
     }
 
     /// Returns the Volume HUD fade-out duration.
@@ -339,6 +444,7 @@ impl AppShell {
     pub fn set_volume_hud_fade_ms(&self, fade_ms: VolumeHudFadeMs) {
         self.window
             .set_volume_hud_fade_ms(Self::slint_i32(fade_ms.value(), "volume_hud_fade_ms"));
+        self.sync_settings_model();
     }
 
     /// Returns whether the Volume HUD overlay is currently in its active hold state.
@@ -435,6 +541,7 @@ impl AppShell {
     pub fn set_codec_hud_timeout_ms(&self, timeout_ms: CodecHudTimeoutMs) {
         self.window
             .set_codec_hud_timeout_ms(Self::slint_i32(timeout_ms.value(), "codec_hud_timeout_ms"));
+        self.sync_settings_model();
     }
 
     /// Binds the JSON path used by the live Screen Settings persistence.
@@ -614,18 +721,6 @@ impl AppShell {
     /// not a recoverable condition.
     fn slint_i32(value: u32, field: &str) -> i32 {
         i32::try_from(value).unwrap_or_else(|_| panic!("{field} value {value} exceeds i32"))
-    }
-
-    /// Clamps a Slint `i32` milliseconds value into the given `u32` domain.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the clamped value exceeds `i32::MAX` — every HUD domain caps
-    /// far below that bound, so a failure here is a violated invariant
-    /// (M-PANIC-ON-BUG), not a recoverable condition.
-    fn clamp_hud_ms(value: i32, min: u32, max: u32) -> i32 {
-        let clamped = Self::slint_ms_to_u32(value).clamp(min, max);
-        i32::try_from(clamped).expect("clamped HUD value fits in i32")
     }
 
     /// Reads and clamps the Volume HUD fade duration window property into `0..=2000`.
@@ -1242,74 +1337,38 @@ impl AppShell {
         });
 
         let win = self.window.as_weak();
+        let models = self.settings_models.clone();
         let persist_tx = Rc::clone(&self.persist_tx);
-        self.window.on_set_marquee_fps(move |fps| {
+        self.window.on_setting_step(move |id, dir| {
+            let Some(setting_id) = SettingId::from_key(id.as_str()) else {
+                tracing::warn!(setting_id = %id, "ignoring unknown setting_step id");
+                return;
+            };
             if let Some(w) = win.upgrade() {
-                // Snap to the valid domain (30/60) before applying; the
-                // programmatic setter does the same, but the callback receives
-                // raw Slint i32 values so it must guard its own input.
-                let fps = if fps == 30 {
-                    30
-                } else {
-                    i32::try_from(DEFAULT_MARQUEE_FPS).unwrap_or(i32::MAX)
-                };
-                w.global::<MarqueeCompose>().set_marquee_fps(fps);
-                Self::persist_window_state(&w, &persist_tx);
+                let mut config = Self::config_from_window(&w);
+                if apply_step(&mut config, setting_id, dir) {
+                    Self::apply_config_to_window(&w, &config);
+                    Self::sync_settings_models_for(&w, &models);
+                    Self::persist_window_state(&w, &persist_tx);
+                }
             }
         });
 
         let win = self.window.as_weak();
+        let models = self.settings_models.clone();
         let persist_tx = Rc::clone(&self.persist_tx);
-        self.window.on_set_title_split_mode(move |split| {
+        self.window.on_setting_toggle(move |id, right_selected| {
+            let Some(setting_id) = SettingId::from_key(id.as_str()) else {
+                tracing::warn!(setting_id = %id, "ignoring unknown setting_toggle id");
+                return;
+            };
             if let Some(w) = win.upgrade() {
-                w.set_title_split_mode(split);
-                Self::persist_window_state(&w, &persist_tx);
-            }
-        });
-
-        let win = self.window.as_weak();
-        let persist_tx = Rc::clone(&self.persist_tx);
-        self.window.on_set_volume_step_percent(move |step| {
-            if let Some(w) = win.upgrade() {
-                let clamped = step.clamp(
-                    i32::from(MIN_VOLUME_STEP_PERCENT),
-                    i32::from(MAX_VOLUME_STEP_PERCENT),
-                );
-                w.set_volume_step_percent(clamped);
-                Self::persist_window_state(&w, &persist_tx);
-            }
-        });
-
-        let win = self.window.as_weak();
-        let persist_tx = Rc::clone(&self.persist_tx);
-        self.window.on_set_volume_hud_timeout_ms(move |ms| {
-            if let Some(w) = win.upgrade() {
-                let clamped =
-                    Self::clamp_hud_ms(ms, MIN_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_TIMEOUT_MS);
-                w.set_volume_hud_timeout_ms(clamped);
-                Self::persist_window_state(&w, &persist_tx);
-            }
-        });
-
-        let win = self.window.as_weak();
-        let persist_tx = Rc::clone(&self.persist_tx);
-        self.window.on_set_volume_hud_fade_ms(move |ms| {
-            if let Some(w) = win.upgrade() {
-                let clamped =
-                    Self::clamp_hud_ms(ms, MIN_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_FADE_MS);
-                w.set_volume_hud_fade_ms(clamped);
-                Self::persist_window_state(&w, &persist_tx);
-            }
-        });
-
-        let win = self.window.as_weak();
-        let persist_tx = Rc::clone(&self.persist_tx);
-        self.window.on_set_codec_hud_timeout_ms(move |ms| {
-            if let Some(w) = win.upgrade() {
-                let clamped =
-                    Self::clamp_hud_ms(ms, MIN_CODEC_HUD_TIMEOUT_MS, MAX_CODEC_HUD_TIMEOUT_MS);
-                w.set_codec_hud_timeout_ms(clamped);
-                Self::persist_window_state(&w, &persist_tx);
+                let mut config = Self::config_from_window(&w);
+                if apply_toggle(&mut config, setting_id, right_selected) {
+                    Self::apply_config_to_window(&w, &config);
+                    Self::sync_settings_models_for(&w, &models);
+                    Self::persist_window_state(&w, &persist_tx);
+                }
             }
         });
     }

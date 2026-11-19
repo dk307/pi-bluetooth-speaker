@@ -1,78 +1,123 @@
 #![cfg(feature = "ui")]
-//! Drift guard between the Slint stepper bounds in `ui/settings_view.slint`
-//! and the Rust config domains in `crate::config`.
-//!
-//! The Advanced settings rows hardcode their min/max/step values directly in
-//! `.slint` markup (`root.volume_step_percent > 1`, `- 250`, ...). Those
-//! literals mirror the `MIN_*`/`MAX_*` constants that the Rust callbacks clamp
-//! against; if one side moves without the other, the UI either enables a
-//! stepper that the Rust side clamps (dead taps at the bound) or disables one
-//! the Rust side would accept (settings that cannot be reached).
-//!
-//! This test pins both sides together: every bound/step literal the
-//! `SettingsStepperRow` invocations rely on is listed as a needle built from
-//! the corresponding Rust constant, and each needle must match exactly once
-//! with a non-digit character after it — so widening a Slint bound (e.g.
-//! `> 1` to `> 15`) breaks the guard instead of silently passing as a
-//! substring.
+//! Catalog consistency and drift guard between `crate::settings_catalog` and
+//! `crate::config`, plus verification that `ui/settings_view.slint` contains
+//! no hardcoded per-setting bounds.
 
 use screen_manager::config::{
-    CODEC_HUD_TIMEOUT_STEP_MS, MAX_CODEC_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_FADE_MS,
+    CODEC_HUD_TIMEOUT_STEP_MS, CoreConfig, MAX_CODEC_HUD_TIMEOUT_MS, MAX_VOLUME_HUD_FADE_MS,
     MAX_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS,
     MIN_VOLUME_HUD_FADE_MS, MIN_VOLUME_HUD_TIMEOUT_MS, MIN_VOLUME_STEP_PERCENT,
     VOLUME_HUD_FADE_STEP_MS,
 };
+use screen_manager::settings_catalog::{
+    SETTINGS_CATALOG, SettingControl, SettingId, SettingTier, apply_step, apply_toggle,
+    find_setting, find_setting_by_key, row_state,
+};
 
-/// The Slint source of the Settings view, embedded at compile time.
 const SETTINGS_VIEW_SLINT: &str = include_str!("../ui/settings_view.slint");
 
-/// Asserts `needle` appears exactly once in the settings view source and is
-/// not the prefix of a longer number (e.g. `> 1` must not match `> 15`).
-fn assert_bound_literal(needle: &str) {
-    let mut matches = SETTINGS_VIEW_SLINT.match_indices(needle);
-    let Some((_, _)) = matches.next() else {
-        panic!("missing `{needle}` in settings_view.slint");
-    };
-    assert!(
-        matches.next().is_none(),
-        "duplicate `{needle}` in settings_view.slint"
-    );
-    let end = SETTINGS_VIEW_SLINT.find(needle).unwrap_or_default() + needle.len();
-    let next = SETTINGS_VIEW_SLINT[end..].chars().next();
-    assert!(
-        !next.is_some_and(|c| c.is_ascii_digit()),
-        "`{needle}` in settings_view.slint is the prefix of a longer number \
-         (next char {next:?}); the Slint bound widened without the Rust domain"
-    );
+#[test]
+fn catalog_bounds_match_rust_config_domains() {
+    let checks: &[(SettingId, i32, i32, i32)] = &[
+        (
+            SettingId::VolumeStepPercent,
+            i32::from(MIN_VOLUME_STEP_PERCENT),
+            i32::from(MAX_VOLUME_STEP_PERCENT),
+            1,
+        ),
+        (
+            SettingId::VolumeHudTimeoutMs,
+            MIN_VOLUME_HUD_TIMEOUT_MS.cast_signed(),
+            MAX_VOLUME_HUD_TIMEOUT_MS.cast_signed(),
+            MIN_VOLUME_HUD_TIMEOUT_MS.cast_signed(),
+        ),
+        (
+            SettingId::VolumeHudFadeMs,
+            MIN_VOLUME_HUD_FADE_MS.cast_signed(),
+            MAX_VOLUME_HUD_FADE_MS.cast_signed(),
+            VOLUME_HUD_FADE_STEP_MS.cast_signed(),
+        ),
+        (
+            SettingId::CodecHudTimeoutMs,
+            MIN_CODEC_HUD_TIMEOUT_MS.cast_signed(),
+            MAX_CODEC_HUD_TIMEOUT_MS.cast_signed(),
+            CODEC_HUD_TIMEOUT_STEP_MS.cast_signed(),
+        ),
+    ];
+
+    for &(id, expected_min, expected_max, expected_step) in checks {
+        let desc = find_setting(id);
+        match desc.control {
+            SettingControl::Stepper { min, max, step, .. } => {
+                assert_eq!(min, expected_min, "min mismatch for {id:?}");
+                assert_eq!(max, expected_max, "max mismatch for {id:?}");
+                assert_eq!(step, expected_step, "step mismatch for {id:?}");
+            }
+            SettingControl::TwoOption { .. } => {
+                panic!("expected Stepper control for {id:?}");
+            }
+        }
+    }
 }
 
 #[test]
-fn stepper_bounds_match_rust_domains() {
-    // (needle template, human-readable context) — templates use inline `{}`.
-    let cases: Vec<String> = vec![
-        // Encoder Volume Step: can_decrease/can_increase bounds + ±1 step.
-        format!("root.volume_step_percent > {MIN_VOLUME_STEP_PERCENT}"),
-        format!("root.volume_step_percent < {MAX_VOLUME_STEP_PERCENT}"),
-        "root.volume_step_percent - 1".into(),
-        "root.volume_step_percent + 1".into(),
-        // Volume HUD Timeout: 250..=30000, step ±250 (MIN doubles as the step).
-        format!("root.volume_hud_timeout_ms > {MIN_VOLUME_HUD_TIMEOUT_MS}"),
-        format!("root.volume_hud_timeout_ms < {MAX_VOLUME_HUD_TIMEOUT_MS}"),
-        format!("root.volume_hud_timeout_ms - {MIN_VOLUME_HUD_TIMEOUT_MS}"),
-        format!("root.volume_hud_timeout_ms + {MIN_VOLUME_HUD_TIMEOUT_MS}"),
-        // Volume HUD Fade: 0..=2000, step ±100.
-        format!("root.volume_hud_fade_ms > {MIN_VOLUME_HUD_FADE_MS}"),
-        format!("root.volume_hud_fade_ms < {MAX_VOLUME_HUD_FADE_MS}"),
-        format!("root.volume_hud_fade_ms - {VOLUME_HUD_FADE_STEP_MS}"),
-        format!("root.volume_hud_fade_ms + {VOLUME_HUD_FADE_STEP_MS}"),
-        // Codec HUD Timeout: 250..=300000, step ±1000 (NOT MIN — the grid is
-        // anchored at 250 + n*1000, see CODEC_HUD_TIMEOUT_STEP_MS docs).
-        format!("root.codec_hud_timeout_ms > {MIN_CODEC_HUD_TIMEOUT_MS}"),
-        format!("root.codec_hud_timeout_ms < {MAX_CODEC_HUD_TIMEOUT_MS}"),
-        format!("root.codec_hud_timeout_ms - {CODEC_HUD_TIMEOUT_STEP_MS}"),
-        format!("root.codec_hud_timeout_ms + {CODEC_HUD_TIMEOUT_STEP_MS}"),
-    ];
-    for needle in &cases {
-        assert_bound_literal(needle);
+fn catalog_keys_round_trip_and_tiers_are_populated() {
+    assert!(
+        SETTINGS_CATALOG
+            .iter()
+            .any(|d| d.tier == SettingTier::Basic)
+    );
+    assert!(
+        SETTINGS_CATALOG
+            .iter()
+            .any(|d| d.tier == SettingTier::Advanced)
+    );
+    for desc in SETTINGS_CATALOG {
+        assert_eq!(SettingId::from_key(desc.key()), Some(desc.id));
+        assert_eq!(find_setting_by_key(desc.key()), Some(desc));
+    }
+    assert_eq!(SettingId::from_key("unknown_setting"), None);
+    assert_eq!(find_setting_by_key("unknown_setting"), None);
+}
+
+#[test]
+fn catalog_step_and_toggle_helpers_clamp_and_format() {
+    let mut cfg = CoreConfig::default();
+
+    assert!(apply_step(&mut cfg, SettingId::VolumeStepPercent, 1));
+    assert_eq!(cfg.volume_step_percent.value(), 3);
+    assert!(apply_step(&mut cfg, SettingId::VolumeStepPercent, -1));
+    assert_eq!(cfg.volume_step_percent.value(), 2);
+    // Direction 0 is a no-op.
+    assert!(!apply_step(&mut cfg, SettingId::VolumeStepPercent, 0));
+    // Step on a TwoOption setting returns false.
+    assert!(!apply_step(&mut cfg, SettingId::TitleDisplayMode, 1));
+
+    // Toggle on a Stepper setting returns false.
+    assert!(!apply_toggle(&mut cfg, SettingId::VolumeStepPercent, true));
+    assert!(apply_toggle(&mut cfg, SettingId::TitleDisplayMode, true));
+    assert!(cfg.title_display_mode.is_split());
+    assert!(apply_toggle(&mut cfg, SettingId::MarqueeFps, false));
+    assert_eq!(cfg.marquee_fps.value(), 30);
+
+    let state = row_state(&cfg, find_setting(SettingId::VolumeStepPercent));
+    assert_eq!(state.value_text, "2 %");
+    assert!(state.can_decrease);
+    assert!(state.can_increase);
+}
+
+#[test]
+fn settings_view_slint_does_not_hardcode_setting_rows() {
+    for forbidden in [
+        "Encoder Volume Step",
+        "Volume HUD Timeout",
+        "Volume HUD Fade",
+        "Codec HUD Timeout",
+        "Marquee FPS",
+    ] {
+        assert!(
+            !SETTINGS_VIEW_SLINT.contains(forbidden),
+            "settings_view.slint must render `{forbidden}` generically from SettingRowItem"
+        );
     }
 }
