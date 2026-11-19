@@ -1763,8 +1763,14 @@ impl BtMonitorState {
             if update.amp_volume.is_some() {
                 lock.amp_volume = update.amp_volume;
             }
-            if update.devices.is_some() {
-                lock.devices = update.devices;
+            if let Some(mut next) = update.devices {
+                if let Some(prev) = lock.devices.take() {
+                    next.pairing = next.pairing.or(prev.pairing);
+                    next.toast = next.toast.or(prev.toast);
+                    next.adapter_alias = next.adapter_alias.or(prev.adapter_alias);
+                    next.action_settled |= prev.action_settled;
+                }
+                lock.devices = Some(next);
             }
         }
     }

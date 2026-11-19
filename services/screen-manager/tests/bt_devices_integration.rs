@@ -1304,3 +1304,52 @@ fn reset_dedup_followed_by_snapshot_error_keeps_last_rows() {
     assert!(failed.toast.is_some());
     assert!(failed.action_settled);
 }
+
+#[test]
+fn commit_update_preserves_unconsumed_one_shot_device_events() {
+    let shared = Mutex::new(BtSharedUpdate::default());
+    BtMonitorState::commit_update(
+        &shared,
+        BtSharedUpdate {
+            devices: Some(BtDevicesUpdate {
+                pairing: Some(PairingStatus::Paired {
+                    name: "Pixel 10 Pro XL".into(),
+                }),
+                toast: Some("Paired".into()),
+                adapter_alias: Some("Pi".into()),
+                action_settled: true,
+                ..BtDevicesUpdate::default()
+            }),
+            ..BtSharedUpdate::default()
+        },
+    );
+
+    // A follow-up tick (e.g., StopDiscovery/Paired property change) arriving
+    // before the UI drains `shared` must not overwrite unconsumed one-shots.
+    BtMonitorState::commit_update(
+        &shared,
+        BtSharedUpdate {
+            devices: Some(BtDevicesUpdate {
+                scanning: false,
+                ..BtDevicesUpdate::default()
+            }),
+            ..BtSharedUpdate::default()
+        },
+    );
+
+    let merged = shared
+        .lock()
+        .unwrap()
+        .devices
+        .take()
+        .expect("merged devices update");
+    assert_eq!(
+        merged.pairing,
+        Some(PairingStatus::Paired {
+            name: "Pixel 10 Pro XL".into()
+        })
+    );
+    assert_eq!(merged.toast.as_deref(), Some("Paired"));
+    assert_eq!(merged.adapter_alias.as_deref(), Some("Pi"));
+    assert!(merged.action_settled);
+}
