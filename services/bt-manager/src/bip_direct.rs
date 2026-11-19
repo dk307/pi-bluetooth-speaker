@@ -563,14 +563,34 @@ impl BipChannel for RfcommBipChannel {
             address = %canonical,
             "SDP: querying AVRCP Target (0x110C) for OBEX L2CAP PSM"
         );
-        if let Some(psm) = self.core.sdp_avrcp_obex_l2cap_psm(&canonical).await? {
-            tracing::info!(
-                address = %canonical,
-                psm,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "SDP resolved AVRCP Cover Art OBEX L2CAP PSM"
-            );
-            return self.core.connect_l2cap(address, psm).await;
+        match self.core.sdp_avrcp_obex_l2cap_psm(&canonical).await {
+            Ok(Some(psm)) => {
+                tracing::info!(
+                    address = %canonical,
+                    psm,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "SDP resolved AVRCP Cover Art OBEX L2CAP PSM"
+                );
+                match self.core.connect_l2cap(address, psm).await {
+                    Ok(stream) => return Ok(stream),
+                    Err(e) => {
+                        tracing::warn!(
+                            address = %canonical,
+                            psm,
+                            error = %e.summary(),
+                            "AVRCP OBEX L2CAP connect failed; falling back to BIP RFCOMM"
+                        );
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    address = %canonical,
+                    error = %e.summary(),
+                    "AVRCP 0x110C SDP query failed; falling back to BIP RFCOMM"
+                );
+            }
         }
 
         tracing::debug!(address = %canonical, "SDP: querying BIP Image Pull service record");
@@ -1304,6 +1324,10 @@ async fn query_avrcp_obex_l2cap_psm(address: &str) -> Result<Option<u16>, BipErr
     query_avrcp_obex_l2cap_psm_on(&mut stream).await
 }
 
+const MAX_SDP_CONTINUATION_PAGES: usize = 16;
+const MAX_SDP_ATTRIBUTE_BYTES: usize = 64 * 1024;
+const MAX_SDP_CONTINUATION_STATE_LEN: usize = 16;
+
 async fn query_avrcp_obex_l2cap_psm_on<S>(stream: &mut S) -> Result<Option<u16>, BipError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -1314,7 +1338,7 @@ where
     let mut continuation: Vec<u8> = Vec::new();
     let mut attribute_bytes: Vec<u8> = Vec::new();
 
-    loop {
+    for page in 0..MAX_SDP_CONTINUATION_PAGES {
         let req = build_sdp_service_search_attr_req(
             transaction_id,
             SDP_AVRCP_TARGET_UUID16,
@@ -1337,6 +1361,7 @@ where
             })?;
 
         let pdu_id = hdr[0];
+        let rsp_tid = u16::from_be_bytes([hdr[1], hdr[2]]);
         let param_len = u16::from_be_bytes([hdr[3], hdr[4]]) as usize;
         let mut params = vec![0u8; param_len];
         tokio::time::timeout(SDP_QUERY_TIMEOUT, stream.read_exact(&mut params))
@@ -1346,6 +1371,11 @@ where
                 BipError::sdp_lookup_details(format!("SDP response body read failed: {e}"))
             })?;
 
+        if rsp_tid != transaction_id {
+            return Err(BipError::sdp_lookup_details(format!(
+                "SDP transaction id mismatch: expected {transaction_id}, got {rsp_tid}"
+            )));
+        }
         if pdu_id == SDP_PDU_ERROR_RESPONSE {
             return Err(BipError::sdp_lookup_details(
                 "SDP server returned ErrorResponse",
@@ -1358,15 +1388,32 @@ where
         }
 
         let (chunk, next_cont) = parse_sdp_service_search_attr_rsp_params(&params)?;
+        if attribute_bytes.len().saturating_add(chunk.len()) > MAX_SDP_ATTRIBUTE_BYTES {
+            return Err(BipError::sdp_lookup_details(
+                "SDP response exceeded maximum attribute byte limit",
+            ));
+        }
         attribute_bytes.extend_from_slice(chunk);
         if next_cont.is_empty() {
-            break;
+            return parse_avrcp_obex_l2cap_psm_from_attr_lists(&attribute_bytes);
+        }
+        if next_cont.len() > MAX_SDP_CONTINUATION_STATE_LEN {
+            return Err(BipError::sdp_lookup_details(
+                "SDP continuation state exceeded 16-byte spec limit",
+            ));
+        }
+        if page + 1 == MAX_SDP_CONTINUATION_PAGES {
+            return Err(BipError::sdp_lookup_details(
+                "SDP response exceeded maximum continuation pages",
+            ));
         }
         continuation = next_cont.to_vec();
         transaction_id = transaction_id.wrapping_add(1);
     }
 
-    parse_avrcp_obex_l2cap_psm_from_attr_lists(&attribute_bytes)
+    Err(BipError::sdp_lookup_details(
+        "SDP response exceeded maximum continuation pages",
+    ))
 }
 
 fn build_sdp_service_search_attr_req(
@@ -1737,6 +1784,120 @@ mod tests {
             return Err("expected ServiceNotFound error".to_string());
         };
         assert!(err.is_service_not_found());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sdp_query_rejects_excessive_continuation_pages() -> Result<(), String> {
+        let (mut client, mut server) = tokio::io::duplex(256);
+        let server_task = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            for tid in 0u16..16 {
+                let mut hdr = [0u8; 5];
+                if server.read_exact(&mut hdr).await.is_err() {
+                    break;
+                }
+                let param_len = usize::from(u16::from_be_bytes([hdr[3], hdr[4]]));
+                let mut req_params = vec![0u8; param_len];
+                if server.read_exact(&mut req_params).await.is_err() {
+                    break;
+                }
+                let mut rsp = vec![0x07, 0, 0, 0x00, 0x04, 0x00, 0x00, 0x01, 0xAA];
+                rsp[1..3].copy_from_slice(&tid.to_be_bytes());
+                if server.write_all(&rsp).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let Err(err) = query_avrcp_obex_l2cap_psm_on(&mut client).await else {
+            return Err("expected continuation page limit error".to_string());
+        };
+        let _ = server_task.await;
+        assert!(err.to_string().contains("continuation pages"));
+        Ok(())
+    }
+
+    struct FailingL2capCore {
+        fail_sdp: bool,
+        fail_connect: bool,
+        opened: std::sync::Mutex<Vec<&'static str>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BipSocketCore for FailingL2capCore {
+        async fn sdp_avrcp_obex_l2cap_psm(&self, _address: &str) -> Result<Option<u16>, BipError> {
+            if self.fail_sdp {
+                Err(BipError::sdp_lookup_details("simulated 0x110C SDP fault"))
+            } else {
+                Ok(Some(4097))
+            }
+        }
+
+        async fn sdp_bip_rfcomm_channel(&self, _address: &str) -> Result<Option<u8>, BipError> {
+            Ok(Some(9))
+        }
+
+        async fn connect_rfcomm(
+            &self,
+            _address: &BtAddress,
+            _channel: u8,
+        ) -> Result<BipStream, BipError> {
+            if let Ok(mut guard) = self.opened.lock() {
+                guard.push("rfcomm");
+            }
+            let (a, _b) = tokio::io::duplex(64);
+            Ok(Box::new(a))
+        }
+
+        async fn connect_l2cap(
+            &self,
+            _address: &BtAddress,
+            _psm: u16,
+        ) -> Result<BipStream, BipError> {
+            if self.fail_connect {
+                Err(BipError::l2cap_connect(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "simulated L2CAP refusal",
+                )))
+            } else {
+                let (a, _b) = tokio::io::duplex(64);
+                Ok(Box::new(a))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sdp_fallback_uses_rfcomm_when_l2cap_sdp_or_connect_fails() -> Result<(), String> {
+        let addr: BtAddress = "30:E0:44:67:38:A2".parse().map_err(|e| format!("{e:?}"))?;
+
+        let sdp_fail_core = Arc::new(FailingL2capCore {
+            fail_sdp: true,
+            fail_connect: false,
+            opened: std::sync::Mutex::new(Vec::new()),
+        });
+        let ch1 =
+            RfcommBipChannel::with_core(None, Arc::clone(&sdp_fail_core) as Arc<dyn BipSocketCore>);
+        let _s1 = ch1.open(&addr).await.map_err(|e| e.to_string())?;
+        assert_eq!(
+            *sdp_fail_core.opened.lock().map_err(|e| e.to_string())?,
+            vec!["rfcomm"]
+        );
+
+        let conn_fail_core = Arc::new(FailingL2capCore {
+            fail_sdp: false,
+            fail_connect: true,
+            opened: std::sync::Mutex::new(Vec::new()),
+        });
+        let ch2 = RfcommBipChannel::with_core(
+            None,
+            Arc::clone(&conn_fail_core) as Arc<dyn BipSocketCore>,
+        );
+        let _s2 = ch2.open(&addr).await.map_err(|e| e.to_string())?;
+        assert_eq!(
+            *conn_fail_core.opened.lock().map_err(|e| e.to_string())?,
+            vec!["rfcomm"]
+        );
         Ok(())
     }
 }
