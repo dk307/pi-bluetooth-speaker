@@ -237,38 +237,7 @@ impl PlaybackSource for DevicePlaybackSource {
         // Must use the async status: the sync wrapper relies on zbus's
         // blocking runtime, which panics when nested inside the provider
         // thread's own tokio runtime.
-        let status = self.bt.status_async().await?;
-        if status.playback.is_some() {
-            return Ok(status.playback);
-        }
-        // Once A2DP PCM is active (`ServicesResolved` is true, typically ~1.5-2s
-        // before `MediaPlayer1` is registered), open the BIP session early so
-        // it is already established when BlueZ sends `GetElementAttributes`.
-        // Opening earlier (at `Device1.Connected` while `services_resolved=false`)
-        // can leave the BIP session unbound to AVRCP on AOSP.
-        Ok(status
-            .devices
-            .iter()
-            .find(|d| d.connected && status.pcms.iter().any(|p| p.device_address == d.address))
-            .map(|d| BtPlaybackState {
-                device_address: Some(d.address),
-                device_name: d.name.clone(),
-                status: Box::from(""),
-                title: Box::from(""),
-                artist: Box::from(""),
-                album: Box::from(""),
-                position_ms: 0,
-                duration_ms: 0,
-                player_path: None,
-                obex_port: None,
-                image_handle: None,
-                cover_art_path: None,
-                phone_volume: None,
-                equalizer: None,
-                repeat: None,
-                shuffle: None,
-                scan: None,
-            }))
+        Ok(self.bt.status_async().await?.playback)
     }
 }
 
@@ -1026,42 +995,7 @@ pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
         },
     );
 
-    // 2. Wake immediately on Device1 Connected / ServicesResolved so the BIP
-    //    session is established BEFORE BlueZ queries GetElementAttributes
-    //    (AOSP omits ImgHandle unless a BIP session is already open).
-    spawn_bluez_signal_loop(
-        connection.clone(),
-        Arc::clone(&wake),
-        "device-connect",
-        || {
-            Ok(zbus::MatchRule::builder()
-                .msg_type(zbus::message::Type::Signal)
-                .sender("org.bluez")?
-                .interface("org.freedesktop.DBus.Properties")?
-                .member("PropertiesChanged")?
-                .arg0ns("org.bluez.Device1")?
-                .build())
-        },
-        |message| {
-            let Ok((_, changed, _)) =
-                message
-                    .body()
-                    .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
-            else {
-                return false;
-            };
-            changed
-                .get("Connected")
-                .and_then(|v| bool::try_from(v).ok())
-                == Some(true)
-                || changed
-                    .get("ServicesResolved")
-                    .and_then(|v| bool::try_from(v).ok())
-                    == Some(true)
-        },
-    );
-
-    // 3. Wake when BlueZ publishes a new MediaPlayer1 object.
+    // 2. Wake immediately when BlueZ publishes a new MediaPlayer1 object.
     spawn_bluez_signal_loop(
         connection.clone(),
         Arc::clone(&wake),
@@ -1085,28 +1019,28 @@ pub fn track_signal_listener(connection: zbus::Connection, wake: Arc<Notify>) {
         },
     );
 
-    // 4. Wake when BlueALSA publishes a new PCM (after ServicesResolved,
-    //    typically ~1.5-2s before MediaPlayer1 appears).
+    // 3. Wake immediately when BlueZ removes MediaPlayer1 (disconnect) so
+    //    the stale BIP session is released right away.
     spawn_bluez_signal_loop(
         connection,
         wake,
-        "bluealsa-pcm-added",
+        "interfaces-removed",
         || {
             Ok(zbus::MatchRule::builder()
                 .msg_type(zbus::message::Type::Signal)
-                .sender("org.bluealsa")?
+                .sender("org.bluez")?
                 .interface("org.freedesktop.DBus.ObjectManager")?
-                .member("InterfacesAdded")?
+                .member("InterfacesRemoved")?
                 .build())
         },
         |message| {
-            let Ok((_, ifaces)) = message.body().deserialize::<(
-                zbus::zvariant::OwnedObjectPath,
-                HashMap<String, HashMap<String, OwnedValue>>,
-            )>() else {
+            let Ok((_, ifaces)) = message
+                .body()
+                .deserialize::<(zbus::zvariant::OwnedObjectPath, Vec<String>)>()
+            else {
                 return false;
             };
-            ifaces.contains_key("org.bluealsa.PCM1")
+            ifaces.iter().any(|iface| iface == "org.bluez.MediaPlayer1")
         },
     );
 }

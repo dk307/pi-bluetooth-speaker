@@ -398,6 +398,13 @@ pub(crate) use bip_socket_core::BipSocketCore;
 #[cfg(any(test, feature = "test-util"))]
 pub use bip_socket_core::BipSocketCore;
 
+/// Process-wide cache of SDP-resolved AVRCP `0x110C` OBEX L2CAP PSMs per peer
+/// address so reconnects skip the ~60ms L2CAP SDP round-trip; evicted on
+/// `connect_l2cap` failure so a re-registered PSM triggers a fresh SDP lookup.
+static AVRCP_OBEX_PSM_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<BtAddress, u16>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// Production [`BipSocketCore`]: real bluer sockets and real SDP queries.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct BluerSocketCore;
@@ -405,7 +412,21 @@ pub(crate) struct BluerSocketCore;
 #[async_trait::async_trait]
 impl BipSocketCore for BluerSocketCore {
     async fn sdp_avrcp_obex_l2cap_psm(&self, address: &str) -> Result<Option<u16>, BipError> {
-        query_avrcp_obex_l2cap_psm(address).await
+        if let Ok(bt_addr) = address.parse::<BtAddress>()
+            && let Ok(guard) = AVRCP_OBEX_PSM_CACHE.lock()
+            && let Some(&psm) = guard.get(&bt_addr)
+        {
+            tracing::debug!(address, psm, "using cached AVRCP Cover Art OBEX L2CAP PSM");
+            return Ok(Some(psm));
+        }
+        let resolved = query_avrcp_obex_l2cap_psm(address).await?;
+        if let Some(psm) = resolved
+            && let Ok(bt_addr) = address.parse::<BtAddress>()
+            && let Ok(mut guard) = AVRCP_OBEX_PSM_CACHE.lock()
+        {
+            guard.insert(bt_addr, psm);
+        }
+        Ok(resolved)
     }
 
     async fn sdp_bip_rfcomm_channel(&self, address: &str) -> Result<Option<u8>, BipError> {
@@ -437,10 +458,15 @@ impl BipSocketCore for BluerSocketCore {
         let socket = open_configured_l2cap_socket()?;
         let socket_addr =
             bluer::l2cap::SocketAddr::new(bluer::Address(octets), bluer::AddressType::BrEdr, psm);
-        let stream = socket
-            .connect(socket_addr)
-            .await
-            .map_err(l2cap_step_err("connect"))?;
+        let stream = match socket.connect(socket_addr).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                if let Ok(mut guard) = AVRCP_OBEX_PSM_CACHE.lock() {
+                    guard.remove(address);
+                }
+                return Err(l2cap_step_err("connect")(e));
+            }
+        };
         tracing::debug!(
             address = %canonical,
             psm,
