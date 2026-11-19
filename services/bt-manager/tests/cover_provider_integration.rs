@@ -284,6 +284,63 @@ async fn track_signal_listener_wakes_only_on_track_changes() {
         .expect("Track change must wake the worker");
 }
 
+#[tokio::test]
+async fn track_signal_listener_wakes_on_media_player_add_and_remove() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    let (_kill, address) = spawn_private_bus();
+    let server = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .name("org.bluez")
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let listener_conn = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let wake = Arc::new(Notify::new());
+    bt_manager::cover_provider::track_signal_listener(listener_conn, Arc::clone(&wake));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let root_emitter = zbus::object_server::SignalEmitter::new(&server, "/")
+        .unwrap()
+        .to_owned();
+    let mut ifaces: HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>> = HashMap::new();
+    ifaces.insert("org.bluez.MediaPlayer1".to_string(), HashMap::new());
+    let player_path =
+        zbus::zvariant::ObjectPath::try_from("/org/bluez/hci0/dev_30_E0_44_67_38_A2/player0")
+            .unwrap();
+    root_emitter
+        .emit(
+            "org.freedesktop.DBus.ObjectManager",
+            "InterfacesAdded",
+            &(player_path.clone(), ifaces),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), wake.notified())
+        .await
+        .expect("InterfacesAdded(MediaPlayer1) must wake the worker");
+
+    root_emitter
+        .emit(
+            "org.freedesktop.DBus.ObjectManager",
+            "InterfacesRemoved",
+            &(player_path, vec!["org.bluez.MediaPlayer1".to_string()]),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), wake.notified())
+        .await
+        .expect("InterfacesRemoved(MediaPlayer1) must wake the worker");
+}
+
 /// `query_snapshot` (the `core` consumer path) reads the published snapshot
 /// through a real D-Bus round-trip on the private bus.
 #[test]
