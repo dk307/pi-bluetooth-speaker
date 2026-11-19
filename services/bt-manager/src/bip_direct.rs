@@ -409,13 +409,17 @@ pub(crate) use bip_socket_core::BipSocketCore;
 #[cfg(any(test, feature = "test-util"))]
 pub use bip_socket_core::BipSocketCore;
 
+/// How long a negative (`None`) `0x110C` SDP result is cached before re-probing.
+pub const NEGATIVE_PSM_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Cache of SDP-resolved AVRCP `0x110C` OBEX L2CAP PSMs per peer address.
 ///
-/// Caches both `Some(psm)` and negative `None` results so reconnects skip the
-/// ~60ms SDP round-trip; evicted on `connect_l2cap` failure.
+/// Caches `Some(psm)` until `connect_l2cap` fails and caches negative `None`
+/// results for [`NEGATIVE_PSM_CACHE_TTL`] so transient absence does not become
+/// permanent.
 #[derive(Debug, Default)]
 pub struct AvrcpObexPsmCache {
-    entries: std::sync::Mutex<std::collections::HashMap<BtAddress, Option<u16>>>,
+    entries: std::sync::Mutex<std::collections::HashMap<BtAddress, (Option<u16>, Instant)>>,
 }
 
 impl AvrcpObexPsmCache {
@@ -425,27 +429,47 @@ impl AvrcpObexPsmCache {
         Self::default()
     }
 
-    /// Returns `Some(cached)` on cache hit, or `None` on cache miss.
+    fn lock_entries(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<BtAddress, (Option<u16>, Instant)>>
+    {
+        self.entries.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("AVRCP OBEX PSM cache mutex poisoned; recovering inner map");
+            poisoned.into_inner()
+        })
+    }
+
+    /// Returns `Some(cached)` on a non-expired cache hit, or `None` on miss/expiry.
     #[must_use]
     pub fn get(&self, address: &BtAddress) -> Option<Option<u16>> {
-        self.entries
-            .lock()
-            .ok()
-            .and_then(|guard| guard.get(address).copied())
+        self.get_at(address, Instant::now())
+    }
+
+    /// Returns `Some(cached)` at `now`, expiring negative `None` entries after `ttl`.
+    #[must_use]
+    pub fn get_at(&self, address: &BtAddress, now: Instant) -> Option<Option<u16>> {
+        let mut guard = self.lock_entries();
+        let (psm, inserted_at) = *guard.get(address)?;
+        if psm.is_none() && now.saturating_duration_since(inserted_at) >= NEGATIVE_PSM_CACHE_TTL {
+            guard.remove(address);
+            return None;
+        }
+        Some(psm)
     }
 
     /// Stores a resolved result (`Some(psm)` or negative `None`) for `address`.
     pub fn insert(&self, address: BtAddress, psm: Option<u16>) {
-        if let Ok(mut guard) = self.entries.lock() {
-            guard.insert(address, psm);
-        }
+        self.insert_at(address, psm, Instant::now());
+    }
+
+    /// Stores a resolved result at `now` (deterministic seam for TTL tests).
+    pub fn insert_at(&self, address: BtAddress, psm: Option<u16>, now: Instant) {
+        self.lock_entries().insert(address, (psm, now));
     }
 
     /// Evicts any cached entry for `address` (e.g. after `connect_l2cap` fails).
     pub fn evict(&self, address: &BtAddress) {
-        if let Ok(mut guard) = self.entries.lock() {
-            guard.remove(address);
-        }
+        self.lock_entries().remove(address);
     }
 
     /// Resolves the PSM via `cache`, running `query` only on a cache miss.
@@ -1419,7 +1443,7 @@ where
             SDP_AVRCP_TARGET_UUID16,
             SDP_ATTR_ADDITIONAL_PROTO_DESC_LISTS,
             &continuation,
-        );
+        )?;
         stream.write_all(&req).await.map_err(|e| {
             BipError::sdp_lookup_with_source(format!("SDP request write failed: {e}"), e)
         })?;
@@ -1482,8 +1506,15 @@ fn build_sdp_service_search_attr_req(
     service_uuid16: u16,
     attr_id: u16,
     continuation: &[u8],
-) -> Vec<u8> {
-    let cont_len = u8::try_from(continuation.len()).unwrap_or(0);
+) -> Result<Vec<u8>, BipError> {
+    if continuation.len() > MAX_SDP_CONTINUATION_STATE_LEN {
+        return Err(BipError::sdp_lookup_details(
+            "SDP continuation state exceeded 16-byte spec limit",
+        ));
+    }
+    let cont_len = u8::try_from(continuation.len()).map_err(|e| {
+        BipError::sdp_lookup_with_source("SDP continuation state length overflow", e)
+    })?;
     let param_len = 13u16.saturating_add(u16::from(cont_len));
     let mut buf = Vec::with_capacity(5 + usize::from(param_len));
     buf.push(SDP_PDU_SERVICE_SEARCH_ATTR_REQ);
@@ -1499,8 +1530,8 @@ fn build_sdp_service_search_attr_req(
     buf.extend_from_slice(&attr_id.to_be_bytes());
     // ContinuationState
     buf.push(cont_len);
-    buf.extend_from_slice(&continuation[..usize::from(cont_len)]);
-    buf
+    buf.extend_from_slice(continuation);
+    Ok(buf)
 }
 
 fn parse_sdp_service_search_attr_rsp_params(params: &[u8]) -> Result<(&[u8], &[u8]), BipError> {

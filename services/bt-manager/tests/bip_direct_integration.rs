@@ -1261,5 +1261,14 @@ async fn psm_cache_hits_negative_hits_evicts_and_ignores_errors() -> Result<(), 
         .map_err(|e| e.to_string())?;
     assert_eq!(none2, None);
     assert_eq!(calls.load(Ordering::Relaxed), 3);
+
+    // 4. Negative entries expire after NEGATIVE_PSM_CACHE_TTL while positive entries stay.
+    let t0 = std::time::Instant::now();
+    cache.insert_at(addr, None, t0);
+    assert_eq!(cache.get_at(&addr, t0), Some(None));
+    assert_eq!(
+        cache.get_at(&addr, t0 + bt_manager::bip_direct::NEGATIVE_PSM_CACHE_TTL),
+        None
+    );
     Ok(())
 }
