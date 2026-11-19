@@ -138,16 +138,11 @@ fn catalog_step_and_toggle_helpers_clamp_and_format() {
 
 #[test]
 fn settings_view_slint_does_not_hardcode_setting_rows() {
-    for forbidden in [
-        "Encoder Volume Step",
-        "Volume HUD Timeout",
-        "Volume HUD Fade",
-        "Codec HUD Timeout",
-        "Marquee FPS",
-    ] {
+    for desc in SETTINGS_CATALOG {
         assert!(
-            !SETTINGS_VIEW_SLINT.contains(forbidden),
-            "settings_view.slint must render `{forbidden}` generically from SettingRowItem"
+            !SETTINGS_VIEW_SLINT.contains(desc.label),
+            "settings_view.slint must render `{}` generically from SettingRowItem",
+            desc.label
         );
     }
 }
