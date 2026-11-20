@@ -300,14 +300,14 @@ fn ui_shell_now_playing_properties_and_playback_state() {
     assert!(!shell.is_playing());
     assert!(!shell.is_muted());
     assert_eq!(shell.window().get_progress_ratio(), 0.0);
-    assert_eq!(shell.window().get_position_text(), "00:00");
-    assert_eq!(shell.window().get_duration_text(), "00:00");
+    assert_eq!(shell.window().get_position_text(), "0:00");
+    assert_eq!(shell.window().get_duration_text(), "0:00");
 
     // Playback state updates
     shell.set_playback_state(true, 65_000, 195_000);
     assert!(shell.is_playing());
-    assert_eq!(shell.window().get_position_text(), "01:05");
-    assert_eq!(shell.window().get_duration_text(), "03:15");
+    assert_eq!(shell.window().get_position_text(), "1:05");
+    assert_eq!(shell.window().get_duration_text(), "3:15");
     let ratio = shell.window().get_progress_ratio();
     assert!((ratio - (65.0 / 195.0)).abs() < 1e-4);
 
@@ -631,13 +631,13 @@ fn ui_shell_now_playing_callbacks() {
     // Playback state and position text sync
     shell.set_playback_state(false, 65_000, 100_000);
     assert_eq!(shell.window().get_progress_ratio(), 0.65);
-    assert_eq!(shell.window().get_position_text(), "01:05");
+    assert_eq!(shell.window().get_position_text(), "1:05");
     shell.set_playback_state(false, 100_000, 100_000);
     assert_eq!(shell.window().get_progress_ratio(), 1.0);
-    assert_eq!(shell.window().get_position_text(), "01:40");
+    assert_eq!(shell.window().get_position_text(), "1:40");
     shell.set_playback_state(false, 0, 100_000);
     assert_eq!(shell.window().get_progress_ratio(), 0.0);
-    assert_eq!(shell.window().get_position_text(), "00:00");
+    assert_eq!(shell.window().get_position_text(), "0:00");
 
     // Wire interactive bluetooth transport via the decoupled command queue.
     let (bt, _) = speaker_bluetooth::BluetoothDevice::new_mocked();

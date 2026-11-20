@@ -117,6 +117,48 @@ pub fn format_duration_ms(ms: u32) -> String {
     }
 }
 
+/// Formats a playback timestamp for the Now Playing progress bar.
+///
+/// Padding is chosen from the *track total* (`total_ms`), not the displayed
+/// position: totals under 10 minutes render `M:SS` (`1:05`), totals from
+/// 10 minutes up to (but not including) 1 hour render padded `MM:SS`
+/// (`05:00`), and totals of 1 hour or more render `HH:MM:SS` (`00:05:00`).
+/// A position that overflows past 1 hour on a sub-hour track also uses
+/// `HH:MM:SS`.
+///
+/// # Examples
+///
+/// ```
+/// use speaker_bluetooth::format_duration_ms_ui;
+/// // 3:15 track -> no leading zero
+/// assert_eq!(format_duration_ms_ui(65_000, 195_000), "1:05");
+/// // 14:20 track -> padded minutes
+/// assert_eq!(format_duration_ms_ui(300_000, 860_000), "05:00");
+/// // 1h track -> HH:MM:SS
+/// assert_eq!(format_duration_ms_ui(300_000, 3_600_000), "00:05:00");
+/// ```
+#[must_use]
+pub fn format_duration_ms_ui(ms: u32, total_ms: u32) -> String {
+    let total_secs = total_ms / 1000;
+    let secs = ms / 1000;
+
+    if total_secs >= 3600 || secs >= 3600 {
+        // Track >= 1h, or defensive position overflow past 1h: HH:MM:SS.
+        format!(
+            "{:02}:{:02}:{:02}",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        )
+    } else if total_secs >= 600 {
+        // Track >= 10 min: padded MM:SS.
+        format!("{:02}:{:02}", secs / 60, secs % 60)
+    } else {
+        // Track < 10 min: no leading zero on minutes.
+        format!("{}:{:02}", secs / 60, secs % 60)
+    }
+}
+
 /// Active Bluetooth AVRCP media player playback state and track metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BtPlaybackState {
