@@ -234,6 +234,7 @@ pub trait PlaybackSource: Send {
 /// Production [`PlaybackSource`] over the real D-Bus `BlueZ` snapshot.
 struct DevicePlaybackSource {
     bt: BluetoothDevice,
+    dbus: Option<zbus::Connection>,
 }
 
 #[async_trait::async_trait]
@@ -246,8 +247,16 @@ impl PlaybackSource for DevicePlaybackSource {
     }
 
     async fn refresh_track(&mut self, player_path: &str) {
-        let Ok(conn) = zbus::Connection::system().await else {
-            tracing::debug!("cannot open system D-Bus for RefreshTrack");
+        if self.dbus.is_none() {
+            match zbus::Connection::system().await {
+                Ok(conn) => self.dbus = Some(conn),
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot open system D-Bus for RefreshTrack");
+                    return;
+                }
+            }
+        }
+        let Some(conn) = self.dbus.as_ref() else {
             return;
         };
         match conn
@@ -264,7 +273,7 @@ impl PlaybackSource for DevicePlaybackSource {
                 player = player_path,
                 "requested BlueZ MediaPlayer1.RefreshTrack"
             ),
-            Err(e) => tracing::debug!(
+            Err(e) => tracing::warn!(
                 player = player_path,
                 error = %e,
                 "MediaPlayer1.RefreshTrack unavailable or failed"
@@ -1225,7 +1234,10 @@ pub fn spawn_production(
         wake: Arc::clone(&wake),
     };
 
-    let source = DevicePlaybackSource { bt: bt.clone() };
+    let source = DevicePlaybackSource {
+        bt: bt.clone(),
+        dbus: None,
+    };
     std::thread::Builder::new()
         .name("cover-art-provider".into())
         .spawn(move || {

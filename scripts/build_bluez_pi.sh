@@ -20,6 +20,7 @@ REMOTE_HOST="${REMOTE_HOST:-root@192.168.2.120}"
 BLUEZ_VERSION="5.88"
 BLUEZ_TARBALL="bluez-${BLUEZ_VERSION}.tar.xz"
 BLUEZ_URL="https://www.kernel.org/pub/linux/bluetooth/${BLUEZ_TARBALL}"
+BLUEZ_SHA256="6952c39eb5f8b0ee712cc50ab3bcff03be17c410dd97ca640f4849d9a1653ba3"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -41,14 +42,15 @@ fi
 REMOTE_PATCH="/tmp/bluez-5.88-mediaplayer-refresh-track.patch"
 scp "${PATCH_FILE}" "${REMOTE_HOST}:${REMOTE_PATCH}"
 
-ssh "${REMOTE_HOST}" bash -s -- "${BLUEZ_VERSION}" "${BLUEZ_TARBALL}" "${BLUEZ_URL}" "${REMOTE_PATCH}" "${BLUETOOTH_ONLY}" <<'EOF'
+ssh "${REMOTE_HOST}" bash -s -- "${BLUEZ_VERSION}" "${BLUEZ_TARBALL}" "${BLUEZ_URL}" "${BLUEZ_SHA256}" "${REMOTE_PATCH}" "${BLUETOOTH_ONLY}" <<'EOF'
 set -euo pipefail
 
 BLUEZ_VERSION="$1"
 BLUEZ_TARBALL="$2"
 BLUEZ_URL="$3"
-REMOTE_PATCH="$4"
-BLUETOOTH_ONLY="$5"
+BLUEZ_SHA256="$4"
+REMOTE_PATCH="$5"
+BLUETOOTH_ONLY="$6"
 BUILD_ROOT="/root/build"
 SRC_DIR="${BUILD_ROOT}/bluez-${BLUEZ_VERSION}"
 
@@ -59,15 +61,14 @@ if [[ ! -d "${SRC_DIR}" ]]; then
   if [[ ! -f "${BLUEZ_TARBALL}" ]]; then
     wget -O "${BLUEZ_TARBALL}" "${BLUEZ_URL}"
   fi
+  echo "${BLUEZ_SHA256}  ${BLUEZ_TARBALL}" | sha256sum -c -
   tar xf "${BLUEZ_TARBALL}"
 fi
 
 cd "${SRC_DIR}"
 
-# GCC 14 (C23 default) fix in src/shared/ad.c
-if grep -q 'return false;' src/shared/ad.c; then
-  sed -i 's/return false;/return NULL;/' src/shared/ad.c
-fi
+# GCC 14 (C23 default) fix in bt_ad_has_data() in src/shared/ad.c
+sed -i '/^struct bt_ad_data \*bt_ad_has_data/,/^}/ s/return false;/return NULL;/' src/shared/ad.c
 
 # Apply RefreshTrack patch idempotently
 if grep -q 'media_player_refresh_track' profiles/audio/player.c; then
