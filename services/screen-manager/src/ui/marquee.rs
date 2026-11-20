@@ -102,7 +102,8 @@ pub fn rasterize_marquee_strip(text: &str, font_scale: f32, color: (u8, u8, u8))
     slint::Image::from_rgba8_premultiplied(buf)
 }
 
-/// Composites a single alpha-mask glyph into a premultiplied `Rgba8Pixel` buffer.
+/// Composites a single alpha-mask glyph into a premultiplied `Rgba8Pixel` buffer
+/// using standard premultiplied source-over blending.
 fn blit_glyph_mask(
     pixels: &mut [slint::Rgba8Pixel],
     width: u32,
@@ -114,49 +115,49 @@ fn blit_glyph_mask(
 ) {
     let (cr, cg, cb) = (u16::from(color.0), u16::from(color.1), u16::from(color.2));
     let gw = img.placement.width as usize;
-    let gh = img.placement.height as usize;
-    for row in 0..gh {
-        let Ok(row_i32) = i32::try_from(row) else {
-            break;
-        };
-        let Ok(py) = usize::try_from(origin_y + row_i32) else {
-            continue;
-        };
-        if py >= height as usize {
-            continue;
-        }
-        let dst_row = py * width as usize;
-        let src_row = row * gw;
-        for col in 0..gw {
-            let Ok(col_i32) = i32::try_from(col) else {
-                break;
-            };
-            let Ok(px) = usize::try_from(origin_x + col_i32) else {
-                continue;
-            };
-            if px >= width as usize {
-                continue;
-            }
-            let cov = img.data[src_row + col];
+    let Ok(mask_w) = i32::try_from(img.placement.width) else {
+        return;
+    };
+    let Ok(mask_h) = i32::try_from(img.placement.height) else {
+        return;
+    };
+    let (buf_w, buf_h) = (width.cast_signed(), height.cast_signed());
+    let x0 = origin_x.max(0);
+    let y0 = origin_y.max(0);
+    let x1 = (origin_x + mask_w).min(buf_w);
+    let y1 = (origin_y + mask_h).min(buf_h);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+
+    for py in y0..y1 {
+        let src_y = (py - origin_y).cast_unsigned() as usize;
+        let dst_row = py.cast_unsigned() as usize * width as usize;
+        let src_row = src_y * gw;
+        for px in x0..x1 {
+            let src_x = (px - origin_x).cast_unsigned() as usize;
+            let cov = img.data[src_row + src_x];
             if cov == 0 {
                 continue;
             }
-            let dst = &mut pixels[dst_row + px];
-            // Saturating premultiplied alpha composite (handles overlapping kerning).
+            let dst = &mut pixels[dst_row + px.cast_unsigned() as usize];
+            let inv_dst_a = u16::from(255 - dst.a);
             let a = u16::from(cov);
+            // Premultiplied source-over: dst + src * (1 - dst.a).
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "(u8 * u8 + 127) / 255 fits in u8"
+                reason = "premultiplied source-over result is bounded in 0..=255"
             )]
-            let (pr, pg, pb) = (
-                ((cr * a + 127) / 255) as u8,
-                ((cg * a + 127) / 255) as u8,
-                ((cb * a + 127) / 255) as u8,
+            let (pr, pg, pb, pa) = (
+                (((cr * a + 127) / 255) * inv_dst_a / 255) as u8,
+                (((cg * a + 127) / 255) * inv_dst_a / 255) as u8,
+                (((cb * a + 127) / 255) * inv_dst_a / 255) as u8,
+                ((a * inv_dst_a + 127) / 255) as u8,
             );
             dst.r = dst.r.saturating_add(pr);
             dst.g = dst.g.saturating_add(pg);
             dst.b = dst.b.saturating_add(pb);
-            dst.a = dst.a.saturating_add(cov);
+            dst.a = dst.a.saturating_add(pa);
         }
     }
 }

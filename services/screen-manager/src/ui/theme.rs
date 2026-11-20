@@ -363,7 +363,7 @@ impl ThemePreset {
         // SharedPixelBuffers matching this theme's primary/secondary colors.
         let frames = self.build_ambient_wave_frames();
         window
-            .global::<crate::ui::generated::AmbientWaveSprites>()
+            .global::<crate::ui::AmbientWaveSprites>()
             .set_frames(slint::ModelRc::new(slint::VecModel::from(frames)));
     }
 

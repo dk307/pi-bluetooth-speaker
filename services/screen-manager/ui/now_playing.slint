@@ -15,7 +15,7 @@ import "./fonts/InterTabular-Bold.ttf";
 // of the dirty marquee rows per frame instead of CPU glyph shaping.
 component MarqueeText inherits Rectangle {
     in property <string> text;
-    in property <image> strip_image: MarqueeCompose.title_strip;
+    in property <image> strip_image;
     // Shared marquee clock (ticks of the parent's single 16.65 ms timer) and the
     // configured marquee frame rate in ticks per second (60 = 1 px per tick, 30 =
     // 2 px every other tick). One shared timer guarantees title and artist scroll
@@ -400,6 +400,7 @@ export component NowPlayingView inherits Rectangle {
                         width: 100%;
                         visible: !root.title_split_mode;
                         text: root.track_title;
+                        strip_image: MarqueeCompose.title_strip;
                         clock_frame: root.marquee_clock;
                         marquee_fps: root.marquee_fps;
                     }
