@@ -318,10 +318,14 @@ fn marquee_strip_rasterizer_handles_empty_descenders_and_2048px_cap() {
     let buf = strip.to_rgba8_premultiplied().expect("rgba8 buffer");
     assert!(buf.as_slice().iter().any(|px| px.a > 0));
 
-    // Very long strings must be clamped to VideoCore IV's 2048 px texture limit.
+    // Strings exceeding 2048 px or containing glyphs missing from Inter
+    // (e.g. CJK) must return an empty image so Slint falls back to live Text.
     let long = "W".repeat(200);
     let capped = rasterize_marquee_strip(&long, 1.35, (255, 255, 255));
-    assert!(capped.size().width <= MAX_MARQUEE_STRIP_WIDTH);
+    assert_eq!(capped.size().width, 0);
+
+    let cjk = rasterize_marquee_strip("日本語テスト", 1.15, (255, 255, 255));
+    assert_eq!(cjk.size().width, 0);
 }
 
 #[cfg(feature = "ui")]

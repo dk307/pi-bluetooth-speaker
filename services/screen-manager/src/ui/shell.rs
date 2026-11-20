@@ -815,8 +815,11 @@ impl AppShell {
         } else {
             Self::DEFAULT_FONT_SCALE
         };
+        let prev = self.font_scale();
         self.window.global::<TouchScale>().set_font_scale(clamped);
-        Self::refresh_marquee_strip(&self.window);
+        if prev.to_bits() != self.font_scale().to_bits() {
+            Self::refresh_marquee_strip(&self.window);
+        }
     }
     /// Sets whether the optical CD player service and navigation entry are enabled.
     ///

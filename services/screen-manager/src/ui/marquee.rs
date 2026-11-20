@@ -44,21 +44,26 @@ pub fn rasterize_marquee_strip(text: &str, font_scale: f32, color: (u8, u8, u8))
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "ascent + descent is positive and bounded (~60 px at 1.35x scale)"
+        reason = "ascent + descent + slack is positive and bounded (~62 px at 1.35x scale)"
     )]
-    let height = ((ascent + descent).ceil().max(1.0) as u32).min(MAX_MARQUEE_STRIP_WIDTH);
+    let height = (ascent + descent).ceil().max(1.0) as u32;
 
     let charmap = font.charmap();
     let glyph_metrics = font.glyph_metrics(&[]).scale(size_px);
 
-    // First pass: collect glyph IDs, advances, and total width (clamped to 2048 px).
+    // First pass: collect glyph IDs, advances, and total width. Fall back to
+    // live Slint `Text` (empty Image) if any glyph is missing from Inter
+    // (`.notdef` / gid 0) or if the strip exceeds VideoCore IV's 2048 px limit.
     let mut glyphs = Vec::with_capacity(text.chars().count());
     let mut cursor_x: f32 = 0.0;
     for ch in text.chars() {
         let gid = charmap.map(ch);
+        if gid == 0 && !ch.is_whitespace() {
+            return slint::Image::default();
+        }
         let advance = glyph_metrics.advance_width(gid);
         if cursor_x + advance > MAX_MARQUEE_STRIP_WIDTH as f32 {
-            break;
+            return slint::Image::default();
         }
         glyphs.push((gid, cursor_x));
         cursor_x += advance;
@@ -114,13 +119,13 @@ fn blit_glyph_mask(
     color: (u8, u8, u8),
 ) {
     let (cr, cg, cb) = (u16::from(color.0), u16::from(color.1), u16::from(color.2));
-    let gw = img.placement.width as usize;
     let Ok(mask_w) = i32::try_from(img.placement.width) else {
         return;
     };
     let Ok(mask_h) = i32::try_from(img.placement.height) else {
         return;
     };
+    let gw = mask_w.cast_unsigned() as usize;
     let (buf_w, buf_h) = (width.cast_signed(), height.cast_signed());
     let x0 = origin_x.max(0);
     let y0 = origin_y.max(0);
@@ -141,23 +146,28 @@ fn blit_glyph_mask(
                 continue;
             }
             let dst = &mut pixels[dst_row + px.cast_unsigned() as usize];
-            let inv_dst_a = u16::from(255 - dst.a);
             let a = u16::from(cov);
-            // Premultiplied source-over: dst + src * (1 - dst.a).
+            let inv_src_a = 255 - a;
+            // Premultiplied source-over: src + dst * (1 - src.a).
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "premultiplied source-over result is bounded in 0..=255"
             )]
-            let (pr, pg, pb, pa) = (
-                (((cr * a + 127) / 255) * inv_dst_a / 255) as u8,
-                (((cg * a + 127) / 255) * inv_dst_a / 255) as u8,
-                (((cb * a + 127) / 255) * inv_dst_a / 255) as u8,
-                ((a * inv_dst_a + 127) / 255) as u8,
+            let (pr, pg, pb) = (
+                ((cr * a + 127) / 255) as u8,
+                ((cg * a + 127) / 255) as u8,
+                ((cb * a + 127) / 255) as u8,
             );
-            dst.r = dst.r.saturating_add(pr);
-            dst.g = dst.g.saturating_add(pg);
-            dst.b = dst.b.saturating_add(pb);
-            dst.a = dst.a.saturating_add(pa);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "dst * (1 - src.a) / 255 fits in u8"
+            )]
+            {
+                dst.r = pr.saturating_add(((u16::from(dst.r) * inv_src_a + 127) / 255) as u8);
+                dst.g = pg.saturating_add(((u16::from(dst.g) * inv_src_a + 127) / 255) as u8);
+                dst.b = pb.saturating_add(((u16::from(dst.b) * inv_src_a + 127) / 255) as u8);
+                dst.a = cov.saturating_add(((u16::from(dst.a) * inv_src_a + 127) / 255) as u8);
+            }
         }
     }
 }
