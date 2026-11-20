@@ -352,6 +352,10 @@ pub struct ShellInit {
     pub amp_commands: crate::volume::AmpVolumeCommandQueue,
     /// Queue bridging render-thread brightness actions to the `brightness` worker.
     pub brightness_commands: crate::brightness::BrightnessCommandQueue,
+    /// Initial auto-mode preference from the appliance configuration.
+    pub brightness_auto_enabled: bool,
+    /// Initial manual percent used when auto mode is disabled at boot.
+    pub brightness_manual_percent: u8,
     /// Queue bridging render-thread Devices-screen actions to the `bt-monitor` worker.
     pub device_commands: speaker_bluetooth::DeviceCommandQueue,
 }
@@ -389,8 +393,9 @@ pub fn init_shell_with_config(
     // presence, so the queue is wired unconditionally.
     let amp_commands = crate::volume::AmpVolumeCommandQueue::new();
     shell.wire_amp_volume(&amp_commands);
-    // Brightness is always controlled through the autobright daemon (single
-    // writer), so its queue is wired unconditionally, like the amp queue.
+    // Brightness is controlled by the embedded engine on the brightness
+    // worker (single sysfs writer), so its queue is wired unconditionally,
+    // like the amp queue.
     let brightness_commands = crate::brightness::BrightnessCommandQueue::new();
     shell.wire_brightness(&brightness_commands);
     // The Devices screen is always present in the shell, so its command queue
@@ -426,6 +431,8 @@ pub fn init_shell_with_config(
         commands,
         amp_commands,
         brightness_commands,
+        brightness_auto_enabled: config.auto_brightness_enabled,
+        brightness_manual_percent: config.brightness_manual_percent,
         device_commands,
     }
 }
@@ -1986,12 +1993,11 @@ pub fn join_brightness_worker(brightness_worker: std::io::Result<std::thread::Jo
     }
 }
 
-/// Spawns the dedicated `brightness` worker thread.
+/// Spawns the embedded brightness control-loop worker thread.
 ///
-/// Mocked sessions use an in-memory client seeded at 100 % / auto so host
-/// tests never touch the system bus. Live sessions retry connection setup
-/// with bounded backoff: a temporarily unavailable `autobright` daemon must
-/// not permanently disable the brightness overlay.
+/// The worker owns the BH1750 sensor and the backlight sysfs handle, so no
+/// separate daemon or D-Bus service is involved. Mocked sessions use in-memory
+/// hardware so host tests never touch I²C or sysfs.
 ///
 /// # Errors
 /// Returns the underlying thread-spawn I/O error.
@@ -2001,51 +2007,76 @@ pub fn spawn_brightness_worker(
     running: &Arc<AtomicBool>,
     brightness_commands: &crate::brightness::BrightnessCommandQueue,
     mocked: bool,
+    auto_enabled: bool,
+    manual_percent: u8,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let shared = Arc::clone(shared);
     let running = Arc::clone(running);
     let brightness_commands = brightness_commands.clone();
+    let policy = crate::brightness::default_policy();
     std::thread::Builder::new()
         .name("brightness".into())
         .spawn(move || {
-            if mocked {
-                let (client, _ctrl) = crate::brightness::BrightnessClient::new_mocked(
-                    crate::brightness::BrightnessState::new(true, 100.0, 50.0, 1.0),
-                );
-                crate::brightness::run_worker(&client, &shared, &brightness_commands, &running);
+            if !running.load(Ordering::Relaxed) {
                 return;
             }
-            let mut backoff = Duration::from_secs(1);
-            loop {
-                if !running.load(Ordering::Relaxed) {
-                    return;
-                }
-                match crate::brightness::BrightnessClient::new_blocking() {
-                    Ok(client) => {
-                        crate::brightness::run_worker(
-                            &client,
-                            &shared,
-                            &brightness_commands,
-                            &running,
+            let (sensor, backlight) = if mocked {
+                let (sensor, _sensor_ctrl) = speaker_hardware::LightSensor::new_mocked();
+                let (backlight, _backlight_ctrl) = speaker_hardware::Backlight::new_mocked();
+                (sensor, backlight)
+            } else {
+                let sensor = match speaker_hardware::LightSensor::new() {
+                    Ok(sensor) => sensor,
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to open BH1750 sensor; brightness disabled");
+                        return;
+                    }
+                };
+                let backlight = match speaker_hardware::Backlight::with_device(
+                    speaker_hardware::DEFAULT_BACKLIGHT_DEVICE,
+                ) {
+                    Ok(backlight) => backlight,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            device = speaker_hardware::DEFAULT_BACKLIGHT_DEVICE,
+                            "Failed to open backlight sysfs device; brightness disabled"
                         );
                         return;
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            backoff_ms = backoff.as_millis() as u64,
-                            "System D-Bus unavailable; retrying brightness connection"
-                        );
-                        let mut remaining = backoff;
-                        while !remaining.is_zero() && running.load(Ordering::Relaxed) {
-                            let slice = remaining.min(Duration::from_millis(200));
-                            std::thread::sleep(slice);
-                            remaining = remaining.saturating_sub(slice);
-                        }
-                        backoff = (backoff * 2).min(Duration::from_secs(60));
-                    }
+                };
+                (sensor, backlight)
+            };
+            let mut engine = match crate::brightness::BrightnessEngine::try_new(
+                sensor,
+                backlight,
+                policy,
+                auto_enabled,
+            ) {
+                Ok(engine) => engine,
+                Err(e) => {
+                    tracing::error!(error = %e, "Brightness hardware bootstrap failed; brightness disabled");
+                    return;
                 }
+            };
+            if !auto_enabled {
+                let command = crate::brightness::BrightnessCommand::SetPercent(f32::from(
+                    manual_percent,
+                ));
+                let _ = engine.tick(
+                    std::time::Instant::now(),
+                    0.0,
+                    &[command],
+                    crate::brightness::BRIGHTNESS_IDLE_RESET,
+                );
             }
+            crate::brightness::run_worker(
+                &mut engine,
+                &shared,
+                &brightness_commands,
+                &running,
+                crate::brightness::BRIGHTNESS_IDLE_RESET,
+            );
         })
 }
 

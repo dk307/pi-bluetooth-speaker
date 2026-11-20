@@ -9,7 +9,6 @@ members = [
     "services/screen-manager",
     "services/bt-manager",
     "services/audio-manager",
-    "services/autobright",
     "tools/diagnostics",
 ]
 

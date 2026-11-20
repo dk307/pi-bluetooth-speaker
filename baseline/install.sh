@@ -172,9 +172,6 @@ mkdir -p /etc/dbus-1/system.d
 cp "${SCRIPT_DIR}/etc/dbus-1/system.d/"*.conf /etc/dbus-1/system.d/
 systemctl reload dbus || true
 
-# Auto-brightness daemon (sole writer of /sys/class/backlight/rpi_backlight)
-cp "${SCRIPT_DIR}/etc/systemd/system/autobright.service" /etc/systemd/system/
-
 # ------------------------------------------------------------------------------
 # 9. Hardware Diagnostic & Monitoring Scripts
 # ------------------------------------------------------------------------------
@@ -203,14 +200,12 @@ systemctl enable bt-agent.service
 systemctl enable bluealsa.service
 systemctl enable bluealsa-aplay.service
 systemctl enable camilladsp.service
-systemctl enable autobright.service
 
 systemctl restart bluetooth.service || true
 systemctl restart bt-agent.service || true
 systemctl restart bluealsa.service || true
 systemctl restart camilladsp.service || true
 systemctl restart bluealsa-aplay.service || true
-systemctl restart autobright.service || true
 
 echo "================================================================================"
 echo " [SUCCESS] Baseline installation and provisioning completed successfully!"

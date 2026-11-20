@@ -130,7 +130,7 @@ jobs:
 
       - name: Verify Binary Architecture & Compatibility
         run: |
-          for bin in screen-manager bt-manager autobright amp-info bt-info dsp-info encoder-read light-read temp-read; do
+          for bin in screen-manager bt-manager amp-info bt-info dsp-info encoder-read light-read temp-read; do
             file "target/aarch64-unknown-linux-gnu/release/$bin"
             readelf -h "target/aarch64-unknown-linux-gnu/release/$bin"
             ls -lh "target/aarch64-unknown-linux-gnu/release/$bin"
@@ -143,7 +143,6 @@ jobs:
           path: |
             target/aarch64-unknown-linux-gnu/release/screen-manager
             target/aarch64-unknown-linux-gnu/release/bt-manager
-            target/aarch64-unknown-linux-gnu/release/autobright
             target/aarch64-unknown-linux-gnu/release/amp-info
             target/aarch64-unknown-linux-gnu/release/bt-info
             target/aarch64-unknown-linux-gnu/release/dsp-info

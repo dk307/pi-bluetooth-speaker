@@ -275,6 +275,8 @@ impl Session {
             commands,
             amp_commands,
             brightness_commands,
+            brightness_auto_enabled,
+            brightness_manual_percent,
             device_commands,
         } = init;
         let shell = Rc::new(shell);
@@ -283,8 +285,14 @@ impl Session {
 
         let amp_worker =
             daemon::spawn_amp_volume_worker(&shared, &bg_running, &amp_commands, mocked);
-        let brightness_worker =
-            daemon::spawn_brightness_worker(&shared, &bg_running, &brightness_commands, mocked);
+        let brightness_worker = daemon::spawn_brightness_worker(
+            &shared,
+            &bg_running,
+            &brightness_commands,
+            mocked,
+            brightness_auto_enabled,
+            brightness_manual_percent,
+        );
         // Raised by the bootstrap worker once the `BlueZ` connect succeeded.
         // The transport callbacks are wired on the render thread (the shell is
         // not `Send`), so the sync timer watches this flag.

@@ -28,7 +28,6 @@ KNOWN_BINARIES=(
   screen-manager
   bt-manager
   audio-manager
-  autobright
   amp-info
   bt-info
   dsp-info

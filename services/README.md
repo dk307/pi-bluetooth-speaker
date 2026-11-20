@@ -8,9 +8,8 @@ This directory contains the modular microservices that power the **Raspberry Pi 
 
 | Service | Language / Stack | Status | Description |
 | :--- | :--- | :--- | :--- |
-| [`screen-manager`](screen-manager) | Rust 2024 / Slint / Tokio | **Production** | Audiophile touchscreen console (800x480 DSI `/dev/fb0`), dual PeppyMeter VU visualizers, rotary encoder volume sync, and display backlight controls (`screen-manager.service`). |
+| [`screen-manager`](screen-manager) | Rust 2024 / Slint / Tokio | **Production** | Audiophile touchscreen console (800x480 DSI `/dev/fb0`), dual PeppyMeter VU visualizers, rotary encoder volume sync, and ambient auto-brightness — the BH1750 lux → backlight policy loop runs as a background thread inside `screen-manager` using `speaker-hardware` (`AutoBrightness`, `LightSensor`, `Backlight`), with no separate daemon or D-Bus service (`screen-manager.service`). |
 | [`bt-manager`](bt-manager) | Rust 2024 / Bluer / Tokio / zbus | **Production** | Dedicated Bluetooth manager daemon, BlueZ & BlueALSA status monitoring, native `org.bluez.Agent1` auto-trust pairing agent, single-active-source arbiter (`org.speaker.Bluetooth`), volume sync, and BIP cover art D-Bus service (`bt-manager.service`, replaces legacy `bt-agent.service`). |
-| [`autobright`](autobright) | Rust 2024 / Tokio / zbus | **Production** | Phone-style ambient auto-brightness daemon: BH1750 lux → hysteretic/slewed backlight policy, external-write manual override detection, idle bias reset, and `org.speaker.Autobright1` single-writer D-Bus control plane for the brightness overlay (`autobright.service`). |
 
 ---
 
