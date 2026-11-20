@@ -4466,6 +4466,7 @@ dependencies = [
  "speaker-dsp",
  "speaker-hardware",
  "speaker-title-breaker",
+ "swash",
  "tempfile",
  "tokio",
  "tracing",

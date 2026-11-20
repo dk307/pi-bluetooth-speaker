@@ -33,10 +33,11 @@ zbus = { workspace = true, features = ["tokio", "blocking-api"] }
 # Slint UI
 i-slint-core = { workspace = true, optional = true }
 slint = { workspace = true, optional = true }
+swash = { workspace = true, optional = true }
 
 [features]
 default = ["ui"]
-ui = ["dep:slint", "dep:slint-build", "dep:i-slint-core", "dep:libblur"]
+ui = ["dep:slint", "dep:slint-build", "dep:i-slint-core", "dep:libblur", "dep:swash"]
 simulator = ["ui", "slint/backend-winit"]
 test-util = []
 

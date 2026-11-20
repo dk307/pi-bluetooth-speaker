@@ -816,6 +816,7 @@ impl AppShell {
             Self::DEFAULT_FONT_SCALE
         };
         self.window.global::<TouchScale>().set_font_scale(clamped);
+        Self::refresh_marquee_strip(&self.window);
     }
     /// Sets whether the optical CD player service and navigation entry are enabled.
     ///
@@ -1050,6 +1051,19 @@ impl AppShell {
         Self::apply_playback_to_window(&self.window, playback);
     }
 
+    fn refresh_marquee_strip(w: &MainWindow) {
+        let title = w.get_track_title();
+        let font_scale = w.global::<TouchScale>().get_clamped_font_scale();
+        let on_bg = w.global::<super::MaterialPalette>().get_on_background();
+        let strip = crate::ui::marquee::rasterize_marquee_strip(
+            title.as_str(),
+            font_scale,
+            (on_bg.red(), on_bg.green(), on_bg.blue()),
+        )
+        .unwrap_or_default();
+        w.global::<MarqueeCompose>().set_title_strip(strip);
+    }
+
     fn apply_track_title(w: &MainWindow, title: &str) {
         // Only notify Slint property bindings when the value actually changed: the
         // Bluetooth worker re-applies state every 250 ms position tick, and
@@ -1066,6 +1080,7 @@ impl AppShell {
             w.set_track_title(title.into());
             w.set_track_title_line1(split.line1.into());
             w.set_track_title_line2(split.line2.into());
+            Self::refresh_marquee_strip(w);
         }
     }
 
@@ -1236,6 +1251,7 @@ impl AppShell {
     /// Applies a theme preset to the UI shell.
     pub fn apply_theme(&self, preset: ThemePreset) {
         preset.apply(&self.window);
+        Self::refresh_marquee_strip(&self.window);
     }
 
     /// Cycles to the next available theme preset in cyclic order.

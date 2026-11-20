@@ -22,6 +22,7 @@ pub(crate) mod backdrop;
 pub mod boot;
 pub(crate) mod bt_devices;
 pub(crate) mod framebuffer;
+pub mod marquee;
 pub mod runtime;
 pub(crate) mod shell;
 pub(crate) mod theme;

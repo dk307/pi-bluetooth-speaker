@@ -90,6 +90,7 @@ slint = { version = "=1.19.0", default-features = false, features = [
 ] }
 i-slint-core = { version = "=1.19.0", features = ["svg", "image-decoders", "image-default-formats"] }
 slint-build = "=1.19.0"
+swash = "=0.2.10"
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"
