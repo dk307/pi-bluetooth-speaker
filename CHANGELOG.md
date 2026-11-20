@@ -7,6 +7,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [2.2.0](https://github.com/dk307/pi-bluetooth-speaker/compare/v2.1.0...v2.2.0) - 2026-11-20
+
+### Added
+
+- *(screen-manager)* generic Basic/Advanced settings catalog and Advanced sub-screen ([#86](https://github.com/dk307/pi-bluetooth-speaker/pull/86))
+- *(overlay)* blurred backdrop with focus for overlays ([#70](https://github.com/dk307/pi-bluetooth-speaker/pull/70))
+- *(bt-manager)* enforce single active Bluetooth audio source ([#83](https://github.com/dk307/pi-bluetooth-speaker/pull/83))
+- *(screen-manager)* Material 3 touch scaling, unclamped primitives, and Screen Settings integration ([#82](https://github.com/dk307/pi-bluetooth-speaker/pull/82))
+- *(screen-manager)* Screen Settings view with live JSON persistence ([#80](https://github.com/dk307/pi-bluetooth-speaker/pull/80))
+
+### Fixed
+
+- *(screen-manager)* show volume HUD for all changes ([#75](https://github.com/dk307/pi-bluetooth-speaker/pull/75))
+- *(bt-manager)* refresh AVRCP track attributes after BIP session connects ([#89](https://github.com/dk307/pi-bluetooth-speaker/pull/89))
+- *(bt-manager)* resolve AVRCP 0x110C L2CAP PSM via live SDP and disable hfp plugin ([#87](https://github.com/dk307/pi-bluetooth-speaker/pull/87))
+- *(bt-manager)* retry active-source seed snapshot with backoff ([#84](https://github.com/dk307/pi-bluetooth-speaker/pull/84))
+
+### Other
+
+- *(screen-manager)* optimize FemtoVG rendering, marquee SharedPixelBuffer, and transport alignment ([#90](https://github.com/dk307/pi-bluetooth-speaker/pull/90))
+- *(now_playing)* drop leading zero on position/duration under 10 min ([#88](https://github.com/dk307/pi-bluetooth-speaker/pull/88))
+- Material 3 Bluetooth devices screen (combined stack, ported to KMS mainline) ([#73](https://github.com/dk307/pi-bluetooth-speaker/pull/73))
+- *(now_playing)* use Inter Tabular font for track position and duration ([#85](https://github.com/dk307/pi-bluetooth-speaker/pull/85))
+- *(screen-manager)* domain newtypes at the AppShell settings boundary ([#81](https://github.com/dk307/pi-bluetooth-speaker/pull/81))
+
 ## [2.1.0](https://github.com/dk307/pi-bluetooth-speaker/releases/tag/v2.1.0) - 2026-11-16
 
 ### Added
