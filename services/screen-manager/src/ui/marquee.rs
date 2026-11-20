@@ -31,7 +31,7 @@ const VERTICAL_SLACK_PX: f32 = 2.0;
 /// Panics if the embedded `Inter-ExtraBold.ttf` asset fails to parse (`M-PANIC-ON-BUG`).
 #[must_use]
 pub fn rasterize_marquee_strip(text: &str, font_scale: f32, color: (u8, u8, u8)) -> slint::Image {
-    if text.is_empty() {
+    if text.is_empty() || !font_scale.is_finite() {
         return slint::Image::default();
     }
 
