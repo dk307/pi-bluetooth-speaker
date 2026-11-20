@@ -99,8 +99,13 @@ if [[ ! -f Makefile ]]; then
     --disable-manpages
 fi
 
+restart_bluetooth() {
+  systemctl start bluetooth.service || true
+}
+
 if [[ "${BLUETOOTH_ONLY}" == "1" ]]; then
   make -j"$(nproc)" src/bluetoothd
+  trap restart_bluetooth EXIT
   systemctl stop bluetooth.service || true
   if [[ -f /usr/libexec/bluetooth/bluetoothd && ! -f /usr/libexec/bluetooth/bluetoothd.bak ]]; then
     cp -a /usr/libexec/bluetooth/bluetoothd /usr/libexec/bluetooth/bluetoothd.bak
@@ -108,6 +113,7 @@ if [[ "${BLUETOOTH_ONLY}" == "1" ]]; then
   install -m 755 src/bluetoothd /usr/libexec/bluetooth/bluetoothd
 else
   make -j"$(nproc)"
+  trap restart_bluetooth EXIT
   systemctl stop bluetooth.service || true
   if [[ -f /usr/libexec/bluetooth/bluetoothd && ! -f /usr/libexec/bluetooth/bluetoothd.bak ]]; then
     cp -a /usr/libexec/bluetooth/bluetoothd /usr/libexec/bluetooth/bluetoothd.bak
@@ -118,6 +124,12 @@ else
   ldconfig
 fi
 
+trap - EXIT
 systemctl start bluetooth.service
 systemctl status bluetooth.service --no-pager -l | head -n 12
+
+if ! ps -eo args | grep -q '[b]luetoothd.*--experimental' && \
+   ! grep -Eq '^[[:space:]]*Experimental[[:space:]]*=[[:space:]]*true' /etc/bluetooth/main.conf 2>/dev/null; then
+  echo "[bluez] WARNING: bluetoothd experimental mode is not enabled (--experimental or Experimental = true); MediaPlayer1.RefreshTrack will not be exposed." >&2
+fi
 EOF

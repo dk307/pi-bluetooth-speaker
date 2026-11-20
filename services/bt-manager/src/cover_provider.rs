@@ -257,17 +257,18 @@ impl PlaybackSource for DevicePlaybackSource {
     }
 
     async fn refresh_track(&mut self, player_path: &str) {
-        if self.dbus.is_none() {
-            match zbus::Connection::system().await {
-                Ok(conn) => self.dbus = Some(conn),
+        let conn = match self.dbus.clone() {
+            Some(conn) => conn,
+            None => match zbus::Connection::system().await {
+                Ok(conn) => {
+                    self.dbus = Some(conn.clone());
+                    conn
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "cannot open system D-Bus for RefreshTrack");
                     return;
                 }
-            }
-        }
-        let Some(conn) = self.dbus.as_ref() else {
-            return;
+            },
         };
         match conn
             .call_method(
@@ -283,11 +284,17 @@ impl PlaybackSource for DevicePlaybackSource {
                 player = player_path,
                 "requested BlueZ MediaPlayer1.RefreshTrack"
             ),
-            Err(e) => tracing::warn!(
-                player = player_path,
-                error = %e,
-                "MediaPlayer1.RefreshTrack unavailable or failed"
-            ),
+            Err(e) => {
+                if matches!(e, zbus::Error::InputOutput(_)) {
+                    // Drop broken system-bus handle so the next reconnect re-opens it.
+                    self.dbus = None;
+                }
+                tracing::warn!(
+                    player = player_path,
+                    error = %e,
+                    "MediaPlayer1.RefreshTrack unavailable or failed"
+                );
+            }
         }
     }
 }
