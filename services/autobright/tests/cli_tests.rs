@@ -7,6 +7,8 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use speaker_common::diag::ScopedTempDir;
+
 #[derive(Debug)]
 struct CliCase {
     name: &'static str,
@@ -164,6 +166,28 @@ fn cli_argument_table() {
             case.name
         );
     }
+}
+
+#[test]
+fn valid_arguments_reach_daemon_main_and_report_config_failure() {
+    // Earlier CLI cases all exit during argument parsing; this one parses
+    // successfully so the binary exercises runtime creation and the call into
+    // `daemon::main`. An explicitly missing config file fails deterministically
+    // before any hardware or D-Bus access is attempted.
+    let temp = ScopedTempDir::new("autobright-cli-resolve-error");
+    let missing = temp.path().join("absent.json");
+    let path = missing.to_str().expect("temporary path is UTF-8");
+    let (success, _stdout, stderr) = run_cli(&["--config", path, "--duration-secs", "1"]);
+
+    assert!(!success, "an explicit missing config must fail: {stderr:?}");
+    assert!(
+        stderr.contains("failed to resolve autobright configuration"),
+        "expected daemon resolve failure, got {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("Backtrace") && !stderr.contains("panicked"),
+        "user-facing config failure leaked a panic: {stderr:?}"
+    );
 }
 
 #[test]

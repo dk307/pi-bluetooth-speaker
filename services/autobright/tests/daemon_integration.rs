@@ -8,7 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use autobright::dbus::AutobrightProxy;
+use autobright::dbus::{AutobrightProxy, DBUS_NAME};
 use autobright::{
     AutobrightError, AutobrightOptions, BacklightIo, Command, LoopState, LuxSource, ResolvedConfig,
     TickAction, TickInput, run_tick, run_with,
@@ -16,6 +16,13 @@ use autobright::{
 use speaker_common::diag::spawn_private_bus;
 use speaker_hardware::Config as BrightnessConfig;
 use zbus::connection::Builder;
+use zbus::fdo;
+use zbus::names::WellKnownName;
+
+#[path = "common/log_capture.rs"]
+mod log_capture;
+
+use log_capture::LogCapture;
 
 const MAX: u32 = 255;
 
@@ -552,4 +559,212 @@ async fn bootstrap_fails_loudly_on_initial_sensor_fault() {
     .await;
 
     assert_eq!(code, ExitCode::FAILURE);
+}
+
+#[test]
+fn auto_mode_change_is_logged_with_structured_fields() {
+    let logs = LogCapture::install();
+    let cfg = BrightnessConfig::default();
+    let sensor = FakeSensor::new(100.0);
+    let backlight = FakeBacklight::new(0);
+    let mut ab = speaker_hardware::AutoBrightness::new(100.0, cfg);
+    let mut state = LoopState::new(0);
+
+    let action = tick(
+        &sensor,
+        &backlight,
+        &mut ab,
+        &cfg,
+        &mut state,
+        &[Command::SetAutoEnabled(false)],
+    );
+
+    assert_eq!(action, TickAction::AutoDisabled);
+    assert!(!state.auto_enabled);
+    assert!(
+        logs.contains("automatic brightness mode changed"),
+        "the mode transition must be logged at INFO: {}",
+        logs.snapshot()
+    );
+}
+
+#[test]
+fn set_auto_enabled_true_when_already_enabled_keeps_auto_mode() {
+    let cfg = BrightnessConfig::default();
+    let sensor = FakeSensor::new(100.0);
+    let backlight = FakeBacklight::new(0);
+    let mut ab = speaker_hardware::AutoBrightness::new(100.0, cfg);
+    let mut state = LoopState::new(0);
+
+    let action = tick(
+        &sensor,
+        &backlight,
+        &mut ab,
+        &cfg,
+        &mut state,
+        &[Command::SetAutoEnabled(true)],
+    );
+
+    assert!(state.auto_enabled, "idempotent enable must keep auto mode");
+    assert!(state.last_manual.is_some());
+    assert_ne!(
+        action,
+        TickAction::AutoDisabled,
+        "an already-enabled command must not suppress the auto path"
+    );
+}
+
+#[test]
+fn external_adoption_logs_the_rounded_percentage_argument() {
+    let logs = LogCapture::install();
+    let cfg = BrightnessConfig::default();
+    let sensor = FakeSensor::new(100.0);
+    let backlight = FakeBacklight::new(200);
+    let mut ab = speaker_hardware::AutoBrightness::new(100.0, cfg);
+    let mut state = LoopState::new(0);
+
+    let action = tick(&sensor, &backlight, &mut ab, &cfg, &mut state, &[]);
+
+    assert_eq!(action, TickAction::ExternalAdopt { raw: 200 });
+    assert!(
+        logs.contains("external brightness change adopted as manual override"),
+        "adoption telemetry must be emitted: {}",
+        logs.snapshot()
+    );
+}
+
+#[test]
+fn idle_reset_logs_the_configured_period_while_auto_is_suppressed() {
+    let logs = LogCapture::install();
+    let cfg = BrightnessConfig::default();
+    let sensor = FakeSensor::new(100.0);
+    let backlight = FakeBacklight::new(0);
+    let mut ab = speaker_hardware::AutoBrightness::new(100.0, cfg);
+    let mut state = LoopState::new(0);
+    state.auto_enabled = false;
+    state.last_manual = Some(
+        Instant::now()
+            .checked_sub(Duration::from_secs(601))
+            .expect("current time is after the six-minute epoch"),
+    );
+
+    let action = tick(&sensor, &backlight, &mut ab, &cfg, &mut state, &[]);
+
+    assert_eq!(action, TickAction::AutoDisabled);
+    assert!(state.last_manual.is_none(), "idle bias must be cleared");
+    assert!(
+        logs.contains("idle timer cleared manual brightness bias"),
+        "idle telemetry must be emitted: {}",
+        logs.snapshot()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_with_fails_when_dbus_name_is_already_owned() {
+    let logs = LogCapture::install();
+    let (_bus, address) = spawn_private_bus();
+    let server = Builder::address(address.as_str())
+        .expect("valid private bus address")
+        .build()
+        .await
+        .expect("server connection");
+    let holder = Builder::address(address.as_str())
+        .expect("valid private bus address")
+        .build()
+        .await
+        .expect("name-holder connection");
+
+    let name = WellKnownName::try_from(DBUS_NAME).expect("valid well-known name");
+    let fdo = fdo::DBusProxy::new(&holder)
+        .await
+        .expect("fdo proxy on holder connection");
+    let reply = fdo
+        .request_name(name, fdo::RequestNameFlags::DoNotQueue.into())
+        .await
+        .expect("claim the autobright bus name first");
+    assert_eq!(reply, fdo::RequestNameReply::PrimaryOwner);
+
+    let code = run_with(
+        probe_config(),
+        Box::new(FakeSensor::new(100.0)),
+        Box::new(FakeBacklight::new(0)),
+        &server,
+    )
+    .await;
+
+    assert_eq!(code, ExitCode::FAILURE);
+    assert!(
+        logs.contains("failed to export org.speaker.Autobright1"),
+        "export failure must be reported: {}",
+        logs.snapshot()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn initial_state_is_visible_over_dbus_before_the_first_tick() {
+    let (_bus, address) = spawn_private_bus();
+    let server = Builder::address(address.as_str())
+        .expect("valid private bus address")
+        .build()
+        .await
+        .expect("server connection");
+    let client = Builder::address(address.as_str())
+        .expect("valid private bus address")
+        .build()
+        .await
+        .expect("client connection");
+
+    let cfg = ResolvedConfig::resolve(AutobrightOptions {
+        tick_ms: Some(1200),
+        duration_secs: Some(2),
+        ..AutobrightOptions::default()
+    })
+    .expect("bounded probe config");
+    let expected_percent = {
+        let ab = speaker_hardware::AutoBrightness::new(123.0, cfg.policy);
+        f64::from((ab.brightness() * 100.0).clamp(0.0, 100.0))
+    };
+    // `initial_published_state` seeds telemetry from `LoopState`, whose lux
+    // readout is updated only by the first real sensor tick.
+    let expected_lux = f64::from(LoopState::new(80).last_lux);
+
+    let (state_tx, state_rx) = tokio::sync::oneshot::channel();
+    let observer = tokio::spawn(async move {
+        let fdo = fdo::DBusProxy::new(&client)
+            .await
+            .expect("fdo proxy on client connection");
+        let name = WellKnownName::try_from(DBUS_NAME).expect("valid well-known name");
+        let wait_for_name = async {
+            while fdo.get_name_owner(name.clone().into()).await.is_err() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        // A client proxy created before the name exists can cache the missing
+        // owner forever, so wait for a fresh name query before constructing it.
+        tokio::time::timeout(Duration::from_secs(2), wait_for_name)
+            .await
+            .expect("daemon must claim its bus name within two seconds");
+
+        let proxy = AutobrightProxy::new(&client).await.expect("client proxy");
+        let state = proxy.get_state().await.expect("initial published state");
+        let available = proxy.available().await.expect("available property");
+        let _ = state_tx.send((state, available));
+    });
+
+    let code = run_with(
+        cfg,
+        Box::new(FakeSensor::new(123.0)),
+        Box::new(FakeBacklight::new(80)),
+        &server,
+    )
+    .await;
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let (published, available) = tokio::time::timeout(Duration::from_secs(1), state_rx)
+        .await
+        .expect("observer must report before the daemon exits")
+        .expect("observer task must send its state snapshot");
+    assert_eq!(published, (true, expected_percent, expected_lux, 1.0));
+    assert!(available);
+    observer.await.expect("observer task");
 }

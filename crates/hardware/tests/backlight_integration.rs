@@ -8,6 +8,7 @@ use std::fs;
 use std::io;
 
 use speaker_common::diag::ScopedTempDir;
+use speaker_common::runtime::FromJoinError;
 use speaker_hardware::{BACKLIGHT_SYSFS_BASE, Backlight, BacklightError, DEFAULT_BACKLIGHT_DEVICE};
 
 fn make_sysfs_tree(prefix: &str, device: &str, max: &str, raw: &str) -> ScopedTempDir {
@@ -134,6 +135,43 @@ fn mock_counters_clamp_and_fault_injection() {
     assert_eq!(backlight.read().unwrap(), 128);
     backlight.write(64).unwrap();
     assert_eq!(mock.last_written(), 64);
+}
+
+#[test]
+fn cancelled_and_invalid_data_errors_expose_full_contract() {
+    let cancelled = BacklightError::from_cancelled("worker stopped during shutdown");
+    assert!(cancelled.is_cancelled());
+    assert!(!cancelled.is_mock_fault());
+    assert!(!cancelled.is_not_found());
+    assert!(
+        cancelled
+            .summary()
+            .contains("task cancelled: worker stopped"),
+        "unexpected summary: {}",
+        cancelled.summary()
+    );
+    assert!(!cancelled.summary().contains("Backtrace"));
+
+    let dir = make_sysfs_tree("backlight_contract", "rpi_backlight", "nope\n", "0\n");
+    let invalid = Backlight::with_root(dir.path(), "rpi_backlight").unwrap_err();
+    assert!(invalid.is_invalid_data());
+    assert!(
+        std::error::Error::source(&invalid).is_none(),
+        "non-I/O errors must not fabricate a source"
+    );
+    assert_ne!(invalid.backtrace().to_string(), "");
+}
+
+#[test]
+fn default_constructor_uses_appliance_backlight_device() {
+    // On a developer host the panel sysfs node is absent; the constructor must
+    // still attempt the canonical device and report a typed NotFound error.
+    match Backlight::new() {
+        Ok(backlight) => assert_eq!(backlight.max_brightness(), 255),
+        Err(err) => {
+            assert!(err.is_not_found(), "unexpected default-device error: {err}");
+        }
+    }
 }
 
 #[tokio::test]

@@ -267,6 +267,219 @@ fn backlight_info_cli_argument_validation() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "comprehensive backlight CLI flag parsing, rejection, stats, and formatter validation"
+)]
+fn backlight_info_cli_argument_parsing_and_stats() {
+    use speaker_common::diag::{CliParse, NumericStats, OutputFormat};
+    use speaker_diagnostics::cli::backlight::{
+        CliOptions, DEFAULT_POLL_INTERVAL, output_json_error, output_json_reading,
+        parse_cli_args_from, print_session_summary, print_usage, read_bl_power,
+    };
+    use speaker_hardware::{Backlight, DEFAULT_BACKLIGHT_DEVICE};
+
+    fn unwrap_options(parsed: Result<CliParse<CliOptions>, String>) -> CliOptions {
+        match parsed.unwrap() {
+            CliParse::Options(o) => o,
+            other => panic!("expected CliParse::Options, got {other:?}"),
+        }
+    }
+
+    print_usage("backlight-info-test");
+
+    // Stats domain behaviour, with both empty and populated session summaries.
+    let mut stats = NumericStats::default();
+    assert!(stats.average().is_none());
+    assert_eq!(stats.min(), None);
+    assert_eq!(stats.max(), None);
+    print_session_summary(&stats);
+
+    stats.record_success(64.0);
+    stats.record_success(128.0);
+    stats.record_error();
+    assert_eq!(stats.total_reads(), 3);
+    assert_eq!(stats.successful_reads(), 2);
+    assert_eq!(stats.errors(), 1);
+    assert_eq!(stats.min(), Some(64.0));
+    assert_eq!(stats.max(), Some(128.0));
+    assert!((stats.average().unwrap() - 96.0).abs() < 1e-4);
+    assert!((stats.error_rate_percent() - 33.333).abs() < 0.1);
+    print_session_summary(&stats);
+
+    // No physical backlight sysfs tree exists on a development host.
+    assert_eq!(read_bl_power("definitely-not-a-real-panel"), None);
+
+    // Direct formatter calls, including the max == 0 percent branch and the
+    // real mock-fault error whose summary is embedded in the NDJSON record.
+    output_json_reading("12:00:00", "panel0", 128, 255, Some(0));
+    output_json_reading("12:00:01", "panel0", 0, 0, None);
+    let (backlight, ctrl) = Backlight::new_mocked();
+    ctrl.set_read_error(Some("panel I2C lockup".into()));
+    let err = backlight.read().unwrap_err();
+    assert!(err.is_mock_fault());
+    assert!(err.summary().contains("panel I2C lockup"));
+    output_json_error("12:00:02", &err);
+
+    // Help and version flags.
+    assert!(matches!(
+        parse_cli_args_from(["--help".into()]).unwrap(),
+        CliParse::Help
+    ));
+    assert!(matches!(
+        parse_cli_args_from(["-h".into()]).unwrap(),
+        CliParse::Help
+    ));
+    assert!(matches!(
+        parse_cli_args_from(["--version".into()]).unwrap(),
+        CliParse::Version
+    ));
+    assert!(matches!(
+        parse_cli_args_from(["-V".into()]).unwrap(),
+        CliParse::Version
+    ));
+
+    // Defaults: once mode, 500 ms interval, default device, human format.
+    let defaults = unwrap_options(parse_cli_args_from([]));
+    assert_eq!(defaults.common.max_count, Some(1));
+    assert_eq!(defaults.common.interval, DEFAULT_POLL_INTERVAL);
+    assert_eq!(defaults.device.as_ref(), DEFAULT_BACKLIGHT_DEVICE);
+    assert_eq!(defaults.common.format, OutputFormat::Human);
+    assert!(!defaults.common.verbose);
+
+    // Repeat/once flags.
+    assert_eq!(
+        unwrap_options(parse_cli_args_from(["--repeat".into()]))
+            .common
+            .max_count,
+        None
+    );
+    assert_eq!(
+        unwrap_options(parse_cli_args_from(["-R".into()]))
+            .common
+            .max_count,
+        None
+    );
+    assert_eq!(
+        unwrap_options(parse_cli_args_from(["--once".into()]))
+            .common
+            .max_count,
+        Some(1)
+    );
+
+    // Combined count, interval, device, verbose, and json flags.
+    let opts = unwrap_options(parse_cli_args_from([
+        "--count".into(),
+        "5".into(),
+        "--interval".into(),
+        "0.5".into(),
+        "--device".into(),
+        "panel0".into(),
+        "--verbose".into(),
+        "--json".into(),
+    ]));
+    assert_eq!(opts.common.max_count, Some(5));
+    assert_eq!(opts.common.interval, Duration::from_millis(500));
+    assert_eq!(opts.device.as_ref(), "panel0");
+    assert!(opts.common.verbose);
+    assert_eq!(opts.common.format, OutputFormat::Json);
+
+    // Short -d alias.
+    let opts = unwrap_options(parse_cli_args_from(["-d".into(), "backlight0".into()]));
+    assert_eq!(opts.device.as_ref(), "backlight0");
+
+    // Rejections: empty device, path separators, missing value, unknown flag.
+    let err = parse_cli_args_from(["--device".into(), String::new()]).unwrap_err();
+    assert!(err.contains("invalid backlight device name"), "{err}");
+    let err = parse_cli_args_from(["--device".into(), "../etc".into()]).unwrap_err();
+    assert!(err.contains("invalid backlight device name"), "{err}");
+    let err = parse_cli_args_from(["--device".into(), "foo\\bar".into()]).unwrap_err();
+    assert!(err.contains("invalid backlight device name"), "{err}");
+    let err = parse_cli_args_from(["--device".into()]).unwrap_err();
+    assert!(err.contains("missing value for --device"), "{err}");
+    let err = parse_cli_args_from(["--unknown-flag".into()]).unwrap_err();
+    assert!(err.contains("unknown option"), "{err}");
+}
+
+#[test]
+fn backlight_info_cli_mock_execution_and_fault_handling() {
+    use std::process::ExitCode;
+
+    use speaker_common::diag::{CommonCliOptions, NumericStats, OutputFormat};
+    use speaker_diagnostics::cli::backlight::{
+        CliOptions, handle_backlight_iteration, print_header, run_app,
+    };
+    use speaker_hardware::Backlight;
+
+    let (backlight, mock) = Backlight::new_mocked();
+    mock.set_raw(128);
+    print_header(&backlight, "panel0");
+
+    let human_opts = CliOptions {
+        common: CommonCliOptions {
+            max_count: Some(2),
+            interval: Duration::from_millis(1),
+            verbose: false,
+            format: OutputFormat::Human,
+        },
+        device: "panel0".into(),
+    };
+    let verbose_opts = CliOptions {
+        common: CommonCliOptions {
+            verbose: true,
+            ..human_opts.common
+        },
+        ..human_opts.clone()
+    };
+    let json_opts = CliOptions {
+        common: CommonCliOptions {
+            format: OutputFormat::Json,
+            ..human_opts.common
+        },
+        ..human_opts.clone()
+    };
+
+    // Successful read, human format.
+    let mut stats = NumericStats::default();
+    handle_backlight_iteration(&backlight, &human_opts, "12:00:00", &mut stats);
+    assert_eq!(stats.total_reads(), 1);
+    assert_eq!(stats.successful_reads(), 1);
+    assert_eq!(stats.errors(), 0);
+    assert_eq!(stats.max(), Some(128.0));
+    assert_eq!(mock.read_count(), 1);
+
+    // Verbose human branch (the bl_power lookup resolves to None on this host).
+    handle_backlight_iteration(&backlight, &verbose_opts, "12:00:01", &mut stats);
+    assert_eq!(stats.successful_reads(), 2);
+    assert_eq!(mock.read_count(), 2);
+
+    // Successful read, JSON format.
+    handle_backlight_iteration(&backlight, &json_opts, "12:00:02", &mut stats);
+    assert_eq!(stats.successful_reads(), 3);
+    assert_eq!(mock.read_count(), 3);
+
+    // Injected read fault in both formats increments only the error counter.
+    mock.set_read_error(Some("panel I2C lockup".into()));
+    handle_backlight_iteration(&backlight, &human_opts, "12:00:03", &mut stats);
+    handle_backlight_iteration(&backlight, &json_opts, "12:00:04", &mut stats);
+    assert_eq!(stats.total_reads(), 5);
+    assert_eq!(stats.successful_reads(), 3);
+    assert_eq!(stats.errors(), 2);
+    assert_eq!(mock.read_count(), 5);
+
+    // run_app with a healthy mock: human verbose and JSON runs both succeed.
+    mock.set_read_error(None);
+    assert_eq!(run_app(&backlight, &verbose_opts), ExitCode::SUCCESS);
+    assert_eq!(run_app(&backlight, &json_opts), ExitCode::SUCCESS);
+    assert_eq!(mock.read_count(), 9);
+
+    // run_app with every read failing yields FAILURE.
+    mock.set_read_error(Some("panel I2C lockup".into()));
+    assert_eq!(run_app(&backlight, &human_opts), ExitCode::FAILURE);
+    assert_eq!(mock.read_count(), 11);
+}
+
+#[test]
 fn amp_info_cli_argument_validation() {
     let bin_path = env!("CARGO_BIN_EXE_amp-info");
     assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
