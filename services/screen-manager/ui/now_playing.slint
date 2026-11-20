@@ -521,33 +521,42 @@ export component NowPlayingView inherits Rectangle {
                     spacing: 36px;
 
                     // Previous Button - tonal filled circle (M3 button group)
-                    TransportButton {
-                        icon: @image-url("../../../assets/icons/previous.svg");
-                        enabled: root.transport_available;
-                        is_hero: false;
-                        icon_color: MaterialPalette.on_secondary_container;
-                        clicked => { root.previous_track(); }
+                    VerticalLayout {
+                        alignment: center;
+                        TransportButton {
+                            icon: @image-url("../../../assets/icons/previous.svg");
+                            enabled: root.transport_available;
+                            is_hero: false;
+                            icon_color: MaterialPalette.on_secondary_container;
+                            clicked => { root.previous_track(); }
+                        }
                     }
 
                     // Play / Pause (Hero Button) - large filled primary circle (M3 filled button)
-                    TransportButton {
-                        icon: @image-url("../../../assets/icons/play.svg");
-                        pause_icon: @image-url("../../../assets/icons/pause.svg");
-                        is_playing: root.is_playing;
-                        enabled: root.transport_available;
-                        is_hero: true;
-                        background_color: MaterialPalette.primary;
-                        icon_color: MaterialPalette.on_primary;
-                        clicked => { root.toggle_play_pause(); }
+                    VerticalLayout {
+                        alignment: center;
+                        TransportButton {
+                            icon: @image-url("../../../assets/icons/play.svg");
+                            pause_icon: @image-url("../../../assets/icons/pause.svg");
+                            is_playing: root.is_playing;
+                            enabled: root.transport_available;
+                            is_hero: true;
+                            background_color: MaterialPalette.primary;
+                            icon_color: MaterialPalette.on_primary;
+                            clicked => { root.toggle_play_pause(); }
+                        }
                     }
 
                     // Next Button - tonal filled circle (M3 button group)
-                    TransportButton {
-                        icon: @image-url("../../../assets/icons/next.svg");
-                        enabled: root.transport_available;
-                        is_hero: false;
-                        icon_color: MaterialPalette.on_secondary_container;
-                        clicked => { root.next_track(); }
+                    VerticalLayout {
+                        alignment: center;
+                        TransportButton {
+                            icon: @image-url("../../../assets/icons/next.svg");
+                            enabled: root.transport_available;
+                            is_hero: false;
+                            icon_color: MaterialPalette.on_secondary_container;
+                            clicked => { root.next_track(); }
+                        }
                     }
                 }
         }
