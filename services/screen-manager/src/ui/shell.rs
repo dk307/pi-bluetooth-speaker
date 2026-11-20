@@ -1059,8 +1059,7 @@ impl AppShell {
             title.as_str(),
             font_scale,
             (on_bg.red(), on_bg.green(), on_bg.blue()),
-        )
-        .unwrap_or_default();
+        );
         w.global::<MarqueeCompose>().set_title_strip(strip);
     }
 

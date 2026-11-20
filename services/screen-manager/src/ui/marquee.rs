@@ -20,24 +20,27 @@ pub const MAX_MARQUEE_STRIP_WIDTH: u32 = 2048;
 /// Base marquee font size in logical pixels (matches `now_playing.slint`).
 const BASE_FONT_SIZE_PX: f32 = 32.0;
 
+/// Extra vertical padding (px) above ascent and below descent so hinted
+/// ascenders/descenders (e.g. `g`, `y`, `q`, `É`) are never clipped.
+const VERTICAL_SLACK_PX: f32 = 2.0;
+
 /// Rasterizes `text` at `BASE_FONT_SIZE_PX * font_scale` with premultiplied
-/// alpha for `color` (`(r, g, b)`). Returns `None` if `text` is empty or the
-/// embedded font cannot be parsed.
+/// alpha for `color` (`(r, g, b)`), returning an empty image for empty `text`.
+///
+/// # Panics
+/// Panics if the embedded `Inter-ExtraBold.ttf` asset fails to parse (`M-PANIC-ON-BUG`).
 #[must_use]
-pub fn rasterize_marquee_strip(
-    text: &str,
-    font_scale: f32,
-    color: (u8, u8, u8),
-) -> Option<slint::Image> {
+pub fn rasterize_marquee_strip(text: &str, font_scale: f32, color: (u8, u8, u8)) -> slint::Image {
     if text.is_empty() {
-        return None;
+        return slint::Image::default();
     }
 
-    let font = FontRef::from_index(INTER_EXTRABOLD_TTF, 0)?;
+    let font = FontRef::from_index(INTER_EXTRABOLD_TTF, 0)
+        .expect("embedded Inter-ExtraBold.ttf must parse");
     let size_px = (BASE_FONT_SIZE_PX * font_scale.clamp(1.0, 1.35)).round();
     let metrics = font.metrics(&[]).scale(size_px);
-    let ascent = metrics.ascent.ceil();
-    let descent = metrics.descent.ceil();
+    let ascent = metrics.ascent.ceil() + VERTICAL_SLACK_PX / 2.0;
+    let descent = metrics.descent.abs().ceil() + VERTICAL_SLACK_PX / 2.0;
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -96,7 +99,7 @@ pub fn rasterize_marquee_strip(
         blit_glyph_mask(pixels, width, height, origin_x, origin_y, &img, color);
     }
 
-    Some(slint::Image::from_rgba8_premultiplied(buf))
+    slint::Image::from_rgba8_premultiplied(buf)
 }
 
 /// Composites a single alpha-mask glyph into a premultiplied `Rgba8Pixel` buffer.

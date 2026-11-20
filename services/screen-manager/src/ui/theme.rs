@@ -367,12 +367,22 @@ impl ThemePreset {
             .set_frames(slint::ModelRc::new(slint::VecModel::from(frames)));
     }
 
-    /// Pre-renders the 6 `64x24` `AmbientWaveIndicator` frames for this theme.
+    /// Pre-renders the 7 `64x24` `AmbientWaveIndicator` frames (ticks `0..6`
+    /// playing + index `6` paused `4px` idle stubs) for this theme.
     fn build_ambient_wave_frames(self) -> Vec<slint::Image> {
         const WIDTH: u32 = 64;
         const HEIGHT: u32 = 24;
         const BAR_WIDTH: u32 = 4;
         const BAR_XS: [u32; 5] = [0, 8, 16, 24, 32];
+        const WAVE_HEIGHTS: [[u32; 5]; 7] = [
+            [20, 18, 7, 16, 16],
+            [14, 10, 12, 22, 8],
+            [8, 18, 20, 16, 8],
+            [14, 24, 12, 9, 16],
+            [20, 18, 7, 16, 8],
+            [14, 10, 12, 22, 8],
+            [4, 4, 4, 4, 4],
+        ];
 
         let (primary, secondary, ..) = self.material_base_colors();
         let primary_px =
@@ -387,33 +397,11 @@ impl ThemePreset {
             primary_px,
         ];
 
-        (0..6_u32)
-            .map(|tick| {
+        WAVE_HEIGHTS
+            .iter()
+            .map(|heights| {
                 let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(WIDTH, HEIGHT);
                 let pixels = buf.make_mut_slice();
-                let heights = [
-                    match tick % 4 {
-                        0 => 20_u32,
-                        2 => 8,
-                        _ => 14,
-                    },
-                    match (tick + 1) % 4 {
-                        0 => 24,
-                        2 => 10,
-                        _ => 18,
-                    },
-                    match (tick + 2) % 4 {
-                        0 => 18,
-                        2 => 7,
-                        _ => 12,
-                    },
-                    match (tick + 3) % 4 {
-                        0 => 22,
-                        2 => 9,
-                        _ => 16,
-                    },
-                    if tick.is_multiple_of(3) { 16 } else { 8 },
-                ];
 
                 for ((&bar_x, &bar_h), &color) in
                     BAR_XS.iter().zip(heights.iter()).zip(bar_colors.iter())

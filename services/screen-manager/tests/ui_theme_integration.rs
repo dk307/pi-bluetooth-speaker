@@ -301,3 +301,43 @@ fn settings_view_swatches_match_preset_constants() {
         );
     }
 }
+
+#[cfg(feature = "ui")]
+#[test]
+fn marquee_strip_rasterizer_handles_empty_descenders_and_2048px_cap() {
+    use screen_manager::ui::marquee::{MAX_MARQUEE_STRIP_WIDTH, rasterize_marquee_strip};
+
+    let empty = rasterize_marquee_strip("", 1.15, (255, 255, 255));
+    assert_eq!(empty.size().width, 0);
+
+    // Descenders and accented capitals must render non-zero pixels without clipping.
+    let strip = rasterize_marquee_strip("gypqÉÁ Hello World", 1.35, (255, 200, 100));
+    let size = strip.size();
+    assert!(size.width > 0 && size.width <= MAX_MARQUEE_STRIP_WIDTH);
+    assert!(size.height >= 32);
+    let buf = strip.to_rgba8_premultiplied().expect("rgba8 buffer");
+    assert!(buf.as_slice().iter().any(|px| px.a > 0));
+
+    // Very long strings must be clamped to VideoCore IV's 2048 px texture limit.
+    let long = "W".repeat(200);
+    let capped = rasterize_marquee_strip(&long, 1.35, (255, 255, 255));
+    assert!(capped.size().width <= MAX_MARQUEE_STRIP_WIDTH);
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ambient_wave_sprites_include_paused_idle_frame() {
+    use screen_manager::ui::{AmbientWaveSprites, Framebuffer, MainWindow};
+    use slint::{ComponentHandle, Model};
+
+    let fb = Framebuffer::new_mocked().0;
+    let _platform = fb.init_platform().expect("platform init");
+    let window = MainWindow::new().expect("MainWindow");
+    ThemePreset::Peppy.apply(&window);
+
+    let frames = window.global::<AmbientWaveSprites>().get_frames();
+    assert_eq!(frames.row_count(), 7);
+    let idle = frames.row_data(6).expect("idle frame 6");
+    assert_eq!(idle.size().width, 64);
+    assert_eq!(idle.size().height, 24);
+}

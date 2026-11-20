@@ -44,9 +44,9 @@ pub use bt_devices::{
 pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError, FramebufferMockCtrl};
 #[doc(inline)]
 pub use generated::{
-    AppTheme, BootCheckLine, BtDeviceRow, MainWindow, MarqueeCompose, MaterialPalette,
-    MaterialStyleMetrics, SettingControlKind, SettingRowItem, SplashScreen, TouchScale,
-    VirtualKeyboard,
+    AmbientWaveSprites, AppTheme, BootCheckLine, BtDeviceRow, MainWindow, MarqueeCompose,
+    MaterialPalette, MaterialStyleMetrics, SettingControlKind, SettingRowItem, SplashScreen,
+    TouchScale, VirtualKeyboard,
 };
 #[doc(inline)]
 pub use shell::{AppShell, BtLinkDetails, EncoderVolumeTracker};

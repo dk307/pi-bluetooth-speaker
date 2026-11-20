@@ -135,7 +135,7 @@ component AmbientWaveIndicator inherits Rectangle {
     Image {
         width: 100%;
         height: 100%;
-        source: AmbientWaveSprites.frames[root.tick];
+        source: AmbientWaveSprites.frames[root.is_playing ? root.tick : 6];
         image-fit: fill;
     }
 }
