@@ -224,6 +224,11 @@ pub trait PlaybackSource: Send {
     /// # Errors
     /// Propagates transport/D-Bus errors (transient hiccups included).
     async fn status(&self) -> Result<Option<BtPlaybackState>, BtError>;
+
+    /// Requests `BlueZ` to re-fetch current track attributes (`MediaPlayer1.RefreshTrack`).
+    ///
+    /// Default no-op so mock sources work unchanged.
+    async fn refresh_track(&mut self, _player_path: &str) {}
 }
 
 /// Production [`PlaybackSource`] over the real D-Bus `BlueZ` snapshot.
@@ -238,6 +243,33 @@ impl PlaybackSource for DevicePlaybackSource {
         // blocking runtime, which panics when nested inside the provider
         // thread's own tokio runtime.
         Ok(self.bt.status_async().await?.playback)
+    }
+
+    async fn refresh_track(&mut self, player_path: &str) {
+        let Ok(conn) = zbus::Connection::system().await else {
+            tracing::debug!("cannot open system D-Bus for RefreshTrack");
+            return;
+        };
+        match conn
+            .call_method(
+                Some("org.bluez"),
+                player_path,
+                Some("org.bluez.MediaPlayer1"),
+                "RefreshTrack",
+                &(),
+            )
+            .await
+        {
+            Ok(_) => tracing::info!(
+                player = player_path,
+                "requested BlueZ MediaPlayer1.RefreshTrack"
+            ),
+            Err(e) => tracing::debug!(
+                player = player_path,
+                error = %e,
+                "MediaPlayer1.RefreshTrack unavailable or failed"
+            ),
+        }
     }
 }
 
@@ -558,6 +590,9 @@ impl CoverArtWorker {
             self.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
         }
         if epoch != prev_epoch && playback.image_handle.is_none() {
+            if let Some(ref player_path) = playback.player_path {
+                self.source.refresh_track(player_path).await;
+            }
             match self.source.status().await {
                 Ok(Some(refreshed)) => *playback = refreshed,
                 Ok(None) => tracing::debug!("no updated playback during post-session re-query"),

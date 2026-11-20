@@ -1,0 +1,79 @@
+--- a/profiles/audio/player.h
++++ b/profiles/audio/player.h
+@@ -46,6 +46,7 @@
+ 	int (*hold)(struct media_player *mp, uint8_t avc_key,
+ 							void *user_data);
+ 	int (*release)(struct media_player *mp, void *user_data);
++	int (*refresh_track)(struct media_player *mp, void *user_data);
+ 	int (*list_items)(struct media_player *mp, const char *name,
+ 				uint32_t start, uint32_t end, void *user_data);
+ 	int (*change_folder)(struct media_player *mp, const char *path,
+--- a/profiles/audio/player.c
++++ b/profiles/audio/player.c
+@@ -641,6 +641,23 @@
+ 	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
+ }
+ 
++static DBusMessage *media_player_refresh_track(DBusConnection *conn,
++						DBusMessage *msg, void *data)
++{
++	struct media_player *mp = data;
++	struct player_callback *cb = mp->cb;
++	int err;
++
++	if (cb == NULL || cb->cbs == NULL || cb->cbs->refresh_track == NULL)
++		return btd_error_not_supported(msg);
++
++	err = cb->cbs->refresh_track(mp, cb->user_data);
++	if (err < 0)
++		return btd_error_failed(msg, strerror(-err));
++
++	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
++}
++
+ static void parse_folder_list(gpointer data, gpointer user_data)
+ {
+ 	struct media_item *item = data;
+@@ -778,6 +795,8 @@
+ 	{ GDBUS_METHOD("Hold", GDBUS_ARGS({"avc_key", "y"}), NULL,
+ 							media_player_hold) },
+ 	{ GDBUS_METHOD("Release", NULL, NULL, media_player_release) },
++	{ GDBUS_EXPERIMENTAL_METHOD("RefreshTrack", NULL, NULL,
++					media_player_refresh_track) },
+ 	{ }
+ };
+ 
+--- a/profiles/audio/avrcp.c
++++ b/profiles/audio/avrcp.c
+@@ -3206,6 +3206,23 @@
+ 	return ct_release(player);
+ }
+ 
++static int ct_refresh_track(struct media_player *mp, void *user_data)
++{
++	struct avrcp_player *player = user_data;
++	struct avrcp *session;
++
++	if (!player || !player->sessions)
++		return -ENOTCONN;
++
++	session = player->sessions->data;
++	if (!session || !session->conn)
++		return -ENOTCONN;
++
++	avrcp_get_element_attributes(session);
++
++	return 0;
++}
++
+ static int ct_list_items(struct media_player *mp, const char *name,
+ 				uint32_t start, uint32_t end, void *user_data)
+ {
+@@ -3576,6 +3593,7 @@
+ 	.press		= ct_press_key,
+ 	.hold		= ct_hold_key,
+ 	.release	= ct_release_key,
++	.refresh_track	= ct_refresh_track,
+ 	.list_items	= ct_list_items,
+ 	.change_folder	= ct_change_folder,
+ 	.search		= ct_search,
