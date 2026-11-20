@@ -913,20 +913,7 @@ impl AppShell {
 
     /// Updates playback state, elapsed position, and total duration.
     pub fn set_playback_state(&self, is_playing: bool, position_ms: u32, duration_ms: u32) {
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "duration_ms up to i32::MAX fits cleanly in slint int"
-        )]
-        self.window.set_duration_ms(duration_ms as i32);
-        self.window.set_is_playing(is_playing);
-        let ratio = speaker_bluetooth::playback_progress_ratio(position_ms, duration_ms);
-        self.window.set_progress_ratio(ratio);
-        self.window.set_position_text(
-            speaker_bluetooth::format_duration_ms_ui(position_ms, duration_ms).into(),
-        );
-        self.window.set_duration_text(
-            speaker_bluetooth::format_duration_ms_ui(duration_ms, duration_ms).into(),
-        );
+        Self::apply_playback_timing(&self.window, is_playing, position_ms, duration_ms);
     }
 
     /// Applies a full [`BtPlaybackState`] snapshot to the window properties.
@@ -1082,6 +1069,31 @@ impl AppShell {
         }
     }
 
+    fn apply_playback_timing(w: &MainWindow, is_playing: bool, position_ms: u32, duration_ms: u32) {
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "duration_ms up to i32::MAX fits cleanly in slint int"
+        )]
+        if w.get_duration_ms() != duration_ms as i32 {
+            w.set_duration_ms(duration_ms as i32);
+        }
+        if w.get_is_playing() != is_playing {
+            w.set_is_playing(is_playing);
+        }
+        let ratio = speaker_bluetooth::playback_progress_ratio(position_ms, duration_ms);
+        if w.get_progress_ratio().to_bits() != ratio.to_bits() {
+            w.set_progress_ratio(ratio);
+        }
+        let position_text = speaker_bluetooth::format_duration_ms_ui(position_ms, duration_ms);
+        if w.get_position_text().as_str() != position_text.as_str() {
+            w.set_position_text(position_text.into());
+        }
+        let duration_text = speaker_bluetooth::format_duration_ms_ui(duration_ms, duration_ms);
+        if w.get_duration_text().as_str() != duration_text.as_str() {
+            w.set_duration_text(duration_text.into());
+        }
+    }
+
     fn apply_playback_to_window(w: &MainWindow, playback: &speaker_bluetooth::BtPlaybackState) {
         Self::apply_track_title(w, playback.title.as_ref());
         if w.get_track_artist().as_str() != playback.artist.as_ref() {
@@ -1090,29 +1102,12 @@ impl AppShell {
         if w.get_track_album().as_str() != playback.album.as_ref() {
             w.set_track_album(playback.album.as_ref().into());
         }
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "duration_ms up to i32::MAX fits cleanly in slint int"
-        )]
-        if w.get_duration_ms() != playback.duration_ms as i32 {
-            w.set_duration_ms(playback.duration_ms as i32);
-        }
-        let playing = playback.is_playing();
-        if w.get_is_playing() != playing {
-            w.set_is_playing(playing);
-        }
-        let ratio =
-            speaker_bluetooth::playback_progress_ratio(playback.position_ms, playback.duration_ms);
-        w.set_progress_ratio(ratio);
-        w.set_position_text(
-            speaker_bluetooth::format_duration_ms_ui(playback.position_ms, playback.duration_ms)
-                .into(),
+        Self::apply_playback_timing(
+            w,
+            playback.is_playing(),
+            playback.position_ms,
+            playback.duration_ms,
         );
-        let duration_text =
-            speaker_bluetooth::format_duration_ms_ui(playback.duration_ms, playback.duration_ms);
-        if w.get_duration_text().as_str() != duration_text.as_str() {
-            w.set_duration_text(duration_text.into());
-        }
         if !playback.device_name.is_empty()
             && w.get_track_or_device().as_str() != playback.device_name.as_ref()
         {

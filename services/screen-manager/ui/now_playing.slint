@@ -30,6 +30,7 @@ component MarqueeText inherits Rectangle {
     property <int> font_weight: 800;
     property <color> font_color: MaterialPalette.on_background;
     clip: true;
+    border-radius: 0px;
     height: Math.max(main_text.preferred-height, root.height_floor);
     horizontal-stretch: 1;
     preferred-width: 0px;
@@ -61,7 +62,9 @@ component MarqueeText inherits Rectangle {
     property <int> cycle_frames: Math.max(1, Math.round(cycle_distance / root.step));
     property <int> scroll_frame: Math.mod(root.clock_frame, root.cycle_frames);
     property <float> progress: scroll_frame * 1.0 / cycle_frames;
-    property <length> scroll_offset: is_overflow ? (-cycle_distance * progress) : 0px;
+    // Snap scroll coordinates to integer physical pixels (X.0px) so draw_glyph_run
+    // avoids half-pixel nearest-neighbor tearing and atlas shifts (femtovg#426).
+    property <length> scroll_offset: is_overflow ? (Math.round((-cycle_distance * progress) / 1px) * 1px) : 0px;
 
     // Whether the wrap-around copy must be composited. Expressed in INTEGER frame
     // arithmetic on purpose: the previous float comparison
@@ -78,7 +81,7 @@ component MarqueeText inherits Rectangle {
     // per-frame dirty area. The element stays in the item tree permanently and
     // only its `visible` flag toggles, so no item-tree destruction can occur.
     Text {
-        x: root.scroll_offset + root.cycle_distance;
+        x: Math.round((root.scroll_offset + root.cycle_distance) / 1px) * 1px;
         text: root.text;
         color: root.font_color;
         font-size: root.font_size;
@@ -173,6 +176,7 @@ component TransportButton inherits Rectangle {
     width: root.btn_size;
     height: root.btn_size;
     border-radius: root.btn_size / 2;
+    cache-rendering-hint: true;
     background: root.is_hero ? (root.enabled ? root.background_color : MaterialPalette.surface) : (root.enabled ? MaterialPalette.secondary_container : transparent);
     border-width: 0px;
     opacity: root.enabled ? (touch.pressed ? 0.8 : 1.0) : 0.35;
@@ -251,6 +255,26 @@ export component NowPlayingView inherits Rectangle {
     callback next_track();
     callback previous_track();
     callback settings_clicked();
+
+    // Pre-warm the glyph atlas on the first frame for tabular playback timer
+    // digits so 1 Hz mm:ss updates never trigger cold glyph rasterization.
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 1px;
+        height: 1px;
+        clip: true;
+        border-radius: 0px;
+        opacity: 0.001;
+
+        Text {
+            text: "0123456789:";
+            font-family: "Inter Tabular";
+            font-size: 18px * TouchScale.clamped_font_scale;
+            font-weight: 700;
+            wrap: no-wrap;
+        }
+    }
 
     HorizontalLayout {
         padding-top: 0px;
@@ -554,6 +578,7 @@ export component NowPlayingView inherits Rectangle {
         width: 56px * TouchScale.widget_scale;
         height: self.width;
         border-radius: self.height / 2;
+        cache-rendering-hint: true;
         background: MaterialPalette.surface;
         border-width: 1px;
         border-color: MaterialPalette.outline_variant;
