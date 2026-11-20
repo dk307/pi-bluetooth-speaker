@@ -680,6 +680,12 @@ cd bluez-5.88
 # which causes GCC 14 to fail compilation with incompatible pointer type error.
 sed -i 's/return false;/return NULL;/' src/shared/ad.c
 
+# 3b. Apply AVRCP initial-track ImgHandle RefreshTrack patch:
+# Adds experimental org.bluez.MediaPlayer1.RefreshTrack() so bt-manager can
+# re-query GetElementAttributes after the OBEX BIP session connects.
+# (Automated end-to-end via scripts/build_bluez_pi.sh)
+patch -p1 < /path/to/repo/baseline/patches/bluez-5.88-mediaplayer-refresh-track.patch
+
 # 4. Configure BlueZ with systemd integration and appliance paths
 ./configure \
   --prefix=/usr \

@@ -224,11 +224,27 @@ pub trait PlaybackSource: Send {
     /// # Errors
     /// Propagates transport/D-Bus errors (transient hiccups included).
     async fn status(&self) -> Result<Option<BtPlaybackState>, BtError>;
+
+    /// Requests `BlueZ` to re-fetch current track attributes (`MediaPlayer1.RefreshTrack`).
+    ///
+    /// Default no-op so mock sources work unchanged.
+    async fn refresh_track(&mut self, _player_path: &str) {}
 }
 
 /// Production [`PlaybackSource`] over the real D-Bus `BlueZ` snapshot.
-struct DevicePlaybackSource {
+#[derive(Debug)]
+pub struct DevicePlaybackSource {
     bt: BluetoothDevice,
+    dbus: Option<zbus::Connection>,
+}
+
+impl DevicePlaybackSource {
+    /// Creates a production playback source, optionally injecting a D-Bus
+    /// connection (e.g. a private test bus) for `MediaPlayer1.RefreshTrack`.
+    #[must_use]
+    pub const fn new(bt: BluetoothDevice, dbus: Option<zbus::Connection>) -> Self {
+        Self { bt, dbus }
+    }
 }
 
 #[async_trait::async_trait]
@@ -238,6 +254,48 @@ impl PlaybackSource for DevicePlaybackSource {
         // blocking runtime, which panics when nested inside the provider
         // thread's own tokio runtime.
         Ok(self.bt.status_async().await?.playback)
+    }
+
+    async fn refresh_track(&mut self, player_path: &str) {
+        let conn = match self.dbus.clone() {
+            Some(conn) => conn,
+            None => match zbus::Connection::system().await {
+                Ok(conn) => {
+                    self.dbus = Some(conn.clone());
+                    conn
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot open system D-Bus for RefreshTrack");
+                    return;
+                }
+            },
+        };
+        match conn
+            .call_method(
+                Some("org.bluez"),
+                player_path,
+                Some("org.bluez.MediaPlayer1"),
+                "RefreshTrack",
+                &(),
+            )
+            .await
+        {
+            Ok(_) => tracing::info!(
+                player = player_path,
+                "requested BlueZ MediaPlayer1.RefreshTrack"
+            ),
+            Err(e) => {
+                if matches!(e, zbus::Error::InputOutput(_)) {
+                    // Drop broken system-bus handle so the next reconnect re-opens it.
+                    self.dbus = None;
+                }
+                tracing::warn!(
+                    player = player_path,
+                    error = %e,
+                    "MediaPlayer1.RefreshTrack unavailable or failed"
+                );
+            }
+        }
     }
 }
 
@@ -558,6 +616,9 @@ impl CoverArtWorker {
             self.keepalive_deadline = Some(Instant::now() + KEEPALIVE_INTERVAL);
         }
         if epoch != prev_epoch && playback.image_handle.is_none() {
+            if let Some(ref player_path) = playback.player_path {
+                self.source.refresh_track(player_path).await;
+            }
             match self.source.status().await {
                 Ok(Some(refreshed)) => *playback = refreshed,
                 Ok(None) => tracing::debug!("no updated playback during post-session re-query"),
@@ -1190,7 +1251,7 @@ pub fn spawn_production(
         wake: Arc::clone(&wake),
     };
 
-    let source = DevicePlaybackSource { bt: bt.clone() };
+    let source = DevicePlaybackSource::new(bt.clone(), None);
     std::thread::Builder::new()
         .name("cover-art-provider".into())
         .spawn(move || {
