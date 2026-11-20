@@ -815,7 +815,11 @@ impl AppShell {
         } else {
             Self::DEFAULT_FONT_SCALE
         };
+        let prev = self.font_scale();
         self.window.global::<TouchScale>().set_font_scale(clamped);
+        if prev.to_bits() != self.font_scale().to_bits() {
+            Self::refresh_marquee_strip(&self.window);
+        }
     }
     /// Sets whether the optical CD player service and navigation entry are enabled.
     ///
@@ -913,20 +917,7 @@ impl AppShell {
 
     /// Updates playback state, elapsed position, and total duration.
     pub fn set_playback_state(&self, is_playing: bool, position_ms: u32, duration_ms: u32) {
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "duration_ms up to i32::MAX fits cleanly in slint int"
-        )]
-        self.window.set_duration_ms(duration_ms as i32);
-        self.window.set_is_playing(is_playing);
-        let ratio = speaker_bluetooth::playback_progress_ratio(position_ms, duration_ms);
-        self.window.set_progress_ratio(ratio);
-        self.window.set_position_text(
-            speaker_bluetooth::format_duration_ms_ui(position_ms, duration_ms).into(),
-        );
-        self.window.set_duration_text(
-            speaker_bluetooth::format_duration_ms_ui(duration_ms, duration_ms).into(),
-        );
+        Self::apply_playback_timing(&self.window, is_playing, position_ms, duration_ms);
     }
 
     /// Applies a full [`BtPlaybackState`] snapshot to the window properties.
@@ -1063,6 +1054,18 @@ impl AppShell {
         Self::apply_playback_to_window(&self.window, playback);
     }
 
+    fn refresh_marquee_strip(w: &MainWindow) {
+        let title = w.get_track_title();
+        let font_scale = w.global::<TouchScale>().get_clamped_font_scale();
+        let on_bg = w.global::<super::MaterialPalette>().get_on_background();
+        let strip = crate::ui::marquee::rasterize_marquee_strip(
+            title.as_str(),
+            font_scale,
+            (on_bg.red(), on_bg.green(), on_bg.blue()),
+        );
+        w.global::<MarqueeCompose>().set_title_strip(strip);
+    }
+
     fn apply_track_title(w: &MainWindow, title: &str) {
         // Only notify Slint property bindings when the value actually changed: the
         // Bluetooth worker re-applies state every 250 ms position tick, and
@@ -1079,6 +1082,42 @@ impl AppShell {
             w.set_track_title(title.into());
             w.set_track_title_line1(split.line1.into());
             w.set_track_title_line2(split.line2.into());
+            Self::refresh_marquee_strip(w);
+        }
+    }
+
+    fn apply_playback_timing(w: &MainWindow, is_playing: bool, position_ms: u32, duration_ms: u32) {
+        /// Minimum progress-bar ratio delta (~1 px on a ~320 px seek bar)
+        /// before dirtying Slint's `progress_ratio` binding; sub-pixel 250 ms
+        /// increments are visually imperceptible yet trigger full-window
+        /// `FemtoVG` redraws.
+        const PROGRESS_RATIO_MIN_STEP: f32 = 1.0 / 320.0;
+
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "duration_ms up to i32::MAX fits cleanly in slint int"
+        )]
+        if w.get_duration_ms() != duration_ms as i32 {
+            w.set_duration_ms(duration_ms as i32);
+        }
+        if w.get_is_playing() != is_playing {
+            w.set_is_playing(is_playing);
+        }
+        let ratio = speaker_bluetooth::playback_progress_ratio(position_ms, duration_ms);
+        let prev_ratio = w.get_progress_ratio();
+        let (ratio_bits, prev_bits) = (ratio.to_bits(), prev_ratio.to_bits());
+        let at_boundary = (ratio_bits == 0.0_f32.to_bits() && prev_bits != 0.0_f32.to_bits())
+            || (ratio_bits == 1.0_f32.to_bits() && prev_bits != 1.0_f32.to_bits());
+        if at_boundary || (ratio - prev_ratio).abs() >= PROGRESS_RATIO_MIN_STEP {
+            w.set_progress_ratio(ratio);
+        }
+        let position_text = speaker_bluetooth::format_duration_ms_ui(position_ms, duration_ms);
+        if w.get_position_text().as_str() != position_text.as_str() {
+            w.set_position_text(position_text.into());
+        }
+        let duration_text = speaker_bluetooth::format_duration_ms_ui(duration_ms, duration_ms);
+        if w.get_duration_text().as_str() != duration_text.as_str() {
+            w.set_duration_text(duration_text.into());
         }
     }
 
@@ -1090,29 +1129,12 @@ impl AppShell {
         if w.get_track_album().as_str() != playback.album.as_ref() {
             w.set_track_album(playback.album.as_ref().into());
         }
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "duration_ms up to i32::MAX fits cleanly in slint int"
-        )]
-        if w.get_duration_ms() != playback.duration_ms as i32 {
-            w.set_duration_ms(playback.duration_ms as i32);
-        }
-        let playing = playback.is_playing();
-        if w.get_is_playing() != playing {
-            w.set_is_playing(playing);
-        }
-        let ratio =
-            speaker_bluetooth::playback_progress_ratio(playback.position_ms, playback.duration_ms);
-        w.set_progress_ratio(ratio);
-        w.set_position_text(
-            speaker_bluetooth::format_duration_ms_ui(playback.position_ms, playback.duration_ms)
-                .into(),
+        Self::apply_playback_timing(
+            w,
+            playback.is_playing(),
+            playback.position_ms,
+            playback.duration_ms,
         );
-        let duration_text =
-            speaker_bluetooth::format_duration_ms_ui(playback.duration_ms, playback.duration_ms);
-        if w.get_duration_text().as_str() != duration_text.as_str() {
-            w.set_duration_text(duration_text.into());
-        }
         if !playback.device_name.is_empty()
             && w.get_track_or_device().as_str() != playback.device_name.as_ref()
         {
@@ -1231,6 +1253,7 @@ impl AppShell {
     /// Applies a theme preset to the UI shell.
     pub fn apply_theme(&self, preset: ThemePreset) {
         preset.apply(&self.window);
+        Self::refresh_marquee_strip(&self.window);
     }
 
     /// Cycles to the next available theme preset in cyclic order.

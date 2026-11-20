@@ -92,6 +92,7 @@ export component TopStatusBar inherits Rectangle {
                         height: root.height;
                         width: root.height * 3.45;
                         image-fit: fill;
+                        cache-rendering-hint: true;
                     }
                 }
             }
@@ -148,6 +149,7 @@ export component TopStatusBar inherits Rectangle {
                         width: 100px;
                         height: 52px;
                         background: transparent;
+                        cache-rendering-hint: true;
 
                         HorizontalLayout {
                             spacing: 8px;
@@ -223,6 +225,7 @@ export component TopStatusBar inherits Rectangle {
                         border-radius: 10px;
                         border-width: 1px;
                         border-color: MaterialPalette.outline_variant;
+                        cache-rendering-hint: true;
 
                         Image {
                             x: (parent.width - self.width) / 2;

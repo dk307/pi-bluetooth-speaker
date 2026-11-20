@@ -8,7 +8,7 @@ import {
 } from "@material/material.slint";
 import { TopStatusBar, CodecSpecs } from "status_bar.slint";
 import { MainViewport } from "viewport.slint";
-import { MarqueeCompose } from "marquee_state.slint";
+import { AmbientWaveSprites, MarqueeCompose } from "marquee_state.slint";
 import { ScreenAppBar } from "screen_app_bar.slint";
 import { VolumeHudOverlay } from "volume_hud.slint";
 import { CodecHudOverlay } from "codec_hud.slint";
@@ -17,7 +17,7 @@ import { VirtualKeyboardSheet } from "touch_scale_widgets.slint";
 import { SettingControlKind, SettingRowItem } from "settings_view.slint";
 
 // Re-exported so slint-build generates the Rust global accessors.
-export { MarqueeCompose, TouchScale, VirtualKeyboard }
+export { AmbientWaveSprites, MarqueeCompose, TouchScale, VirtualKeyboard }
 
 import "../../../assets/fonts/Inter-Regular.ttf";
 import "../../../assets/fonts/Inter-Medium.ttf";

@@ -79,9 +79,18 @@ libc = "=0.2.191"
 ctrlc = "=3.4.2"
 
 # UI Framework (Slint with Linux Framebuffer & KMS/DRM backends)
-slint = { version = "=1.19.0", default-features = false, features = ["std", "compat-1-18", "renderer-femtovg", "renderer-software", "software-renderer-systemfonts", "backend-linuxkms", "backend-linuxkms-noseat"] }
+slint = { version = "=1.19.0", default-features = false, features = [
+  "std",
+  "compat-1-18",
+  "renderer-femtovg",
+  "renderer-software",
+  "software-renderer-systemfonts",
+  "backend-linuxkms",
+  "backend-linuxkms-libinput",
+] }
 i-slint-core = { version = "=1.19.0", features = ["svg", "image-decoders", "image-default-formats"] }
 slint-build = "=1.19.0"
+swash = "=0.2.10"
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"

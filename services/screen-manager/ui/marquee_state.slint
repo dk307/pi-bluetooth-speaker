@@ -8,4 +8,11 @@ export global MarqueeCompose {
     in-out property <int> marquee_fps: 60;
     // Shared marquee clock advanced by the single 16.65 ms timer in NowPlayingView.
     in-out property <int> clock: 0;
+    // Pre-rendered premultiplied RGBA strip for overflowing track titles.
+    in-out property <image> title_strip;
+}
+
+// Pre-rendered 64x24 frames for AmbientWaveIndicator (6 playing + 1 idle).
+export global AmbientWaveSprites {
+    in-out property <[image]> frames;
 }

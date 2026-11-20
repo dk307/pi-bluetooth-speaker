@@ -231,6 +231,7 @@ export component VolumeHudOverlay inherits Rectangle {
                     width: max(220px * TouchScale.widget_scale, mute_layout.min-width);
                     height: max(MaterialStyleMetrics.size_48, mute_layout.min-height);
                     border-radius: self.height / 2;
+                    cache-rendering-hint: true;
                     background: root.is_muted ? MaterialPalette.error : MaterialPalette.surface;
                     border-width: 2px;
                     border-color: root.is_muted ? MaterialPalette.error : MaterialPalette.primary;
