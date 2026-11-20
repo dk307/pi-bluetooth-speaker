@@ -826,10 +826,12 @@ impl AppShell {
         self.window.set_is_playing(is_playing);
         let ratio = speaker_bluetooth::playback_progress_ratio(position_ms, duration_ms);
         self.window.set_progress_ratio(ratio);
-        self.window
-            .set_position_text(speaker_bluetooth::format_duration_ms(position_ms).into());
-        self.window
-            .set_duration_text(speaker_bluetooth::format_duration_ms(duration_ms).into());
+        self.window.set_position_text(
+            speaker_bluetooth::format_duration_ms_ui(position_ms, duration_ms).into(),
+        );
+        self.window.set_duration_text(
+            speaker_bluetooth::format_duration_ms_ui(duration_ms, duration_ms).into(),
+        );
     }
 
     /// Applies a full [`BtPlaybackState`] snapshot to the window properties.
@@ -1007,8 +1009,12 @@ impl AppShell {
         let ratio =
             speaker_bluetooth::playback_progress_ratio(playback.position_ms, playback.duration_ms);
         w.set_progress_ratio(ratio);
-        w.set_position_text(speaker_bluetooth::format_duration_ms(playback.position_ms).into());
-        let duration_text = speaker_bluetooth::format_duration_ms(playback.duration_ms);
+        w.set_position_text(
+            speaker_bluetooth::format_duration_ms_ui(playback.position_ms, playback.duration_ms)
+                .into(),
+        );
+        let duration_text =
+            speaker_bluetooth::format_duration_ms_ui(playback.duration_ms, playback.duration_ms);
         if w.get_duration_text().as_str() != duration_text.as_str() {
             w.set_duration_text(duration_text.into());
         }

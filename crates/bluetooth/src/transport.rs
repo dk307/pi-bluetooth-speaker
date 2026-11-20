@@ -117,6 +117,33 @@ pub fn format_duration_ms(ms: u32) -> String {
     }
 }
 
+/// Formats a playback timestamp for the Now Playing progress bar.
+///
+/// Minutes < 10 omit the leading zero (`1:05` instead of `01:05`).
+/// Minutes >= 10 keep two-digit padding for visual stability.
+/// Hours >= 1 always use `HH:MM:SS`.
+#[must_use]
+pub fn format_duration_ms_ui(ms: u32, total_ms: u32) -> String {
+    let total_secs = total_ms / 1000;
+    let hours_total = total_secs / 3600;
+
+    let secs = ms / 1000;
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    let seconds = secs % 60;
+
+    if hours_total > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else if hours > 0 {
+        // Defensive: position exceeds 1h on a sub-hour track
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else if total_secs >= 600 {
+        format!("{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 /// Active Bluetooth AVRCP media player playback state and track metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BtPlaybackState {

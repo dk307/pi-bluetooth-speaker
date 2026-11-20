@@ -8,7 +8,8 @@ use speaker_bluetooth::bluetooth_test_helpers::{DbusClient, ManagedObjects};
 use speaker_bluetooth::{
     BlueAlsaPcm, BluetoothControllerInfo, BluetoothDevice, BluetoothHardwareInfo,
     BluetoothServices, BtAddress, BtDevice, BtError, BtPlaybackState, bluetooth_test_helpers,
-    decode_pcm_format, format_duration_ms, seek_offset_us, validate_bip_handle,
+    decode_pcm_format, format_duration_ms, format_duration_ms_ui, seek_offset_us,
+    validate_bip_handle,
 };
 use speaker_common::systemd::ServiceState;
 
@@ -1150,6 +1151,24 @@ fn playback_state_and_duration_formatting() {
     assert_eq!(format_duration_ms(3_600_000), "01:00:00");
     assert_eq!(format_duration_ms(3_661_000), "01:01:01");
     assert_eq!(format_duration_ms(36_000_000), "10:00:00");
+
+    // UI formatter: leading-zero omission for <10 min tracks
+    assert_eq!(format_duration_ms_ui(0, 0), "0:00");
+    assert_eq!(format_duration_ms_ui(0, 400_000), "0:00");
+    assert_eq!(format_duration_ms_ui(65_000, 195_000), "1:05");
+    assert_eq!(format_duration_ms_ui(195_000, 195_000), "3:15");
+    assert_eq!(format_duration_ms_ui(300_000, 400_000), "5:00");
+    assert_eq!(format_duration_ms_ui(599_000, 599_000), "9:59");
+    // >=10 min tracks keep the leading zero
+    assert_eq!(format_duration_ms_ui(0, 600_000), "00:00");
+    assert_eq!(format_duration_ms_ui(599_000, 600_000), "09:59");
+    assert_eq!(format_duration_ms_ui(300_000, 600_000), "05:00");
+    assert_eq!(format_duration_ms_ui(600_000, 600_000), "10:00");
+    // >=1 h always uses HH:MM:SS
+    assert_eq!(format_duration_ms_ui(3_600_000, 3_600_000), "01:00:00");
+    assert_eq!(format_duration_ms_ui(3_661_000, 3_661_000), "01:01:01");
+    // Defensive: position > 1h on sub-hour track
+    assert_eq!(format_duration_ms_ui(3_600_000, 600_000), "01:00:00");
 
     let def = BtPlaybackState::default();
     assert_eq!(def.device_address, None);
