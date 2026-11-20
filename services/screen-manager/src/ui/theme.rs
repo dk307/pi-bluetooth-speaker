@@ -358,6 +358,86 @@ impl ThemePreset {
 
         // Single source of truth for the preset index (skin selection reads this).
         window.global::<AppTheme>().set_active_preset(self.index());
+
+        // Pre-render the 6 discrete AmbientWaveIndicator frames into
+        // SharedPixelBuffers matching this theme's primary/secondary colors.
+        let frames = self.build_ambient_wave_frames();
+        window
+            .global::<crate::ui::generated::AmbientWaveSprites>()
+            .set_frames(slint::ModelRc::new(slint::VecModel::from(frames)));
+    }
+
+    /// Pre-renders the 6 `64x24` `AmbientWaveIndicator` frames for this theme.
+    fn build_ambient_wave_frames(self) -> Vec<slint::Image> {
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 24;
+        const BAR_WIDTH: u32 = 4;
+        const BAR_XS: [u32; 5] = [0, 8, 16, 24, 32];
+
+        let (primary, secondary, ..) = self.material_base_colors();
+        let primary_px =
+            slint::Rgba8Pixel::new(primary.red(), primary.green(), primary.blue(), 255);
+        let secondary_px =
+            slint::Rgba8Pixel::new(secondary.red(), secondary.green(), secondary.blue(), 255);
+        let bar_colors = [
+            primary_px,
+            secondary_px,
+            primary_px,
+            secondary_px,
+            primary_px,
+        ];
+
+        (0..6_u32)
+            .map(|tick| {
+                let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(WIDTH, HEIGHT);
+                let pixels = buf.make_mut_slice();
+                let heights = [
+                    match tick % 4 {
+                        0 => 20_u32,
+                        2 => 8,
+                        _ => 14,
+                    },
+                    match (tick + 1) % 4 {
+                        0 => 24,
+                        2 => 10,
+                        _ => 18,
+                    },
+                    match (tick + 2) % 4 {
+                        0 => 18,
+                        2 => 7,
+                        _ => 12,
+                    },
+                    match (tick + 3) % 4 {
+                        0 => 22,
+                        2 => 9,
+                        _ => 16,
+                    },
+                    if tick.is_multiple_of(3) { 16 } else { 8 },
+                ];
+
+                for ((&bar_x, &bar_h), &color) in
+                    BAR_XS.iter().zip(heights.iter()).zip(bar_colors.iter())
+                {
+                    let y0 = (HEIGHT - bar_h) / 2;
+                    let y1 = y0 + bar_h;
+                    for y in y0..y1 {
+                        // Round top/bottom rows (border-radius: 2px on 4px bar).
+                        let is_cap_row = y == y0 || y + 1 == y1;
+                        let (x_start, x_end) = if is_cap_row {
+                            (bar_x + 1, bar_x + BAR_WIDTH - 1)
+                        } else {
+                            (bar_x, bar_x + BAR_WIDTH)
+                        };
+                        let row_off = (y * WIDTH) as usize;
+                        for x in x_start..x_end {
+                            pixels[row_off + x as usize] = color;
+                        }
+                    }
+                }
+                // Pixels are either alpha=255 or (0,0,0,0), so already premultiplied.
+                slint::Image::from_rgba8_premultiplied(buf)
+            })
+            .collect()
     }
 
     /// Applies this theme preset to a [`SplashScreen`] component.

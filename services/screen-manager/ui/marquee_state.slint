@@ -9,3 +9,8 @@ export global MarqueeCompose {
     // Shared marquee clock advanced by the single 16.65 ms timer in NowPlayingView.
     in-out property <int> clock: 0;
 }
+
+// Pre-rendered 64x24 frames for AmbientWaveIndicator (6 discrete ticks).
+export global AmbientWaveSprites {
+    in-out property <[image]> frames;
+}
