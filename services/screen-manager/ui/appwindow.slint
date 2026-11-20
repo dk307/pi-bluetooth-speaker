@@ -12,6 +12,7 @@ import { MarqueeCompose } from "marquee_state.slint";
 import { ScreenAppBar } from "screen_app_bar.slint";
 import { VolumeHudOverlay } from "volume_hud.slint";
 import { CodecHudOverlay } from "codec_hud.slint";
+import { BrightnessHudOverlay } from "brightness_hud.slint";
 import { BluetoothDevicesScreen, BtDeviceRow } from "bluetooth_devices.slint";
 import { VirtualKeyboardSheet } from "touch_scale_widgets.slint";
 import { SettingControlKind, SettingRowItem } from "settings_view.slint";
@@ -72,6 +73,18 @@ export component MainWindow inherits Window {
     in-out property <int> volume_step_percent: 2;
     out property <float> codec_hud_opacity: root.codec_hud_visible ? 1.0 : 0.0;
     animate codec_hud_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
+    // Brightness / auto-brightness overlay: opened from the top-bar brightness button.
+    in-out property <float> brightness_value: 100.0;
+    in-out property <bool> auto_brightness_enabled: true;
+    in-out property <float> ambient_lux: 0.0;
+    in-out property <bool> brightness_hud_visible: false;
+    in-out property <int> brightness_hud_timeout_ms: 8000;
+    in-out property <int> brightness_hud_elapsed_ms: 0;
+    in-out property <int> brightness_hud_fade_ms: 200;
+    out property <float> brightness_hud_opacity: root.brightness_hud_visible ? 1.0 : 0.0;
+    animate brightness_hud_opacity { duration: root.brightness_hud_fade_ms * 1ms; easing: ease-out; }
+    // Peak opacity of the three mutually-exclusive HUDs, shared by backdrop and scrim.
+    property <float> max_hud_opacity: Math.max(root.volume_hud_opacity, Math.max(root.codec_hud_opacity, root.brightness_hud_opacity));
     in-out property <bool> has_cover_art: false;
     in-out property <image> cover_image;
 
@@ -93,7 +106,7 @@ export component MainWindow inherits Window {
     in-out property <float> left_peak_ratio: 0.0;
     in-out property <float> right_peak_ratio: 0.0;
     in-out property <bool> cd_enabled: false;
-    out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01
+    out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01 || root.brightness_hud_visible || root.brightness_hud_opacity > 0.01
         // The devices screen keeps frames coming only while a live animation
         // source runs: the pairing ring (mode 2 + spinning), the Add-Device
         // scanning spinner (mode 1 + scanning), a pending row action, or a
@@ -129,13 +142,23 @@ export component MainWindow inherits Window {
 
     callback prepare_overlay_backdrop();
 
+    // True only on the opening edge: no HUD is visible or still fading out.
+    // The frozen backdrop must be captured exactly once per overlay period —
+    // never again while switching directly between HUDs (AGENTS.md §4.5).
+    function all_huds_closed() -> bool {
+        return !root.volume_hud_visible && root.volume_hud_opacity <= 0.01
+            && !root.codec_hud_visible && root.codec_hud_opacity <= 0.01
+            && !root.brightness_hud_visible && root.brightness_hud_opacity <= 0.01;
+    }
+
     public function show_volume_hud() {
-        if (!root.volume_hud_visible && root.volume_hud_opacity <= 0.01 && !root.codec_hud_visible && root.codec_hud_opacity <= 0.01) {
+        if (root.all_huds_closed()) {
             root.prepare_overlay_backdrop();
         }
         root.volume_hud_elapsed_ms = 0;
         root.volume_hud_visible = true;
         root.codec_hud_visible = false;
+        root.brightness_hud_visible = false;
         root_stack.focus_volume_hud();
     }
 
@@ -145,15 +168,16 @@ export component MainWindow inherits Window {
         root_stack.unfocus_volume_hud();
     }
 
-    // Opens the codec information overlay. The Volume HUD and the codec overlay are
+    // Opens the codec information overlay. Volume, codec and brightness HUDs are
     // mutually exclusive: only one of them can cover the viewport at a time.
     public function show_codec_hud() {
-        if (!root.volume_hud_visible && root.volume_hud_opacity <= 0.01 && !root.codec_hud_visible && root.codec_hud_opacity <= 0.01) {
+        if (root.all_huds_closed()) {
             root.prepare_overlay_backdrop();
         }
         root.codec_hud_elapsed_ms = 0;
         root.codec_hud_visible = true;
         root.volume_hud_visible = false;
+        root.brightness_hud_visible = false;
         root_stack.focus_codec_hud();
     }
 
@@ -163,31 +187,55 @@ export component MainWindow inherits Window {
         root_stack.unfocus_codec_hud();
     }
 
+    // Opens the brightness overlay from the top-bar brightness button.
+    public function show_brightness_hud() {
+        if (root.all_huds_closed()) {
+            root.prepare_overlay_backdrop();
+        }
+        root.brightness_hud_elapsed_ms = 0;
+        root.brightness_hud_visible = true;
+        root.volume_hud_visible = false;
+        root.codec_hud_visible = false;
+        root_stack.focus_brightness_hud();
+    }
+
+    public function dismiss_brightness_hud() {
+        root.brightness_hud_visible = false;
+        root.brightness_hud_elapsed_ms = 0;
+        root_stack.unfocus_brightness_hud();
+    }
+
     // True while the Volume HUD overlay owns the keyboard focus.
     out property <bool> volume_hud_has_focus: root_stack.volume_hud_has_focus;
     // True while the codec information overlay owns the keyboard focus.
     out property <bool> codec_hud_has_focus: root_stack.codec_hud_has_focus;
+    // True while the brightness overlay owns the keyboard focus.
+    out property <bool> brightness_hud_has_focus: root_stack.brightness_hud_has_focus;
 
+    // One shared 50 ms HUD tick advances whichever overlay is open and dismisses
+    // it at its own timeout. A single timer avoids the same-rate timer drift that
+    // separate 50 ms timers would introduce (screen-manager AGENTS.md item 19).
     Timer {
         interval: 50ms;
-        running: root.volume_hud_visible;
+        running: root.volume_hud_visible || root.codec_hud_visible || root.brightness_hud_visible;
         triggered() => {
-            root.volume_hud_elapsed_ms += 50;
-            if (root.volume_hud_elapsed_ms >= root.volume_hud_timeout_ms) {
-                root.volume_hud_visible = false;
-                root.volume_hud_elapsed_ms = 0;
+            if (root.volume_hud_visible) {
+                root.volume_hud_elapsed_ms += 50;
+                if (root.volume_hud_elapsed_ms >= root.volume_hud_timeout_ms) {
+                    root.dismiss_volume_hud();
+                }
             }
-        }
-    }
-
-    Timer {
-        interval: 50ms;
-        running: root.codec_hud_visible;
-        triggered() => {
-            root.codec_hud_elapsed_ms += 50;
-            if (root.codec_hud_elapsed_ms >= root.codec_hud_timeout_ms) {
-                root.codec_hud_visible = false;
-                root.codec_hud_elapsed_ms = 0;
+            if (root.codec_hud_visible) {
+                root.codec_hud_elapsed_ms += 50;
+                if (root.codec_hud_elapsed_ms >= root.codec_hud_timeout_ms) {
+                    root.dismiss_codec_hud();
+                }
+            }
+            if (root.brightness_hud_visible) {
+                root.brightness_hud_elapsed_ms += 50;
+                if (root.brightness_hud_elapsed_ms >= root.brightness_hud_timeout_ms) {
+                    root.dismiss_brightness_hud();
+                }
             }
         }
     }
@@ -238,6 +286,8 @@ export component MainWindow inherits Window {
     callback volume_clicked();
     callback stream_pill_clicked();
     callback volume_changed(float);
+    callback brightness_changed(float);
+    callback auto_brightness_toggled(bool);
     callback source_clicked();
     callback night_mode_clicked();
     callback tab_selected(int);
@@ -334,7 +384,8 @@ export component MainWindow inherits Window {
                     // while the devices screen opens from the logo, the device
                     // name and the Settings grid.
                     protocol_clicked => { root.show_codec_hud(); }
-                    night_mode_clicked => { root.night_mode_clicked(); }
+                    dim_active: root.auto_brightness_enabled;
+                    night_mode_clicked => { root.show_brightness_hud(); root.night_mode_clicked(); }
                     volume_clicked => {
                         root.show_volume_hud();
                         root.volume_clicked();
@@ -451,8 +502,8 @@ export component MainWindow inherits Window {
             width: 100%;
             height: 100%;
             source: root.overlay_backdrop;
-            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity);
-            visible: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) > 0.01;
+            opacity: root.max_hud_opacity;
+            visible: root.max_hud_opacity > 0.01;
         }
 
         // HUD scrim (above the backdrop) — dims the entire screen behind the
@@ -465,9 +516,9 @@ export component MainWindow inherits Window {
             width: 100%;
             height: 100%;
             background: #000000;
-            opacity: Math.max(root.volume_hud_opacity, root.codec_hud_opacity)
+            opacity: root.max_hud_opacity
                 * (root.overlay_backdrop_available ? 0.25 : 0.55);
-            visible: Math.max(root.volume_hud_opacity, root.codec_hud_opacity) > 0.01;
+            visible: root.max_hud_opacity > 0.01;
         }
 
         // Volume HUD overlay (top layer) — same below-the-top-bar geometry.
@@ -503,11 +554,31 @@ export component MainWindow inherits Window {
             dismiss_requested => { root.dismiss_codec_hud(); }
         }
 
+        // Brightness overlay (top layer) — same below-the-top-bar geometry.
+        brightness_hud := BrightnessHudOverlay {
+            y: root.top_bar_height;
+            width: 100%;
+            height: parent.height - root.top_bar_height;
+            overlay_backdrop_available: root.overlay_backdrop_available;
+            visible: root.brightness_hud_opacity > 0.01;
+            opacity: root.brightness_hud_opacity;
+            brightness_value <=> root.brightness_value;
+            auto_enabled <=> root.auto_brightness_enabled;
+            ambient_lux: root.ambient_lux;
+            brightness_changed(val) => { root.brightness_changed(val); }
+            auto_toggled(on) => { root.auto_brightness_toggled(on); }
+            dismiss_requested => { root.dismiss_brightness_hud(); }
+            interaction_activity => { root.show_brightness_hud(); }
+        }
+
         // True while the Volume HUD overlay owns the keyboard focus.
         out property <bool> volume_hud_has_focus: volume_hud.has-focus;
 
         // True while the codec information overlay owns the keyboard focus.
         out property <bool> codec_hud_has_focus: codec_hud.has-focus;
+
+        // True while the brightness overlay owns the keyboard focus.
+        out property <bool> brightness_hud_has_focus: brightness_hud.has-focus;
 
         // Transfers the keyboard focus to the Volume HUD overlay.
         public function focus_volume_hud() {
@@ -527,6 +598,16 @@ export component MainWindow inherits Window {
         // Releases the keyboard focus held by the codec information overlay.
         public function unfocus_codec_hud() {
             codec_hud.release_focus();
+        }
+
+        // Transfers the keyboard focus to the brightness overlay.
+        public function focus_brightness_hud() {
+            brightness_hud.focus();
+        }
+
+        // Releases the keyboard focus held by the brightness overlay.
+        public function unfocus_brightness_hud() {
+            brightness_hud.release_focus();
         }
 
         // Bottom-sheet virtual keyboard overlay: pops up whenever a `TextField`

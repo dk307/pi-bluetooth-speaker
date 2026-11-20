@@ -350,6 +350,8 @@ pub struct ShellInit {
     pub commands: speaker_bluetooth::TransportCommandQueue,
     /// Queue bridging render-thread volume/mute actions to the `amp-volume` worker.
     pub amp_commands: crate::volume::AmpVolumeCommandQueue,
+    /// Queue bridging render-thread brightness actions to the `brightness` worker.
+    pub brightness_commands: crate::brightness::BrightnessCommandQueue,
     /// Queue bridging render-thread Devices-screen actions to the `bt-monitor` worker.
     pub device_commands: speaker_bluetooth::DeviceCommandQueue,
 }
@@ -387,6 +389,10 @@ pub fn init_shell_with_config(
     // presence, so the queue is wired unconditionally.
     let amp_commands = crate::volume::AmpVolumeCommandQueue::new();
     shell.wire_amp_volume(&amp_commands);
+    // Brightness is always controlled through the autobright daemon (single
+    // writer), so its queue is wired unconditionally, like the amp queue.
+    let brightness_commands = crate::brightness::BrightnessCommandQueue::new();
+    shell.wire_brightness(&brightness_commands);
     // The Devices screen is always present in the shell, so its command queue
     // is wired unconditionally (parity with the amp queue): navigation
     // callbacks stay functional even when the D-Bus connection failed at boot.
@@ -419,6 +425,7 @@ pub fn init_shell_with_config(
         bt: maybe_bt,
         commands,
         amp_commands,
+        brightness_commands,
         device_commands,
     }
 }
@@ -625,6 +632,9 @@ pub struct BtSharedUpdate {
     /// Authoritative amp level/mute snapshot, if it changed since the last
     /// publish (pushed by the dedicated `amp-volume` worker).
     pub amp_volume: Option<crate::volume::AmpVolumeState>,
+    /// Authoritative display brightness snapshot, published by the dedicated
+    /// `brightness` worker (never read from D-Bus on the render thread).
+    pub brightness: Option<crate::brightness::BrightnessState>,
     /// Bluetooth Devices screen delta (rows/discovery/pairing/toast), if any
     /// screen-visible state changed since the last publish.
     pub devices: Option<crate::ui::BtDevicesUpdate>,
@@ -1748,6 +1758,7 @@ impl BtMonitorState {
             || update.pcm.is_some()
             || update.cover.is_some()
             || update.amp_volume.is_some()
+            || update.brightness.is_some()
             || update.devices.is_some()
         {
             // A poisoned mutex is recovered (not silently dropped): the snapshot
@@ -1768,6 +1779,9 @@ impl BtMonitorState {
             }
             if update.amp_volume.is_some() {
                 lock.amp_volume = update.amp_volume;
+            }
+            if update.brightness.is_some() {
+                lock.brightness = update.brightness;
             }
             if let Some(mut next) = update.devices {
                 if let Some(prev) = lock.devices.take() {
@@ -1956,6 +1970,85 @@ pub fn join_amp_volume_worker(amp_worker: std::io::Result<std::thread::JoinHandl
     }
 }
 
+/// Joins the `brightness` worker, re-raising a worker panic (fail-fast).
+#[cfg(feature = "ui")]
+pub fn join_brightness_worker(brightness_worker: std::io::Result<std::thread::JoinHandle<()>>) {
+    match brightness_worker {
+        Ok(handle) => {
+            if let Err(panic) = handle.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        Err(e) => tracing::error!(
+            error = %e,
+            "Failed to spawn brightness worker thread; screen brightness disabled"
+        ),
+    }
+}
+
+/// Spawns the dedicated `brightness` worker thread.
+///
+/// Mocked sessions use an in-memory client seeded at 100 % / auto so host
+/// tests never touch the system bus. Live sessions retry connection setup
+/// with bounded backoff: a temporarily unavailable `autobright` daemon must
+/// not permanently disable the brightness overlay.
+///
+/// # Errors
+/// Returns the underlying thread-spawn I/O error.
+#[cfg(feature = "ui")]
+pub fn spawn_brightness_worker(
+    shared: &Arc<Mutex<BtSharedUpdate>>,
+    running: &Arc<AtomicBool>,
+    brightness_commands: &crate::brightness::BrightnessCommandQueue,
+    mocked: bool,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let shared = Arc::clone(shared);
+    let running = Arc::clone(running);
+    let brightness_commands = brightness_commands.clone();
+    std::thread::Builder::new()
+        .name("brightness".into())
+        .spawn(move || {
+            if mocked {
+                let (client, _ctrl) = crate::brightness::BrightnessClient::new_mocked(
+                    crate::brightness::BrightnessState::new(true, 100.0, 50.0, 1.0),
+                );
+                crate::brightness::run_worker(&client, &shared, &brightness_commands, &running);
+                return;
+            }
+            let mut backoff = Duration::from_secs(1);
+            loop {
+                if !running.load(Ordering::Relaxed) {
+                    return;
+                }
+                match crate::brightness::BrightnessClient::new_blocking() {
+                    Ok(client) => {
+                        crate::brightness::run_worker(
+                            &client,
+                            &shared,
+                            &brightness_commands,
+                            &running,
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "System D-Bus unavailable; retrying brightness connection"
+                        );
+                        let mut remaining = backoff;
+                        while !remaining.is_zero() && running.load(Ordering::Relaxed) {
+                            let slice = remaining.min(Duration::from_millis(200));
+                            std::thread::sleep(slice);
+                            remaining = remaining.saturating_sub(slice);
+                        }
+                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                    }
+                }
+            }
+        })
+}
+
 /// Spawns the `bt-monitor` worker thread for a live Bluetooth device.
 ///
 /// # Errors
@@ -2080,6 +2173,9 @@ pub fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtShared
         }
         if let Some(amp) = lock.amp_volume.take() {
             shell.apply_amp_volume(&amp);
+        }
+        if let Some(brightness) = lock.brightness.take() {
+            shell.apply_brightness(&brightness);
         }
     }
 }

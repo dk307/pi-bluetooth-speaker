@@ -41,6 +41,7 @@ check "Service 'bt-agent.service' active" "systemctl is-active --quiet bt-agent"
 check "Service 'bluealsa.service' active" "systemctl is-active --quiet bluealsa"
 check "Service 'bluealsa-aplay.service' active" "systemctl is-active --quiet bluealsa-aplay"
 check "Service 'camilladsp.service' active" "systemctl is-active --quiet camilladsp"
+check "Service 'autobright.service' active" "systemctl is-active --quiet autobright"
 
 echo ""
 echo "--- 3. Network Ports & Sockets ---"
@@ -57,6 +58,7 @@ check "ALSA persisted mixer state /var/lib/alsa/asound.state exists" "[ -s /var/
 check "MA12070P HW mixer bound in bluealsa-aplay.service" "grep -q -- '--mixer-control=\"A.Mstr Vol\"' /etc/systemd/system/bluealsa-aplay.service"
 check "Single-audio gate enabled in bluealsa-aplay.service" "grep -q -- '--single-audio' /etc/systemd/system/bluealsa-aplay.service"
 check "D-Bus policy org.speaker.Bluetooth.conf exists" "[ -s /etc/dbus-1/system.d/org.speaker.Bluetooth.conf ]"
+check "D-Bus policy org.speaker.Autobright.conf exists" "[ -s /etc/dbus-1/system.d/org.speaker.Autobright.conf ]"
 check "CamillaDSP configuration crossover.yml exists" "[ -s /etc/camilladsp/crossover.yml ]"
 
 echo ""

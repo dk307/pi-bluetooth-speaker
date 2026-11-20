@@ -405,6 +405,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "autobright"
+version = "2.1.0"
+dependencies = [
+ "autobright",
+ "ctrlc",
+ "futures-util",
+ "sd-notify",
+ "serde",
+ "serde_json",
+ "speaker-common",
+ "speaker-hardware",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zbus",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

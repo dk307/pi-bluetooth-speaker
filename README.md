@@ -70,7 +70,8 @@ pi-bluetooth-speaker/
 ├── services/                 # Appliance background daemons
 │   ├── README.md             # Service architecture and roadmap
 │   ├── screen-manager/       # Touchscreen Appliance Console & UI (screen-manager.service)
-│   └── bt-manager/           # Bluetooth Manager daemon, active-source arbiter & BIP cover art service (bt-manager.service)
+│   ├── bt-manager/           # Bluetooth Manager daemon, active-source arbiter & BIP cover art service (bt-manager.service)
+│   └── autobright/           # Ambient auto-brightness daemon & single-writer backlight D-Bus service (autobright.service)
 ├── tools/                    # Hardware diagnostic utilities
 │   └── diagnostics/          # CLI probes: amp-info, bt-info, dsp-info, encoder-read, light-read, temp-read
 └── docs/                     # Architectural documentation & technical reports

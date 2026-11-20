@@ -11,6 +11,10 @@ name = "amp-info"
 path = "src/bin/amp-info.rs"
 
 [[bin]]
+name = "backlight-info"
+path = "src/bin/backlight-info.rs"
+
+[[bin]]
 name = "bt-info"
 path = "src/bin/bt-info.rs"
 

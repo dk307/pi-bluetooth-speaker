@@ -483,7 +483,7 @@ impl TitleDisplayMode {
 /// (e.g. `{}` or `{"theme": "peppy"}`) remain valid. Domain newtypes enforce
 /// allowed bounds at the deserialization boundary, so an invalid value cannot
 /// inhabit this struct.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CoreConfig {
     /// Theme preset override applied on startup; `None` keeps the built-in default.
@@ -503,6 +503,27 @@ pub struct CoreConfig {
     pub codec_hud_timeout_ms: CodecHudTimeoutMs,
     /// Touch UI font scale factor (`1.0..=1.35`, default `1.15`).
     pub font_scale: FontScale,
+    /// Whether ambient light drives screen brightness automatically.
+    pub auto_brightness_enabled: bool,
+    /// Last user-selected brightness percent while in manual mode (`0..=100`).
+    pub brightness_manual_percent: u8,
+}
+
+impl Default for CoreConfig {
+    fn default() -> Self {
+        Self {
+            theme: None,
+            marquee_fps: MarqueeFps::default(),
+            title_display_mode: TitleDisplayMode::default(),
+            volume_step_percent: VolumeStepPercent::default(),
+            volume_hud_timeout_ms: VolumeHudTimeoutMs::default(),
+            volume_hud_fade_ms: VolumeHudFadeMs::default(),
+            codec_hud_timeout_ms: CodecHudTimeoutMs::default(),
+            font_scale: FontScale::default(),
+            auto_brightness_enabled: true,
+            brightness_manual_percent: 100,
+        }
+    }
 }
 
 impl CoreConfig {

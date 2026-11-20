@@ -103,6 +103,11 @@ const HELP_CASES: &[(&str, &str, &str)] = &[
         "CamillaDSP Pipeline Diagnostic Utility",
         "--repeat",
     ),
+    (
+        env!("CARGO_BIN_EXE_backlight-info"),
+        "Backlight Diagnostic Utility",
+        "--repeat",
+    ),
 ];
 
 /// Shared `--version` semantic version probe cases for all diagnostic utilities.
@@ -113,6 +118,7 @@ const VERSION_CASES: &[(&str, &str)] = &[
     (env!("CARGO_BIN_EXE_bt-info"), "bt-info"),
     (env!("CARGO_BIN_EXE_encoder-read"), "encoder-read"),
     (env!("CARGO_BIN_EXE_dsp-info"), "dsp-info"),
+    (env!("CARGO_BIN_EXE_backlight-info"), "backlight-info"),
 ];
 
 #[test]
@@ -241,6 +247,21 @@ fn light_read_cli_argument_validation() {
             (&["--address", "0x42"], "invalid BH1750 I2C address"),
             (&["--address", "0x77"], "invalid BH1750 I2C address"),
             (&["--address", "0x80"], "invalid BH1750 I2C address"),
+        ],
+    );
+}
+
+#[test]
+fn backlight_info_cli_argument_validation() {
+    let bin_path = env!("CARGO_BIN_EXE_backlight-info");
+    assert_cli_rejects(bin_path, COMMON_INVALID_ARGS);
+    assert_cli_rejects(
+        bin_path,
+        &[
+            (&["--device"], "missing value for --device"),
+            (&["-d"], "missing value for --device"),
+            (&["--device", ""], "invalid backlight device name"),
+            (&["--device", "../etc"], "invalid backlight device name"),
         ],
     );
 }

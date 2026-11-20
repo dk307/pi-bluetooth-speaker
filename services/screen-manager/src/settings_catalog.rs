@@ -48,17 +48,20 @@ pub enum SettingId {
     VolumeHudFadeMs,
     /// Codec HUD auto-dismiss timeout (`250..=300000` ms).
     CodecHudTimeoutMs,
+    /// Automatic ambient-light brightness control (`Manual` vs `Auto`).
+    AutoBrightness,
 }
 
 impl SettingId {
     /// All variants of [`SettingId`], used to prove catalog completeness at compile time.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::TitleDisplayMode,
         Self::MarqueeFps,
         Self::VolumeStepPercent,
         Self::VolumeHudTimeoutMs,
         Self::VolumeHudFadeMs,
         Self::CodecHudTimeoutMs,
+        Self::AutoBrightness,
     ];
 
     /// Stable slug key used to identify this setting across the Rust/Slint boundary.
@@ -71,6 +74,7 @@ impl SettingId {
             Self::VolumeHudTimeoutMs => "volume_hud_timeout_ms",
             Self::VolumeHudFadeMs => "volume_hud_fade_ms",
             Self::CodecHudTimeoutMs => "codec_hud_timeout_ms",
+            Self::AutoBrightness => "auto_brightness",
         }
     }
 
@@ -196,6 +200,15 @@ pub const SETTINGS_CATALOG: &[SettingDescriptor] = &[
             max: MAX_CODEC_HUD_TIMEOUT_MS.cast_signed(),
             step: CODEC_HUD_TIMEOUT_STEP_MS.cast_signed(),
             unit: "ms",
+        },
+    },
+    SettingDescriptor {
+        id: SettingId::AutoBrightness,
+        label: "Auto Brightness",
+        tier: SettingTier::Basic,
+        control: SettingControl::TwoOption {
+            left_label: "Manual",
+            right_label: "Auto",
         },
     },
 ];
@@ -325,6 +338,10 @@ pub fn apply_toggle(config: &mut CoreConfig, id: SettingId, right_selected: bool
             };
             true
         }
+        SettingId::AutoBrightness => {
+            config.auto_brightness_enabled = right_selected;
+            true
+        }
         SettingId::VolumeStepPercent
         | SettingId::VolumeHudTimeoutMs
         | SettingId::VolumeHudFadeMs
@@ -341,7 +358,7 @@ fn stepper_value(config: &CoreConfig, id: SettingId) -> i32 {
             .expect("validated volume_hud_fade_ms fits in i32"),
         SettingId::CodecHudTimeoutMs => i32::try_from(config.codec_hud_timeout_ms.value())
             .expect("validated codec_hud_timeout_ms fits in i32"),
-        SettingId::TitleDisplayMode | SettingId::MarqueeFps => 0,
+        SettingId::TitleDisplayMode | SettingId::MarqueeFps | SettingId::AutoBrightness => 0,
     }
 }
 
@@ -380,7 +397,7 @@ fn set_stepper_value(config: &mut CoreConfig, id: SettingId, value: i32) -> bool
             config.codec_hud_timeout_ms = CodecHudTimeoutMs::new(clamped);
             true
         }
-        SettingId::TitleDisplayMode | SettingId::MarqueeFps => false,
+        SettingId::TitleDisplayMode | SettingId::MarqueeFps | SettingId::AutoBrightness => false,
     }
 }
 
@@ -388,6 +405,7 @@ fn two_option_is_right(config: &CoreConfig, id: SettingId) -> bool {
     match id {
         SettingId::TitleDisplayMode => config.title_display_mode.is_split(),
         SettingId::MarqueeFps => config.marquee_fps == MarqueeFps::FPS_60,
+        SettingId::AutoBrightness => config.auto_brightness_enabled,
         SettingId::VolumeStepPercent
         | SettingId::VolumeHudTimeoutMs
         | SettingId::VolumeHudFadeMs

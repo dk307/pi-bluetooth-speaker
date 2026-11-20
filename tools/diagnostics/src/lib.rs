@@ -2,6 +2,7 @@
 
 pub mod cli {
     pub mod amp;
+    pub mod backlight;
     pub mod bt;
     pub mod dsp;
     pub mod encoder;

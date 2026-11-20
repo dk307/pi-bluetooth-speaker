@@ -1175,6 +1175,7 @@ fn bt_monitor_state_commands_settle_and_commit() {
             pcm: None,
             cover: Some(None),
             amp_volume: None,
+            brightness: None,
             devices: None,
         },
     );

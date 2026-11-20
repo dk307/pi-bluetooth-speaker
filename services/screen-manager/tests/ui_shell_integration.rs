@@ -1199,11 +1199,15 @@ fn ui_shell_generic_settings_callbacks_clamp_and_sync_models() {
 
     // Verify basic_settings and advanced_settings models reflect the updated state.
     let basic_rows = shell.window().get_basic_settings();
-    assert_eq!(basic_rows.row_count(), 1);
+    assert_eq!(basic_rows.row_count(), 2);
     let title_row = basic_rows.row_data(0).expect("title_display_mode row");
     assert_eq!(title_row.id.as_str(), "title_display_mode");
     assert!(!title_row.is_advanced);
     assert!(title_row.right_selected);
+    let auto_row = basic_rows.row_data(1).expect("auto_brightness row");
+    assert_eq!(auto_row.id.as_str(), "auto_brightness");
+    assert!(!auto_row.is_advanced);
+    assert!(auto_row.right_selected);
 
     let adv_rows = shell.window().get_advanced_settings();
     assert_eq!(adv_rows.row_count(), 5);
@@ -1278,6 +1282,8 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
         volume_hud_fade_ms: VolumeHudFadeMs::new(650),
         codec_hud_timeout_ms: CodecHudTimeoutMs::new(45_000),
         font_scale: FontScale::from_percent(125),
+        auto_brightness_enabled: false,
+        brightness_manual_percent: 60,
     };
     shell.apply_config(&cfg);
 

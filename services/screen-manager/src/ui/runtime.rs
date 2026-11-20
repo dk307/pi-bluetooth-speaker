@@ -252,6 +252,7 @@ fn run_splash(probe: BootProbe, preview_secs: Option<u64>, theme: Option<ThemePr
 struct Session {
     bg_running: Arc<AtomicBool>,
     amp_worker: std::io::Result<std::thread::JoinHandle<()>>,
+    brightness_worker: std::io::Result<std::thread::JoinHandle<()>>,
     bt_worker: Option<std::io::Result<std::thread::JoinHandle<()>>>,
     _sync_timer: Timer,
     _encoder_timer: Option<Timer>,
@@ -273,6 +274,7 @@ impl Session {
             bt,
             commands,
             amp_commands,
+            brightness_commands,
             device_commands,
         } = init;
         let shell = Rc::new(shell);
@@ -281,6 +283,8 @@ impl Session {
 
         let amp_worker =
             daemon::spawn_amp_volume_worker(&shared, &bg_running, &amp_commands, mocked);
+        let brightness_worker =
+            daemon::spawn_brightness_worker(&shared, &bg_running, &brightness_commands, mocked);
         // Raised by the bootstrap worker once the `BlueZ` connect succeeded.
         // The transport callbacks are wired on the render thread (the shell is
         // not `Send`), so the sync timer watches this flag.
@@ -327,6 +331,7 @@ impl Session {
             if shell_sync.window().get_overlay_backdrop_available()
                 && !shell_sync.is_volume_hud_active()
                 && !shell_sync.is_codec_hud_active()
+                && !shell_sync.is_brightness_hud_active()
             {
                 shell_sync.set_overlay_backdrop(slint::Image::default());
                 tracing::debug!("Cleared overlay backdrop");
@@ -366,6 +371,7 @@ impl Session {
         Self {
             bg_running,
             amp_worker,
+            brightness_worker,
             bt_worker,
             _sync_timer: sync_timer,
             _encoder_timer: encoder_timer,
@@ -377,6 +383,7 @@ impl Session {
     fn shutdown(self) {
         self.bg_running.store(false, Ordering::Relaxed);
         daemon::join_amp_volume_worker(self.amp_worker);
+        daemon::join_brightness_worker(self.brightness_worker);
         match self.bt_worker {
             Some(Ok(handle)) => {
                 if let Err(panic) = handle.join() {
