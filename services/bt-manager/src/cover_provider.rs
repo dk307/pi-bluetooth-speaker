@@ -232,9 +232,19 @@ pub trait PlaybackSource: Send {
 }
 
 /// Production [`PlaybackSource`] over the real D-Bus `BlueZ` snapshot.
-struct DevicePlaybackSource {
+#[derive(Debug)]
+pub struct DevicePlaybackSource {
     bt: BluetoothDevice,
     dbus: Option<zbus::Connection>,
+}
+
+impl DevicePlaybackSource {
+    /// Creates a production playback source, optionally injecting a D-Bus
+    /// connection (e.g. a private test bus) for `MediaPlayer1.RefreshTrack`.
+    #[must_use]
+    pub const fn new(bt: BluetoothDevice, dbus: Option<zbus::Connection>) -> Self {
+        Self { bt, dbus }
+    }
 }
 
 #[async_trait::async_trait]
@@ -1234,10 +1244,7 @@ pub fn spawn_production(
         wake: Arc::clone(&wake),
     };
 
-    let source = DevicePlaybackSource {
-        bt: bt.clone(),
-        dbus: None,
-    };
+    let source = DevicePlaybackSource::new(bt.clone(), None);
     std::thread::Builder::new()
         .name("cover-art-provider".into())
         .spawn(move || {

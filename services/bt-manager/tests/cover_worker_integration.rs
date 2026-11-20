@@ -1057,3 +1057,54 @@ async fn track_change_resets_missing_handle_retries_budget() {
         Some(("Track 2", track2.artist.as_ref()))
     );
 }
+
+struct FakeMediaPlayer1 {
+    calls: Arc<AtomicUsize>,
+}
+
+#[zbus::interface(name = "org.bluez.MediaPlayer1")]
+impl FakeMediaPlayer1 {
+    fn refresh_track(&self) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn device_playback_source_refresh_track_calls_dbus_and_handles_missing_method() {
+    let (_guard, address) = spawn_private_bus_sync();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _server = zbus::connection::Builder::address(address.as_str())
+        .expect("valid bus address")
+        .name("org.bluez")
+        .expect("valid well-known name")
+        .serve_at(
+            "/org/bluez/hci0/dev_11_22_33_44_55_66/player0",
+            FakeMediaPlayer1 {
+                calls: Arc::clone(&calls),
+            },
+        )
+        .expect("serve FakeMediaPlayer1")
+        .build()
+        .await
+        .expect("start fake BlueZ server");
+
+    let client = zbus::connection::Builder::address(address.as_str())
+        .expect("valid bus address")
+        .build()
+        .await
+        .expect("connect client to private bus");
+
+    let (bt, _mock) = speaker_bluetooth::BluetoothDevice::new_mocked();
+    let mut source = DevicePlaybackSource::new(bt, Some(client));
+
+    source
+        .refresh_track("/org/bluez/hci0/dev_11_22_33_44_55_66/player0")
+        .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Unpatched / absent player object exercises the warn-and-continue error path.
+    source
+        .refresh_track("/org/bluez/hci0/dev_11_22_33_44_55_66/missing_player")
+        .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
