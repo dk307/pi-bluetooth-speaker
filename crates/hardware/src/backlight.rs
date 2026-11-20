@@ -61,6 +61,12 @@ impl BacklightError {
         })
     }
 
+    fn not_found(message: impl Into<String>) -> Self {
+        Self::new(BacklightErrorKind::Io {
+            source: io::Error::new(io::ErrorKind::NotFound, message.into()),
+        })
+    }
+
     fn mock_fault(message: Box<str>) -> Self {
         Self::new(BacklightErrorKind::MockFault { message })
     }
@@ -210,6 +216,54 @@ impl Backlight {
     /// `max_brightness` node is malformed.
     pub fn with_device(device: &str) -> Result<Self, BacklightError> {
         Self::with_root(BACKLIGHT_SYSFS_BASE, device)
+    }
+
+    /// Opens the appliance backlight, discovering the actual sysfs device when
+    /// the historical `rpi_backlight` name is absent.
+    ///
+    /// `DietPi` releases on the appliance expose the panel as an I²C backlight
+    /// (for example `10-0045`) rather than `rpi_backlight`. The preferred name
+    /// is still tried first; only a `NotFound` triggers discovery, so
+    /// permission and malformed-data faults are never masked. Discovered
+    /// devices are tried in lexicographic order and malformed ones skipped.
+    /// The selected device name is returned alongside the handle for logging.
+    ///
+    /// # Errors
+    /// Returns [`BacklightError`] when no usable backlight device exists or the
+    /// sysfs root cannot be read.
+    pub fn with_appliance_default() -> Result<(Self, Box<str>), BacklightError> {
+        Self::with_appliance_default_in(BACKLIGHT_SYSFS_BASE)
+    }
+
+    /// Variant of [`Backlight::with_appliance_default`] with a custom sysfs root.
+    ///
+    /// # Errors
+    /// Returns [`BacklightError`] when no usable backlight device exists under
+    /// `root` or the directory cannot be read.
+    pub fn with_appliance_default_in(
+        root: impl AsRef<Path>,
+    ) -> Result<(Self, Box<str>), BacklightError> {
+        match Self::with_root(root.as_ref(), DEFAULT_BACKLIGHT_DEVICE) {
+            Ok(backlight) => Ok((backlight, DEFAULT_BACKLIGHT_DEVICE.into())),
+            Err(e) if e.is_not_found() => {
+                let mut names: Vec<Box<str>> = fs::read_dir(root.as_ref())?
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .filter_map(|entry| entry.file_name().into_string().ok().map(Into::into))
+                    .collect();
+                names.sort();
+                for name in names {
+                    if let Ok(backlight) = Self::with_root(root.as_ref(), name.as_ref()) {
+                        return Ok((backlight, name));
+                    }
+                }
+                Err(BacklightError::not_found(format!(
+                    "no usable backlight device under '{}'",
+                    root.as_ref().display()
+                )))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Opens a named backlight device under a custom sysfs root.

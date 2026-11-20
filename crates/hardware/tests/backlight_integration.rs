@@ -27,6 +27,41 @@ fn constants_match_appliance_panel() {
 }
 
 #[test]
+fn appliance_default_prefers_the_historical_device_name() {
+    let dir = make_sysfs_tree("backlight_preferred", "rpi_backlight", "255\n", "100\n");
+    let other = dir.path().join("10-0045");
+    fs::create_dir_all(&other).expect("create i2c backlight dir");
+    fs::write(other.join("max_brightness"), "255\n").expect("write max");
+    fs::write(other.join("brightness"), "80\n").expect("write raw");
+
+    let (backlight, device) = Backlight::with_appliance_default_in(dir.path()).unwrap();
+    assert_eq!(&*device, "rpi_backlight");
+    assert_eq!(backlight.read().unwrap(), 100);
+}
+
+#[test]
+fn appliance_default_discovers_i2c_backlight_device() {
+    let dir = make_sysfs_tree("backlight_discovery", "10-0045", "255\n", "200\n");
+
+    let (backlight, device) = Backlight::with_appliance_default_in(dir.path()).unwrap();
+    assert_eq!(&*device, "10-0045");
+    assert_eq!(backlight.max_brightness(), 255);
+    assert_eq!(backlight.read().unwrap(), 200);
+}
+
+#[test]
+fn appliance_default_skips_malformed_devices_and_fails_when_none_usable() {
+    let dir = ScopedTempDir::new("backlight_no_usable");
+    let broken = dir.path().join("aaa-broken");
+    fs::create_dir_all(&broken).expect("create malformed device dir");
+    fs::write(broken.join("max_brightness"), "not-a-number\n").expect("write max");
+    fs::write(broken.join("brightness"), "0\n").expect("write raw");
+
+    let err = Backlight::with_appliance_default_in(dir.path()).unwrap_err();
+    assert!(err.is_not_found(), "expected NotFound, got: {err}");
+}
+
+#[test]
 fn sysfs_read_write_round_trip_and_max_clamp() {
     let dir = make_sysfs_tree("backlight_round_trip", "rpi_backlight", "255\n", "100\n");
     let backlight = Backlight::with_root(dir.path(), "rpi_backlight").unwrap();

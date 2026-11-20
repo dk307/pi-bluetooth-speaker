@@ -2032,19 +2032,15 @@ pub fn spawn_brightness_worker(
                         return;
                     }
                 };
-                let backlight = match speaker_hardware::Backlight::with_device(
-                    speaker_hardware::DEFAULT_BACKLIGHT_DEVICE,
-                ) {
-                    Ok(backlight) => backlight,
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            device = speaker_hardware::DEFAULT_BACKLIGHT_DEVICE,
-                            "Failed to open backlight sysfs device; brightness disabled"
-                        );
-                        return;
-                    }
-                };
+                let (backlight, device) =
+                    match speaker_hardware::Backlight::with_appliance_default() {
+                        Ok(handle) => handle,
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to open backlight sysfs device; brightness disabled");
+                            return;
+                        }
+                    };
+                tracing::info!(device = %device, "Backlight sysfs device selected");
                 (sensor, backlight)
             };
             let mut engine = match crate::brightness::BrightnessEngine::try_new(
