@@ -1070,6 +1070,12 @@ impl AppShell {
     }
 
     fn apply_playback_timing(w: &MainWindow, is_playing: bool, position_ms: u32, duration_ms: u32) {
+        /// Minimum progress-bar ratio delta (~1 px on a ~320 px seek bar)
+        /// before dirtying Slint's `progress_ratio` binding; sub-pixel 250 ms
+        /// increments are visually imperceptible yet trigger full-window
+        /// `FemtoVG` redraws.
+        const PROGRESS_RATIO_MIN_STEP: f32 = 1.0 / 320.0;
+
         #[expect(
             clippy::cast_possible_wrap,
             reason = "duration_ms up to i32::MAX fits cleanly in slint int"
@@ -1081,7 +1087,11 @@ impl AppShell {
             w.set_is_playing(is_playing);
         }
         let ratio = speaker_bluetooth::playback_progress_ratio(position_ms, duration_ms);
-        if w.get_progress_ratio().to_bits() != ratio.to_bits() {
+        let prev_ratio = w.get_progress_ratio();
+        let (ratio_bits, prev_bits) = (ratio.to_bits(), prev_ratio.to_bits());
+        let at_boundary = (ratio_bits == 0.0_f32.to_bits() && prev_bits != 0.0_f32.to_bits())
+            || (ratio_bits == 1.0_f32.to_bits() && prev_bits != 1.0_f32.to_bits());
+        if at_boundary || (ratio - prev_ratio).abs() >= PROGRESS_RATIO_MIN_STEP {
             w.set_progress_ratio(ratio);
         }
         let position_text = speaker_bluetooth::format_duration_ms_ui(position_ms, duration_ms);
