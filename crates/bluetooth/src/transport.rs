@@ -119,28 +119,43 @@ pub fn format_duration_ms(ms: u32) -> String {
 
 /// Formats a playback timestamp for the Now Playing progress bar.
 ///
-/// Minutes < 10 omit the leading zero (`1:05` instead of `01:05`).
-/// Minutes >= 10 keep two-digit padding for visual stability.
-/// Hours >= 1 always use `HH:MM:SS`.
+/// Padding is chosen from the *track total* (`total_ms`), not the displayed
+/// position: totals under 10 minutes render `M:SS` (`1:05`), totals from
+/// 10 minutes up to (but not including) 1 hour render padded `MM:SS`
+/// (`05:00`), and totals of 1 hour or more render `HH:MM:SS` (`00:05:00`).
+/// A position that overflows past 1 hour on a sub-hour track also uses
+/// `HH:MM:SS`.
+///
+/// # Examples
+///
+/// ```
+/// use speaker_bluetooth::format_duration_ms_ui;
+/// // 3:15 track -> no leading zero
+/// assert_eq!(format_duration_ms_ui(65_000, 195_000), "1:05");
+/// // 14:20 track -> padded minutes
+/// assert_eq!(format_duration_ms_ui(300_000, 860_000), "05:00");
+/// // 1h track -> HH:MM:SS
+/// assert_eq!(format_duration_ms_ui(300_000, 3_600_000), "00:05:00");
+/// ```
 #[must_use]
 pub fn format_duration_ms_ui(ms: u32, total_ms: u32) -> String {
     let total_secs = total_ms / 1000;
-    let hours_total = total_secs / 3600;
-
     let secs = ms / 1000;
-    let hours = secs / 3600;
-    let minutes = (secs % 3600) / 60;
-    let seconds = secs % 60;
 
-    if hours_total > 0 {
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
-    } else if hours > 0 {
-        // Defensive: position exceeds 1h on a sub-hour track
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    if total_secs >= 3600 || secs >= 3600 {
+        // Track >= 1h, or defensive position overflow past 1h: HH:MM:SS.
+        format!(
+            "{:02}:{:02}:{:02}",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        )
     } else if total_secs >= 600 {
-        format!("{minutes:02}:{seconds:02}")
+        // Track >= 10 min: padded MM:SS.
+        format!("{:02}:{:02}", secs / 60, secs % 60)
     } else {
-        format!("{minutes}:{seconds:02}")
+        // Track < 10 min: no leading zero on minutes.
+        format!("{}:{:02}", secs / 60, secs % 60)
     }
 }
 
