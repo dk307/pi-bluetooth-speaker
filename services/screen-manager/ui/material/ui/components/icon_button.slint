@@ -17,6 +17,9 @@ export component IconButton {
     in property <bool> inverse;
     in property <bool> inline: false;
     in property <bool> has_error;
+    // Optional touch-target/icon sizing; defaults match the stock M3 button.
+    in property <length> button_size: root.inline ? MaterialStyleMetrics.icon_size_18 : MaterialStyleMetrics.size_40;
+    in property <length> icon_size: root.inline ? MaterialStyleMetrics.icon_size_18 : MaterialStyleMetrics.icon_size_24;
 
     callback clicked();
 
@@ -35,8 +38,8 @@ export component IconButton {
         button_vertical_padding: 0;
         width: self.height;
         display_background: false;
-        icon_size: root.inline ? MaterialStyleMetrics.icon_size_18 : MaterialStyleMetrics.icon_size_24;
-        min_layout_width: root.inline ? MaterialStyleMetrics.icon_size_18 : MaterialStyleMetrics.size_40;
+        icon_size: root.icon_size;
+        min_layout_width: root.button_size;
         min_layout_height: self.min_layout_width;
         clip_ripple: !root.inline;
 

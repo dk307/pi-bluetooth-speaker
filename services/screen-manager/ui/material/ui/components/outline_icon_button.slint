@@ -14,6 +14,14 @@ export component OutlineIconButton {
     in_out property <bool> checked;
     in property <string> tooltip <=> base.tooltip;
     in property <bool> enabled <=> base.enabled;
+    // Optional styling overrides. Defaults match the stock M3 outlined icon
+    // button, so existing callers are unchanged while larger touch targets
+    // (e.g. the appliance's 56 dp settings tile) can reuse this component.
+    in property <length> button_size: MaterialStyleMetrics.size_40;
+    in property <length> icon_size: MaterialStyleMetrics.icon_size_24;
+    in property <color> icon_color: MaterialPalette.on_surface_variant;
+    in property <color> background_color: transparent;
+    in property <color> border_color: MaterialPalette.outline;
 
     callback clicked();
 
@@ -32,7 +40,8 @@ export component OutlineIconButton {
         height: 100%;
         border_radius: base.border_radius;
         border_width: 1px;
-        border_color: MaterialPalette.outline;
+        border_color: root.border_color;
+        background: root.background_color;
     }
 
     base := BaseButton {
@@ -40,12 +49,12 @@ export component OutlineIconButton {
         height: 100%;
         icon: root.checked ? root.checked_icon : root.icon;
         border_radius: self.height / 2;
-        color: MaterialPalette.on_surface_variant;
+        color: root.icon_color;
         button_horizontal_padding: 0;
         button_vertical_padding: 0;
-        min_layout_width: MaterialStyleMetrics.size_40;
-        min_layout_height: self.min_layout_width;
-        icon_size: MaterialStyleMetrics.icon_size_24;
+        min_layout_width: root.button_size;
+        min_layout_height: root.button_size;
+        icon_size: root.icon_size;
         display_background: false;
 
         clicked => {

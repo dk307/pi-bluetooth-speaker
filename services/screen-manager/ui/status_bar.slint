@@ -1,6 +1,7 @@
 import {
     MaterialPalette,
     MaterialStyleMetrics,
+    StateLayerArea,
     TouchScale,
 } from "@material/material.slint";
 
@@ -76,7 +77,9 @@ export component TopStatusBar inherits Rectangle {
         // Left: Bluetooth Source (icon + label, no pill badge; vertically centered)
         VerticalLayout {
             alignment: center;
-            TouchArea {
+            StateLayerArea {
+                color: MaterialPalette.primary;
+                border_radius: MaterialStyleMetrics.border_radius_16;
                 clicked => {
                     root.source_clicked();
                 }
@@ -132,7 +135,9 @@ export component TopStatusBar inherits Rectangle {
                             overflow: elide;
                         }
 
-                        TouchArea {
+                        StateLayerArea {
+                            color: MaterialPalette.primary;
+                            border_radius: 10px;
                             clicked => {
                                 root.protocol_clicked();
                             }
@@ -207,7 +212,9 @@ export component TopStatusBar inherits Rectangle {
                             }
                         }
 
-                        TouchArea {
+                        StateLayerArea {
+                            color: MaterialPalette.secondary;
+                            border_radius: MaterialStyleMetrics.border_radius_16;
                             clicked => {
                                 root.volume_clicked();
                             }
@@ -237,7 +244,9 @@ export component TopStatusBar inherits Rectangle {
                             image-fit: contain;
                         }
 
-                        TouchArea {
+                        StateLayerArea {
+                            color: MaterialPalette.primary;
+                            border_radius: 10px;
                             clicked => {
                                 root.night_mode_clicked();
                             }
@@ -270,7 +279,9 @@ export component TopStatusBar inherits Rectangle {
             overflow: elide;
         }
 
-        TouchArea {
+        StateLayerArea {
+            color: MaterialPalette.primary;
+            border_radius: MaterialStyleMetrics.border_radius_16;
             clicked => {
                 root.device_clicked();
             }

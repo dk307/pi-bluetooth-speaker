@@ -1623,6 +1623,16 @@ impl AppShell {
             }
         });
 
+        let win = self.window.as_weak();
+        self.window.on_settings_clicked(move || {
+            if let Some(w) = win.upgrade() {
+                tracing::info!(
+                    from_tab = w.get_previous_tab(),
+                    "Settings opened from Now Playing"
+                );
+            }
+        });
+
         self.window.on_volume_clicked(|| {
             tracing::debug!("Top bar volume indicator clicked; showing Volume HUD");
         });

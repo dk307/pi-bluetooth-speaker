@@ -1,6 +1,9 @@
 import {
+    FilledIconButton,
     MaterialPalette,
     MaterialStyleMetrics,
+    OutlineIconButton,
+    TonalIconButton,
     TouchScale,
 } from "@material/material.slint";
 import { AmbientWaveSprites, MarqueeCompose } from "marquee_state.slint";
@@ -140,51 +143,41 @@ component AmbientWaveIndicator inherits Rectangle {
     }
 }
 
-// Android Material 3 player transport button (button group, see M3 common buttons)
-// Hero (play/pause): large filled circle, primary/on_primary (M3 filled button / FAB)
-// Prev/next: tonal filled circles, secondary_container/on_secondary_container (M3 button group)
+// Material 3 player transport button. The hero (play/pause) delegates to the
+// shared M3 `FilledIconButton`, prev/next to `TonalIconButton`, so press feedback
+// (state layer + ripple) is identical to every other M3 button in the appliance.
 component TransportButton inherits Rectangle {
     in property <image> icon;
     in property <bool> enabled: true;
     in property <bool> is_hero: false;
-    in property <color> background_color: MaterialPalette.primary;
-    in property <color> icon_color: MaterialPalette.on_primary;
     in property <bool> is_playing: false;
-    in property <image> play_icon: @image-url("../../../assets/icons/play.svg");
-    in property <image> pause_icon: @image-url("../../../assets/icons/pause.svg");
 
-    property <length> btn_size: (root.is_hero ? 86px : 72px) * TouchScale.widget_scale;
-    property <length> icon_size: (root.is_hero ? 26px : 32px) * TouchScale.widget_scale;
-    width: root.btn_size;
-    height: root.btn_size;
-    border-radius: root.btn_size / 2;
-    cache-rendering-hint: true;
-    background: root.is_hero ? (root.enabled ? root.background_color : MaterialPalette.surface) : (root.enabled ? MaterialPalette.secondary_container : transparent);
-    border-width: 0px;
-    opacity: root.enabled ? (touch.pressed ? 0.8 : 1.0) : 0.35;
-    animate opacity { duration: 80ms; easing: ease-out; }
-    animate background { duration: 80ms; easing: ease-out; }
+    property <length> button_size: (root.is_hero ? 86px : 72px) * TouchScale.widget_scale;
+    property <length> glyph_size: (root.is_hero ? 26px : 32px) * TouchScale.widget_scale;
+    width: root.button_size;
+    height: root.button_size;
 
-    VerticalLayout {
-        alignment: center;
-        HorizontalLayout {
-            alignment: center;
-            Image {
-                source: root.is_hero && root.is_playing ? root.pause_icon : root.icon;
-                colorize: root.enabled ? root.icon_color : MaterialPalette.on_surface_variant;
-                width: root.icon_size;
-                height: root.icon_size;
-                image-fit: contain;
-                vertical-alignment: center;
-            }
-        }
+    if root.is_hero : FilledIconButton {
+        width: 100%;
+        height: 100%;
+        icon: root.is_playing
+            ? @image-url("../../../assets/icons/pause.svg")
+            : (root.icon.width > 0 ? root.icon : @image-url("../../../assets/icons/play.svg"));
+        tooltip: root.is_playing ? "Pause" : "Play";
+        enabled: root.enabled;
+        button_size: root.button_size;
+        icon_size: root.glyph_size;
+        clicked => { root.clicked(); }
     }
 
-    touch := TouchArea {
+    if !root.is_hero : TonalIconButton {
+        width: 100%;
+        height: 100%;
+        icon: root.icon;
         enabled: root.enabled;
-        clicked => {
-            root.clicked();
-        }
+        button_size: root.button_size;
+        icon_size: root.glyph_size;
+        clicked => { root.clicked(); }
     }
 
     callback clicked();
@@ -599,7 +592,6 @@ export component NowPlayingView inherits Rectangle {
                             icon: @image-url("../../../assets/icons/previous.svg");
                             enabled: root.transport_available;
                             is_hero: false;
-                            icon_color: MaterialPalette.on_secondary_container;
                             clicked => { root.previous_track(); }
                         }
                     }
@@ -609,12 +601,9 @@ export component NowPlayingView inherits Rectangle {
                         alignment: center;
                         TransportButton {
                             icon: @image-url("../../../assets/icons/play.svg");
-                            pause_icon: @image-url("../../../assets/icons/pause.svg");
                             is_playing: root.is_playing;
                             enabled: root.transport_available;
                             is_hero: true;
-                            background_color: MaterialPalette.primary;
-                            icon_color: MaterialPalette.on_primary;
                             clicked => { root.toggle_play_pause(); }
                         }
                     }
@@ -626,7 +615,6 @@ export component NowPlayingView inherits Rectangle {
                             icon: @image-url("../../../assets/icons/next.svg");
                             enabled: root.transport_available;
                             is_hero: false;
-                            icon_color: MaterialPalette.on_secondary_container;
                             clicked => { root.next_track(); }
                         }
                     }
@@ -634,35 +622,19 @@ export component NowPlayingView inherits Rectangle {
         }
     }
 
-    // Dedicated Settings button anchored to the right-bottom corner with proper padding
-    settings_btn := Rectangle {
+    // Dedicated Settings button anchored to the right-bottom corner. Uses the
+    // shared Material 3 outlined icon button so its press feedback (state layer
+    // + ripple) is identical to every other M3 button on the appliance.
+    settings_btn := OutlineIconButton {
         x: parent.width - self.width - MaterialStyleMetrics.padding_24;
         y: parent.height - self.height - MaterialStyleMetrics.padding_24;
-        width: 56px * TouchScale.widget_scale;
-        height: self.width;
-        border-radius: self.height / 2;
-        cache-rendering-hint: true;
-        background: MaterialPalette.surface;
-        border-width: 1px;
-        border-color: MaterialPalette.outline_variant;
-
-        Image {
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            source: @image-url("../../../assets/icons/config.svg");
-            colorize: MaterialPalette.primary;
-            width: 28px * TouchScale.widget_scale;
-            height: self.width;
-            image-fit: contain;
-        }
-
-        touch_settings := TouchArea {
-            clicked => {
-                root.settings_clicked();
-            }
-        }
-
-        opacity: touch_settings.pressed ? 0.7 : 1.0;
-        animate opacity { duration: 80ms; easing: ease-out; }
+        icon: @image-url("../../../assets/icons/config.svg");
+        tooltip: "Settings";
+        button_size: 56px * TouchScale.widget_scale;
+        icon_size: 28px * TouchScale.widget_scale;
+        icon_color: MaterialPalette.primary;
+        background_color: MaterialPalette.surface;
+        border_color: MaterialPalette.outline_variant;
+        clicked => { root.settings_clicked(); }
     }
 }

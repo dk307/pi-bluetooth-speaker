@@ -244,6 +244,8 @@ export component MainWindow inherits Window {
     callback volume_changed(float);
     callback source_clicked();
     callback night_mode_clicked();
+    // Raised after the settings tab transition so Rust can log the navigation.
+    callback settings_clicked();
     callback tab_selected(int);
     callback select_theme(int);
     callback cycle_theme();
@@ -400,6 +402,7 @@ export component MainWindow inherits Window {
                 settings_clicked => {
                     root.previous_tab = root.active_tab;
                     root.active_tab = 5;
+                    root.settings_clicked();
                 }
                 select_tab(idx) => {
                     root.previous_tab = root.active_tab;
