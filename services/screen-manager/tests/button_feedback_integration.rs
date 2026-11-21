@@ -137,11 +137,10 @@ fn settings_button_renders_press_feedback_and_opens_settings() {
     );
 
     release(&mut h, 748.0, 428.0);
-    let released = h.buffer.region(region.0, region.1, region.2, region.3);
-    assert!(
-        count_diff(&idle, &released) > 50,
-        "press feedback must persist briefly after a quick tap instead of vanishing instantly"
-    );
+    // Do NOT sample a "persistence" frame here: the click navigates to the
+    // Settings tab, so any diff would measure the whole view swap rather than
+    // the state layer fading out. Persistence is asserted on a non-navigating
+    // button in `transport_buttons_render_press_feedback` instead.
     assert_eq!(
         h.shell.current_tab(),
         5,
@@ -196,4 +195,41 @@ fn transport_buttons_render_press_feedback() {
             "{label} transport button must show a visible pressed state"
         );
     }
+}
+
+#[test]
+fn press_feedback_persists_briefly_then_fades_to_idle() {
+    // Use a non-navigating transport button ("next") so the sampled region is
+    // not invalidated by a view swap or a play/pause glyph change.
+    let region = (672, 309, 744, 381);
+    let mut h = harness();
+    let idle = h.buffer.region(region.0, region.1, region.2, region.3);
+
+    press(&mut h, 708.0, 345.0);
+    let pressed = h.buffer.region(region.0, region.1, region.2, region.3);
+    assert!(
+        count_diff(&idle, &pressed) > 100,
+        "transport button must show a visible pressed state"
+    );
+
+    release(&mut h, 708.0, 345.0);
+    let released = h.buffer.region(region.0, region.1, region.2, region.3);
+    assert!(
+        count_diff(&idle, &released) > 50,
+        "press feedback must persist briefly after a quick tap instead of vanishing instantly"
+    );
+
+    // Let the state layer finish fading out. This appliance is touch-only, so
+    // focus must not leave a persistent 10% highlight behind after the tap.
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        slint::platform::update_timers_and_animations();
+        h.buffer.draw(&h.window);
+    }
+    let settled = h.buffer.region(region.0, region.1, region.2, region.3);
+    let settled_diff = count_diff(&idle, &settled);
+    assert!(
+        settled_diff < 500,
+        "press feedback must fade back to idle after the animation, but {settled_diff} bytes still differ (lingering focus highlight?)"
+    );
 }
