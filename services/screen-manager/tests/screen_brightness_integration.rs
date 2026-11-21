@@ -977,6 +977,32 @@ fn spawned_mocked_brightness_worker_publishes_and_joins() {
 }
 
 #[test]
+fn sleep_or_stop_returns_promptly_when_running_is_cleared() {
+    let running = Arc::new(AtomicBool::new(true));
+    let stopper = Arc::clone(&running);
+    let stopper = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        stopper.store(false, Ordering::Relaxed);
+    });
+    let started = Instant::now();
+    // A 5 s sleep with 100 ms slices must abort within a fraction of that
+    // once `running` is cleared (worker shutdown must not hang on backoff).
+    screen_manager::daemon::sleep_or_stop(Duration::from_secs(5), &running);
+    assert!(
+        started.elapsed() < Duration::from_millis(1_500),
+        "sleep_or_stop must return promptly when stopped, took {:?}",
+        started.elapsed()
+    );
+    stopper.join().expect("stopper thread panicked");
+
+    // With `running` still true it sleeps for the full requested duration.
+    let running = AtomicBool::new(true);
+    let started = Instant::now();
+    screen_manager::daemon::sleep_or_stop(Duration::from_millis(30), &running);
+    assert!(started.elapsed() >= Duration::from_millis(30));
+}
+
+#[test]
 fn live_brightness_worker_exits_when_stopped_before_hardware_setup() {
     let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
     let running = Arc::new(AtomicBool::new(false));

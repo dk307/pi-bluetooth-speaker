@@ -2016,6 +2016,75 @@ impl crate::screen_brightness::LuxSource for WorkerLuxSource {
     }
 }
 
+/// Sleeps for `duration` in short slices, returning early as soon as `running`
+/// is cleared.
+///
+/// Long backoff sleeps in the brightness worker would otherwise block the UI
+/// session shutdown (which joins that worker) for up to the full backoff window
+/// when the service is stopped during a backlight boot-order retry.
+#[cfg(feature = "ui")]
+pub fn sleep_or_stop(duration: Duration, running: &AtomicBool) {
+    const SLICE: Duration = Duration::from_millis(100);
+    let mut remaining = duration;
+    while remaining > Duration::ZERO && running.load(Ordering::Relaxed) {
+        let step = remaining.min(SLICE);
+        std::thread::sleep(step);
+        remaining = remaining.saturating_sub(step);
+    }
+}
+
+/// Opens the appliance backlight, retrying while the device has not appeared
+/// yet (a boot-order race) with exponential backoff capped at 60 s.
+///
+/// Returns `None` if the worker was asked to stop while waiting, so shutdown
+/// never blocks on a sysfs device that may never appear.
+#[cfg(feature = "ui")]
+fn open_backlight_with_retry(
+    running: &AtomicBool,
+) -> Option<(speaker_hardware::Backlight, Box<str>, u32)> {
+    let mut backoff = Duration::from_secs(1);
+    let mut first_failure = true;
+    loop {
+        if !running.load(Ordering::Relaxed) {
+            return None;
+        }
+        let attempt = match speaker_hardware::Backlight::with_appliance_default() {
+            Ok((handle, device)) => match handle.read() {
+                Ok(raw) => return Some((handle, device, raw)),
+                Err(e) => {
+                    tracing::warn!(error = %e, device = %device, "Backlight bootstrap read failed");
+                    "backlight read"
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "Backlight sysfs device not available yet");
+                "backlight open"
+            }
+        };
+        if first_failure {
+            tracing::error!(
+                stage = attempt,
+                retry_secs = backoff.as_secs(),
+                "Brightness worker waiting for backlight"
+            );
+            first_failure = false;
+        } else {
+            tracing::warn!(
+                stage = attempt,
+                retry_secs = backoff.as_secs(),
+                "Retrying brightness backlight establishment"
+            );
+        }
+        // Short slices re-check `running` so joining the worker on shutdown
+        // cannot stall for the whole backoff window.
+        sleep_or_stop(backoff, running);
+        if !running.load(Ordering::Relaxed) {
+            return None;
+        }
+        backoff = (backoff * 2).min(Duration::from_secs(60));
+    }
+}
+
 /// Spawns the embedded brightness control-loop worker thread.
 ///
 /// The worker owns the BH1750 sensor and the backlight sysfs handle, so no
@@ -2065,36 +2134,9 @@ pub fn spawn_brightness_worker(
                         (WorkerLuxSource::Unavailable, false)
                     }
                 };
-                // The backlight is mandatory, but the sysfs device can appear
-                // after screen-manager starts (boot-order race). Retry with
-                // exponential backoff instead of killing the worker forever.
-                let mut backoff = Duration::from_secs(1);
-                let mut first_failure = true;
-                let (backlight, device, initial_raw) = loop {
-                    if !running.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let attempt = match speaker_hardware::Backlight::with_appliance_default() {
-                        Ok((handle, device)) => match handle.read() {
-                            Ok(raw) => break (handle, device, raw),
-                            Err(e) => {
-                                tracing::warn!(error = %e, device = %device, "Backlight bootstrap read failed");
-                                "backlight read"
-                            }
-                        },
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Backlight sysfs device not available yet");
-                            "backlight open"
-                        }
-                    };
-                    if first_failure {
-                        tracing::error!(stage = attempt, retry_secs = backoff.as_secs(), "Brightness worker waiting for backlight");
-                        first_failure = false;
-                    } else {
-                        tracing::warn!(stage = attempt, retry_secs = backoff.as_secs(), "Retrying brightness backlight establishment");
-                    }
-                    std::thread::sleep(backoff);
-                    backoff = (backoff * 2).min(Duration::from_secs(60));
+                let Some((backlight, device, initial_raw)) = open_backlight_with_retry(&running)
+                else {
+                    return;
                 };
                 tracing::info!(device = %device, "Backlight sysfs device selected");
                 (sensor, backlight, sensor_available, initial_raw)
