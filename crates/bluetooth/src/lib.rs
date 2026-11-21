@@ -41,9 +41,9 @@ pub use transport::{
     AVRCP_MAX_VOLUME, AVRCP_VOLUME_MAX, AvrcpVolume, BT_NO_CONNECTION_TITLE, BlueAlsaPcm,
     BtPlaybackState, PERCENT_VOLUME_MAX, TransportCommand, TransportCommandQueue,
     UNKNOWN_TRACK_TIME_MS, apply_mute_to_volume_bytes, avrcp_avg_to_percent, decode_pcm_format,
-    encode_volume_bytes, format_duration_ms, format_duration_ms_ui, format_volume_bytes,
-    percent_to_bluealsa_level, playback_progress_ratio, seek_offset_us, select_active_pcm,
-    select_active_pcm_for,
+    duration_known_ms, encode_volume_bytes, format_duration_ms, format_duration_ms_ui,
+    format_volume_bytes, percent_to_bluealsa_level, playback_progress_ratio, position_known_ms,
+    seek_offset_us, select_active_pcm, select_active_pcm_for,
 };
 
 #[doc(inline)]

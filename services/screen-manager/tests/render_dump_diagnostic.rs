@@ -66,6 +66,12 @@ fn dump_single_frame_for_layout_analysis() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    // Reproduce the device's `font_scale` (see `/etc/screen-manager/config.json`)
+    // so text-overflow issues show up offline.
+    let font_scale: f32 = std::env::var("RENDER_DUMP_FONT_SCALE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1.0);
 
     let fb = Framebuffer::new_mocked().0;
     let window = fb.init_platform().expect("platform init");
@@ -80,6 +86,7 @@ fn dump_single_frame_for_layout_analysis() {
         shell.window().set_volume_hud_fade_ms(0);
     }
     shell.apply_theme(ThemePreset::Peppy);
+    shell.set_font_scale(font_scale);
     shell.set_track_metadata(
         "Test Track Title",
         "Some Artist Name",
@@ -105,6 +112,9 @@ fn dump_single_frame_for_layout_analysis() {
             duration_ms: u32::MAX,
             ..speaker_bluetooth::BtPlaybackState::default()
         }),
+        // Multi-hour track: `H:MM:SS` readouts are the widest strings the seek
+        // row can produce and used to be clipped by the fixed 64 px slots.
+        Some("long") => shell.set_playback_state(true, 3_723_000, 7_384_000),
         _ => shell.set_playback_state(true, 60_000, 500_000),
     }
     shell.set_tab(tab);

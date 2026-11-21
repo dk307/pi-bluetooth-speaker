@@ -189,6 +189,59 @@ struct SettingsModels {
     advanced: Rc<VecModel<SettingRowItem>>,
 }
 
+/// Seek-row presentation derived from the raw `BlueZ` timeline fields.
+///
+/// `BlueZ` keeps the "unknown" sentinel (`u32::MAX`) in the wire values, so the
+/// presentation layer decides how much of the row is meaningful:
+///
+/// | `duration_known` | `position_known` | rendering |
+/// | --- | --- | --- |
+/// | yes | yes | determinate bar with fill and both readouts |
+/// | no | yes | thin thumb-less track with a shimmer sweep, position only |
+/// | no | no | row hidden, both readouts blank |
+///
+/// A known duration with an unreported position is treated as indeterminate:
+/// there is no meaningful fill without a position.
+#[derive(Debug)]
+struct SeekRow {
+    duration_known: bool,
+    position_known: bool,
+    /// Total length used for bar geometry; `0` when the timeline is unknown.
+    timeline_ms: u32,
+    /// Empty when the peer never reported an elapsed position: a stale `0:00`
+    /// next to a live shimmer would read as "stuck".
+    position_text: String,
+    /// Empty when the peer never reported a total length; the shimmer carries
+    /// the "playing, timeline unknown" signal instead.
+    duration_text: String,
+}
+
+impl SeekRow {
+    fn new(position_ms: u32, duration_ms: u32) -> Self {
+        let duration_known = speaker_bluetooth::duration_known_ms(duration_ms);
+        let position_known = speaker_bluetooth::position_known_ms(position_ms);
+        // Only a determinate timeline feeds the ratio/bar geometry.
+        let timeline_ms = if duration_known { duration_ms } else { 0 };
+        let position_text = if position_known {
+            speaker_bluetooth::format_duration_ms_ui(position_ms, timeline_ms)
+        } else {
+            String::new()
+        };
+        let duration_text = if duration_known {
+            speaker_bluetooth::format_duration_ms_ui(duration_ms, duration_ms)
+        } else {
+            String::new()
+        };
+        Self {
+            duration_known,
+            position_known,
+            timeline_ms,
+            position_text,
+            duration_text,
+        }
+    }
+}
+
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
@@ -1093,37 +1146,25 @@ impl AppShell {
         /// `FemtoVG` redraws.
         const PROGRESS_RATIO_MIN_STEP: f32 = 1.0 / 320.0;
 
-        // `BlueZ` reports an unknown timeline as `u32::MAX` (`1193` hours once
-        // formatted). The domain keeps the raw wire value; the presentation
-        // layer decides how much of the seek row is meaningful:
-        //   * duration + position known -> determinate seek bar
-        //   * position only             -> indeterminate shimmer track
-        //   * neither                   -> seek row hidden entirely
-        let duration_known =
-            duration_ms != speaker_bluetooth::UNKNOWN_TRACK_TIME_MS && duration_ms != 0;
-        let position_known = position_ms != speaker_bluetooth::UNKNOWN_TRACK_TIME_MS;
-        // Only a determinate timeline feeds the ratio/bar geometry; the
-        // indeterminate track ignores it and animates a shimmer instead.
-        let timeline_ms = if duration_known { duration_ms } else { 0 };
-
-        if w.get_duration_known() != duration_known {
-            w.set_duration_known(duration_known);
+        let row = SeekRow::new(position_ms, duration_ms);
+        if w.get_duration_known() != row.duration_known {
+            w.set_duration_known(row.duration_known);
         }
-        if w.get_position_known() != position_known {
-            w.set_position_known(position_known);
+        if w.get_position_known() != row.position_known {
+            w.set_position_known(row.position_known);
         }
 
         #[expect(
             clippy::cast_possible_wrap,
             reason = "timeline_ms is 0 or a real duration <= i32::MAX; fits cleanly in slint int"
         )]
-        if w.get_duration_ms() != timeline_ms as i32 {
-            w.set_duration_ms(timeline_ms as i32);
+        if w.get_duration_ms() != row.timeline_ms as i32 {
+            w.set_duration_ms(row.timeline_ms as i32);
         }
         if w.get_is_playing() != is_playing {
             w.set_is_playing(is_playing);
         }
-        let ratio = speaker_bluetooth::playback_progress_ratio(position_ms, timeline_ms);
+        let ratio = speaker_bluetooth::playback_progress_ratio(position_ms, row.timeline_ms);
         let prev_ratio = w.get_progress_ratio();
         let (ratio_bits, prev_bits) = (ratio.to_bits(), prev_ratio.to_bits());
         let at_boundary = (ratio_bits == 0.0_f32.to_bits() && prev_bits != 0.0_f32.to_bits())
@@ -1131,25 +1172,11 @@ impl AppShell {
         if at_boundary || (ratio - prev_ratio).abs() >= PROGRESS_RATIO_MIN_STEP {
             w.set_progress_ratio(ratio);
         }
-        // Blank the elapsed readout when the peer never reported a position;
-        // a stale `0:00` next to a live shimmer would read as "stuck".
-        let position_text = if position_known {
-            speaker_bluetooth::format_duration_ms_ui(position_ms, timeline_ms)
-        } else {
-            String::new()
-        };
-        if w.get_position_text().as_str() != position_text.as_str() {
-            w.set_position_text(position_text.into());
+        if w.get_position_text().as_str() != row.position_text.as_str() {
+            w.set_position_text(row.position_text.into());
         }
-        // No total length -> no duration readout; the shimmer carries the
-        // "playing, timeline unknown" signal instead.
-        let duration_text = if duration_known {
-            speaker_bluetooth::format_duration_ms_ui(duration_ms, duration_ms)
-        } else {
-            String::new()
-        };
-        if w.get_duration_text().as_str() != duration_text.as_str() {
-            w.set_duration_text(duration_text.into());
+        if w.get_duration_text().as_str() != row.duration_text.as_str() {
+            w.set_duration_text(row.duration_text.into());
         }
     }
 

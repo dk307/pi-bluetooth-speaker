@@ -82,19 +82,18 @@ pub fn select_active_pcm_for(
 
 /// Computes the playback progress ratio clamped to `0.0..=1.0`.
 ///
-/// A zero duration, an unreported position, or [`UNKNOWN_TRACK_TIME_MS`] on
-/// either field maps to `0.0`: an unknown timeline has no meaningful progress.
-/// Shared between [`BtPlaybackState::progress_ratio`] and the UI shell so the
-/// ratio logic has a single source of truth.
+/// An unreported position or duration (see [`UNKNOWN_TRACK_TIME_MS`]) maps to
+/// `0.0`: an unknown timeline has no meaningful progress. Shared between
+/// [`BtPlaybackState::progress_ratio`] and the UI shell so the ratio logic has
+/// a single source of truth.
 #[must_use]
 pub fn playback_progress_ratio(position_ms: u32, duration_ms: u32) -> f32 {
-    if duration_ms == 0
-        || duration_ms == UNKNOWN_TRACK_TIME_MS
-        || position_ms == UNKNOWN_TRACK_TIME_MS
-    {
-        0.0
-    } else {
-        (position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
+    match (
+        position_known_ms(position_ms),
+        duration_known_ms(duration_ms),
+    ) {
+        (true, true) => (position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0),
+        _ => 0.0,
     }
 }
 
@@ -108,6 +107,26 @@ pub fn playback_progress_ratio(position_ms: u32, duration_ms: u32) -> f32 {
 /// hours field, so the domain boundary must classify it as *unknown* rather
 /// than as a duration.
 pub const UNKNOWN_TRACK_TIME_MS: u32 = u32::MAX;
+
+/// Returns `true` when `duration_ms` is a usable total track length.
+///
+/// `BlueZ` publishes [`UNKNOWN_TRACK_TIME_MS`] when the peer never described the
+/// track; `0` means the same thing for UI purposes (no timeline to seek within).
+/// This is the single source of truth for the sentinel: both
+/// [`BtPlaybackState::duration_known`] and the presentation layer call it, so
+/// the rule cannot drift between them.
+#[must_use]
+pub fn duration_known_ms(duration_ms: u32) -> bool {
+    duration_ms != UNKNOWN_TRACK_TIME_MS && duration_ms != 0
+}
+
+/// Returns `true` when `position_ms` is a usable elapsed position.
+///
+/// The presentation-layer counterpart of [`duration_known_ms`].
+#[must_use]
+pub fn position_known_ms(position_ms: u32) -> bool {
+    position_ms != UNKNOWN_TRACK_TIME_MS
+}
 
 /// Computes the `MediaPlayer1.Seek` relative offset for an absolute target.
 ///
@@ -303,13 +322,13 @@ impl BtPlaybackState {
     /// timeline to seek within).
     #[must_use]
     pub fn duration_known(&self) -> bool {
-        self.duration_ms != UNKNOWN_TRACK_TIME_MS && self.duration_ms != 0
+        duration_known_ms(self.duration_ms)
     }
 
     /// Returns `true` when the transport reported a usable elapsed position.
     #[must_use]
     pub fn position_known(&self) -> bool {
-        self.position_ms != UNKNOWN_TRACK_TIME_MS
+        position_known_ms(self.position_ms)
     }
 
     /// Returns the progress ratio between 0.0 and 1.0.
