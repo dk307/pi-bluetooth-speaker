@@ -686,6 +686,29 @@ fn shell_brightness_overlay_callbacks_drive_the_engine() {
 }
 
 #[test]
+fn brightness_hud_renders_at_every_font_size_setting() {
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use slint::ComponentHandle;
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let platform_window = fb.init_platform().expect("offscreen platform");
+    let window = MainWindow::new().expect("MainWindow");
+    let shell = AppShell::new(window);
+    shell.window().show().expect("show MainWindow");
+    shell.show_brightness_hud();
+    assert!(shell.is_brightness_hud_active());
+
+    // The Settings font-size slider drives TouchScale; the overlay must lay out
+    // and render at both ends of the supported range without clipping or panics.
+    for scale in [1.0, 1.35] {
+        shell.set_font_scale(scale);
+        assert_eq!(shell.font_scale(), scale);
+        fb.render_frame_full_redraw(&platform_window)
+            .unwrap_or_else(|e| panic!("render brightness HUD at font scale {scale}: {e}"));
+    }
+}
+
+#[test]
 fn commit_update_merges_brightness_delta() {
     use screen_manager::daemon::BtMonitorState;
 
