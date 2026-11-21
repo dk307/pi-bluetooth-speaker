@@ -366,63 +366,63 @@ async fn hardware_backend_websocket_roundtrip() {
                 while let Some(msg) = ws.next().await {
                     let Ok(msg) = msg else { break };
                     if let Message::Text(text) = msg {
-                        let cmd: String = serde_json::from_str(&text).unwrap();
-                        let resp = match cmd.as_str() {
+                        let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        let cmd = req.get("command").and_then(|c| c.as_str()).unwrap();
+                        let resp = match cmd {
                             "GetVersion" => {
-                                serde_json::json!({"GetVersion": {"result": "Ok", "value": "4.1.3"}})
+                                serde_json::json!({"reply": "GetVersion", "result": "Ok", "value": "5.0.0-beta.2"})
                             }
                             "GetConfigTitle" => {
-                                serde_json::json!({"GetConfigTitle": {"result": "Ok", "value": "Test Engine"}})
+                                serde_json::json!({"reply": "GetConfigTitle", "result": "Ok", "value": "Test Engine"})
                             }
                             "GetConfigFilePath" => {
-                                serde_json::json!({"GetConfigFilePath": {"result": "Ok", "value": "/etc/camilladsp/crossover.yml"}})
+                                serde_json::json!({"reply": "GetConfigFilePath", "result": "Ok", "value": "/etc/camilladsp/crossover.yml"})
                             }
                             "GetState" => {
-                                serde_json::json!({"GetState": {"result": "Ok", "value": "Running"}})
+                                serde_json::json!({"reply": "GetState", "result": "Ok", "value": "Running"})
                             }
                             "GetProcessingLoad" => {
-                                serde_json::json!({"GetProcessingLoad": {"result": "Ok", "value": 4.25}})
+                                serde_json::json!({"reply": "GetProcessingLoad", "result": "Ok", "value": 4.25})
                             }
                             "GetResamplerLoad" => {
-                                serde_json::json!({"GetResamplerLoad": {"result": "Ok", "value": 0.15}})
+                                serde_json::json!({"reply": "GetResamplerLoad", "result": "Ok", "value": 0.15})
                             }
                             "GetRateAdjust" => {
-                                serde_json::json!({"GetRateAdjust": {"result": "Ok", "value": 1.000_010}})
+                                serde_json::json!({"reply": "GetRateAdjust", "result": "Ok", "value": 1.000_010})
                             }
                             "GetBufferLevel" => {
-                                serde_json::json!({"GetBufferLevel": {"result": "Ok", "value": 512}})
+                                serde_json::json!({"reply": "GetBufferLevel", "result": "Ok", "value": 512})
                             }
                             "GetClippedSamples" => {
-                                serde_json::json!({"GetClippedSamples": {"result": "Ok", "value": 0}})
+                                serde_json::json!({"reply": "GetClippedSamples", "result": "Ok", "value": 0})
                             }
                             "GetCaptureRate" => {
-                                serde_json::json!({"GetCaptureRate": {"result": "Ok", "value": 48000}})
+                                serde_json::json!({"reply": "GetCaptureRate", "result": "Ok", "value": 48000})
                             }
                             "GetStopReason" => {
-                                serde_json::json!({"GetStopReason": {"result": "Ok", "value": "None"}})
+                                serde_json::json!({"reply": "GetStopReason", "result": "Ok", "value": "None"})
                             }
                             "GetVolume" => {
-                                serde_json::json!({"GetVolume": {"result": "Ok", "value": -6.0}})
+                                serde_json::json!({"reply": "GetVolume", "result": "Ok", "value": -6.0})
                             }
                             "GetMute" => {
-                                serde_json::json!({"GetMute": {"result": "Ok", "value": false}})
+                                serde_json::json!({"reply": "GetMute", "result": "Ok", "value": false})
                             }
                             "GetSignalLevels" => serde_json::json!({
-                                "GetSignalLevels": {
-                                    "result": "Ok",
-                                    "value": {
-                                        "capture_peak": [-15.0, -14.5],
-                                        "capture_rms": [-20.0, -19.5],
-                                        "playback_peak": [-18.0, -17.5],
-                                        "playback_rms": [-23.0, -22.5]
-                                    }
+                                "reply": "GetSignalLevels",
+                                "result": "Ok",
+                                "value": {
+                                    "capture_peak": [-15.0, -14.5],
+                                    "capture_rms": [-20.0, -19.5],
+                                    "playback_peak": [-18.0, -17.5],
+                                    "playback_rms": [-23.0, -22.5]
                                 }
                             }),
                             "ResetClippedSamples" => {
-                                serde_json::json!({"ResetClippedSamples": {"result": "Ok"}})
+                                serde_json::json!({"reply": "ResetClippedSamples", "result": "Ok"})
                             }
                             other => {
-                                serde_json::json!({other: {"result": "Error", "value": "unsupported"}})
+                                serde_json::json!({"reply": other, "result": "Error", "message": "unsupported"})
                             }
                         };
                         if ws
@@ -441,7 +441,7 @@ async fn hardware_backend_websocket_roundtrip() {
     let dsp = DspDevice::with_host_and_port(DspHost::default(), DspPort::new(local_port).unwrap());
 
     let status = dsp.read_status_async().await.unwrap();
-    assert_eq!(status.version.as_deref(), Some("4.1.3"));
+    assert_eq!(status.version.as_deref(), Some("5.0.0-beta.2"));
     assert_eq!(status.config_title.as_deref(), Some("Test Engine"));
     assert_eq!(status.state, ProcessingState::Running);
     assert_eq!(status.processing_load, 4.25);
@@ -477,43 +477,44 @@ async fn hardware_backend_levels_fallback_and_command_error() {
         while let Some(msg) = ws.next().await {
             let Ok(msg) = msg else { break };
             if let Message::Text(text) = msg {
-                let cmd: String = serde_json::from_str(&text).unwrap();
-                let resp = match cmd.as_str() {
+                let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let cmd = req.get("command").and_then(|c| c.as_str()).unwrap();
+                let resp = match cmd {
                     "GetState" => {
-                        serde_json::json!({"GetState": {"result": "Ok", "value": "Running"}})
+                        serde_json::json!({"reply": "GetState", "result": "Ok", "value": "Running"})
                     }
                     "GetProcessingLoad" => {
-                        serde_json::json!({"GetProcessingLoad": {"result": "Ok", "value": 1.5}})
+                        serde_json::json!({"reply": "GetProcessingLoad", "result": "Ok", "value": 1.5})
                     }
                     "GetBufferLevel" => {
-                        serde_json::json!({"GetBufferLevel": {"result": "Ok", "value": 512}})
+                        serde_json::json!({"reply": "GetBufferLevel", "result": "Ok", "value": 512})
                     }
                     "GetRateAdjust" => {
-                        serde_json::json!({"GetRateAdjust": {"result": "Ok", "value": 1.0}})
+                        serde_json::json!({"reply": "GetRateAdjust", "result": "Ok", "value": 1.0})
                     }
                     "GetClippedSamples" => {
-                        serde_json::json!({"GetClippedSamples": {"result": "Ok", "value": 0}})
+                        serde_json::json!({"reply": "GetClippedSamples", "result": "Ok", "value": 0})
                     }
                     "GetStopReason" => {
-                        serde_json::json!({"GetStopReason": {"result": "Ok", "value": "None"}})
+                        serde_json::json!({"reply": "GetStopReason", "result": "Ok", "value": "None"})
                     }
                     "GetSignalLevels" => {
-                        serde_json::json!({"GetSignalLevels": {"result": "Error", "value": "not implemented"}})
+                        serde_json::json!({"reply": "GetSignalLevels", "result": "Error", "message": "not implemented"})
                     }
                     "GetCaptureSignalPeak" => {
-                        serde_json::json!({"GetCaptureSignalPeak": {"result": "Ok", "value": [-10.0, -11.0]}})
+                        serde_json::json!({"reply": "GetCaptureSignalPeak", "result": "Ok", "value": [-10.0, -11.0]})
                     }
                     "GetCaptureSignalRms" => {
-                        serde_json::json!({"GetCaptureSignalRms": {"result": "Ok", "value": [-16.0, -17.0]}})
+                        serde_json::json!({"reply": "GetCaptureSignalRms", "result": "Ok", "value": [-16.0, -17.0]})
                     }
                     "GetPlaybackSignalPeak" => {
-                        serde_json::json!({"GetPlaybackSignalPeak": {"result": "Ok", "value": [-12.0, -13.0]}})
+                        serde_json::json!({"reply": "GetPlaybackSignalPeak", "result": "Ok", "value": [-12.0, -13.0]})
                     }
                     "GetPlaybackSignalRms" => {
-                        serde_json::json!({"GetPlaybackSignalRms": {"result": "Ok", "value": [-18.0, -19.0]}})
+                        serde_json::json!({"reply": "GetPlaybackSignalRms", "result": "Ok", "value": [-18.0, -19.0]})
                     }
                     other => {
-                        serde_json::json!({other: {"result": "Error", "value": "not implemented"}})
+                        serde_json::json!({"reply": other, "result": "Error", "message": "not implemented"})
                     }
                 };
                 ws.send(Message::Text(serde_json::to_string(&resp).unwrap().into()))

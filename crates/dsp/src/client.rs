@@ -1189,8 +1189,7 @@ impl DspDevice {
             + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
             + Unpin,
     {
-        let payload =
-            serde_json::to_string(cmd).map_err(|e| DspError::protocol_error(e.to_string()))?;
+        let payload = serde_json::json!({ "command": cmd }).to_string();
         ws.send(Message::Text(payload.into()))
             .await
             .map_err(|e| DspError::protocol_error(format!("failed to send '{cmd}': {e}")))?;
@@ -1217,27 +1216,30 @@ impl DspDevice {
             DspError::protocol_error(format!("invalid JSON in response to '{cmd}': {e}"))
         })?;
 
-        // Response format: { "<cmd>": { "result": "Ok", "value": ... } }
-        if let Some(cmd_obj) = val.get(cmd) {
-            let res = cmd_obj
+        // CamillaDSP 5.0 internally-tagged response format:
+        // { "reply": "<cmd>", "result": "Ok" | "<Error>", "value": ..., "message": ... }
+        // or { "reply": "Invalid", "error": "..." }
+        let reply = val.get("reply").and_then(|r| r.as_str());
+        if reply == Some(cmd) {
+            let res = val
                 .get("result")
                 .and_then(|r| r.as_str())
                 .unwrap_or("Error");
             if res == "Ok" {
-                Ok(cmd_obj
-                    .get("value")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null))
+                Ok(val.get("value").cloned().unwrap_or(serde_json::Value::Null))
             } else {
-                let err_msg = cmd_obj
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown error");
+                let err_msg = val.get("message").and_then(|v| v.as_str()).unwrap_or(res);
                 Err(DspError::command_failed(cmd, err_msg))
             }
+        } else if reply == Some("Invalid") {
+            let err_msg = val
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("invalid command");
+            Err(DspError::command_failed(cmd, err_msg))
         } else {
             Err(DspError::protocol_error(format!(
-                "missing '{cmd}' key in server response: {val}"
+                "missing or mismatched 'reply' for '{cmd}' in server response: {val}"
             )))
         }
     }

@@ -8,7 +8,7 @@ devices:
   # after it observes a stopped state, so this setting does not by itself
   # guarantee a mute before BCLK stops.
   silence_threshold: -60
-  silence_timeout: 3.0
+  silence_timeout_s: 3.0
   capture:
     type: Alsa
     channels: 2
