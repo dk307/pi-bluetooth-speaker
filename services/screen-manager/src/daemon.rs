@@ -2022,6 +2022,9 @@ impl crate::screen_brightness::LuxSource for WorkerLuxSource {
 /// Long backoff sleeps in the brightness worker would otherwise block the UI
 /// session shutdown (which joins that worker) for up to the full backoff window
 /// when the service is stopped during a backlight boot-order retry.
+///
+/// Public because the shutdown-responsiveness contract is exercised by the
+/// integration tests under `tests/` (M-TEST-UTIL).
 #[cfg(feature = "ui")]
 pub fn sleep_or_stop(duration: Duration, running: &AtomicBool) {
     const SLICE: Duration = Duration::from_millis(100);
@@ -2052,19 +2055,21 @@ fn open_backlight_with_retry(
             Ok((handle, device)) => match handle.read() {
                 Ok(raw) => return Some((handle, device, raw)),
                 Err(e) => {
-                    tracing::warn!(error = %e, device = %device, "Backlight bootstrap read failed");
+                    tracing::debug!(error = %e, device = %device, "Backlight bootstrap read failed");
                     "backlight read"
                 }
             },
             Err(e) => {
-                tracing::warn!(error = %e, "Backlight sysfs device not available yet");
+                tracing::debug!(error = %e, "Backlight sysfs device not available yet");
                 "backlight open"
             }
         };
         if first_failure {
             // A backlight appearing a moment after boot is the expected case
             // this retry loop exists for; `error!` would misreport it as a
-            // fatal subsystem start failure (AGENTS.md §4.6).
+            // fatal subsystem start failure (AGENTS.md §4.6). One warning per
+            // episode, then debug: a missing node must not flood the journal
+            // every 60 s for the lifetime of the service.
             tracing::warn!(
                 stage = attempt,
                 retry_secs = backoff.as_secs(),
@@ -2072,7 +2077,7 @@ fn open_backlight_with_retry(
             );
             first_failure = false;
         } else {
-            tracing::warn!(
+            tracing::debug!(
                 stage = attempt,
                 retry_secs = backoff.as_secs(),
                 "Retrying brightness backlight establishment"

@@ -174,11 +174,11 @@ fn coalescing_a_drag_keeps_only_the_last_percent_and_preserves_order() {
     assert_eq!(
         batch,
         vec![
-            BrightnessCommand::SetPercent(50.0),
             BrightnessCommand::SetAuto(true),
+            BrightnessCommand::SetPercent(50.0),
             BrightnessCommand::ResetBias,
         ],
-        "only the final slider level is written, with AUTO/reset order intact"
+        "only the final slider level is written, at its own position so a later drag still wins over an earlier AUTO toggle"
     );
     assert_eq!(coalesce_commands(Vec::new()), Vec::new());
 }

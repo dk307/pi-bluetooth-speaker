@@ -855,28 +855,28 @@ impl From<BacklightError> for BrightnessError {
 }
 
 /// Collapses a drained batch to its final slider percent while preserving the
-/// relative order of AUTO toggles and bias resets.
+/// position of that percent relative to AUTO toggles and bias resets.
 ///
 /// A slider drag queues one `SetPercent` per pointer event; issuing a sysfs
 /// write for every one of them would mean several slow panel-controller I²C
 /// transactions per tick when only the last level determines the final state.
+/// Superseded percents are dropped *in place*: the surviving one keeps its own
+/// original index, so `[SetPercent(10), SetAuto(true), SetPercent(50)]` becomes
+/// `[SetAuto(true), SetPercent(50)]` and the final manual drag still wins over
+/// the AUTO toggle that preceded it.
 #[must_use]
 pub fn coalesce_commands(drained: Vec<BrightnessCommand>) -> Vec<BrightnessCommand> {
-    let mut percent_idx: Option<usize> = None;
-    let mut out = Vec::with_capacity(drained.len());
-    for command in drained {
-        if matches!(command, BrightnessCommand::SetPercent(_)) {
-            if let Some(idx) = percent_idx {
-                out[idx] = command;
-            } else {
-                percent_idx = Some(out.len());
-                out.push(command);
-            }
-        } else {
-            out.push(command);
-        }
-    }
-    out
+    let last_percent = drained
+        .iter()
+        .rposition(|command| matches!(command, BrightnessCommand::SetPercent(_)));
+    drained
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, command)| match command {
+            BrightnessCommand::SetPercent(_) if Some(index) != last_percent => None,
+            _ => Some(command),
+        })
+        .collect()
 }
 
 /// Publishes a state snapshot into the shared update, recovering a poisoned guard.
@@ -1132,7 +1132,15 @@ pub struct AutoBrightness {
     lux_anchor: f32,
     b_current: f32,
     b_target: f32,
+    /// Best-effort exponent describing the manual bias at the lux where it was
+    /// set (telemetry only). Bounded by `gamma_min..=gamma_max`, which cannot
+    /// express deep dimming in a bright room where the base curve approaches 1.
     manual_gamma: f32,
+    /// Authoritative multiplicative bias over the *current* base curve. Unlike
+    /// the bounded exponent this keeps a manual dim intact when ambient light
+    /// changes: `target = base(now) * factor`, so at the manual lux it equals
+    /// the chosen level and it remains that fraction of the curve afterwards.
+    manual_bias_factor: f32,
     pending_dir: PendingDir,
     pending_elapsed: f32,
 }
@@ -1142,7 +1150,7 @@ impl AutoBrightness {
     #[must_use]
     pub fn new(initial_lux: f32, cfg: BrightnessConfig) -> Self {
         let lux = sanitize_lux(initial_lux, 0.0);
-        let b = target_for(cfg, 1.0, lux);
+        let b = base_curve_for(cfg, lux);
         Self {
             cfg,
             lux_ema: lux,
@@ -1150,6 +1158,7 @@ impl AutoBrightness {
             b_current: b,
             b_target: b,
             manual_gamma: 1.0,
+            manual_bias_factor: 1.0,
             pending_dir: PendingDir::None,
             pending_elapsed: 0.0,
         }
@@ -1164,28 +1173,37 @@ impl AutoBrightness {
     /// Computes the perceptual target brightness for a lux sample under the manual bias.
     #[must_use]
     pub fn target_from_lux(&self, lux: f32) -> f32 {
-        target_for(self.cfg, self.manual_gamma, lux)
+        (base_curve_for(self.cfg, lux) * self.manual_bias_factor).clamp(self.cfg.b_min, 1.0)
     }
 
-    /// Applies a user brightness value as a gamma bias over the smoothed lux base.
+    /// Applies a user brightness value as a multiplicative bias over the
+    /// smoothed lux base.
     ///
     /// The perceptual level snaps to `user_b`; a non-finite value is ignored.
+    /// The bias is stored as `user_b / base(now)` rather than a bounded gamma
+    /// exponent, so a manual dim in a bright room (where `base ≈ 1`) is not
+    /// silently undone at the next hysteresis re-anchor.
     pub fn on_manual_change(&mut self, user_b: f32) {
         if !user_b.is_finite() {
             return;
         }
         let clamped = user_b.clamp(self.cfg.b_min, 1.0);
         let base = self.base_curve(self.lux_ema);
-        if base > DEGENERATE_EPSILON && (base - 1.0).abs() > DEGENERATE_EPSILON && base.is_finite()
-        {
+        if base > DEGENERATE_EPSILON && base.is_finite() {
+            // Telemetry only: the bounded exponent is kept for diagnostics, but
+            // `manual_bias_factor` is the value that actually steers the target.
             let gamma = clamped.ln() / base.ln();
             self.manual_gamma = if gamma.is_finite() {
                 gamma.clamp(self.cfg.gamma_min, self.cfg.gamma_max)
             } else {
                 1.0
             };
+            // base is clamped to b_min..=1, so this factor is always finite and
+            // bounded (b_min/1 ..= 1/b_min) without an arbitrary extra clamp.
+            self.manual_bias_factor = clamped / base;
         } else {
             self.manual_gamma = 1.0;
+            self.manual_bias_factor = 1.0;
         }
         self.b_current = clamped;
         self.b_target = clamped;
@@ -1193,9 +1211,10 @@ impl AutoBrightness {
         self.pending_elapsed = 0.0;
     }
 
-    /// Clears the manual gamma bias while preserving the current brightness level.
+    /// Clears the manual bias while preserving the current brightness level.
     pub fn reset_manual_bias(&mut self) {
         self.manual_gamma = 1.0;
+        self.manual_bias_factor = 1.0;
         self.b_target = self.target_from_lux(self.lux_ema);
     }
 
@@ -1304,10 +1323,6 @@ fn base_curve_for(cfg: BrightnessConfig, lux: f32) -> f32 {
     // infinity saturates to the configured ceiling through the final clamp.
     let safe_lux = lux.max(0.0);
     (BASE_CURVE_SLOPE * (safe_lux + 1.0).ln() + cfg.b_min).clamp(cfg.b_min, 1.0)
-}
-
-fn target_for(cfg: BrightnessConfig, gamma: f32, lux: f32) -> f32 {
-    base_curve_for(cfg, lux).powf(gamma).clamp(cfg.b_min, 1.0)
 }
 
 const _: () = {

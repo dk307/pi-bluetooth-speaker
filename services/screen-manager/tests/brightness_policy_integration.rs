@@ -185,6 +185,30 @@ fn manual_change_sets_gamma_and_snap_then_reset_clears_gamma_only() {
 }
 
 #[test]
+fn bright_room_manual_dim_survives_hysteresis_reanchor() {
+    let mut state = AutoBrightness::new(10_000.0, DEFAULT_BRIGHTNESS_CONFIG);
+    state.on_manual_change(0.3);
+    assert!((state.brightness() - 0.3).abs() < 1e-6);
+
+    // A large sustained ambient rise re-anchors the auto curve. The bounded
+    // gamma exponent alone cannot express 30% when base ~= 1; the multiplicative
+    // bias must keep the user's level instead of slewing back to full.
+    for _ in 0..40 {
+        let _ = state.update(20_000.0, 0.5);
+    }
+    assert!(
+        state.target() <= 0.32,
+        "manual dim was undone in a bright room: target={}",
+        state.target()
+    );
+    assert!(
+        state.brightness() <= 0.32,
+        "manual dim was undone in a bright room: brightness={}",
+        state.brightness()
+    );
+}
+
+#[test]
 fn manual_change_clamps_bounds_and_ignores_non_finite_input() {
     let mut state = AutoBrightness::new(200.0, DEFAULT_BRIGHTNESS_CONFIG);
 
