@@ -18,7 +18,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 #[cfg(feature = "ui")]
-use crate::config::CoreConfig;
+use crate::config::{CoreConfig, ManualBrightnessPercent};
 #[cfg(feature = "ui")]
 use crate::ui::{
     AppShell, BootCheckLine, BootCheckStatus, BootCheckUpdate, BootProbe, BtDeviceRow,
@@ -350,6 +350,12 @@ pub struct ShellInit {
     pub commands: speaker_bluetooth::TransportCommandQueue,
     /// Queue bridging render-thread volume/mute actions to the `amp-volume` worker.
     pub amp_commands: crate::volume::AmpVolumeCommandQueue,
+    /// Queue bridging render-thread brightness actions to the `brightness` worker.
+    pub brightness_commands: crate::screen_brightness::BrightnessCommandQueue,
+    /// Initial auto-mode preference from the appliance configuration.
+    pub brightness_auto_enabled: bool,
+    /// Initial manual percent used when auto mode is disabled at boot.
+    pub brightness_manual_percent: ManualBrightnessPercent,
     /// Queue bridging render-thread Devices-screen actions to the `bt-monitor` worker.
     pub device_commands: speaker_bluetooth::DeviceCommandQueue,
 }
@@ -387,6 +393,11 @@ pub fn init_shell_with_config(
     // presence, so the queue is wired unconditionally.
     let amp_commands = crate::volume::AmpVolumeCommandQueue::new();
     shell.wire_amp_volume(&amp_commands);
+    // Brightness is controlled by the embedded engine on the brightness
+    // worker (single sysfs writer), so its queue is wired unconditionally,
+    // like the amp queue.
+    let brightness_commands = crate::screen_brightness::BrightnessCommandQueue::new();
+    shell.wire_brightness(&brightness_commands);
     // The Devices screen is always present in the shell, so its command queue
     // is wired unconditionally (parity with the amp queue): navigation
     // callbacks stay functional even when the D-Bus connection failed at boot.
@@ -419,6 +430,9 @@ pub fn init_shell_with_config(
         bt: maybe_bt,
         commands,
         amp_commands,
+        brightness_commands,
+        brightness_auto_enabled: config.auto_brightness_enabled,
+        brightness_manual_percent: config.brightness_manual_percent,
         device_commands,
     }
 }
@@ -625,6 +639,9 @@ pub struct BtSharedUpdate {
     /// Authoritative amp level/mute snapshot, if it changed since the last
     /// publish (pushed by the dedicated `amp-volume` worker).
     pub amp_volume: Option<crate::volume::AmpVolumeState>,
+    /// Authoritative display brightness snapshot, published by the dedicated
+    /// `brightness` worker (never read from D-Bus on the render thread).
+    pub brightness: Option<crate::screen_brightness::BrightnessState>,
     /// Bluetooth Devices screen delta (rows/discovery/pairing/toast), if any
     /// screen-visible state changed since the last publish.
     pub devices: Option<crate::ui::BtDevicesUpdate>,
@@ -1748,6 +1765,7 @@ impl BtMonitorState {
             || update.pcm.is_some()
             || update.cover.is_some()
             || update.amp_volume.is_some()
+            || update.brightness.is_some()
             || update.devices.is_some()
         {
             // A poisoned mutex is recovered (not silently dropped): the snapshot
@@ -1768,6 +1786,9 @@ impl BtMonitorState {
             }
             if update.amp_volume.is_some() {
                 lock.amp_volume = update.amp_volume;
+            }
+            if update.brightness.is_some() {
+                lock.brightness = update.brightness;
             }
             if let Some(mut next) = update.devices {
                 if let Some(prev) = lock.devices.take() {
@@ -1956,6 +1977,221 @@ pub fn join_amp_volume_worker(amp_worker: std::io::Result<std::thread::JoinHandl
     }
 }
 
+/// Joins the `brightness` worker, re-raising a worker panic (fail-fast).
+#[cfg(feature = "ui")]
+pub fn join_brightness_worker(brightness_worker: std::io::Result<std::thread::JoinHandle<()>>) {
+    match brightness_worker {
+        Ok(handle) => {
+            if let Err(panic) = handle.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        Err(e) => tracing::error!(
+            error = %e,
+            "Failed to spawn brightness worker thread; screen brightness disabled"
+        ),
+    }
+}
+
+/// Ambient source used by the brightness worker so a missing BH1750 does not
+/// also take down manual brightness control.
+#[cfg(feature = "ui")]
+enum WorkerLuxSource {
+    /// Live or mocked BH1750 sensor.
+    Hardware(speaker_hardware::LightSensor),
+    /// Sensor could not be opened; auto mode stays faulted while manual writes
+    /// keep working.
+    Unavailable,
+}
+
+#[cfg(feature = "ui")]
+impl crate::screen_brightness::LuxSource for WorkerLuxSource {
+    fn read_lux(&self) -> Result<f32, crate::screen_brightness::BrightnessError> {
+        match self {
+            Self::Hardware(sensor) => crate::screen_brightness::LuxSource::read_lux(sensor),
+            Self::Unavailable => crate::screen_brightness::LuxSource::read_lux(
+                &crate::screen_brightness::UnavailableLuxSource,
+            ),
+        }
+    }
+}
+
+/// Sleeps for `duration` in short slices, returning early as soon as `running`
+/// is cleared.
+///
+/// Long backoff sleeps in the brightness worker would otherwise block the UI
+/// session shutdown (which joins that worker) for up to the full backoff window
+/// when the service is stopped during a backlight boot-order retry.
+///
+/// Public because the shutdown-responsiveness contract is exercised by the
+/// integration tests under `tests/` (M-TEST-UTIL).
+#[cfg(feature = "ui")]
+pub fn sleep_or_stop(duration: Duration, running: &AtomicBool) {
+    const SLICE: Duration = Duration::from_millis(100);
+    let mut remaining = duration;
+    while remaining > Duration::ZERO && running.load(Ordering::Relaxed) {
+        let step = remaining.min(SLICE);
+        std::thread::sleep(step);
+        remaining = remaining.saturating_sub(step);
+    }
+}
+
+/// Opens the appliance backlight, retrying while the device has not appeared
+/// yet (a boot-order race) with exponential backoff capped at 60 s.
+///
+/// Returns `None` if the worker was asked to stop while waiting, so shutdown
+/// never blocks on a sysfs device that may never appear.
+#[cfg(feature = "ui")]
+fn open_backlight_with_retry(
+    running: &AtomicBool,
+) -> Option<(speaker_hardware::Backlight, Box<str>, u32)> {
+    let mut backoff = Duration::from_secs(1);
+    let mut first_failure = true;
+    loop {
+        if !running.load(Ordering::Relaxed) {
+            return None;
+        }
+        let attempt = match speaker_hardware::Backlight::with_appliance_default() {
+            Ok((handle, device)) => match handle.read() {
+                Ok(raw) => return Some((handle, device, raw)),
+                Err(e) => {
+                    tracing::debug!(error = %e, device = %device, "Backlight bootstrap read failed");
+                    "backlight read"
+                }
+            },
+            Err(e) => {
+                tracing::debug!(error = %e, "Backlight sysfs device not available yet");
+                "backlight open"
+            }
+        };
+        if first_failure {
+            // A backlight appearing a moment after boot is the expected case
+            // this retry loop exists for; `error!` would misreport it as a
+            // fatal subsystem start failure (AGENTS.md §4.6). One warning per
+            // episode, then debug: a missing node must not flood the journal
+            // every 60 s for the lifetime of the service.
+            tracing::warn!(
+                stage = attempt,
+                retry_secs = backoff.as_secs(),
+                "Brightness worker waiting for backlight"
+            );
+            first_failure = false;
+        } else {
+            tracing::debug!(
+                stage = attempt,
+                retry_secs = backoff.as_secs(),
+                "Retrying brightness backlight establishment"
+            );
+        }
+        // Short slices re-check `running` so joining the worker on shutdown
+        // cannot stall for the whole backoff window.
+        sleep_or_stop(backoff, running);
+        if !running.load(Ordering::Relaxed) {
+            return None;
+        }
+        backoff = (backoff * 2).min(Duration::from_secs(60));
+    }
+}
+
+/// Spawns the embedded brightness control-loop worker thread.
+///
+/// The worker owns the BH1750 sensor and the backlight sysfs handle, so no
+/// separate daemon or D-Bus service is involved. A missing ambient sensor only
+/// disables the auto path; manual slider control still drives the backlight.
+/// Mocked sessions use in-memory hardware so host tests never touch I²C or sysfs.
+///
+/// # Errors
+/// Returns the underlying thread-spawn I/O error.
+#[cfg(feature = "ui")]
+pub fn spawn_brightness_worker(
+    shared: &Arc<Mutex<BtSharedUpdate>>,
+    running: &Arc<AtomicBool>,
+    brightness_commands: &crate::screen_brightness::BrightnessCommandQueue,
+    mocked: bool,
+    auto_enabled: bool,
+    manual_percent: ManualBrightnessPercent,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let shared = Arc::clone(shared);
+    let running = Arc::clone(running);
+    let brightness_commands = brightness_commands.clone();
+    let policy = crate::screen_brightness::default_policy();
+    std::thread::Builder::new()
+        .name("brightness".into())
+        .spawn(move || {
+            if !running.load(Ordering::Relaxed) {
+                return;
+            }
+            let (sensor, backlight, sensor_available, initial_raw) = if mocked {
+                let (sensor, _sensor_ctrl) = speaker_hardware::LightSensor::new_mocked();
+                let (backlight, _backlight_ctrl) = speaker_hardware::Backlight::new_mocked();
+                let initial_raw = match backlight.read() {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Mock backlight read failed; using boot default");
+                        100
+                    }
+                };
+                (WorkerLuxSource::Hardware(sensor), backlight, true, initial_raw)
+            } else {
+                // The ambient sensor is optional: keep the worker alive with a
+                // faulting source so the manual slider remains functional.
+                let (sensor, sensor_available) = match speaker_hardware::LightSensor::new() {
+                    Ok(sensor) => (WorkerLuxSource::Hardware(sensor), true),
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to open BH1750 sensor; auto brightness disabled, manual brightness remains available");
+                        (WorkerLuxSource::Unavailable, false)
+                    }
+                };
+                let Some((backlight, device, initial_raw)) = open_backlight_with_retry(&running)
+                else {
+                    return;
+                };
+                tracing::info!(device = %device, "Backlight sysfs device selected");
+                (sensor, backlight, sensor_available, initial_raw)
+            };
+            // A transient first lux conversion must not kill the worker: seed
+            // the policy nominally and let the normal tick path report the
+            // sensor fault while manual brightness stays available.
+            let initial_lux = if sensor_available {
+                match crate::screen_brightness::LuxSource::read_lux(&sensor) {
+                    Ok(lux) => lux,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Initial ambient read failed; using nominal seed");
+                        50.0
+                    }
+                }
+            } else {
+                50.0
+            };
+            let mut engine = crate::screen_brightness::BrightnessEngine::new_seeded_with_raw(
+                sensor,
+                backlight,
+                policy,
+                auto_enabled,
+                initial_lux,
+                initial_raw,
+            );
+            if !auto_enabled {
+                let command = crate::screen_brightness::BrightnessCommand::SetPercent(f32::from(
+                    manual_percent.value(),
+                ));
+                let _ = engine.tick(
+                    std::time::Instant::now(),
+                    0.0,
+                    &[command],
+                    crate::screen_brightness::BRIGHTNESS_IDLE_RESET,
+                );
+            }
+            crate::screen_brightness::run_worker(
+                &mut engine,
+                &shared,
+                &brightness_commands,
+                &running,
+                crate::screen_brightness::BRIGHTNESS_IDLE_RESET,
+            );
+        })
+}
+
 /// Spawns the `bt-monitor` worker thread for a live Bluetooth device.
 ///
 /// # Errors
@@ -2080,6 +2316,9 @@ pub fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtShared
         }
         if let Some(amp) = lock.amp_volume.take() {
             shell.apply_amp_volume(&amp);
+        }
+        if let Some(brightness) = lock.brightness.take() {
+            shell.apply_brightness(&brightness);
         }
     }
 }

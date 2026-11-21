@@ -206,6 +206,61 @@ impl From<VolumeStepPercent> for u8 {
     }
 }
 
+/// Strongly typed manual brightness percentage (`0..=100`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub struct ManualBrightnessPercent(u8);
+
+impl ManualBrightnessPercent {
+    /// Production default manual level (`100%`).
+    pub const DEFAULT: Self = Self::new(100);
+
+    /// Const constructor validated against `0..=100`.
+    ///
+    /// # Panics
+    /// Panics if `percent` is greater than `100`.
+    #[must_use]
+    pub const fn new(percent: u8) -> Self {
+        assert!(
+            percent <= 100,
+            "brightness_manual_percent out of range 0..=100"
+        );
+        Self(percent)
+    }
+
+    /// Returns the raw percentage (`0..=100`).
+    #[must_use]
+    pub const fn value(self) -> u8 {
+        self.0
+    }
+}
+
+impl Default for ManualBrightnessPercent {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl TryFrom<u8> for ManualBrightnessPercent {
+    type Error = ConfigError;
+
+    fn try_from(percent: u8) -> Result<Self, Self::Error> {
+        if percent <= 100 {
+            Ok(Self::new(percent))
+        } else {
+            Err(ConfigError::invalid(format!(
+                "invalid brightness_manual_percent '{percent}': expected 0..=100"
+            )))
+        }
+    }
+}
+
+impl From<ManualBrightnessPercent> for u8 {
+    fn from(percent: ManualBrightnessPercent) -> Self {
+        percent.0
+    }
+}
+
 /// Strongly typed Volume HUD auto-dismiss timeout in milliseconds (`250..=30_000`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u32", into = "u32")]
@@ -483,7 +538,7 @@ impl TitleDisplayMode {
 /// (e.g. `{}` or `{"theme": "peppy"}`) remain valid. Domain newtypes enforce
 /// allowed bounds at the deserialization boundary, so an invalid value cannot
 /// inhabit this struct.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CoreConfig {
     /// Theme preset override applied on startup; `None` keeps the built-in default.
@@ -503,6 +558,27 @@ pub struct CoreConfig {
     pub codec_hud_timeout_ms: CodecHudTimeoutMs,
     /// Touch UI font scale factor (`1.0..=1.35`, default `1.15`).
     pub font_scale: FontScale,
+    /// Whether ambient light drives screen brightness automatically.
+    pub auto_brightness_enabled: bool,
+    /// Last user-selected brightness percent while in manual mode (`0..=100`).
+    pub brightness_manual_percent: ManualBrightnessPercent,
+}
+
+impl Default for CoreConfig {
+    fn default() -> Self {
+        Self {
+            theme: None,
+            marquee_fps: MarqueeFps::default(),
+            title_display_mode: TitleDisplayMode::default(),
+            volume_step_percent: VolumeStepPercent::default(),
+            volume_hud_timeout_ms: VolumeHudTimeoutMs::default(),
+            volume_hud_fade_ms: VolumeHudFadeMs::default(),
+            codec_hud_timeout_ms: CodecHudTimeoutMs::default(),
+            font_scale: FontScale::default(),
+            auto_brightness_enabled: true,
+            brightness_manual_percent: ManualBrightnessPercent::DEFAULT,
+        }
+    }
 }
 
 impl CoreConfig {

@@ -2,6 +2,8 @@
 
 pub mod config;
 pub mod daemon;
+#[cfg(feature = "ui")]
+pub mod screen_brightness;
 pub mod settings_catalog;
 #[cfg(feature = "ui")]
 pub mod ui;

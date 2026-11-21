@@ -10,15 +10,32 @@ use std::cell::{Cell, RefCell};
 use std::fmt::{self, Debug, Formatter};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
+
+/// Optimistic-command settle marker. Each controlled field is held for the
+/// settle window only when the command that set it carried a fresh value for it;
+/// the other field continues to track authoritative snapshots.
+#[derive(Debug, Clone, Copy)]
+struct BrightnessSettleSnapshot {
+    at: Instant,
+    percent: Option<f32>,
+    auto: Option<bool>,
+}
+
+type BrightnessSettle = Rc<Cell<Option<BrightnessSettleSnapshot>>>;
 
 use crate::config::{
     CodecHudTimeoutMs, CoreConfig, DEFAULT_FONT_SCALE, DEFAULT_VOLUME_STEP_PERCENT, FontScale,
     MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
     MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE, MIN_VOLUME_HUD_TIMEOUT_MS,
-    MIN_VOLUME_STEP_PERCENT, MarqueeFps, TitleDisplayMode, VolumeHudFadeMs, VolumeHudTimeoutMs,
-    VolumeStepPercent,
+    MIN_VOLUME_STEP_PERCENT, ManualBrightnessPercent, MarqueeFps, TitleDisplayMode,
+    VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+};
+use crate::screen_brightness::{
+    BRIGHTNESS_SETTLE_WINDOW, BrightnessCommand, BrightnessCommandQueue, BrightnessState,
 };
 use crate::settings_catalog::{
     SETTINGS_CATALOG, SettingControl, SettingId, SettingTier, apply_step, apply_toggle, row_state,
@@ -252,6 +269,12 @@ pub struct AppShell {
     last_amp_volume: Cell<Option<crate::volume::AmpVolumeState>>,
     transport_commands: Rc<RefCell<Option<speaker_bluetooth::TransportCommandQueue>>>,
     amp_commands: Rc<RefCell<Option<crate::volume::AmpVolumeCommandQueue>>>,
+    brightness_commands: Rc<RefCell<Option<BrightnessCommandQueue>>>,
+    /// Set when the overlay last issued an optimistic brightness command. Each
+    /// field (percent / AUTO) is held for the settle window only when that
+    /// command supplied it; after the window expires the next authoritative
+    /// snapshot is always applied, forcing convergence (AGENTS.md §4.5).
+    last_brightness_command: BrightnessSettle,
     device_commands: Rc<RefCell<Option<speaker_bluetooth::DeviceCommandQueue>>>,
     bt_devices: Rc<RefCell<crate::ui::BtDevicesController>>,
     last_toggle: Rc<Cell<std::time::Instant>>,
@@ -309,6 +332,8 @@ impl AppShell {
             last_amp_volume: Cell::new(None),
             transport_commands: Rc::new(RefCell::new(None)),
             amp_commands: Rc::new(RefCell::new(None)),
+            brightness_commands: Rc::new(RefCell::new(None)),
+            last_brightness_command: Rc::new(Cell::new(None)),
             device_commands: Rc::new(RefCell::new(None)),
             bt_devices: Rc::new(RefCell::new(crate::ui::BtDevicesController::default())),
             last_toggle: Rc::new(Cell::new(
@@ -361,6 +386,8 @@ impl AppShell {
             config.codec_hud_timeout_ms.value(),
             "codec_hud_timeout_ms",
         ));
+        window.set_auto_brightness_enabled(config.auto_brightness_enabled);
+        window.set_brightness_value(f32::from(config.brightness_manual_percent.value()));
     }
 
     fn build_setting_rows(config: &CoreConfig, tier: SettingTier) -> Vec<SettingRowItem> {
@@ -557,6 +584,40 @@ impl AppShell {
         self.window.invoke_dismiss_codec_hud();
     }
 
+    /// Returns whether the Brightness HUD overlay is currently visible.
+    #[must_use]
+    pub fn is_brightness_hud_visible(&self) -> bool {
+        self.window.get_brightness_hud_visible()
+    }
+
+    /// Returns the current opacity (`0.0..=1.0`) of the Brightness HUD overlay.
+    #[must_use]
+    pub fn brightness_hud_opacity(&self) -> f32 {
+        self.window.get_brightness_hud_opacity()
+    }
+
+    /// Returns `true` while the Brightness HUD is visible or still fading out.
+    #[must_use]
+    pub fn is_brightness_hud_active(&self) -> bool {
+        self.is_brightness_hud_visible() || self.brightness_hud_opacity() > 0.01
+    }
+
+    /// Opens the Brightness HUD overlay and resets its auto-dismiss countdown.
+    pub fn show_brightness_hud(&self) {
+        self.window.invoke_show_brightness_hud();
+    }
+
+    /// Immediately begins dismissing the Brightness HUD overlay.
+    pub fn dismiss_brightness_hud(&self) {
+        self.window.invoke_dismiss_brightness_hud();
+    }
+
+    /// Returns `true` while the Brightness HUD owns the keyboard focus.
+    #[must_use]
+    pub fn brightness_hud_has_focus(&self) -> bool {
+        self.window.get_brightness_hud_has_focus()
+    }
+
     /// Publishes the blurred snapshot that the overlay panels render behind
     /// themselves, replacing the previous screen with a frosted backdrop.
     ///
@@ -612,18 +673,35 @@ impl AppShell {
         let spawned = std::thread::Builder::new()
             .name("screen-settings-persist".into())
             .spawn(move || {
-                for config in rx {
-                    // M-PANIC-ON-BUG: a worker crash is a bug, not a
-                    // recoverable I/O hiccup — re-raise instead of silently
-                    // killing the worker and dropping queued snapshots.
-                    // A failed save is logged by persist_config and dropped:
-                    // the worker must survive to persist the next edit.
+                // M-PANIC-ON-BUG: a worker crash is a bug, not a recoverable
+                // I/O hiccup — re-raise instead of silently killing the worker.
+                // A failed save is logged by persist_config and dropped: the
+                // worker must survive to persist the next edit.
+                let save = |config: &CoreConfig| {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let _ = Self::persist_config(&config, &worker_path);
+                        let _ = Self::persist_config(config, &worker_path);
                     }));
                     if let Err(p) = result {
                         std::panic::resume_unwind(p);
                     }
+                };
+
+                // Slider drags enqueue a snapshot per pointer-move. Coalesce
+                // them inside the worker so only the final value hits the SD
+                // card; the 120 ms quiet period is imperceptible to users.
+                while let Ok(config) = rx.recv() {
+                    let mut latest = config;
+                    loop {
+                        match rx.recv_timeout(Duration::from_millis(120)) {
+                            Ok(config) => latest = config,
+                            Err(RecvTimeoutError::Timeout) => break,
+                            Err(RecvTimeoutError::Disconnected) => {
+                                save(&latest);
+                                return;
+                            }
+                        }
+                    }
+                    save(&latest);
                 }
             });
         match spawned {
@@ -676,7 +754,25 @@ impl AppShell {
             codec_hud_timeout_ms: Self::codec_hud_timeout_from_window(window),
             font_scale: FontScale::try_from(window.global::<TouchScale>().get_clamped_font_scale())
                 .unwrap_or_default(),
+            auto_brightness_enabled: window.get_auto_brightness_enabled(),
+            brightness_manual_percent: Self::brightness_percent_from_window(window),
         }
+    }
+
+    /// Reads the overlay brightness percent, sanitizing NaN and clamping to `0..=100`.
+    fn brightness_percent_from_window(window: &MainWindow) -> ManualBrightnessPercent {
+        let value = window.get_brightness_value();
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped 0.0..=100.0 fits in u8"
+        )]
+        let clamped: u8 = if value.is_finite() {
+            value.round().clamp(0.0, 100.0) as u8
+        } else {
+            100
+        };
+        ManualBrightnessPercent::new(clamped)
     }
 
     /// Saves a config snapshot to `path` and logs the outcome with structured fields.
@@ -696,6 +792,8 @@ impl AppShell {
                 volume_hud_timeout_ms = config.volume_hud_timeout_ms.value(),
                 volume_hud_fade_ms = config.volume_hud_fade_ms.value(),
                 codec_hud_timeout_ms = config.codec_hud_timeout_ms.value(),
+                auto_brightness = config.auto_brightness_enabled,
+                brightness_percent = config.brightness_manual_percent.value(),
                 "Screen settings saved"
             ),
             Err(e) => tracing::error!(
@@ -1076,6 +1174,80 @@ impl AppShell {
         *self.amp_commands.borrow_mut() = Some(commands.clone());
     }
 
+    /// Applies an authoritative brightness snapshot published by the worker.
+    ///
+    /// The ambient lux readout always updates. During the settle window, each
+    /// field supplied by the last optimistic command (slider percent and/or
+    /// AUTO toggle) is held so an in-flight stale snapshot cannot yank the thumb
+    /// back or flip the AUTO/MANUAL chip; once the window expires the next
+    /// authoritative snapshot is always applied, forcing convergence even if a
+    /// write failed.
+    pub fn apply_brightness(&self, state: &BrightnessState) {
+        self.window
+            .set_ambient_lux(state.ambient_lux.unwrap_or(f32::NAN));
+        self.window
+            .set_ambient_lux_available(state.ambient_lux.is_some());
+        let authoritative_percent = state.brightness_percent.clamp(0.0, 100.0);
+        let (hold_percent, hold_auto) = self
+            .last_brightness_command
+            .get()
+            .filter(|marker| marker.at.elapsed() < BRIGHTNESS_SETTLE_WINDOW)
+            .map_or((false, false), |marker| {
+                (marker.percent.is_some(), marker.auto.is_some())
+            });
+        if !hold_auto {
+            self.window.set_auto_brightness_enabled(state.auto_enabled);
+        }
+        if !hold_percent {
+            self.window.set_brightness_value(authoritative_percent);
+        }
+        tracing::debug!(
+            auto_enabled = state.auto_enabled,
+            brightness_percent = state.brightness_percent,
+            ambient_lux = ?state.ambient_lux,
+            hold_percent,
+            hold_auto,
+            "Applied brightness state"
+        );
+    }
+
+    /// Wires the brightness overlay callbacks to the dedicated worker queue.
+    pub fn wire_brightness(&self, commands: &BrightnessCommandQueue) {
+        *self.brightness_commands.borrow_mut() = Some(commands.clone());
+    }
+
+    /// Queues one brightness command, marking the optimistic settle window.
+    fn push_brightness_command(
+        queue: &Rc<RefCell<Option<BrightnessCommandQueue>>>,
+        settle: &BrightnessSettle,
+        command: BrightnessCommand,
+    ) {
+        if let Some(commands) = queue.borrow().as_ref() {
+            commands.push(command);
+        } else {
+            tracing::debug!(?command, "Brightness command dropped (no queue wired)");
+        }
+        // A slider drag is a manual takeover (hold percent and AUTO off); an
+        // AUTO toggle holds only the AUTO chip so auto-driven percent changes
+        // stay live. ResetBias is paired with SetAuto, so leave its marker intact.
+        let marker = match command {
+            BrightnessCommand::SetPercent(pct) => Some(BrightnessSettleSnapshot {
+                at: Instant::now(),
+                percent: Some(pct),
+                auto: Some(false),
+            }),
+            BrightnessCommand::SetAuto(enabled) => Some(BrightnessSettleSnapshot {
+                at: Instant::now(),
+                percent: None,
+                auto: Some(enabled),
+            }),
+            BrightnessCommand::ResetBias => None,
+        };
+        if let Some(marker) = marker {
+            settle.set(Some(marker));
+        }
+    }
+
     /// Updates the mini peak meter visualization ratios (0.0 to 1.0).
     pub fn set_peak_levels(&self, left: f32, right: f32) {
         let clamp_ratio = |val: f32| {
@@ -1448,6 +1620,8 @@ impl AppShell {
         let win = self.window.as_weak();
         let models = self.settings_models.clone();
         let persist_tx = Rc::clone(&self.persist_tx);
+        let setting_brightness_cmds = Rc::clone(&self.brightness_commands);
+        let setting_brightness_settle = Rc::clone(&self.last_brightness_command);
         self.window.on_setting_toggle(move |id, right_selected| {
             let Some(setting_id) = SettingId::from_key(id.as_str()) else {
                 tracing::warn!(setting_id = %id, "ignoring unknown setting_toggle id");
@@ -1459,6 +1633,23 @@ impl AppShell {
                     Self::apply_config_to_window(&w, &config);
                     Self::sync_settings_models_for(&w, &models);
                     Self::persist_window_state(&w, &persist_tx);
+                    if setting_id == SettingId::AutoBrightness {
+                        Self::push_brightness_command(
+                            &setting_brightness_cmds,
+                            &setting_brightness_settle,
+                            BrightnessCommand::SetAuto(right_selected),
+                        );
+                        if !right_selected {
+                            // Match the HUD toggle: dropping AUTO also drops
+                            // the learned gamma bias so re-enabling AUTO
+                            // returns to the unmodified ambient curve.
+                            Self::push_brightness_command(
+                                &setting_brightness_cmds,
+                                &setting_brightness_settle,
+                                BrightnessCommand::ResetBias,
+                            );
+                        }
+                    }
                 }
             }
         });
@@ -1646,7 +1837,59 @@ impl AppShell {
         });
 
         self.window.on_night_mode_clicked(|| {
-            tracing::info!("Night mode clicked");
+            tracing::debug!("Brightness button clicked; Brightness HUD opened");
+        });
+
+        let win = self.window.as_weak();
+        let brightness_cmds = Rc::clone(&self.brightness_commands);
+        let brightness_settle = Rc::clone(&self.last_brightness_command);
+        let brightness_persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_brightness_changed(move |value| {
+            let Some(w) = win.upgrade() else {
+                return;
+            };
+            let clamped_f32 = if value.is_finite() {
+                value.clamp(0.0, 100.0)
+            } else {
+                0.0
+            };
+            w.set_brightness_value(clamped_f32);
+            w.set_auto_brightness_enabled(false);
+            Self::push_brightness_command(
+                &brightness_cmds,
+                &brightness_settle,
+                BrightnessCommand::SetPercent(clamped_f32),
+            );
+            Self::persist_window_state(&w, &brightness_persist_tx);
+            tracing::debug!(
+                brightness_percent = clamped_f32,
+                "Manual brightness changed"
+            );
+        });
+
+        let win = self.window.as_weak();
+        let brightness_cmds = Rc::clone(&self.brightness_commands);
+        let auto_settle = Rc::clone(&self.last_brightness_command);
+        let auto_persist_tx = Rc::clone(&self.persist_tx);
+        self.window.on_auto_brightness_toggled(move |enabled| {
+            let Some(w) = win.upgrade() else {
+                return;
+            };
+            w.set_auto_brightness_enabled(enabled);
+            Self::push_brightness_command(
+                &brightness_cmds,
+                &auto_settle,
+                BrightnessCommand::SetAuto(enabled),
+            );
+            if !enabled {
+                Self::push_brightness_command(
+                    &brightness_cmds,
+                    &auto_settle,
+                    BrightnessCommand::ResetBias,
+                );
+            }
+            Self::persist_window_state(&w, &auto_persist_tx);
+            tracing::info!(auto_enabled = enabled, "Auto brightness toggled");
         });
 
         let win = self.window.as_weak();

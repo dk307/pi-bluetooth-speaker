@@ -69,7 +69,7 @@ pi-bluetooth-speaker/
 │   └── bluetooth/            # Bluez, BlueALSA, BIP cover art protocol (speaker-bluetooth)
 ├── services/                 # Appliance background daemons
 │   ├── README.md             # Service architecture and roadmap
-│   ├── screen-manager/       # Touchscreen Appliance Console & UI (screen-manager.service)
+│   ├── screen-manager/       # Touchscreen Appliance Console & UI, incl. ambient auto-brightness loop (screen-manager.service)
 │   └── bt-manager/           # Bluetooth Manager daemon, active-source arbiter & BIP cover art service (bt-manager.service)
 ├── tools/                    # Hardware diagnostic utilities
 │   └── diagnostics/          # CLI probes: amp-info, bt-info, dsp-info, encoder-read, light-read, temp-read
