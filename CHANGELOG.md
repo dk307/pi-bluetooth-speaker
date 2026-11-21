@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [2.3.0](https://github.com/dk307/pi-bluetooth-speaker/compare/v2.2.0...v2.3.0) - 2026-11-21
+
+### Added
+
+- *(brightness)* ambient auto-brightness and HUD in screen-manager ([#91](https://github.com/dk307/pi-bluetooth-speaker/pull/91))
+- *(dsp)* upgrade to CamillaDSP 5.0.0-beta.2, dynamic sample-rate switching, and SubscribeState ([#95](https://github.com/dk307/pi-bluetooth-speaker/pull/95))
+
+### Fixed
+
+- *(screen-manager)* restore Material 3 button press feedback on now-playing ([#94](https://github.com/dk307/pi-bluetooth-speaker/pull/94))
+- *(now-playing)* handle unknown track timeline instead of rendering 1193 ([#92](https://github.com/dk307/pi-bluetooth-speaker/pull/92))
+
 ## [2.2.0](https://github.com/dk307/pi-bluetooth-speaker/compare/v2.1.0...v2.2.0) - 2026-11-20
 
 ### Added
