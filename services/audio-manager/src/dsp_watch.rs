@@ -170,56 +170,98 @@ pub fn poll_interval(idle: Duration, current: EmittedLifecycle) -> Duration {
 const START_RETRY_POLLS: u32 = 8;
 const MAX_START_RETRIES: u32 = 15;
 
-/// Run the watcher until the command channel closes (the receiver is owned
-/// by [`crate::amp_controller::AmpController::run`], so dropping the
-/// controller ends the watcher — no separate shutdown plumbing).
-///
-/// Only the engine STATE is read each poll (single `GetState` query): a
-/// failure in ancillary telemetry (rate adjust, buffer level, …) can
-/// never block a start/stop edge.
+/// Run the push-based `SubscribeState` watcher until the command channel closes
+/// (the receiver is owned by [`crate::amp_controller::AmpController::run`], so
+/// dropping the controller ends the watcher — no separate shutdown plumbing).
 ///
 /// Failed starts are retried (bounded): the watcher sends `StreamStarting`
 /// fire-and-forget and cannot observe the controller's handshake outcome,
 /// so while the DSP stays `Running` the edge is re-issued every
-/// [`START_RETRY_POLLS`] polls up to [`MAX_START_RETRIES`] times. A resend
-/// on an already-playing controller is a cheap no-op.
+/// `START_RETRY_POLLS * running_interval` up to [`MAX_START_RETRIES`] times.
+/// A resend on an already-playing controller is a cheap no-op.
 ///
 /// # Errors/Naming
 /// Hardware/WS faults are logged (state held, §4.5) and never close the
-/// loop; the loop exits only when the command channel closes.
+/// loop; the loop reconnects with `poll_interval(idle_interval, lifecycle)`
+/// and exits only when the command channel closes.
 pub async fn run(device: DspDevice, commands: mpsc::Sender<AmpCommand>, idle_interval: Duration) {
     let mut tracker = LifecycleTracker::new();
     info!(
-        idle_interval_ms = idle_interval.as_millis() as u64,
-        "DSP stream-lifecycle watcher started (emits StreamStarting/Stopping edges)"
+        reconnect_interval_ms = idle_interval.as_millis() as u64,
+        "DSP stream-lifecycle watcher started (SubscribeState push mode)"
     );
     let mut telemetry_failed = false;
-    let mut polls_since_start: u32 = 0;
     let mut start_retries: u32 = 0;
+
     loop {
-        // The receiver lives in the controller loop; when it is dropped
-        // (daemon shutdown), exit promptly even without a pending edge.
         if commands.is_closed() {
             info!("Command channel closed; DSP watcher exiting");
             return;
         }
-        tokio::time::sleep(poll_interval(idle_interval, tracker.lifecycle())).await;
-        match device.read_state_async().await {
-            Ok(state) => {
+
+        match device.subscribe_state().await {
+            Ok(mut state_rx) => {
                 if telemetry_failed {
                     telemetry_failed = false;
                     info!("DSP telemetry recovered");
                 }
-                let edge = tracker.step(&state);
-                if tracker.lifecycle() == EmittedLifecycle::Running {
-                    if edge.is_some() {
-                        polls_since_start = 0;
-                    } else {
-                        polls_since_start += 1;
-                        if polls_since_start >= START_RETRY_POLLS
-                            && start_retries < MAX_START_RETRIES
-                        {
-                            polls_since_start = 0;
+                let running_step = poll_interval(idle_interval, EmittedLifecycle::Running);
+                let retry_period = running_step.saturating_mul(START_RETRY_POLLS);
+                let mut pending_stalled = false;
+
+                loop {
+                    tokio::select! {
+                        () = commands.closed() => {
+                            info!("Command channel closed; DSP watcher exiting");
+                            return;
+                        }
+                        maybe_state = state_rx.recv() => {
+                            let Some(state) = maybe_state else {
+                                if !telemetry_failed {
+                                    telemetry_failed = true;
+                                    warn!("DSP state subscription closed; holding last lifecycle");
+                                }
+                                break;
+                            };
+                            if telemetry_failed {
+                                telemetry_failed = false;
+                                info!("DSP telemetry recovered");
+                            }
+                            pending_stalled = matches!(state, ProcessingState::Stalled)
+                                && tracker.lifecycle() == EmittedLifecycle::Running;
+                            let edge = tracker.step(&state);
+                            if tracker.lifecycle() != EmittedLifecycle::Running {
+                                start_retries = 0;
+                                pending_stalled = false;
+                            }
+                            if let Some(kind) = edge {
+                                info!(?kind, "DSP lifecycle edge");
+                                if commands
+                                    .send(AmpCommand::fire_and_forget(kind))
+                                    .await
+                                    .is_err()
+                                {
+                                    info!("Command channel closed; DSP watcher exiting");
+                                    return;
+                                }
+                            }
+                        }
+                        () = tokio::time::sleep(running_step), if pending_stalled => {
+                            pending_stalled = false;
+                            if let Some(kind) = tracker.step(&ProcessingState::Stalled) {
+                                info!(?kind, "DSP lifecycle edge (stalled confirmed)");
+                                start_retries = 0;
+                                if commands
+                                    .send(AmpCommand::fire_and_forget(kind))
+                                    .await
+                                    .is_err()
+                                {
+                                    info!("Command channel closed; DSP watcher exiting");
+                                    return;
+                                }
+                            }
+                        }
+                        () = tokio::time::sleep(retry_period), if tracker.lifecycle() == EmittedLifecycle::Running && start_retries < MAX_START_RETRIES => {
                             start_retries += 1;
                             debug!(
                                 retry = start_retries,
@@ -235,36 +277,24 @@ pub async fn run(device: DspDevice, commands: mpsc::Sender<AmpCommand>, idle_int
                             }
                         }
                     }
-                } else {
-                    // Stopped lifecycle: the retry budget resets for the
-                    // next start episode.
-                    start_retries = 0;
-                    polls_since_start = 0;
-                }
-                if let Some(kind) = edge {
-                    info!(?kind, "DSP lifecycle edge");
-                    if commands
-                        .send(AmpCommand::fire_and_forget(kind))
-                        .await
-                        .is_err()
-                    {
-                        info!("Command channel closed; DSP watcher exiting");
-                        return;
-                    }
                 }
             }
             Err(e) => {
-                // §4.5: a transient telemetry hiccup must hold the last
-                // known lifecycle, not flap the amp. warn on transition
-                // into the failure state, debug on repeats (journal
-                // discipline at 250 ms cadence).
                 if !telemetry_failed {
                     telemetry_failed = true;
-                    warn!(error = %e, "DSP telemetry read failed; holding last lifecycle");
+                    warn!(error = %e, "DSP telemetry subscribe failed; holding last lifecycle");
                 } else {
-                    debug!(error = %e, "DSP telemetry read still failing");
+                    debug!(error = %e, "DSP telemetry subscribe still failing");
                 }
             }
+        }
+
+        tokio::select! {
+            () = commands.closed() => {
+                info!("Command channel closed; DSP watcher exiting");
+                return;
+            }
+            () = tokio::time::sleep(poll_interval(idle_interval, tracker.lifecycle())) => {}
         }
     }
 }

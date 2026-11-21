@@ -352,8 +352,7 @@ fn config_json_parsing_passthrough_and_pipeline() {
     assert!(dsp_test_helpers::helper_parse_config_json(&serde_json::json!(123)).is_none());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hardware_backend_websocket_roundtrip() {
+async fn spawn_mock_ws_server() -> (u16, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_port = listener.local_addr().unwrap().port();
 
@@ -368,63 +367,7 @@ async fn hardware_backend_websocket_roundtrip() {
                     if let Message::Text(text) = msg {
                         let req: serde_json::Value = serde_json::from_str(&text).unwrap();
                         let cmd = req.get("command").and_then(|c| c.as_str()).unwrap();
-                        let resp = match cmd {
-                            "GetVersion" => {
-                                serde_json::json!({"reply": "GetVersion", "result": "Ok", "value": "5.0.0-beta.2"})
-                            }
-                            "GetConfigTitle" => {
-                                serde_json::json!({"reply": "GetConfigTitle", "result": "Ok", "value": "Test Engine"})
-                            }
-                            "GetConfigFilePath" => {
-                                serde_json::json!({"reply": "GetConfigFilePath", "result": "Ok", "value": "/etc/camilladsp/crossover.yml"})
-                            }
-                            "GetState" => {
-                                serde_json::json!({"reply": "GetState", "result": "Ok", "value": "Running"})
-                            }
-                            "GetProcessingLoad" => {
-                                serde_json::json!({"reply": "GetProcessingLoad", "result": "Ok", "value": 4.25})
-                            }
-                            "GetResamplerLoad" => {
-                                serde_json::json!({"reply": "GetResamplerLoad", "result": "Ok", "value": 0.15})
-                            }
-                            "GetRateAdjust" => {
-                                serde_json::json!({"reply": "GetRateAdjust", "result": "Ok", "value": 1.000_010})
-                            }
-                            "GetBufferLevel" => {
-                                serde_json::json!({"reply": "GetBufferLevel", "result": "Ok", "value": 512})
-                            }
-                            "GetClippedSamples" => {
-                                serde_json::json!({"reply": "GetClippedSamples", "result": "Ok", "value": 0})
-                            }
-                            "GetCaptureRate" => {
-                                serde_json::json!({"reply": "GetCaptureRate", "result": "Ok", "value": 48000})
-                            }
-                            "GetStopReason" => {
-                                serde_json::json!({"reply": "GetStopReason", "result": "Ok", "value": "None"})
-                            }
-                            "GetVolume" => {
-                                serde_json::json!({"reply": "GetVolume", "result": "Ok", "value": -6.0})
-                            }
-                            "GetMute" => {
-                                serde_json::json!({"reply": "GetMute", "result": "Ok", "value": false})
-                            }
-                            "GetSignalLevels" => serde_json::json!({
-                                "reply": "GetSignalLevels",
-                                "result": "Ok",
-                                "value": {
-                                    "capture_peak": [-15.0, -14.5],
-                                    "capture_rms": [-20.0, -19.5],
-                                    "playback_peak": [-18.0, -17.5],
-                                    "playback_rms": [-23.0, -22.5]
-                                }
-                            }),
-                            "ResetClippedSamples" => {
-                                serde_json::json!({"reply": "ResetClippedSamples", "result": "Ok"})
-                            }
-                            other => {
-                                serde_json::json!({"reply": other, "result": "Error", "message": "unsupported"})
-                            }
-                        };
+                        let resp = mock_ws_reply(cmd);
                         if ws
                             .send(Message::Text(serde_json::to_string(&resp).unwrap().into()))
                             .await
@@ -437,6 +380,66 @@ async fn hardware_backend_websocket_roundtrip() {
             });
         }
     });
+    (local_port, server_task)
+}
+
+fn mock_ws_reply(cmd: &str) -> serde_json::Value {
+    match cmd {
+        "GetVersion" => {
+            serde_json::json!({"reply": "GetVersion", "result": "Ok", "value": "5.0.0-beta.2"})
+        }
+        "GetConfigTitle" => {
+            serde_json::json!({"reply": "GetConfigTitle", "result": "Ok", "value": "Test Engine"})
+        }
+        "GetConfigFilePath" => {
+            serde_json::json!({"reply": "GetConfigFilePath", "result": "Ok", "value": "/etc/camilladsp/crossover.yml"})
+        }
+        "GetState" => serde_json::json!({"reply": "GetState", "result": "Ok", "value": "Running"}),
+        "GetProcessingLoad" => {
+            serde_json::json!({"reply": "GetProcessingLoad", "result": "Ok", "value": 4.25})
+        }
+        "GetResamplerLoad" => {
+            serde_json::json!({"reply": "GetResamplerLoad", "result": "Ok", "value": 0.15})
+        }
+        "GetRateAdjust" => {
+            serde_json::json!({"reply": "GetRateAdjust", "result": "Ok", "value": 1.000_010})
+        }
+        "GetBufferLevel" => {
+            serde_json::json!({"reply": "GetBufferLevel", "result": "Ok", "value": 512})
+        }
+        "GetClippedSamples" => {
+            serde_json::json!({"reply": "GetClippedSamples", "result": "Ok", "value": 0})
+        }
+        "GetCaptureRate" => {
+            serde_json::json!({"reply": "GetCaptureRate", "result": "Ok", "value": 48000})
+        }
+        "GetStopReason" => {
+            serde_json::json!({"reply": "GetStopReason", "result": "Ok", "value": "None"})
+        }
+        "GetVolume" => serde_json::json!({"reply": "GetVolume", "result": "Ok", "value": -6.0}),
+        "GetMute" => serde_json::json!({"reply": "GetMute", "result": "Ok", "value": false}),
+        "GetSignalLevels" => serde_json::json!({
+            "reply": "GetSignalLevels",
+            "result": "Ok",
+            "value": {
+                "capture_peak": [-15.0, -14.5],
+                "capture_rms": [-20.0, -19.5],
+                "playback_peak": [-18.0, -17.5],
+                "playback_rms": [-23.0, -22.5]
+            }
+        }),
+        "ResetClippedSamples" => {
+            serde_json::json!({"reply": "ResetClippedSamples", "result": "Ok"})
+        }
+        "SetConfig" => serde_json::json!({"reply": "SetConfig", "result": "Ok"}),
+        "SetConfigJson" => serde_json::json!({"reply": "SetConfigJson", "result": "Ok"}),
+        other => serde_json::json!({"reply": other, "result": "Error", "message": "unsupported"}),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hardware_backend_websocket_roundtrip() {
+    let (local_port, server_task) = spawn_mock_ws_server().await;
 
     let dsp = DspDevice::with_host_and_port(DspHost::default(), DspPort::new(local_port).unwrap());
 
@@ -463,7 +466,77 @@ async fn hardware_backend_websocket_roundtrip() {
     // Sync reset
     dsp.reset_clipped_samples().unwrap();
 
+    // SetConfig and SetConfigJson roundtrip
+    dsp.set_config_async("devices:\n  samplerate: 48000\n")
+        .await
+        .unwrap();
+    dsp.set_config_json_async(r#"{"devices":{"samplerate":48000}}"#)
+        .await
+        .unwrap();
+
     server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hardware_backend_subscribe_state_roundtrip() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_port = listener.local_addr().unwrap().port();
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+        // Expect GetState
+        let msg = ws.next().await.unwrap().unwrap();
+        let req: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert_eq!(req["command"], "GetState");
+        let resp = serde_json::json!({"reply": "GetState", "result": "Ok", "value": "Inactive"});
+        ws.send(Message::Text(resp.to_string().into()))
+            .await
+            .unwrap();
+
+        // Expect SubscribeState
+        let msg = ws.next().await.unwrap().unwrap();
+        let req: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert_eq!(req["command"], "SubscribeState");
+        let resp = serde_json::json!({"reply": "SubscribeState", "result": "Ok"});
+        ws.send(Message::Text(resp.to_string().into()))
+            .await
+            .unwrap();
+
+        // Push Running then ProcessingStopped
+        let ev1 = serde_json::json!({
+            "reply": "StateEvent",
+            "result": "Ok",
+            "value": {"state": "Running", "stop_reason": null}
+        });
+        ws.send(Message::Text(ev1.to_string().into()))
+            .await
+            .unwrap();
+        let ev2 = serde_json::json!({
+            "reply": "StateEvent",
+            "result": "ProcessingStopped",
+            "value": {"state": "Inactive", "stop_reason": "Done"}
+        });
+        ws.send(Message::Text(ev2.to_string().into()))
+            .await
+            .unwrap();
+
+        // Expect StopSubscription when receiver is dropped
+        if let Some(Ok(Message::Text(text))) = ws.next().await {
+            let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(req["command"], "StopSubscription");
+        }
+    });
+
+    let dsp = DspDevice::with_host_and_port(DspHost::default(), DspPort::new(local_port).unwrap());
+    let mut rx = dsp.subscribe_state().await.unwrap();
+    assert_eq!(rx.recv().await, Some(ProcessingState::Inactive));
+    assert_eq!(rx.recv().await, Some(ProcessingState::Running));
+    assert_eq!(rx.recv().await, Some(ProcessingState::Inactive));
+    drop(rx);
+
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_task).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

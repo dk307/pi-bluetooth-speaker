@@ -212,9 +212,17 @@ async fn apply_loopback_state_ext(
 /// Runs the ALSA `hw:Loopback` rate-watcher task until the process shuts down.
 pub async fn run(dsp: DspDevice) {
     let config_path = Path::new(DEFAULT_CAMILLADSP_CONFIG_PATH);
-    let (tx, mut rx) = mpsc::channel::<(LoopbackState, bool)>(8);
+    let (tx, rx) = mpsc::channel::<(LoopbackState, bool)>(8);
     tokio::task::spawn_blocking(move || loopback_ctl_thread(&tx));
+    run_with_rx(dsp, config_path, rx).await;
+}
 
+/// Drives the rate-watcher state machine from an injected `LoopbackState` receiver.
+pub async fn run_with_rx(
+    dsp: DspDevice,
+    config_path: &Path,
+    mut rx: mpsc::Receiver<(LoopbackState, bool)>,
+) {
     let mut ctrl = RateWatchController::new();
     let mut last_state: Option<LoopbackState> = None;
 

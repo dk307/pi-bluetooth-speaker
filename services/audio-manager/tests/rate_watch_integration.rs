@@ -2,11 +2,11 @@
 
 use audio_manager::rate_watch::{
     LoopbackState, RateWatchController, apply_loopback_state, build_reconfigured_config_json,
-    chunksize_for_rate,
+    chunksize_for_rate, run_with_rx,
 };
 use camilladsp_schema::config::Configuration;
 use speaker_common::diag::ScopedTempDir;
-use speaker_dsp::DspDevice;
+use speaker_dsp::{DspDevice, ProcessingState};
 
 const SAMPLE_CONFIG_YAML: &str = "\
 devices:
@@ -193,4 +193,80 @@ async fn rate_watch_controller_applies_switches_and_retries_on_fault() {
         .await
     );
     assert_eq!(ctrl.applied_rate(), Some(192_000));
+
+    // Missing config file or invalid YAML returns false without marking applied
+    let missing = tmp.path().join("missing.yml");
+    let mut ctrl2 = RateWatchController::new();
+    assert!(
+        !apply_loopback_state(
+            &mut ctrl2,
+            &dsp,
+            &missing,
+            LoopbackState {
+                active: true,
+                rate_hz: 48_000
+            }
+        )
+        .await
+    );
+    let bad_path = tmp.path().join("bad.yml");
+    std::fs::write(&bad_path, "not: valid: camilladsp").unwrap();
+    assert!(
+        !apply_loopback_state(
+            &mut ctrl2,
+            &dsp,
+            &bad_path,
+            LoopbackState {
+                active: true,
+                rate_hz: 48_000
+            }
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn run_with_rx_reapplies_when_engine_inactive_and_exits_on_close() {
+    let tmp = ScopedTempDir::new("rate_watch_rx");
+    let cfg_path = tmp.path().join("crossover.yml");
+    std::fs::write(&cfg_path, SAMPLE_CONFIG_YAML).unwrap();
+
+    let (dsp, mock) = DspDevice::new_mocked();
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+
+    let cfg_clone = cfg_path.clone();
+    let dsp_clone = dsp.clone();
+    let handle = tokio::spawn(async move {
+        run_with_rx(dsp_clone, &cfg_clone, rx).await;
+    });
+
+    // Initial active @ 48000 Hz
+    tx.send((
+        LoopbackState {
+            active: true,
+            rate_hz: 48_000,
+        },
+        false,
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(mock.last_set_config_json().is_some());
+
+    // Simulate engine going Inactive (fast close/reopen at same rate) with from_event=true
+    mock.set_state(ProcessingState::Inactive);
+    tx.send((
+        LoopbackState {
+            active: true,
+            rate_hz: 48_000,
+        },
+        true,
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Close channel -> task exits cleanly
+    drop(tx);
+    handle.await.unwrap();
 }

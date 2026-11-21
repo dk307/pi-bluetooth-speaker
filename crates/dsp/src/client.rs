@@ -722,6 +722,7 @@ struct MockState {
     last_set_config: Option<String>,
     last_set_config_json: Option<String>,
     injected_fault: Option<String>,
+    state_events: tokio::sync::broadcast::Sender<Option<ProcessingState>>,
 }
 
 impl Default for DspDeviceMock {
@@ -770,6 +771,7 @@ impl DspDeviceMock {
                 last_set_config: None,
                 last_set_config_json: None,
                 injected_fault: None,
+                state_events: tokio::sync::broadcast::channel(32).0,
             })),
         }
     }
@@ -784,7 +786,8 @@ impl DspDeviceMock {
     /// Sets the simulated processing state.
     pub fn set_state(&self, state: ProcessingState) {
         if let Ok(mut g) = self.inner.lock() {
-            g.state = state;
+            g.state = state.clone();
+            let _ = g.state_events.send(Some(state));
         }
     }
 
@@ -889,6 +892,7 @@ impl DspDeviceMock {
     pub fn inject_fault(&self, msg: impl Into<String>) {
         if let Ok(mut g) = self.inner.lock() {
             g.injected_fault = Some(msg.into());
+            let _ = g.state_events.send(None);
         }
     }
 
@@ -897,6 +901,39 @@ impl DspDeviceMock {
         if let Ok(mut g) = self.inner.lock() {
             g.injected_fault = None;
         }
+    }
+
+    async fn subscribe_state(
+        &self,
+    ) -> Result<tokio::sync::mpsc::Receiver<ProcessingState>, DspError> {
+        let (initial, mut sub_rx) = {
+            let g = self.inner.lock().expect("dsp mock mutex poisoned");
+            if let Some(ref fault) = g.injected_fault {
+                return Err(DspError::protocol_error(fault.clone()));
+            }
+            (g.state.clone(), g.state_events.subscribe())
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        if tx.send(initial).await.is_err() {
+            return Ok(rx);
+        }
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = tx.closed() => break,
+                    evt = sub_rx.recv() => match evt {
+                        Ok(Some(state)) => {
+                            if tx.send(state).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(None) | Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    }
+                }
+            }
+        });
+        Ok(rx)
     }
 
     /// Mock state-only read (sibling of [`Self::read_status`]).
@@ -1142,6 +1179,92 @@ impl DspDevice {
     pub async fn read_state_async(&self) -> Result<ProcessingState, DspError> {
         let dev = self.clone();
         speaker_common::runtime::run_blocking("dsp state", move || dev.read_state()).await
+    }
+
+    /// Opens a push subscription to `CamillaDSP` processing state changes (`SubscribeState`).
+    ///
+    /// Seeds the returned channel with the current state (via `GetState`) and then
+    /// streams `StateEvent` transitions as they arrive. The channel closes when the
+    /// WebSocket disconnects or an error occurs; dropping the receiver unsubscribes
+    /// and closes the WebSocket cleanly.
+    ///
+    /// # Errors
+    /// Returns [`DspError`] if connecting or subscribing fails.
+    pub async fn subscribe_state(
+        &self,
+    ) -> Result<tokio::sync::mpsc::Receiver<ProcessingState>, DspError> {
+        match &*self.backend {
+            Backend::Mock { mock, .. } => mock.subscribe_state().await,
+            Backend::Hardware { host, port } => {
+                Self::subscribe_hardware_state(host.clone(), *port).await
+            }
+        }
+    }
+
+    async fn subscribe_hardware_state(
+        host: DspHost,
+        port: DspPort,
+    ) -> Result<tokio::sync::mpsc::Receiver<ProcessingState>, DspError> {
+        let mut ws = Self::connect_ws(&host, port).await?;
+
+        let initial_state = match Self::send_ws_command(&mut ws, &WsCommand::GetState).await? {
+            WsReply::GetState { result, value } => {
+                check_ws_result("GetState", result)?;
+                ProcessingState::from(value)
+            }
+            other => return Err(unexpected_reply("GetState", &other)),
+        };
+
+        match Self::send_ws_command(&mut ws, &WsCommand::SubscribeState).await? {
+            WsReply::SubscribeState { result } => check_ws_result("SubscribeState", result)?,
+            other => return Err(unexpected_reply("SubscribeState", &other)),
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        if tx.send(initial_state).await.is_err() {
+            return Ok(rx);
+        }
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = tx.closed() => {
+                        if let Ok(payload) = serde_json::to_string(&WsCommand::StopSubscription) {
+                            let _ = tokio::time::timeout(
+                                Duration::from_millis(500),
+                                ws.send(Message::Text(payload.into())),
+                            ).await;
+                        }
+                        let _ = tokio::time::timeout(Duration::from_millis(500), ws.close(None)).await;
+                        break;
+                    }
+                    msg = ws.next() => {
+                        let Some(Ok(Message::Text(text))) = msg else {
+                            break;
+                        };
+                        let Ok(reply) = serde_json::from_str::<WsReply>(&text) else {
+                            continue;
+                        };
+                        let next_state = match reply {
+                            WsReply::StateEvent { result: WsResult::Ok, value } => {
+                                Some(ProcessingState::from(value.state))
+                            }
+                            WsReply::StateEvent { result: WsResult::ProcessingStopped, .. } => {
+                                Some(ProcessingState::Inactive)
+                            }
+                            _ => None,
+                        };
+                        if let Some(state) = next_state
+                            && tx.send(state).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
     }
 
     async fn query_state(host: DspHost, port: DspPort) -> Result<ProcessingState, DspError> {

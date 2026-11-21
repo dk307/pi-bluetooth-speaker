@@ -82,17 +82,13 @@ cp "${SCRIPT_DIR}/alsa/asound.state" /var/lib/alsa/asound.state
 alsactl restore || true
 
 # ------------------------------------------------------------------------------
-# 5. CamillaDSP Installation (v4.1.3)
+# 5. CamillaDSP Installation (v5.0.0-beta.2)
 # ------------------------------------------------------------------------------
-echo "==> [5/10] Setting up CamillaDSP binary, crossover filters, and service..."
+echo "==> [5/10] Setting up CamillaDSP binary, configuration, and service..."
 mkdir -p /etc/camilladsp /var/log/camilladsp /usr/local/bin
 
 if [ ! -f /usr/local/bin/camilladsp ]; then
-    echo "Downloading CamillaDSP v4.1.3 aarch64 release..."
-    wget -q https://github.com/HEnquist/camilladsp/releases/download/v4.1.3/camilladsp-linux-aarch64.tar.gz -O /tmp/camilladsp.tar.gz
-    tar -xzf /tmp/camilladsp.tar.gz -C /usr/local/bin/
-    chmod +x /usr/local/bin/camilladsp
-    rm -f /tmp/camilladsp.tar.gz
+    echo "NOTE: Build and install CamillaDSP v5.0.0-beta.2 from the host via scripts/build_camilladsp_pi.sh"
 fi
 
 cp "${SCRIPT_DIR}/etc/camilladsp/crossover.yml" /etc/camilladsp/
