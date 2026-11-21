@@ -221,8 +221,12 @@ pub async fn reconcile_with_engine(
         return false;
     }
     if ctrl.applied_rate() == Some(state.rate_hz) {
-        let Ok(status) = dsp.read_status_async().await else {
-            return false;
+        let status = match dsp.read_status_async().await {
+            Ok(s) => s,
+            Err(e) => {
+                debug!(error = %e, "Skipping engine rate reconcile; DSP status unavailable");
+                return false;
+            }
         };
         let live_rate = status.config.as_ref().and_then(|c| c.samplerate);
         let rate_mismatch = live_rate.is_some_and(|r| r != state.rate_hz);

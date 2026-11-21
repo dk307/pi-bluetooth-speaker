@@ -488,6 +488,8 @@ async fn hardware_backend_websocket_roundtrip() {
 async fn hardware_backend_subscribe_state_roundtrip() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_port = listener.local_addr().unwrap().port();
+    let seeded = std::sync::Arc::new(tokio::sync::Notify::new());
+    let seeded_srv = std::sync::Arc::clone(&seeded);
 
     let server_task = tokio::spawn(async move {
         // Connection 1: SubscribeState
@@ -512,7 +514,9 @@ async fn hardware_backend_subscribe_state_roundtrip() {
             .await
             .unwrap();
 
-        // Push Running then ProcessingStopped on subscription connection
+        // Wait until the client has observed the initial seed before pushing StateEvents
+        seeded_srv.notified().await;
+
         let ev1 = serde_json::json!({
             "reply": "StateEvent",
             "result": "Ok",
@@ -539,12 +543,23 @@ async fn hardware_backend_subscribe_state_roundtrip() {
 
     let dsp = DspDevice::with_host_and_port(DspHost::default(), DspPort::new(local_port).unwrap());
     let mut rx = dsp.subscribe_state().await.unwrap();
-    assert_eq!(rx.recv().await, Some(ProcessingState::Inactive));
-    assert_eq!(rx.recv().await, Some(ProcessingState::Running));
-    assert_eq!(rx.recv().await, Some(ProcessingState::Inactive));
+    let timeout = std::time::Duration::from_secs(2);
+    assert_eq!(
+        tokio::time::timeout(timeout, rx.recv()).await.unwrap(),
+        Some(ProcessingState::Inactive)
+    );
+    seeded.notify_one();
+    assert_eq!(
+        tokio::time::timeout(timeout, rx.recv()).await.unwrap(),
+        Some(ProcessingState::Running)
+    );
+    assert_eq!(
+        tokio::time::timeout(timeout, rx.recv()).await.unwrap(),
+        Some(ProcessingState::Inactive)
+    );
     drop(rx);
 
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_task).await;
+    let _ = tokio::time::timeout(timeout, server_task).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
