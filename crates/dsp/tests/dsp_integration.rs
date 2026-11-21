@@ -142,6 +142,7 @@ fn dsp_status_calculations() {
         version: Some("4.1.3".into()),
         config_title: Some("Test".into()),
         config_path: Some("/etc/camilladsp/crossover.yml".into()),
+        config: None,
         capture_rate: Some(48000),
         state: ProcessingState::Running,
         processing_load: 5.0,
@@ -293,8 +294,6 @@ fn hardware_info_constants() {
     let hw = dsp.hardware_info();
     assert_eq!(hw.service_unit, "camilladsp.service");
     assert_eq!(hw.default_port, 1234);
-    assert_eq!(hw.chunk_size, 1024);
-    assert_eq!(hw.crossover_freq_hz, 180);
 
     assert_eq!(dsp.host().as_str(), DEFAULT_DSP_HOST);
     assert_eq!(dsp.port().as_u16(), DEFAULT_DSP_PORT);
@@ -321,6 +320,36 @@ fn hardware_info_constants() {
     assert_eq!(mock_status.version.as_deref(), Some("4.2.0"));
     assert_eq!(mock_status.config_title.as_deref(), Some("New Config"));
     assert_eq!(mock_status.capture_rate, Some(96000));
+}
+
+#[test]
+fn config_json_parsing_passthrough_and_pipeline() {
+    let passthrough = serde_json::json!(
+        r#"{"devices":{"samplerate":48000,"chunksize":1024,"capture":{"device":"hw:Loopback,1,0","format":"S32_LE"},"playback":{"device":"hw:sndrpihifiberry,0","format":"S32_LE"}},"mixers":null,"filters":null,"processors":null,"pipeline":null}"#
+    );
+    let cfg = dsp_test_helpers::helper_parse_config_json(&passthrough).unwrap();
+    assert_eq!(cfg.samplerate, Some(48000));
+    assert_eq!(cfg.chunksize, Some(1024));
+    assert_eq!(cfg.capture_device.as_deref(), Some("hw:Loopback,1,0"));
+    assert_eq!(cfg.capture_format.as_deref(), Some("S32_LE"));
+    assert_eq!(cfg.playback_device.as_deref(), Some("hw:sndrpihifiberry,0"));
+    assert_eq!(cfg.playback_format.as_deref(), Some("S32_LE"));
+    assert!(cfg.is_passthrough());
+
+    let with_pipeline = serde_json::json!(
+        r#"{"devices":{"samplerate":44100,"chunksize":512,"capture":{"device":"hw:0,0"},"playback":{"device":"hw:1,0"}},"mixers":{"m1":{}},"filters":{"f1":{},"f2":{}},"processors":{"p1":{}},"pipeline":[{"type":"Filter"}]}"#
+    );
+    let cfg2 = dsp_test_helpers::helper_parse_config_json(&with_pipeline).unwrap();
+    assert_eq!(cfg2.samplerate, Some(44100));
+    assert_eq!(cfg2.chunksize, Some(512));
+    assert_eq!(cfg2.mixers.len(), 1);
+    assert_eq!(cfg2.filters.len(), 2);
+    assert_eq!(cfg2.processors.len(), 1);
+    assert_eq!(cfg2.pipeline_stages, 1);
+    assert!(!cfg2.is_passthrough());
+
+    assert!(dsp_test_helpers::helper_parse_config_json(&serde_json::json!("not json")).is_none());
+    assert!(dsp_test_helpers::helper_parse_config_json(&serde_json::json!(123)).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

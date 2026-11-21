@@ -1,10 +1,10 @@
 //! `CamillaDSP` audio processing engine diagnostic and status utility.
 //!
-//! Provides CLI diagnostics for the `CamillaDSP` ALSA crossover engine on the
-//! Raspberry Pi 3 appliance. Displays systemd service states, connection properties,
-//! engine state, CPU load, rate adjust ratio, buffer fill levels, master volume/mute,
-//! digital clipped sample counters, and real-time dBFS level meters for capture and
-//! playback channels.
+//! Provides CLI diagnostics for the `CamillaDSP` engine on the Raspberry Pi 3
+//! appliance. Displays systemd service states, connection properties, live engine
+//! configuration, engine state, CPU load, rate adjust ratio, buffer fill levels,
+//! master volume/mute, digital clipped sample counters, and real-time dBFS level
+//! meters for capture and playback channels.
 
 use std::env;
 use std::process::ExitCode;
@@ -49,7 +49,7 @@ impl Default for CliOptions {
 
 /// Prints CLI usage and flag documentation to stdout.
 pub fn print_usage(bin_name: &str) {
-    println!("CamillaDSP Pipeline Diagnostic Utility");
+    println!("CamillaDSP Diagnostic Utility");
     println!();
     println!("Usage: {bin_name} [OPTIONS]");
     println!();
@@ -172,23 +172,16 @@ pub fn update_max_peaks(dst: &mut Vec<f32>, src: &[f32]) {
     }
 }
 
-/// Prints the hardware metadata banner to stdout.
+/// Prints the service metadata banner to stdout.
 pub fn print_header(hw: &DspHardwareInfo, host: &DspHost, port: DspPort) {
     println!("=========================================================");
-    println!("               CAMILLADSP PIPELINE STATUS                ");
+    println!("                    CAMILLADSP STATUS                    ");
     println!("=========================================================");
-    println!("Pipeline Hardware Info:");
-    println!("  • Engine       : CamillaDSP ALSA Crossover Pipeline");
+    println!("Service Info:");
+    println!("  • Engine       : CamillaDSP");
     println!("  • WebSocket    : {}:{}", host.as_str(), port.as_u16());
     println!("  • Service Unit : {}", hw.service_unit);
-    println!("  • Config File  : {}", hw.config_path);
     println!("  • Log File     : {}", hw.log_path);
-    println!("  • Capture Dev  : {}", hw.capture_device);
-    println!("  • Playback Dev : {}", hw.playback_device);
-    println!(
-        "  • Crossover    : {} Hz (Sub LPF / Coax HPF) | Infrasonic: {} Hz",
-        hw.crossover_freq_hz, hw.infrasonic_hpf_hz
-    );
     println!("---------------------------------------------------------");
 }
 
@@ -235,16 +228,7 @@ pub fn print_session_summary(stats: &DspStats) {
             .max_playback_peaks
             .iter()
             .enumerate()
-            .map(|(i, p)| {
-                let name = if i == 0 {
-                    "Sub"
-                } else if i == 1 {
-                    "Coax"
-                } else {
-                    "Ch"
-                };
-                format!("{name}: {p:.1} dBFS")
-            })
+            .map(|(i, p)| format!("Ch{i}: {p:.1} dBFS"))
             .collect();
         println!("Max Playback    : {}", peaks_str.join(", "));
     }
@@ -266,6 +250,7 @@ pub fn output_json_status(timestamp: &str, status: &DspStatus) {
         "version": status.version,
         "config_title": status.config_title,
         "config_path": status.config_path,
+        "config": status.config,
         "capture_rate": status.capture_rate,
         "state": status.state.as_str(),
         "processing_load_percent": status.processing_load,
@@ -352,8 +337,46 @@ pub fn print_human_detailed(status: &DspStatus) {
     if let Some(ref ver) = status.version {
         println!("DSP Engine Version       : {ver}");
     }
-    if let Some(ref title) = status.config_title {
+    if let Some(ref title) = status.config_title
+        && !title.is_empty()
+    {
         println!("Active Config Title      : {title}");
+    }
+    if let Some(ref path) = status.config_path {
+        println!("Active Config File       : {path}");
+    }
+    if let Some(ref cfg) = status.config {
+        if let Some(ref cap) = cfg.capture_device {
+            let fmt = cfg
+                .capture_format
+                .as_deref()
+                .map_or(String::new(), |f| format!(" ({f})"));
+            println!("Capture Device           : {cap}{fmt}");
+        }
+        if let Some(ref play) = cfg.playback_device {
+            let fmt = cfg
+                .playback_format
+                .as_deref()
+                .map_or(String::new(), |f| format!(" ({f})"));
+            println!("Playback Device          : {play}{fmt}");
+        }
+        if let Some(sr) = cfg.samplerate {
+            let chunk = cfg
+                .chunksize
+                .map_or(String::new(), |c| format!(" | Chunk: {c} samples"));
+            println!("Configured Sample Rate   : {sr} Hz{chunk}");
+        }
+        if cfg.is_passthrough() {
+            println!("Processing Pipeline      : Passthrough (no filters/mixers)");
+        } else {
+            println!(
+                "Processing Pipeline      : {} stage(s) | Mixers: {} | Filters: {} | Processors: {}",
+                cfg.pipeline_stages,
+                cfg.mixers.len(),
+                cfg.filters.len(),
+                cfg.processors.len(),
+            );
+        }
     }
     if let Some(rate) = status.capture_rate {
         println!("Measured Capture Rate    : {rate} Hz");
@@ -396,54 +419,22 @@ pub fn print_human_detailed(status: &DspStatus) {
         println!("Stop Reason              : {}", status.stop_reason);
     }
 
-    // Capture channels (L/R)
-    let cap_peaks_str: Vec<String> = status
-        .capture
-        .peaks
-        .iter()
-        .map(|p| format!("{p:.1}"))
-        .collect();
-    println!(
-        "Capture Peak (L/R)       : [{}] dBFS",
-        cap_peaks_str.join(", ")
-    );
-    for i in 0..status.capture.channels() {
-        let label = if i == 0 {
-            "Ch0 (L)  "
-        } else if i == 1 {
-            "Ch1 (R)  "
-        } else {
-            "Channel  "
-        };
-        let p = status.capture.peak_or_floor(i);
-        let r = status.capture.rms_or_floor(i);
-        let bar = format_dbfs_meter(p, 14);
-        println!("  • {label}: {bar} {p:5.1} dBFS (RMS: {r:5.1} dBFS)");
-    }
+    // Capture channels
+    print_channel_levels("Capture Peak", &status.capture);
 
-    // Playback channels (Sub/Coax)
-    let play_peaks_str: Vec<String> = status
-        .playback
-        .peaks
-        .iter()
-        .map(|p| format!("{p:.1}"))
-        .collect();
-    println!(
-        "Playback Peak (Sub/Coax) : [{}] dBFS",
-        play_peaks_str.join(", ")
-    );
-    for i in 0..status.playback.channels() {
-        let label = if i == 0 {
-            "Ch0 (Sub) "
-        } else if i == 1 {
-            "Ch1 (Coax)"
-        } else {
-            "Channel   "
-        };
-        let p = status.playback.peak_or_floor(i);
-        let r = status.playback.rms_or_floor(i);
+    // Playback channels
+    print_channel_levels("Playback Peak", &status.playback);
+}
+
+fn print_channel_levels(heading: &str, levels: &speaker_dsp::DspChannelLevels) {
+    let peaks_str: Vec<String> = levels.peaks.iter().map(|p| format!("{p:.1}")).collect();
+    println!("{heading:<25}: [{}] dBFS", peaks_str.join(", "));
+    for i in 0..levels.channels() {
+        let label = format!("Ch{i}");
+        let p = levels.peak_or_floor(i);
+        let r = levels.rms_or_floor(i);
         let bar = format_dbfs_meter(p, 14);
-        println!("  • {label}: {bar} {p:5.1} dBFS (RMS: {r:5.1} dBFS)");
+        println!("  • {label:<9}: {bar} {p:5.1} dBFS (RMS: {r:5.1} dBFS)");
     }
 }
 

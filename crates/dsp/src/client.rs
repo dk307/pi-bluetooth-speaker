@@ -381,6 +381,42 @@ impl DspChannelLevels {
     }
 }
 
+/// Runtime configuration summary read from `CamillaDSP` (`GetConfigJson`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DspConfigInfo {
+    /// Configured sample rate in Hz.
+    pub samplerate: Option<u32>,
+    /// Configured chunk size in samples.
+    pub chunksize: Option<u32>,
+    /// Configured capture device identifier (e.g. `hw:Loopback,1,0`).
+    pub capture_device: Option<Box<str>>,
+    /// Configured capture sample format (e.g. `S32_LE`).
+    pub capture_format: Option<Box<str>>,
+    /// Configured playback device identifier (e.g. `hw:sndrpihifiberry,0`).
+    pub playback_device: Option<Box<str>>,
+    /// Configured playback sample format (e.g. `S32_LE`).
+    pub playback_format: Option<Box<str>>,
+    /// Names of configured mixers.
+    pub mixers: Vec<Box<str>>,
+    /// Names of configured filters.
+    pub filters: Vec<Box<str>>,
+    /// Names of configured processors.
+    pub processors: Vec<Box<str>>,
+    /// Number of pipeline stages configured.
+    pub pipeline_stages: usize,
+}
+
+impl DspConfigInfo {
+    /// Returns `true` when no mixers, filters, processors, or pipeline stages are configured.
+    #[must_use]
+    pub fn is_passthrough(&self) -> bool {
+        self.pipeline_stages == 0
+            && self.mixers.is_empty()
+            && self.filters.is_empty()
+            && self.processors.is_empty()
+    }
+}
+
 /// Snapshot of the `CamillaDSP` audio pipeline status.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DspStatus {
@@ -396,6 +432,8 @@ pub struct DspStatus {
     pub config_title: Option<Box<str>>,
     /// Active configuration file path.
     pub config_path: Option<Box<str>>,
+    /// Live configuration summary read from `CamillaDSP` (`GetConfigJson`).
+    pub config: Option<DspConfigInfo>,
     /// Measured capture sample rate in Hz.
     pub capture_rate: Option<u32>,
     /// Current audio processing state.
@@ -454,7 +492,7 @@ impl DspStatus {
     }
 }
 
-/// Static hardware and pipeline configuration info for `CamillaDSP` on Raspberry Pi 3.
+/// Static service metadata for `CamillaDSP` on Raspberry Pi 3.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DspHardwareInfo {
     /// Systemd service unit name.
@@ -463,40 +501,19 @@ pub struct DspHardwareInfo {
     pub default_host: &'static str,
     /// Default local WebSocket port.
     pub default_port: u16,
-    /// Primary crossover engine configuration path.
-    pub config_path: &'static str,
     /// Service log output path.
     pub log_path: &'static str,
-    /// ALSA capture device identifier.
-    pub capture_device: &'static str,
-    /// ALSA playback hardware device identifier.
-    pub playback_device: &'static str,
-    /// Subwoofer infrasonic high-pass filter frequency in Hz.
-    pub infrasonic_hpf_hz: u32,
-    /// Subwoofer to coaxial satellite crossover frequency in Hz.
-    pub crossover_freq_hz: u32,
-    /// Coaxial tweeter padding shelf frequency in Hz.
-    pub tweeter_shelf_hz: u32,
-    /// Standard ALSA chunk size in samples.
-    pub chunk_size: u32,
 }
 
 impl DspHardwareInfo {
-    /// Returns the standard hardware profile for the Raspberry Pi 3 Bluetooth Speaker appliance.
+    /// Returns the standard service profile for the Raspberry Pi 3 Bluetooth Speaker appliance.
     #[must_use]
     pub const fn rpi3() -> Self {
         Self {
             service_unit: "camilladsp.service",
             default_host: DEFAULT_DSP_HOST,
             default_port: DEFAULT_DSP_PORT,
-            config_path: "/etc/camilladsp/crossover.yml",
             log_path: "/var/log/camilladsp/camilladsp.log",
-            capture_device: "hw:Loopback,1,0",
-            playback_device: "hw:sndrpihifiberry,0",
-            infrasonic_hpf_hz: 45,
-            crossover_freq_hz: 180,
-            tweeter_shelf_hz: 3000,
-            chunk_size: DEFAULT_DSP_BUFFER_CAPACITY,
         }
     }
 }
@@ -681,6 +698,7 @@ struct MockState {
     version: Option<Box<str>>,
     config_title: Option<Box<str>>,
     config_path: Option<Box<str>>,
+    config: Option<DspConfigInfo>,
     capture_rate: Option<u32>,
     state: ProcessingState,
     processing_load: f32,
@@ -713,8 +731,20 @@ impl DspDeviceMock {
             inner: Arc::new(Mutex::new(MockState {
                 service: ServiceState::Active,
                 version: Some("4.1.3".into()),
-                config_title: Some("CamillaDSP Crossover Engine".into()),
+                config_title: Some("CamillaDSP".into()),
                 config_path: Some("/etc/camilladsp/crossover.yml".into()),
+                config: Some(DspConfigInfo {
+                    samplerate: Some(48000),
+                    chunksize: Some(DEFAULT_DSP_BUFFER_CAPACITY),
+                    capture_device: Some("hw:Loopback,1,0".into()),
+                    capture_format: Some("S32_LE".into()),
+                    playback_device: Some("hw:sndrpihifiberry,0".into()),
+                    playback_format: Some("S32_LE".into()),
+                    mixers: Vec::new(),
+                    filters: Vec::new(),
+                    processors: Vec::new(),
+                    pipeline_stages: 0,
+                }),
                 capture_rate: Some(48000),
                 state: ProcessingState::Running,
                 processing_load: 3.45,
@@ -788,6 +818,16 @@ impl DspDeviceMock {
     pub fn set_config_title(&self, title: Option<&str>) {
         if let Ok(mut g) = self.inner.lock() {
             g.config_title = title.map(Into::into);
+        }
+    }
+
+    /// Sets the simulated parsed configuration summary.
+    pub fn set_config(&self, config: Option<DspConfigInfo>) {
+        if let Ok(mut g) = self.inner.lock() {
+            if let Some(chunk) = config.as_ref().and_then(|c| c.chunksize) {
+                g.buffer_capacity = chunk;
+            }
+            g.config = config;
         }
     }
 
@@ -871,6 +911,7 @@ impl DspDeviceMock {
             version: g.version.clone(),
             config_title: g.config_title.clone(),
             config_path: g.config_path.clone(),
+            config: g.config.clone(),
             capture_rate: g.capture_rate,
             state: g.state.clone(),
             processing_load: g.processing_load,
@@ -1253,6 +1294,11 @@ impl DspDevice {
             .await
             .and_then(|v| v.as_str().map(Into::into));
 
+        // 3b. Live Configuration JSON
+        let config = Self::optional_query(&mut ws, "GetConfigJson")
+            .await
+            .and_then(|v| parse_config_json(&v));
+
         // 4. State (mandatory core telemetry)
         let state_val = Self::send_command(&mut ws, "GetState").await?;
         let state_str = state_val
@@ -1314,29 +1360,14 @@ impl DspDevice {
 
         // 13. Levels: Try GetSignalLevels first, fallback to individual queries
         let (capture_peaks, capture_rms, playback_peaks, playback_rms) =
-            if let Ok(levels_val) = Self::send_command(&mut ws, "GetSignalLevels").await {
-                parse_levels_object(&levels_val)
-            } else {
-                let cap_p = Self::optional_query(&mut ws, "GetCaptureSignalPeak")
-                    .await
-                    .map(|v| parse_f32_list(&v))
-                    .unwrap_or_default();
-                let cap_r = Self::optional_query(&mut ws, "GetCaptureSignalRms")
-                    .await
-                    .map(|v| parse_f32_list(&v))
-                    .unwrap_or_default();
-                let play_p = Self::optional_query(&mut ws, "GetPlaybackSignalPeak")
-                    .await
-                    .map(|v| parse_f32_list(&v))
-                    .unwrap_or_default();
-                let play_r = Self::optional_query(&mut ws, "GetPlaybackSignalRms")
-                    .await
-                    .map(|v| parse_f32_list(&v))
-                    .unwrap_or_default();
-                (cap_p, cap_r, play_p, play_r)
-            };
+            Self::query_signal_levels(&mut ws).await;
 
         let _ = ws.close(None).await;
+
+        let buffer_capacity = config
+            .as_ref()
+            .and_then(|c| c.chunksize)
+            .unwrap_or(DEFAULT_DSP_BUFFER_CAPACITY);
 
         Ok(DspStatus {
             service,
@@ -1345,13 +1376,14 @@ impl DspDevice {
             version,
             config_title,
             config_path,
+            config,
             capture_rate,
             state,
             processing_load,
             resampler_load,
             rate_adjust,
             buffer_level,
-            buffer_capacity: DEFAULT_DSP_BUFFER_CAPACITY,
+            buffer_capacity,
             volume_db,
             muted,
             clipped_samples,
@@ -1360,6 +1392,82 @@ impl DspDevice {
             playback: DspChannelLevels::new(playback_peaks, playback_rms),
         })
     }
+
+    async fn query_signal_levels<S>(ws: &mut S) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)
+    where
+        S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error>
+            + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+            + Unpin,
+    {
+        if let Ok(levels_val) = Self::send_command(ws, "GetSignalLevels").await {
+            return parse_levels_object(&levels_val);
+        }
+        let cap_p = Self::optional_query(ws, "GetCaptureSignalPeak")
+            .await
+            .map(|v| parse_f32_list(&v))
+            .unwrap_or_default();
+        let cap_r = Self::optional_query(ws, "GetCaptureSignalRms")
+            .await
+            .map(|v| parse_f32_list(&v))
+            .unwrap_or_default();
+        let play_p = Self::optional_query(ws, "GetPlaybackSignalPeak")
+            .await
+            .map(|v| parse_f32_list(&v))
+            .unwrap_or_default();
+        let play_r = Self::optional_query(ws, "GetPlaybackSignalRms")
+            .await
+            .map(|v| parse_f32_list(&v))
+            .unwrap_or_default();
+        (cap_p, cap_r, play_p, play_r)
+    }
+}
+
+fn map_keys(val: Option<&serde_json::Value>) -> Vec<Box<str>> {
+    val.and_then(|v| v.as_object())
+        .map(|obj| obj.keys().map(|k| k.as_str().into()).collect())
+        .unwrap_or_default()
+}
+
+fn parse_config_json(val: &serde_json::Value) -> Option<DspConfigInfo> {
+    let raw = val.as_str()?;
+    let root: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let devices = root.get("devices");
+    let capture = devices.and_then(|d| d.get("capture"));
+    let playback = devices.and_then(|d| d.get("playback"));
+
+    Some(DspConfigInfo {
+        samplerate: devices
+            .and_then(|d| d.get("samplerate"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok()),
+        chunksize: devices
+            .and_then(|d| d.get("chunksize"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok()),
+        capture_device: capture
+            .and_then(|c| c.get("device"))
+            .and_then(serde_json::Value::as_str)
+            .map(Into::into),
+        capture_format: capture
+            .and_then(|c| c.get("format"))
+            .and_then(serde_json::Value::as_str)
+            .map(Into::into),
+        playback_device: playback
+            .and_then(|p| p.get("device"))
+            .and_then(serde_json::Value::as_str)
+            .map(Into::into),
+        playback_format: playback
+            .and_then(|p| p.get("format"))
+            .and_then(serde_json::Value::as_str)
+            .map(Into::into),
+        mixers: map_keys(root.get("mixers")),
+        filters: map_keys(root.get("filters")),
+        processors: map_keys(root.get("processors")),
+        pipeline_stages: root
+            .get("pipeline")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len),
+    })
 }
 
 fn parse_f32_list(val: &serde_json::Value) -> Vec<f32> {
@@ -1435,8 +1543,14 @@ pub fn format_load_meter(load_pct: f32, width: usize) -> String {
 
 #[cfg(feature = "test-util")]
 pub mod test_helpers {
-    use super::{DspError, parse_f32_list, parse_levels_object};
+    use super::{DspConfigInfo, DspError, parse_config_json, parse_f32_list, parse_levels_object};
     use speaker_common::runtime::FromJoinError;
+
+    /// Helper for testing `GetConfigJson` parsing.
+    #[must_use]
+    pub fn helper_parse_config_json(val: &serde_json::Value) -> Option<DspConfigInfo> {
+        parse_config_json(val)
+    }
 
     /// Helper for testing JSON float list parsing.
     #[must_use]
