@@ -15,8 +15,17 @@ use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
-/// Optimistic-command settle tracker: `(issued at, percent if slider change)`.
-type BrightnessSettle = Rc<Cell<Option<(Instant, Option<f32>)>>>;
+/// Optimistic-command settle marker. Each controlled field is held for the
+/// settle window only when the command that set it carried a fresh value for it;
+/// the other field continues to track authoritative snapshots.
+#[derive(Debug, Clone, Copy)]
+struct BrightnessSettleSnapshot {
+    at: Instant,
+    percent: Option<f32>,
+    auto: Option<bool>,
+}
+
+type BrightnessSettle = Rc<Cell<Option<BrightnessSettleSnapshot>>>;
 
 use crate::config::{
     CodecHudTimeoutMs, CoreConfig, DEFAULT_FONT_SCALE, DEFAULT_VOLUME_STEP_PERCENT, FontScale,
@@ -207,11 +216,10 @@ pub struct AppShell {
     transport_commands: Rc<RefCell<Option<speaker_bluetooth::TransportCommandQueue>>>,
     amp_commands: Rc<RefCell<Option<crate::volume::AmpVolumeCommandQueue>>>,
     brightness_commands: Rc<RefCell<Option<BrightnessCommandQueue>>>,
-    /// Set when the overlay last issued an optimistic brightness command:
-    /// `(timestamp, Some(percent) for a slider drag, None for an AUTO toggle)`.
-    /// While the percent marker is fresh, both the percent and AUTO state are
-    /// held so a stale in-flight snapshot cannot yank the thumb or flip the
-    /// chip; once the window expires the next authoritative snapshot wins.
+    /// Set when the overlay last issued an optimistic brightness command. Each
+    /// field (percent / AUTO) is held for the settle window only when that
+    /// command supplied it; after the window expires the next authoritative
+    /// snapshot is always applied, forcing convergence (AGENTS.md §4.5).
     last_brightness_command: BrightnessSettle,
     device_commands: Rc<RefCell<Option<speaker_bluetooth::DeviceCommandQueue>>>,
     bt_devices: Rc<RefCell<crate::ui::BtDevicesController>>,
@@ -1123,30 +1131,37 @@ impl AppShell {
 
     /// Applies an authoritative brightness snapshot published by the worker.
     ///
-    /// The ambient lux readout always updates. During the settle window the
-    /// optimistic percent *and* AUTO state are preserved so an in-flight stale
-    /// snapshot cannot yank the thumb back or flip the AUTO/MANUAL chip; once
-    /// the window expires the next authoritative snapshot is always applied,
-    /// forcing convergence even if a write failed.
+    /// The ambient lux readout always updates. During the settle window, each
+    /// field supplied by the last optimistic command (slider percent and/or
+    /// AUTO toggle) is held so an in-flight stale snapshot cannot yank the thumb
+    /// back or flip the AUTO/MANUAL chip; once the window expires the next
+    /// authoritative snapshot is always applied, forcing convergence even if a
+    /// write failed.
     pub fn apply_brightness(&self, state: &BrightnessState) {
         self.window
             .set_ambient_lux(state.ambient_lux.unwrap_or(f32::NAN));
         self.window
             .set_ambient_lux_available(state.ambient_lux.is_some());
         let authoritative_percent = state.brightness_percent.clamp(0.0, 100.0);
-        let settle = self.last_brightness_command.get();
-        let hold_optimistic = settle.is_some_and(|(at, optimistic)| {
-            at.elapsed() < BRIGHTNESS_SETTLE_WINDOW && optimistic.is_some()
-        });
-        if !hold_optimistic {
+        let (hold_percent, hold_auto) = self
+            .last_brightness_command
+            .get()
+            .filter(|marker| marker.at.elapsed() < BRIGHTNESS_SETTLE_WINDOW)
+            .map_or((false, false), |marker| {
+                (marker.percent.is_some(), marker.auto.is_some())
+            });
+        if !hold_auto {
             self.window.set_auto_brightness_enabled(state.auto_enabled);
+        }
+        if !hold_percent {
             self.window.set_brightness_value(authoritative_percent);
         }
         tracing::debug!(
             auto_enabled = state.auto_enabled,
             brightness_percent = state.brightness_percent,
             ambient_lux = ?state.ambient_lux,
-            hold_optimistic,
+            hold_percent,
+            hold_auto,
             "Applied brightness state"
         );
     }
@@ -1162,16 +1177,30 @@ impl AppShell {
         settle: &BrightnessSettle,
         command: BrightnessCommand,
     ) {
-        let optimistic_percent = match command {
-            BrightnessCommand::SetPercent(pct) => Some(pct),
-            BrightnessCommand::SetAuto(_) | BrightnessCommand::ResetBias => None,
-        };
         if let Some(commands) = queue.borrow().as_ref() {
             commands.push(command);
         } else {
             tracing::debug!(?command, "Brightness command dropped (no queue wired)");
         }
-        settle.set(Some((Instant::now(), optimistic_percent)));
+        // A slider drag is a manual takeover (hold percent and AUTO off); an
+        // AUTO toggle holds only the AUTO chip so auto-driven percent changes
+        // stay live. ResetBias is paired with SetAuto, so leave its marker intact.
+        let marker = match command {
+            BrightnessCommand::SetPercent(pct) => Some(BrightnessSettleSnapshot {
+                at: Instant::now(),
+                percent: Some(pct),
+                auto: Some(false),
+            }),
+            BrightnessCommand::SetAuto(enabled) => Some(BrightnessSettleSnapshot {
+                at: Instant::now(),
+                percent: None,
+                auto: Some(enabled),
+            }),
+            BrightnessCommand::ResetBias => None,
+        };
+        if let Some(marker) = marker {
+            settle.set(Some(marker));
+        }
     }
 
     /// Updates the mini peak meter visualization ratios (0.0 to 1.0).

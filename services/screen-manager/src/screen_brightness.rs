@@ -854,6 +854,31 @@ impl From<BacklightError> for BrightnessError {
     }
 }
 
+/// Collapses a drained batch to its final slider percent while preserving the
+/// relative order of AUTO toggles and bias resets.
+///
+/// A slider drag queues one `SetPercent` per pointer event; issuing a sysfs
+/// write for every one of them would mean several slow panel-controller I²C
+/// transactions per tick when only the last level determines the final state.
+#[must_use]
+pub fn coalesce_commands(drained: Vec<BrightnessCommand>) -> Vec<BrightnessCommand> {
+    let mut percent_idx: Option<usize> = None;
+    let mut out = Vec::with_capacity(drained.len());
+    for command in drained {
+        if matches!(command, BrightnessCommand::SetPercent(_)) {
+            if let Some(idx) = percent_idx {
+                out[idx] = command;
+            } else {
+                percent_idx = Some(out.len());
+                out.push(command);
+            }
+        } else {
+            out.push(command);
+        }
+    }
+    out
+}
+
 /// Publishes a state snapshot into the shared update, recovering a poisoned guard.
 fn publish(state: BrightnessState, shared: &Mutex<crate::daemon::BtSharedUpdate>) {
     let mut lock = shared.lock().unwrap_or_else(|p| {
@@ -889,7 +914,8 @@ pub fn run_worker<S, B>(
         let now = Instant::now();
         let dt = now.duration_since(last_tick).as_secs_f32();
         last_tick = now;
-        let outcome = engine.tick(now, dt, &drained, idle_reset);
+        let batch = coalesce_commands(drained);
+        let outcome = engine.tick(now, dt, &batch, idle_reset);
         publish(outcome.state, shared);
     }
     info!("Embedded brightness worker stopped");

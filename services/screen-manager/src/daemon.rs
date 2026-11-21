@@ -2062,7 +2062,10 @@ fn open_backlight_with_retry(
             }
         };
         if first_failure {
-            tracing::error!(
+            // A backlight appearing a moment after boot is the expected case
+            // this retry loop exists for; `error!` would misreport it as a
+            // fatal subsystem start failure (AGENTS.md §4.6).
+            tracing::warn!(
                 stage = attempt,
                 retry_secs = backoff.as_secs(),
                 "Brightness worker waiting for backlight"

@@ -12,7 +12,7 @@ use screen_manager::daemon::BtSharedUpdate;
 use screen_manager::screen_brightness::{
     AutoBrightness, BacklightIo, BrightnessCommand, BrightnessCommandQueue, BrightnessConfig,
     BrightnessEngine, BrightnessError, BrightnessState, LoopState, LuxSource, TickAction,
-    TickInput, UnavailableLuxSource, default_policy, run_tick, run_worker,
+    TickInput, UnavailableLuxSource, coalesce_commands, default_policy, run_tick, run_worker,
 };
 
 const MAX: u32 = 255;
@@ -159,6 +159,28 @@ fn command_queue_drains_and_notifies() {
     let (commands, changed) = queue.drain_idle(Duration::from_millis(1));
     assert_eq!(commands, vec![BrightnessCommand::SetPercent(42.0)]);
     assert!(changed);
+}
+
+#[test]
+fn coalescing_a_drag_keeps_only_the_last_percent_and_preserves_order() {
+    let batch = coalesce_commands(vec![
+        BrightnessCommand::SetPercent(10.0),
+        BrightnessCommand::SetPercent(20.0),
+        BrightnessCommand::SetAuto(true),
+        BrightnessCommand::SetPercent(42.0),
+        BrightnessCommand::SetPercent(50.0),
+        BrightnessCommand::ResetBias,
+    ]);
+    assert_eq!(
+        batch,
+        vec![
+            BrightnessCommand::SetPercent(50.0),
+            BrightnessCommand::SetAuto(true),
+            BrightnessCommand::ResetBias,
+        ],
+        "only the final slider level is written, with AUTO/reset order intact"
+    );
+    assert_eq!(coalesce_commands(Vec::new()), Vec::new());
 }
 
 #[test]
@@ -838,6 +860,47 @@ fn shell_brightness_overlay_callbacks_drive_the_engine() {
             BrightnessCommand::ResetBias
         ]
     );
+}
+
+#[test]
+fn auto_toggle_is_held_against_stale_snapshots_until_settle_expires() {
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+
+    let fb = Framebuffer::new_mocked().0;
+    let _platform = fb.init_platform().expect("offscreen platform");
+    let window = MainWindow::new().expect("MainWindow");
+    let shell = AppShell::new(window);
+    let queue = BrightnessCommandQueue::new();
+    shell.wire_brightness(&queue);
+
+    assert!(shell.window().get_auto_brightness_enabled());
+    shell.window().invoke_auto_brightness_toggled(false);
+    assert_eq!(
+        queue.drain(),
+        vec![
+            BrightnessCommand::SetAuto(false),
+            BrightnessCommand::ResetBias
+        ]
+    );
+    assert!(!shell.window().get_auto_brightness_enabled());
+
+    // An AUTO tap holds only the chip: a stale snapshot cannot flip it back,
+    // while the percent continues to track authoritative auto adjustments.
+    shell.apply_brightness(&state(true, 77.0));
+    assert!(!shell.window().get_auto_brightness_enabled());
+    assert_eq!(shell.window().get_brightness_value(), 77.0);
+
+    shell.window().invoke_auto_brightness_toggled(true);
+    assert_eq!(queue.drain(), vec![BrightnessCommand::SetAuto(true)]);
+    assert!(shell.window().get_auto_brightness_enabled());
+    shell.apply_brightness(&state(false, 40.0));
+    assert!(shell.window().get_auto_brightness_enabled());
+    assert_eq!(shell.window().get_brightness_value(), 40.0);
+
+    // Once the window expires the authoritative AUTO state always wins.
+    std::thread::sleep(std::time::Duration::from_millis(1_600));
+    shell.apply_brightness(&state(false, 40.0));
+    assert!(!shell.window().get_auto_brightness_enabled());
 }
 
 #[test]

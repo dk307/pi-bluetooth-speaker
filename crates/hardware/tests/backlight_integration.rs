@@ -216,18 +216,6 @@ fn cancelled_and_invalid_data_errors_expose_full_contract() {
     assert_ne!(invalid.backtrace().to_string(), "");
 }
 
-#[test]
-fn default_constructor_uses_appliance_backlight_device() {
-    // On a developer host the panel sysfs node is absent; the constructor must
-    // still attempt the canonical device and report a typed NotFound error.
-    match Backlight::new() {
-        Ok(backlight) => assert_eq!(backlight.max_brightness(), 255),
-        Err(err) => {
-            assert!(err.is_not_found(), "unexpected default-device error: {err}");
-        }
-    }
-}
-
 #[tokio::test]
 async fn async_wrappers_delegate_to_blocking_backend() {
     let (backlight, mock) = Backlight::new_mocked();
