@@ -460,6 +460,13 @@ async fn hardware_backend_websocket_roundtrip() {
     let sync_status = dsp.read_status().unwrap();
     assert_eq!(sync_status.state, ProcessingState::Running);
 
+    // State-only queries (covers query_state)
+    assert_eq!(
+        dsp.read_state_async().await.unwrap(),
+        ProcessingState::Running
+    );
+    assert_eq!(dsp.read_state().unwrap(), ProcessingState::Running);
+
     // Async reset
     dsp.reset_clipped_samples_async().await.unwrap();
 
@@ -483,19 +490,9 @@ async fn hardware_backend_subscribe_state_roundtrip() {
     let local_port = listener.local_addr().unwrap().port();
 
     let server_task = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-
-        // Expect GetState
-        let msg = ws.next().await.unwrap().unwrap();
-        let req: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
-        assert_eq!(req["command"], "GetState");
-        let resp = serde_json::json!({"reply": "GetState", "result": "Ok", "value": "Inactive"});
-        ws.send(Message::Text(resp.to_string().into()))
-            .await
-            .unwrap();
-
-        // Expect SubscribeState
+        // Connection 1: SubscribeState
+        let (stream1, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream1).await.unwrap();
         let msg = ws.next().await.unwrap().unwrap();
         let req: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
         assert_eq!(req["command"], "SubscribeState");
@@ -504,7 +501,18 @@ async fn hardware_backend_subscribe_state_roundtrip() {
             .await
             .unwrap();
 
-        // Push Running then ProcessingStopped
+        // Connection 2: GetState seed after subscription is active
+        let (stream2, _) = listener.accept().await.unwrap();
+        let mut ws2 = tokio_tungstenite::accept_async(stream2).await.unwrap();
+        let msg2 = ws2.next().await.unwrap().unwrap();
+        let req2: serde_json::Value = serde_json::from_str(msg2.to_text().unwrap()).unwrap();
+        assert_eq!(req2["command"], "GetState");
+        let resp2 = serde_json::json!({"reply": "GetState", "result": "Ok", "value": "Inactive"});
+        ws2.send(Message::Text(resp2.to_string().into()))
+            .await
+            .unwrap();
+
+        // Push Running then ProcessingStopped on subscription connection
         let ev1 = serde_json::json!({
             "reply": "StateEvent",
             "result": "Ok",

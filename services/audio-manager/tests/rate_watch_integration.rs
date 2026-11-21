@@ -2,11 +2,11 @@
 
 use audio_manager::rate_watch::{
     LoopbackState, RateWatchController, apply_loopback_state, build_reconfigured_config_json,
-    chunksize_for_rate, run_with_rx,
+    chunksize_for_rate, reconcile_with_engine, run_with_rx,
 };
 use camilladsp_schema::config::Configuration;
 use speaker_common::diag::ScopedTempDir;
-use speaker_dsp::{DspDevice, ProcessingState};
+use speaker_dsp::{DspConfigInfo, DspDevice, ProcessingState};
 
 const SAMPLE_CONFIG_YAML: &str = "\
 devices:
@@ -269,4 +269,38 @@ async fn run_with_rx_reapplies_when_engine_inactive_and_exits_on_close() {
     // Close channel -> task exits cleanly
     drop(tx);
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn reconcile_with_engine_recovers_after_dsp_restart() {
+    let tmp = ScopedTempDir::new("rate_watch_reconcile");
+    let cfg_path = tmp.path().join("crossover.yml");
+    std::fs::write(&cfg_path, SAMPLE_CONFIG_YAML).unwrap();
+
+    let (dsp, mock) = DspDevice::new_mocked();
+    let mut ctrl = RateWatchController::new();
+    let state_44k = LoopbackState {
+        active: true,
+        rate_hz: 44_100,
+    };
+
+    // Initial configure at 44100 Hz
+    assert!(apply_loopback_state(&mut ctrl, &dsp, &cfg_path, state_44k).await);
+    mock.set_config(Some(DspConfigInfo {
+        samplerate: Some(44_100),
+        ..DspConfigInfo::default()
+    }));
+
+    // Matching live rate is a no-op
+    assert!(!reconcile_with_engine(&mut ctrl, &dsp, &cfg_path, state_44k).await);
+
+    // Simulate camilladsp.service restart reverting to static 48000 Hz config
+    mock.set_config(Some(DspConfigInfo {
+        samplerate: Some(48_000),
+        ..DspConfigInfo::default()
+    }));
+    assert!(reconcile_with_engine(&mut ctrl, &dsp, &cfg_path, state_44k).await);
+    let pushed: Configuration =
+        serde_json::from_str(&mock.last_set_config_json().unwrap()).unwrap();
+    assert_eq!(pushed.devices.samplerate.get(), 44_100);
 }

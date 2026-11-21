@@ -209,6 +209,38 @@ async fn apply_loopback_state_ext(
     }
 }
 
+/// Reconciles `ctrl` against `CamillaDSP`'s live status when a loopback stream is
+/// active, recovering if `camilladsp.service` restarted with its static config.
+pub async fn reconcile_with_engine(
+    ctrl: &mut RateWatchController,
+    dsp: &DspDevice,
+    config_path: &Path,
+    state: LoopbackState,
+) -> bool {
+    if !state.active || state.rate_hz == 0 {
+        return false;
+    }
+    if ctrl.applied_rate() == Some(state.rate_hz) {
+        let Ok(status) = dsp.read_status_async().await else {
+            return false;
+        };
+        let live_rate = status.config.as_ref().and_then(|c| c.samplerate);
+        if status.state != speaker_dsp::ProcessingState::Inactive
+            && live_rate == Some(state.rate_hz)
+        {
+            return false;
+        }
+        warn!(
+            expected_rate = state.rate_hz,
+            ?live_rate,
+            engine_state = %status.state,
+            "CamillaDSP diverged from active Loopback rate; reconfiguring"
+        );
+        ctrl.applied_rate = None;
+    }
+    apply_loopback_state(ctrl, dsp, config_path, state).await
+}
+
 /// Runs the ALSA `hw:Loopback` rate-watcher task until the process shuts down.
 pub async fn run(dsp: DspDevice) {
     let config_path = Path::new(DEFAULT_CAMILLADSP_CONFIG_PATH);
@@ -227,6 +259,13 @@ pub async fn run_with_rx(
     let mut last_state: Option<LoopbackState> = None;
 
     loop {
+        let needs_retry =
+            last_state.is_some_and(|s| s.active && ctrl.applied_rate() != Some(s.rate_hz));
+        let reconcile_interval = if needs_retry {
+            Duration::from_millis(500)
+        } else {
+            Duration::from_secs(2)
+        };
         tokio::select! {
             maybe_msg = rx.recv() => {
                 let Some((state, from_event)) = maybe_msg else {
@@ -236,9 +275,9 @@ pub async fn run_with_rx(
                 last_state = Some(state);
                 apply_loopback_state_ext(&mut ctrl, &dsp, config_path, state, from_event).await;
             }
-            () = tokio::time::sleep(Duration::from_millis(500)), if last_state.is_some_and(|s| s.active && ctrl.applied_rate() != Some(s.rate_hz)) => {
+            () = tokio::time::sleep(reconcile_interval), if last_state.is_some_and(|s| s.active) => {
                 if let Some(state) = last_state {
-                    apply_loopback_state(&mut ctrl, &dsp, config_path, state).await;
+                    reconcile_with_engine(&mut ctrl, &dsp, config_path, state).await;
                 }
             }
         }
@@ -246,53 +285,51 @@ pub async fn run_with_rx(
 }
 
 fn loopback_ctl_thread(tx: &mpsc::Sender<(LoopbackState, bool)>) {
-    loop {
-        if tx.is_closed() {
-            return;
-        }
-        // Open in non-blocking mode so draining pending events with `ctl.read()`
-        // returns `Ok(None)` instead of blocking indefinitely after the last event.
-        match Ctl::new("hw:Loopback", true) {
-            Ok(ctl) => {
-                enable_pcm_notify(&ctl);
-                if let Err(e) = ctl.subscribe_events(true) {
-                    warn!(error = %e, "Failed to subscribe to hw:Loopback ALSA ctl events");
-                    std::thread::sleep(Duration::from_secs(1));
-                    continue;
-                }
-                let mut prev: Option<LoopbackState> = None;
-                let mut from_event = false;
-                loop {
-                    if tx.is_closed() {
-                        return;
-                    }
-                    if let Some(state) = read_loopback_state(&ctl)
-                        && (prev != Some(state) || from_event)
-                    {
-                        if tx.blocking_send((state, from_event)).is_err() {
-                            return;
-                        }
-                        prev = Some(state);
-                    }
-                    from_event = false;
-                    match ctl.wait(Some(500)) {
-                        Ok(true) => {
-                            while let Ok(Some(_)) = ctl.read() {}
-                            from_event = true;
-                        }
-                        Ok(false) => {}
-                        Err(e) => {
-                            warn!(error = %e, "hw:Loopback ALSA ctl wait failed; reopening");
-                            break;
-                        }
-                    }
-                }
+    while !tx.is_closed() {
+        let Some(ctl) = open_loopback_ctl() else {
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        };
+        poll_loopback_ctl(&ctl, tx);
+    }
+}
+
+fn open_loopback_ctl() -> Option<Ctl> {
+    // Open non-blocking so draining events with `ctl.read()` returns `Ok(None)`.
+    let ctl = Ctl::new("hw:Loopback", true)
+        .inspect_err(|e| warn!(error = %e, "Failed to open hw:Loopback ALSA ctl; retrying"))
+        .ok()?;
+    enable_pcm_notify(&ctl);
+    if let Err(e) = ctl.subscribe_events(true) {
+        warn!(error = %e, "Failed to subscribe to hw:Loopback ALSA ctl events");
+        return None;
+    }
+    Some(ctl)
+}
+
+fn poll_loopback_ctl(ctl: &Ctl, tx: &mpsc::Sender<(LoopbackState, bool)>) {
+    let mut prev: Option<LoopbackState> = None;
+    let mut from_event = false;
+    while !tx.is_closed() {
+        if let Some(state) = read_loopback_state(ctl)
+            && (prev != Some(state) || from_event)
+        {
+            if tx.blocking_send((state, from_event)).is_err() {
+                return;
             }
+            prev = Some(state);
+        }
+        from_event = match ctl.wait(Some(500)) {
+            Ok(true) => {
+                while let Ok(Some(_)) = ctl.read() {}
+                true
+            }
+            Ok(false) => false,
             Err(e) => {
-                warn!(error = %e, "Failed to open hw:Loopback ALSA ctl; retrying");
-                std::thread::sleep(Duration::from_secs(1));
+                warn!(error = %e, "hw:Loopback ALSA ctl wait failed; reopening");
+                return;
             }
-        }
+        };
     }
 }
 

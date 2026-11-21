@@ -1001,21 +1001,17 @@ impl DspDeviceMock {
         Ok(())
     }
 
-    fn set_config_yaml(&self, config_yaml: &str) -> Result<(), DspError> {
+    fn set_config_slot(&self, is_json: bool, payload: &str) -> Result<(), DspError> {
         let mut g = self.inner.lock().expect("dsp mock mutex poisoned");
         if let Some(ref fault) = g.injected_fault {
             return Err(DspError::protocol_error(fault.clone()));
         }
-        g.last_set_config = Some(config_yaml.to_owned());
-        Ok(())
-    }
-
-    fn set_config_json(&self, config_json: &str) -> Result<(), DspError> {
-        let mut g = self.inner.lock().expect("dsp mock mutex poisoned");
-        if let Some(ref fault) = g.injected_fault {
-            return Err(DspError::protocol_error(fault.clone()));
-        }
-        g.last_set_config_json = Some(config_json.to_owned());
+        let slot = if is_json {
+            &mut g.last_set_config_json
+        } else {
+            &mut g.last_set_config
+        };
+        *slot = Some(payload.to_owned());
         Ok(())
     }
 }
@@ -1205,20 +1201,16 @@ impl DspDevice {
         host: DspHost,
         port: DspPort,
     ) -> Result<tokio::sync::mpsc::Receiver<ProcessingState>, DspError> {
+        // Subscribe BEFORE seeding via GetState so no transition between the
+        // two round trips can be missed: any edge after SubscribeState is
+        // buffered on `ws`, while any earlier state is observed by `query_state`.
         let mut ws = Self::connect_ws(&host, port).await?;
-
-        let initial_state = match Self::send_ws_command(&mut ws, &WsCommand::GetState).await? {
-            WsReply::GetState { result, value } => {
-                check_ws_result("GetState", result)?;
-                ProcessingState::from(value)
-            }
-            other => return Err(unexpected_reply("GetState", &other)),
-        };
-
         match Self::send_ws_command(&mut ws, &WsCommand::SubscribeState).await? {
             WsReply::SubscribeState { result } => check_ws_result("SubscribeState", result)?,
             other => return Err(unexpected_reply("SubscribeState", &other)),
         }
+
+        let initial_state = Self::query_state(host, port).await?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         if tx.send(initial_state).await.is_err() {
@@ -1335,33 +1327,38 @@ impl DspDevice {
         .await
     }
 
-    /// Uploads and immediately applies a YAML configuration string on `CamillaDSP`.
-    ///
-    /// # Errors
-    /// Returns [`DspError`] if the WebSocket request fails or `CamillaDSP` rejects the config.
-    pub fn set_config(&self, config_yaml: &str) -> Result<(), DspError> {
+    fn send_config_sync(&self, is_json: bool, payload: &str) -> Result<(), DspError> {
         match &*self.backend {
-            Backend::Mock { mock, .. } => mock.set_config_yaml(config_yaml),
+            Backend::Mock { mock, .. } => mock.set_config_slot(is_json, payload),
             Backend::Hardware { host, port } => {
                 let host_clone = host.clone();
                 let port_val = *port;
-                let yaml_owned = config_yaml.to_owned();
+                let owned = payload.to_owned();
+                let cmd = if is_json {
+                    WsCommand::SetConfigJson { value: owned }
+                } else {
+                    WsCommand::SetConfig { value: owned }
+                };
                 let handle = std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .map_err(|e| DspError::invalid_state(e.to_string()))?;
-                    rt.block_on(Self::send_hardware_unit_cmd(
-                        host_clone,
-                        port_val,
-                        WsCommand::SetConfig { value: yaml_owned },
-                    ))
+                    rt.block_on(Self::send_hardware_unit_cmd(host_clone, port_val, cmd))
                 });
                 handle
                     .join()
                     .unwrap_or_else(|e| std::panic::resume_unwind(e))
             }
         }
+    }
+
+    /// Uploads and immediately applies a YAML configuration string on `CamillaDSP`.
+    ///
+    /// # Errors
+    /// Returns [`DspError`] if the WebSocket request fails or `CamillaDSP` rejects the config.
+    pub fn set_config(&self, config_yaml: &str) -> Result<(), DspError> {
+        self.send_config_sync(false, config_yaml)
     }
 
     /// Uploads and immediately applies a YAML configuration string asynchronously.
@@ -1380,28 +1377,7 @@ impl DspDevice {
     /// # Errors
     /// Returns [`DspError`] if the WebSocket request fails or `CamillaDSP` rejects the config.
     pub fn set_config_json(&self, config_json: &str) -> Result<(), DspError> {
-        match &*self.backend {
-            Backend::Mock { mock, .. } => mock.set_config_json(config_json),
-            Backend::Hardware { host, port } => {
-                let host_clone = host.clone();
-                let port_val = *port;
-                let json_owned = config_json.to_owned();
-                let handle = std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(|e| DspError::invalid_state(e.to_string()))?;
-                    rt.block_on(Self::send_hardware_unit_cmd(
-                        host_clone,
-                        port_val,
-                        WsCommand::SetConfigJson { value: json_owned },
-                    ))
-                });
-                handle
-                    .join()
-                    .unwrap_or_else(|e| std::panic::resume_unwind(e))
-            }
-        }
+        self.send_config_sync(true, config_json)
     }
 
     /// Uploads and immediately applies a JSON configuration string asynchronously.
