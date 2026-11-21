@@ -1,4 +1,17 @@
 fn main() {
+    // Redirect math symbols that host glibc >= 2.42 versions as @GLIBC_2.43
+    // (`acosf`, `atan2f`, `remainder`) to `speaker_common`'s `@GLIBC_2.17`
+    // `__wrap_*` trampolines so both Rust LTO and `libskia.a` link cleanly for
+    // Debian 13 Trixie (glibc 2.41) without affecting host build scripts.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
+        && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu")
+    {
+        println!("cargo:rustc-link-arg=-Wl,--wrap=acosf");
+        println!("cargo:rustc-link-arg=-Wl,--wrap=atan2f");
+        println!("cargo:rustc-link-arg=-Wl,--wrap=remainder");
+    }
+
     #[cfg(feature = "ui")]
     {
         use std::collections::HashMap;

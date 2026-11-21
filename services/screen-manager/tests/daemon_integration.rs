@@ -886,7 +886,7 @@ fn decode_cover_buffer_upscales_and_caches() {
     let src = sample_png(dir.path(), "art.png");
     let buffer = decode_cover_buffer(src.to_str().expect("utf8")).expect("decoded");
     assert_eq!(buffer.width(), TARGET_COVER_SIZE);
-    let cache = dir.path().join("art.png.480.jpg");
+    let cache = dir.path().join("art.png.360.jpg");
     assert!(cache.is_file(), "cache file should be written");
     // Second call serves from the cache and still decodes.
     assert!(decode_cover_buffer(src.to_str().expect("utf8")).is_some());
@@ -904,7 +904,7 @@ fn decode_cover_buffer_missing_file_is_none() {
 fn decode_cover_buffer_regenerates_corrupt_cache() {
     let dir = ScopedTempDir::try_new("cover_decode_corrupt").expect("temp dir");
     let src = sample_png(dir.path(), "art.png");
-    let cache = dir.path().join("art.png.480.jpg");
+    let cache = dir.path().join("art.png.360.jpg");
     std::fs::write(&cache, b"truncated-jpeg-garbage").expect("cache write");
     assert!(
         decode_cover_buffer(src.to_str().expect("utf8")).is_some(),

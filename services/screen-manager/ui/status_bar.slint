@@ -26,7 +26,12 @@ export global CodecSpecs {
 
 export component TopStatusBar inherits Rectangle {
     height: 60px;
-    background: MaterialPalette.background;
+    // `MainWindow` already clears the 800x480 backbuffer to `MaterialPalette.background`.
+    // Cache the entire 800x60 status bar into a single GPU FBO layer so
+    // `SkiaItemRenderer::visit_layer` returns `ContinueRenderingWithoutChildren`
+    // and prunes all 45 child items on every 60 Hz marquee tick.
+    background: transparent;
+    cache-rendering-hint: true;
 
     in property <string> active_source: "Bluetooth";
     in property <string> track_or_device: "Waiting for Connection...";
@@ -95,7 +100,6 @@ export component TopStatusBar inherits Rectangle {
                         height: root.height;
                         width: root.height * 3.45;
                         image-fit: fill;
-                        cache-rendering-hint: true;
                     }
                 }
             }
@@ -154,7 +158,6 @@ export component TopStatusBar inherits Rectangle {
                         width: 100px;
                         height: 52px;
                         background: transparent;
-                        cache-rendering-hint: true;
 
                         HorizontalLayout {
                             spacing: 8px;
@@ -232,7 +235,6 @@ export component TopStatusBar inherits Rectangle {
                         border-radius: 10px;
                         border-width: 1px;
                         border-color: MaterialPalette.outline_variant;
-                        cache-rendering-hint: true;
 
                         Image {
                             x: (parent.width - self.width) / 2;

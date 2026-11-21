@@ -339,9 +339,13 @@ fn ambient_wave_sprites_include_paused_idle_frame() {
     let window = MainWindow::new().expect("MainWindow");
     ThemePreset::Peppy.apply(&window);
 
-    let frames = window.global::<AmbientWaveSprites>().get_frames();
+    let sprites = window.global::<AmbientWaveSprites>();
+    let frames = sprites.get_frames();
     assert_eq!(frames.row_count(), 7);
     let idle = frames.row_data(6).expect("idle frame 6");
     assert_eq!(idle.size().width, 64);
     assert_eq!(idle.size().height, 24);
+    let sheet = sprites.get_sprite_sheet();
+    assert_eq!(sheet.size().width, 64 * 7);
+    assert_eq!(sheet.size().height, 24);
 }

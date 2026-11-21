@@ -658,9 +658,11 @@ pub type CoverPixelBuffer = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
 /// pay a full Lanczos3 resize on the worker for a persistently broken file.
 #[cfg(feature = "ui")]
 pub const COVER_DECODE_RETRY: Duration = Duration::from_secs(10);
-/// Target side length (px) for upscaled cover-art cache images.
+/// Target side length (px) for upscaled cover-art cache images, matching the
+/// fixed `360x360` cover-art container in `NowPlayingView` 1:1 so the GPU
+/// blits the texture without per-frame bilinear downsampling.
 #[cfg(feature = "ui")]
-pub const TARGET_COVER_SIZE: u32 = 480;
+pub const TARGET_COVER_SIZE: u32 = 360;
 
 /// Peer status can lag a local transport command by hundreds of milliseconds.
 ///
@@ -771,7 +773,7 @@ pub fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
     let src = Path::new(path);
     let file_name = src.file_name()?;
     let mut upscaled_name = file_name.to_os_string();
-    upscaled_name.push(".480.jpg");
+    upscaled_name.push(".360.jpg");
     let out_path = src.with_file_name(upscaled_name);
 
     // A corrupt cache file (truncated by a power loss mid-write) must not

@@ -1,10 +1,9 @@
 //! Blurred backdrop snapshot for the full-screen overlays.
 //!
-//! Slint's `FemtoVG` and software renderers have no `backdrop-blur` primitive, so
-//! the frosted-glass effect is produced here: when an overlay is about to open,
-//! [`AppShell`] captures a [`slint::Window::take_snapshot`] of the clean scene,
-//! blurs it with [`libblur`] (stronger behind the overlay than in the top bar
-//! outside it), and publishes it back to Slint as an [`slint::Image`].
+//! When an overlay is about to open, [`AppShell`] captures a
+//! [`slint::Window::take_snapshot`] of the clean scene, blurs it with
+//! [`libblur`] (stronger behind the overlay than in the top bar outside it),
+//! and publishes it back to Slint as an [`slint::Image`].
 
 use std::backtrace::Backtrace;
 use std::fmt::{self, Debug, Formatter};

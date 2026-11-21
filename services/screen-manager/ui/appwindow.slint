@@ -501,85 +501,104 @@ export component MainWindow inherits Window {
             close_clicked => { root.close_bt_devices(); }
         }
 
-        // Blurred backdrop — the frozen, blurred snapshot of the entire screen
-        // (including the top bar outside the overlay, blurred more strongly).
-        // It sits directly on the background, BELOW the scrim, so the scrim's
-        // 0.25 dimming renders on top of the blur. Published by Rust when an
-        // overlay opens. By design it is not refreshed while the overlay stays
-        // open: content changes underneath only appear after a reopen.
-        hud_backdrop := Image {
-            y: 0;
+        // Wrap the HUD backdrop/scrim, modal HUD overlays, and virtual keyboard
+        // sheet in a single `cache-rendering-hint: true` layer. While all
+        // overlays and the keyboard are closed (`visible: false` on every child),
+        // `i_slint_core::item_rendering::render_layer` computes a `0x0` bounding
+        // rect, allocates zero GPU FBO memory (`layer_cache` stores `None`),
+        // and prunes all 110+ hidden items in a single HashMap lookup per 60 Hz frame.
+        Rectangle {
             width: 100%;
             height: 100%;
-            source: root.overlay_backdrop;
-            opacity: root.max_hud_opacity;
-            visible: root.max_hud_opacity > 0.01;
-        }
+            cache-rendering-hint: true;
 
-        // HUD scrim (above the backdrop) — dims the entire screen behind the
-        // overlay (including the top bar outside the overlay). The dimming
-        // adapts to backdrop availability: 0.25 when a blurred backdrop is
-        // published (the blur provides most of the separation), falling back
-        // to the pre-backdrop 0.55 when none is — e.g. if snapshot capture fails.
-        hud_scrim := Rectangle {
-            y: 0;
-            width: 100%;
-            height: 100%;
-            background: #000000;
-            opacity: root.max_hud_opacity
-                * (root.overlay_backdrop_available ? 0.25 : 0.55);
-            visible: root.max_hud_opacity > 0.01;
-        }
+            // Blurred backdrop — the frozen, blurred snapshot of the entire screen
+            // (including the top bar outside the overlay, blurred more strongly).
+            // It sits directly on the background, BELOW the scrim, so the scrim's
+            // 0.25 dimming renders on top of the blur. Published by Rust when an
+            // overlay opens. By design it is not refreshed while the overlay stays
+            // open: content changes underneath only appear after a reopen.
+            hud_backdrop := Image {
+                y: 0;
+                width: 100%;
+                height: 100%;
+                source: root.overlay_backdrop;
+                opacity: root.max_hud_opacity;
+                visible: root.max_hud_opacity > 0.01;
+            }
 
-        // Volume HUD overlay (top layer) — same below-the-top-bar geometry.
-        volume_hud := VolumeHudOverlay {
-            y: root.top_bar_height;
-            width: 100%;
-            height: parent.height - root.top_bar_height;
-            overlay_backdrop_available: root.overlay_backdrop_available;
-            visible: root.volume_hud_opacity > 0.01;
-            opacity: root.volume_hud_opacity;
-            volume_value <=> root.volume_value;
-            is_muted <=> root.is_muted;
-            volume_changed(val) => { root.volume_changed(val); }
-            toggle_mute => { root.toggle_mute(); }
-            dismiss_requested => { root.dismiss_volume_hud(); }
-            interaction_activity => { root.show_volume_hud(); }
-        }
+            // HUD scrim (above the backdrop) — dims the entire screen behind the
+            // overlay (including the top bar outside the overlay). The dimming
+            // adapts to backdrop availability: 0.25 when a blurred backdrop is
+            // published (the blur provides most of the separation), falling back
+            // to the pre-backdrop 0.55 when none is — e.g. if snapshot capture fails.
+            hud_scrim := Rectangle {
+                y: 0;
+                width: 100%;
+                height: 100%;
+                background: #000000;
+                opacity: root.max_hud_opacity
+                    * (root.overlay_backdrop_available ? 0.25 : 0.55);
+                visible: root.max_hud_opacity > 0.01;
+            }
 
-        // Codec information overlay (top layer) — same below-the-top-bar geometry.
-        codec_hud := CodecHudOverlay {
-            y: root.top_bar_height;
-            width: 100%;
-            height: parent.height - root.top_bar_height;
-            overlay_backdrop_available: root.overlay_backdrop_available;
-            visible: root.codec_hud_opacity > 0.01;
-            opacity: root.codec_hud_opacity;
-            codec: root.stream_codec;
-            sample_rate: root.stream_sample_rate;
-            bit_depth: root.stream_bit_depth;
-            stream_format: root.bt_stream_format;
-            delay_text: root.bt_delay_text;
-            connected: root.bt_connected;
-            dismiss_requested => { root.dismiss_codec_hud(); }
-        }
+            // Volume HUD overlay (top layer) — same below-the-top-bar geometry.
+            volume_hud := VolumeHudOverlay {
+                y: root.top_bar_height;
+                width: 100%;
+                height: parent.height - root.top_bar_height;
+                overlay_backdrop_available: root.overlay_backdrop_available;
+                visible: root.volume_hud_opacity > 0.01;
+                opacity: root.volume_hud_opacity;
+                volume_value <=> root.volume_value;
+                is_muted <=> root.is_muted;
+                volume_changed(val) => { root.volume_changed(val); }
+                toggle_mute => { root.toggle_mute(); }
+                dismiss_requested => { root.dismiss_volume_hud(); }
+                interaction_activity => { root.show_volume_hud(); }
+            }
 
-        // Brightness overlay (top layer) — same below-the-top-bar geometry.
-        brightness_hud := BrightnessHudOverlay {
-            y: root.top_bar_height;
-            width: 100%;
-            height: parent.height - root.top_bar_height;
-            overlay_backdrop_available: root.overlay_backdrop_available;
-            visible: root.brightness_hud_opacity > 0.01;
-            opacity: root.brightness_hud_opacity;
-            brightness_value <=> root.brightness_value;
-            auto_enabled <=> root.auto_brightness_enabled;
-            ambient_lux: root.ambient_lux;
-            ambient_lux_available: root.ambient_lux_available;
-            brightness_changed(val) => { root.brightness_changed(val); }
-            auto_toggled(on) => { root.auto_brightness_toggled(on); }
-            dismiss_requested => { root.dismiss_brightness_hud(); }
-            interaction_activity => { root.show_brightness_hud(); }
+            // Codec information overlay (top layer) — same below-the-top-bar geometry.
+            codec_hud := CodecHudOverlay {
+                y: root.top_bar_height;
+                width: 100%;
+                height: parent.height - root.top_bar_height;
+                overlay_backdrop_available: root.overlay_backdrop_available;
+                visible: root.codec_hud_opacity > 0.01;
+                opacity: root.codec_hud_opacity;
+                codec: root.stream_codec;
+                sample_rate: root.stream_sample_rate;
+                bit_depth: root.stream_bit_depth;
+                stream_format: root.bt_stream_format;
+                delay_text: root.bt_delay_text;
+                connected: root.bt_connected;
+                dismiss_requested => { root.dismiss_codec_hud(); }
+            }
+
+            // Brightness overlay (top layer) — same below-the-top-bar geometry.
+            brightness_hud := BrightnessHudOverlay {
+                y: root.top_bar_height;
+                width: 100%;
+                height: parent.height - root.top_bar_height;
+                overlay_backdrop_available: root.overlay_backdrop_available;
+                visible: root.brightness_hud_opacity > 0.01;
+                opacity: root.brightness_hud_opacity;
+                brightness_value <=> root.brightness_value;
+                auto_enabled <=> root.auto_brightness_enabled;
+                ambient_lux: root.ambient_lux;
+                ambient_lux_available: root.ambient_lux_available;
+                brightness_changed(val) => { root.brightness_changed(val); }
+                auto_toggled(on) => { root.auto_brightness_toggled(on); }
+                dismiss_requested => { root.dismiss_brightness_hud(); }
+                interaction_activity => { root.show_brightness_hud(); }
+            }
+
+            // Bottom-sheet virtual keyboard overlay: pops up whenever a `TextField`
+            // gains focus (`VirtualKeyboard.visible == true`).
+            VirtualKeyboardSheet {
+                width: 100%;
+                height: 100%;
+            }
         }
 
         // True while the Volume HUD overlay owns the keyboard focus.
@@ -619,13 +638,6 @@ export component MainWindow inherits Window {
         // Releases the keyboard focus held by the brightness overlay.
         public function unfocus_brightness_hud() {
             brightness_hud.release_focus();
-        }
-
-        // Bottom-sheet virtual keyboard overlay: pops up whenever a `TextField`
-        // gains focus (`VirtualKeyboard.visible == true`).
-        VirtualKeyboardSheet {
-            width: 100%;
-            height: 100%;
         }
 
         // Boot splash overlay (top-most): full-window coverage during the

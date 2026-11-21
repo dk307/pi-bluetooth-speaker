@@ -15,6 +15,31 @@ macro_rules! glibc_compat {
     };
 }
 
+// Trampolines for `-Wl,--wrap=acosf/atan2f/remainder` emitted by `screen-manager/build.rs`.
+//
+// Defined once in `speaker_common` (rather than inside `glibc_compat!`) so both
+// binaries and integration tests in `screen-manager` resolve `__wrap_*` against
+// `@GLIBC_2.17` without duplicating symbols or breaking host build scripts on
+// `aarch64` runners.
+#[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]
+core::arch::global_asm!(
+    ".symver __glibc217_acosf, acosf@GLIBC_2.17",
+    ".global __wrap_acosf",
+    ".type __wrap_acosf, %function",
+    "__wrap_acosf:",
+    "b __glibc217_acosf",
+    ".symver __glibc217_atan2f, atan2f@GLIBC_2.17",
+    ".global __wrap_atan2f",
+    ".type __wrap_atan2f, %function",
+    "__wrap_atan2f:",
+    "b __glibc217_atan2f",
+    ".symver __glibc217_remainder, remainder@GLIBC_2.17",
+    ".global __wrap_remainder",
+    ".type __wrap_remainder, %function",
+    "__wrap_remainder:",
+    "b __glibc217_remainder",
+);
+
 /// Enforces glibc 2.17 symbol versioning for `log10f` on aarch64-unknown-linux-gnu.
 ///
 /// Slint 1.19 rendering code pulls in `log10f`, which recent compiler-rt
