@@ -270,8 +270,9 @@ ldconfig
 Notes:
 
 - `--enable-rfcomm` is **required** — the deployed build left it at its
-  default `off`, which is why the currently installed `/usr/bin/bluealsa-rfcomm`
-  is still the distro v4.3.1 binary.
+  default `off` (so the old `/usr/bin/bluealsa-rfcomm` was the distro v4.3.1
+  binary). This private build enables it and installs `/usr/local/bin/bluealsa-rfcomm`
+  (v5.0.0); apt package removal deletes the old distro copy.
 - `--with-alsaplugindir` and `--with-dbusconfdir` are new versus the deployed
   build; see §4 for why. The D-Bus policy is installed under `/usr/local` by
   the build phase and copied into `/etc/dbus-1/system.d` only by the gated
@@ -521,9 +522,10 @@ codec `.so` copies in `/usr/local/lib/variants/stock/` for A/B.
    - ✅ `docs/rpi_audio_bluetooth_report.md` §10.6 — points at the script as
      authoritative and flags the old `-O2`/`--prefix=/usr`/`--disable-opus`
      divergences as wrong (done in this PR).
-   - ☐ Remaining `docs/*.md` `/usr/bin/bluealsa*` path references still to
-     update: `volume_sync_plan.md`, `single_active_bt_source.md`,
-     `ui_architecture_plan_rust.md`, and report §10.7 unit listings.
+   - ✅ Doc `/usr/bin/bluealsa*` path references — all updated to
+     `/usr/local/bin` in report §5/§7/§10.6/§10.7/§10.9,
+     `volume_sync_plan.md`, `single_active_bt_source.md` and
+     `ui_architecture_plan_rust.md` (done in this PR).
 
 **Rollback:** `apt-get install bluez-alsa-utils=4.3.1-3`, restore the two units
 and `20-bluealsa.conf` from the timestamped backup directory created by the

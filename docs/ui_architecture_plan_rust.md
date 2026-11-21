@@ -937,7 +937,7 @@ rustflags = [
     - **CamillaDSP:** Native Rust binary (`/usr/local/bin/camilladsp`)
     - **Screen Console:** Native Rust binary (`/usr/local/bin/screen-manager`)
     - **Bluetooth Manager & Agent:** Native Rust binary (`/usr/local/bin/bt-manager`)
-    - **BlueALSA & BlueZ:** Native C binaries (`/usr/bin/bluealsa`, `/usr/libexec/bluetooth/bluetoothd`)
+    - **BlueALSA & BlueZ:** Native C binaries (`/usr/local/bin/bluealsad`, `/usr/libexec/bluetooth/bluetoothd`)
 
 ---
 

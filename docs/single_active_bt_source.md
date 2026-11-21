@@ -9,7 +9,7 @@ Multiple Bluetooth devices (e.g., a phone and a laptop) may remain paired and co
 `baseline/etc/systemd/system/bluealsa-aplay.service` runs:
 
 ```ini
-ExecStart=/usr/bin/bluealsa-aplay -S -D default --volume=none --single-audio
+ExecStart=/usr/local/bin/bluealsa-aplay -S -D default --volume=none --single-audio
 ```
 
 - **First-play-wins:** Each connected BlueALSA A2DP PCM gets a worker thread, starting inactive. The first worker to receive audio acquires the single ALSA playback slot (`dsp_dmix` in `baseline/etc/asound.conf`) until its PCM `Running` property drops to `false` or the PCM is removed.

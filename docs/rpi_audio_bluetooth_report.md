@@ -14,7 +14,7 @@ The target machine is a **Raspberry Pi 3 Model B** running **DietPi (Debian 13 T
 The system features:
 - **Audio Output:** High-resolution digital I2S connected directly to an **InnoMaker Merus MA12070P Class-D Amplifier HAT**, actively managed and crossover-filtered via **CamillaDSP**.
 - **Custom Device Tree Overlay:** Uses a custom-compiled `merus-amp-custom.dtbo` with stripped `pinctrl` properties to prevent pin-mux conflicts with other GPIO peripherals.
-- **Bluetooth Stack:** High-quality external **TP-Link UB500 (Bluetooth 5.0)** USB adapter with onboard Wi-Fi and Bluetooth disabled in hardware/device-tree. Custom-compiled **BlueALSA v5.0.0** optimized for the Raspberry Pi 3's **Cortex-A53** CPU with hardware **ARM NEON SIMD** vectorization (`-O2 -mcpu=cortex-a53+crc+simd -ftree-vectorize`), featuring high-resolution codec support (aptX-HD, aptX, AAC, LC3plus, MP3, SBC-XQ+) and `libsamplerate` adaptive resampling. (Proprietary/transmit-only Sony LDAC removed; experimental non-standard A2DP Opus excluded — see §7.1).
+- **Bluetooth Stack:** High-quality external **TP-Link UB500 (Bluetooth 5.0)** USB adapter with onboard Wi-Fi and Bluetooth disabled in hardware/device-tree. Custom-compiled **BlueALSA v5.0.0** optimized for the Raspberry Pi 3's **Cortex-A53** CPU with hardware **ARM NEON SIMD** vectorization (`-O3 -mcpu=cortex-a53+crc+simd -ftree-vectorize`, private `/usr/local` build), featuring high-resolution codec support (aptX-HD, aptX, AAC, LC3plus, MP3, SBC-XQ+) and `libsamplerate` adaptive resampling. (Proprietary/transmit-only Sony LDAC removed; experimental non-standard A2DP Opus excluded — see §7.1).
 - **Display & Touch:** **Freenove 4.3" MIPI DSI Display (800x480 IPS)** with native capacitive touch powered via the dedicated Raspberry Pi DSI ribbon cable (`raspberrypi-ts` / `/dev/fb0`).
 - **Physical Controls & Sensors:** 4-pin PWM cooling fan with tachometer feedback, 1-Wire DS18B20 digital temperature sensor, BH1750 ambient light sensor over I2C, and a TOP-UP EC12 rotary encoder with an integrated RGB LED and push button.
 - **Hardware Telemetry Suites:** Python utilities in `/root/amp/` for real-time monitoring of amplifier I2C registers, CamillaDSP DSP load and buffer stats, and Bluetooth connectivity.
@@ -166,8 +166,8 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 | :--- | :--- | :--- | :--- | :--- |
 | **`bluetooth.service`** | `active (running)` | System | `/usr/libexec/bluetooth/bluetoothd` | Official BlueZ 5.88 daemon managing HCI controller and A2DP profile. |
 | **`bt-manager.service`** | `active (running)` | Appliance | `/usr/local/bin/bt-manager` | Pure-Rust service providing native BlueZ `org.bluez.Agent1` headless auto-pairing & auto-trust agent, BlueZ/BlueALSA status monitoring, and BIP cover-art publisher (replaces legacy `bt-agent.service`). |
-| **`bluealsa.service`** | `active (running)` | Custom/System | `/usr/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+` | BlueALSA v5.0.0 daemon acting as an A2DP sink supporting all high-resolution codecs except Opus, with native AVRCP volume. |
-| **`bluealsa-aplay.service`**| `active (running)` | Custom/System | `/usr/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"` | Pipes incoming decoded audio stream from BlueALSA to ALSA `default` (`dsp_dmix` -> `Loopback,0,0` -> CamillaDSP) with hardware-only volume auto-sync to the Merus MA12070P chip (`hw:sndrpimerusamp`). |
+| **`bluealsa.service`** | `active (running)` | Appliance | `/usr/local/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+` | BlueALSA v5.0.0 (private A53-tuned build) daemon acting as an A2DP sink supporting all high-resolution codecs except Opus, with native AVRCP volume. |
+| **`bluealsa-aplay.service`**| `active (running)` | Appliance | `/usr/local/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"` | Pipes incoming decoded audio stream from BlueALSA to ALSA `default` (`dsp_dmix` -> `Loopback,0,0` -> CamillaDSP) with hardware-only volume auto-sync to the Merus MA12070P chip (`hw:sndrpimerusamp`). |
 | **`camilladsp.service`** | `active (running)` | Custom | `/usr/local/bin/camilladsp -p 1234 -o /var/log/camilladsp/camilladsp.log /etc/camilladsp/crossover.yml` | CamillaDSP v4.1.3 crossover and filter engine with WebSocket control API on port 1234. |
 
 ### Infrastructure & System Services
@@ -266,10 +266,10 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 
 ### 7.1. BlueALSA Daemon (`bluealsa.service`)
 - **File:** `/etc/systemd/system/bluealsa.service`
-- **Version:** BlueALSA v5.0.0 (`/usr/bin/bluealsad`)
+- **Version:** BlueALSA v5.0.0 (`/usr/local/bin/bluealsad`)
 - **Command Line:**
   ```bash
-  /usr/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+
+  /usr/local/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+
   ```
 - **Opus Exclusion (mandatory):** The non-standard A2DP Opus codec (Google vendor ID `0x00E0`, codec ID `0x0001`) MUST be excluded with `-c-opus`. Pixel/Android phones prefer Opus when it is advertised, but their A2DP stack wedges during Opus negotiation (endless SetConfiguration → START → abort probe loop alternating with aptX-HD, zero media packets transmitted, no audio output). With Opus absent from the endpoint list, clients fall through to aptX-HD and stream stably. Do not re-enable Opus.
 
@@ -279,7 +279,7 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 - **Hardware-Only Volume Sync:** `-M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"` explicitly binds `bluealsa-aplay` to the Merus MA12070P hardware amplifier mixer (`Card 1: sndrpimerusamp`) rather than relying on `ctl.!default`. This sets `SoftVolume: false` on the BlueALSA PCM transport so BlueALSA performs **zero software attenuation**, feeding a bit-perfect 100% full-scale digital signal into CamillaDSP while mapping AVRCP volume (`0..127`) exclusively to the MA12070P hardware `'A.Mstr Vol'` register (`0..144`, `-144 dB..0.00 dB`).
 - **Command Line:**
   ```bash
-  /usr/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"
+  /usr/local/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"
   ```
 - **Boot Race Mitigation (Critical):** `bluealsa-aplay` MUST NOT attempt to enumerate the PCM list before `bluealsad` has fully registered `org.bluealsa` on the system D-Bus bus. A boot race here (previously observed when starting the service without proper ordering) manifests as `Couldn't get BlueALSA PCM list: The name org.bluealsa was not provided by any .service files`, after which the AVRCP → Merus hardware volume sync is permanently dead for the session (the mixer handle is never opened, so volume changes on the phone are silently ignored while playback continues at whatever hardware volume was last set).
 - **Dependency & Resilience Configuration:** To prevent the boot race, the `[Unit]` section MUST pin `bluealsa-aplay.service` to `bluealsa.service` with both ordering and lifecycle dependencies, and the `[Service]` section MUST enable aggressive automatic restarts:
@@ -810,8 +810,8 @@ make install
 ldconfig
 
 # Compatibility symlinks for legacy tool invocations
-ln -sf /usr/bin/bluealsad /usr/bin/bluealsa
-ln -sf /usr/bin/bluealsactl /usr/bin/bluealsa-cli
+ln -sf /usr/local/bin/bluealsad /usr/local/bin/bluealsa
+ln -sf /usr/local/bin/bluealsactl /usr/local/bin/bluealsa-cli
 ```
 
 ### 10.7. BlueALSA Systemd Services Installation
@@ -829,7 +829,7 @@ Requires=bluetooth.service
 Type=simple
 User=root
 StateDirectory=bluealsa
-ExecStart=/usr/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+
+ExecStart=/usr/local/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+
 Restart=always
 RestartSec=2
 
@@ -848,7 +848,7 @@ Wants=camilladsp.service
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"
+ExecStart=/usr/local/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"
 Restart=always
 RestartSec=2
 
@@ -912,7 +912,7 @@ mkdir -p /usr/var/lib
 ln -sfn /var/lib/bluealsa /usr/var/lib/bluealsa
 chmod 700 /var/lib/bluealsa
 ```
-*(Note: Installing `bluez-alsa-utils` installs `bluealsa-cli` without overwriting the custom-compiled `/usr/bin/bluealsa` daemon).*
+*(Note: Installing `bluez-alsa-utils` installs `bluealsa-cli` without overwriting the private `/usr/local/bin/bluealsad` daemon).*
 
 ### 10.10. Python Libraries & Peripherals Dependencies
 *(Note: Python D-Bus & GObject packages previously required for `bt-auto-trust-agent.py` have been deprecated; `bt-manager` runs as a compiled pure-Rust binary).*

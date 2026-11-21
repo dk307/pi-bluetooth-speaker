@@ -68,10 +68,10 @@ Phone volume buttons (AVRCP absolute volume, 0-127)
 ### Working Config (Minimal)
 ```ini
 # /etc/systemd/system/bluealsa.service
-ExecStart=/usr/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+
+ExecStart=/usr/local/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+
 
 # /etc/systemd/system/bluealsa-aplay.service
-ExecStart=/usr/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol" --pcm-buffer-time=500000 --pcm-period-time=100000
+ExecStart=/usr/local/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol" --pcm-buffer-time=500000 --pcm-period-time=100000
 ```
 
 ### bt-manager Features
