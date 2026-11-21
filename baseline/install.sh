@@ -88,7 +88,11 @@ echo "==> [5/10] Setting up CamillaDSP binary, configuration, and service..."
 mkdir -p /etc/camilladsp /var/log/camilladsp /usr/local/bin
 
 if [ ! -f /usr/local/bin/camilladsp ]; then
-    echo "NOTE: Build and install CamillaDSP v5.0.0-beta.2 from the host via scripts/build_camilladsp_pi.sh"
+    echo "Downloading CamillaDSP v5.0.0-beta.2 aarch64 release (or build from source via scripts/build_camilladsp_pi.sh)..."
+    wget -q https://github.com/HEnquist/camilladsp/releases/download/v5.0.0-beta.2/camilladsp-linux-aarch64.tar.gz -O /tmp/camilladsp.tar.gz
+    tar -xzf /tmp/camilladsp.tar.gz -C /usr/local/bin/
+    chmod +x /usr/local/bin/camilladsp
+    rm -f /tmp/camilladsp.tar.gz
 fi
 
 cp "${SCRIPT_DIR}/etc/camilladsp/crossover.yml" /etc/camilladsp/

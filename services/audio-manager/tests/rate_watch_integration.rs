@@ -294,6 +294,10 @@ async fn reconcile_with_engine_recovers_after_dsp_restart() {
     // Matching live rate is a no-op
     assert!(!reconcile_with_engine(&mut ctrl, &dsp, &cfg_path, state_44k).await);
 
+    // Missing GetConfigJson telemetry while Running must NOT trigger a re-push
+    mock.set_config(None);
+    assert!(!reconcile_with_engine(&mut ctrl, &dsp, &cfg_path, state_44k).await);
+
     // Simulate camilladsp.service restart reverting to static 48000 Hz config
     mock.set_config(Some(DspConfigInfo {
         samplerate: Some(48_000),

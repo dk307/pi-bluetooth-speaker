@@ -225,9 +225,8 @@ pub async fn reconcile_with_engine(
             return false;
         };
         let live_rate = status.config.as_ref().and_then(|c| c.samplerate);
-        if status.state != speaker_dsp::ProcessingState::Inactive
-            && live_rate == Some(state.rate_hz)
-        {
+        let rate_mismatch = live_rate.is_some_and(|r| r != state.rate_hz);
+        if status.state != speaker_dsp::ProcessingState::Inactive && !rate_mismatch {
             return false;
         }
         warn!(
