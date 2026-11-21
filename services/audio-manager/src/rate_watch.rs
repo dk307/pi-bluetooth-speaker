@@ -244,8 +244,13 @@ pub async fn reconcile_with_engine(
 pub async fn run(dsp: DspDevice) {
     let config_path = Path::new(DEFAULT_CAMILLADSP_CONFIG_PATH);
     let (tx, rx) = mpsc::channel::<(LoopbackState, bool)>(8);
-    tokio::task::spawn_blocking(move || loopback_ctl_thread(&tx));
+    let ctl_handle = tokio::task::spawn_blocking(move || loopback_ctl_thread(&tx));
     run_with_rx(dsp, config_path, rx).await;
+    if let Err(join_err) = ctl_handle.await
+        && join_err.is_panic()
+    {
+        std::panic::resume_unwind(join_err.into_panic());
+    }
 }
 
 /// Drives the rate-watcher state machine from an injected `LoopbackState` receiver.

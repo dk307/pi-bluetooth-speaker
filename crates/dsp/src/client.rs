@@ -23,7 +23,7 @@ use camilladsp_schema::protocol::{
     ProcessingState as SchemaProcessingState, StopReason as SchemaStopReason, WsCommand, WsReply,
     WsResult,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
@@ -1210,7 +1210,17 @@ impl DspDevice {
             other => return Err(unexpected_reply("SubscribeState", &other)),
         }
 
-        let initial_state = Self::query_state(host, port).await?;
+        let mut initial_state = Self::query_state(host, port).await?;
+
+        // Drain any StateEvent frames that arrived between SubscribeState and
+        // GetState so older buffered events are not delivered after the newer seed.
+        while let Some(Some(Ok(Message::Text(text)))) = ws.next().now_or_never() {
+            if let Ok(reply) = serde_json::from_str::<WsReply>(&text)
+                && let Some(state) = extract_state_event(reply)
+            {
+                initial_state = state;
+            }
+        }
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         if tx.send(initial_state).await.is_err() {
@@ -1237,16 +1247,7 @@ impl DspDevice {
                         let Ok(reply) = serde_json::from_str::<WsReply>(&text) else {
                             continue;
                         };
-                        let next_state = match reply {
-                            WsReply::StateEvent { result: WsResult::Ok, value } => {
-                                Some(ProcessingState::from(value.state))
-                            }
-                            WsReply::StateEvent { result: WsResult::ProcessingStopped, .. } => {
-                                Some(ProcessingState::Inactive)
-                            }
-                            _ => None,
-                        };
-                        if let Some(state) = next_state
+                        if let Some(state) = extract_state_event(reply)
                             && tx.send(state).await.is_err()
                         {
                             break;
@@ -1751,6 +1752,20 @@ struct OptionalTelemetry {
     capture_rate: Option<u32>,
     volume_db: Option<f32>,
     muted: Option<bool>,
+}
+
+fn extract_state_event(reply: WsReply) -> Option<ProcessingState> {
+    match reply {
+        WsReply::StateEvent {
+            result: WsResult::Ok,
+            value,
+        } => Some(ProcessingState::from(value.state)),
+        WsReply::StateEvent {
+            result: WsResult::ProcessingStopped,
+            ..
+        } => Some(ProcessingState::Inactive),
+        _ => None,
+    }
 }
 
 fn unexpected_reply(cmd: &str, reply: &WsReply) -> DspError {
