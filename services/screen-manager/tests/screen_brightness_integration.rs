@@ -224,6 +224,49 @@ fn auto_disabled_suppresses_subsequent_writes() {
 }
 
 #[test]
+fn manual_mode_keeps_ambient_lux_fresh() {
+    let cfg = default_policy();
+    let backlight = FakeBacklight::new(0);
+    let mut ab = AutoBrightness::new(100.0, cfg);
+    let mut loop_state = LoopState::new(0);
+
+    let sensor = FakeSensor::new(321.0);
+    let first = run_tick(
+        &sensor,
+        &backlight,
+        &mut ab,
+        &cfg,
+        &mut loop_state,
+        TickInput {
+            now: Instant::now(),
+            dt: 0.05,
+            commands: &[BrightnessCommand::SetAuto(false)],
+            idle_reset: IDLE_RESET,
+        },
+    );
+    assert_eq!(first.action, TickAction::AutoDisabled);
+    assert!((first.state.ambient_lux - 321.0).abs() < f32::EPSILON);
+
+    let brighter = FakeSensor::new(654.0);
+    let second = run_tick(
+        &brighter,
+        &backlight,
+        &mut ab,
+        &cfg,
+        &mut loop_state,
+        TickInput {
+            now: Instant::now(),
+            dt: 0.05,
+            commands: &[],
+            idle_reset: IDLE_RESET,
+        },
+    );
+    assert_eq!(second.action, TickAction::AutoDisabled);
+    assert!((second.state.ambient_lux - 654.0).abs() < f32::EPSILON);
+    assert!((second.state.brightness_percent - first.state.brightness_percent).abs() < 0.5);
+}
+
+#[test]
 fn manual_drag_suppresses_auto_until_reenabled() {
     let cfg = default_policy();
     let sensor = FakeSensor::new(100.0);

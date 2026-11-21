@@ -306,6 +306,43 @@ pub struct TickOutcome {
     pub state: BrightnessState,
 }
 
+/// Samples ambient light for telemetry, reporting a fault through `action`.
+///
+/// Returns `Some(lux)` only for a finite reading. The caller decides whether to
+/// feed that value into the auto policy; manual ticks still update the readout.
+fn sample_lux<S>(sensor: &S, state: &mut LoopState, action: &mut TickAction) -> Option<f32>
+where
+    S: LuxSource + ?Sized,
+{
+    match sensor.read_lux() {
+        Ok(lux) if lux.is_finite() => {
+            state.sensor_fault_logged = false;
+            state.last_lux = lux;
+            Some(lux)
+        }
+        Ok(lux) => {
+            if state.sensor_fault_logged {
+                debug!(lux, "non-finite lux sample; holding brightness");
+            } else {
+                warn!(lux, "ignored non-finite lux sample; holding brightness");
+                state.sensor_fault_logged = true;
+            }
+            *action = TickAction::SensorFault;
+            None
+        }
+        Err(e) => {
+            if state.sensor_fault_logged {
+                debug!(error = %e, "lux read still failing; holding last brightness");
+            } else {
+                warn!(error = %e, "lux read failed; holding last brightness");
+                state.sensor_fault_logged = true;
+            }
+            *action = TickAction::SensorFault;
+            None
+        }
+    }
+}
+
 /// Executes one control-loop tick over injectable hardware seams.
 ///
 /// Commands are applied first (with an immediate backlight write for a manual
@@ -454,52 +491,31 @@ where
             action = TickAction::IdleReset;
         }
 
-        if loop_state.auto_enabled {
-            match sensor.read_lux() {
-                Ok(lux) if lux.is_finite() => {
-                    loop_state.sensor_fault_logged = false;
-                    loop_state.last_lux = lux;
-                    let duty = ab.update(lux, input.dt);
-                    let raw = raw_from_duty(duty, max);
-                    if raw != loop_state.last_written {
-                        match backlight.write(raw) {
-                            Ok(()) => {
-                                loop_state.last_written = raw;
-                                action = TickAction::AutoWrite { raw };
-                                debug!(raw, lux, dt = input.dt, "auto brightness write");
-                            }
-                            Err(e) => {
-                                warn!(
-                                    error = %e,
-                                    target_raw = raw,
-                                    "backlight write failed; retrying with backoff next tick"
-                                );
-                                action = TickAction::WriteFault { raw };
-                            }
+        if let Some(lux) = sample_lux(sensor, loop_state, &mut action) {
+            if loop_state.auto_enabled {
+                let duty = ab.update(lux, input.dt);
+                let raw = raw_from_duty(duty, max);
+                if raw != loop_state.last_written {
+                    match backlight.write(raw) {
+                        Ok(()) => {
+                            loop_state.last_written = raw;
+                            action = TickAction::AutoWrite { raw };
+                            debug!(raw, lux, dt = input.dt, "auto brightness write");
+                        }
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                target_raw = raw,
+                                "backlight write failed; retrying with backoff next tick"
+                            );
+                            action = TickAction::WriteFault { raw };
                         }
                     }
                 }
-                Ok(lux) => {
-                    if loop_state.sensor_fault_logged {
-                        debug!(lux, "non-finite lux sample; holding brightness");
-                    } else {
-                        warn!(lux, "ignored non-finite lux sample; holding brightness");
-                        loop_state.sensor_fault_logged = true;
-                    }
-                    action = TickAction::SensorFault;
-                }
-                Err(e) => {
-                    if loop_state.sensor_fault_logged {
-                        debug!(error = %e, "lux read still failing; holding last brightness");
-                    } else {
-                        warn!(error = %e, "lux read failed; holding last brightness");
-                        loop_state.sensor_fault_logged = true;
-                    }
-                    action = TickAction::SensorFault;
-                }
+            } else {
+                // Manual mode still publishes the live ambient reading.
+                action = TickAction::AutoDisabled;
             }
-        } else {
-            action = TickAction::AutoDisabled;
         }
     }
 
