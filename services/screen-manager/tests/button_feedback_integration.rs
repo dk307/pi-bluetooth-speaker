@@ -150,6 +150,35 @@ fn settings_button_renders_press_feedback_and_opens_settings() {
 }
 
 #[test]
+fn app_bar_back_button_renders_press_feedback() {
+    let mut h = harness();
+    h.shell.set_tab(5);
+    for _ in 0..4 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        slint::platform::update_timers_and_animations();
+        h.buffer.draw(&h.window);
+    }
+    // ScreenAppBar trailing "Back" FilledIconButton: right edge, 12 px margin,
+    // 40 dp circle centered vertically in the 60 px bar -> ~(764, 30).
+    let region = (728, 4, 796, 56);
+    let idle = h.buffer.region(region.0, region.1, region.2, region.3);
+
+    press(&mut h, 764.0, 30.0);
+    let pressed = h.buffer.region(region.0, region.1, region.2, region.3);
+    assert!(
+        count_diff(&idle, &pressed) > 100,
+        "app bar back button must show a visible pressed state"
+    );
+
+    release(&mut h, 764.0, 30.0);
+    assert_eq!(
+        h.shell.current_tab(),
+        0,
+        "app bar Back must return to the previous tab"
+    );
+}
+
+#[test]
 fn transport_buttons_render_press_feedback() {
     // (label, center x, center y, region)
     let buttons = [

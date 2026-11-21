@@ -53,7 +53,12 @@ export component NavigationItemTemplate inherits BaseNavigationItemTemplate {
                             width: 100%;
                             height: 100%;
 
-                            if touch_area.pressed && !root.selected : Ripple {
+                            // Kept mounted and driven by `active` so a short
+                            // touchscreen tap still renders the ripple — an
+                            // `if pressed : Ripple` item was destroyed on release
+                            // before its 250 ms animation could show anything.
+                            Ripple {
+                                active: touch_area.pressed && !root.selected;
                                 width: root.width;
                                 height: root.height;
                                 pressed_x: touch_area.pressed_x;
