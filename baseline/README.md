@@ -18,13 +18,15 @@ baseline/
 │       ├── merus-amp-custom.dtbo  # Precompiled custom device tree overlay (pinctrl stripped)
 │       └── make_custom_overlay.sh # Script to rebuild custom DTBO from stock merus-amp.dtbo
 ├── etc/
-│   ├── asound.conf                # ALSA Loopback, dmix resampler, and default routing
+│   ├── asound.conf                # Direct ALSA Loopback pass-through (plug -> hw:Loopback,0,0, any rate)
 │   ├── alsa/
 │   │   └── 20-bluealsa.conf       # BlueALSA ALSA plugin configuration
 │   ├── bluetooth/
 │   │   └── main.conf              # BlueZ audio loudspeaker class & auto-enable settings
 │   ├── camilladsp/
-│   │   └── crossover.yml          # Active 2-way DSP crossover & limiter filter graph
+│   │   └── crossover.yml          # CamillaDSP 5.0 config (vanilla passthrough, dynamic rate/inactive stop)
+│   ├── modprobe.d/
+│   │   └── snd-aloop.conf         # snd-aloop module options (pcm_notify=1 for rate/active events)
 │   ├── modules-load.d/
 │   │   ├── snd-aloop.conf         # Autoload ALSA virtual loopback driver
 │   │   └── i2c-dev.conf           # Autoload I2C device nodes
@@ -32,9 +34,9 @@ baseline/
 │   │   ├── org.speaker.Bluetooth.conf # D-Bus policy for active-source arbiter (bt-manager)
 │   │   └── org.speaker.CoverArt.conf  # D-Bus policy for BIP cover-art service (bt-manager)
 │   └── systemd/system/
-│       ├── camilladsp.service     # CamillaDSP WebSocket & filtering engine daemon
+│       ├── camilladsp.service     # CamillaDSP 5.0 engine daemon (-w wait mode, WS on 127.0.0.1:1234)
 │       ├── bluealsa.service       # BlueALSA high-res A2DP audio sink daemon
-│       ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA dmix (--volume=none --single-audio)
+│       ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA default (--volume=none --single-audio)
 │       └── bt-agent.service       # Legacy standalone agent (superseded by bt-manager.service)
 ├── alsa/
 │   └── asound.state               # Persisted MA12070P hardware mixer gains & limiter states
@@ -123,7 +125,7 @@ This performs an automated 25-point check across:
 
 ```text
 [Phone / Bluetooth Client]
-         │ (A2DP: aptX-HD / AAC / Opus / SBC-XQ)
+         │ (A2DP: aptX-HD / AAC / SBC)
          ▼
   [TP-Link UB500 USB BT Adapter]
          │
@@ -131,20 +133,18 @@ This performs an automated 25-point check across:
   [bluealsa.service (v5.0.0)]
          │
          ▼
-  [bluealsa-aplay.service -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"]
-         │  (SoftVolume: false — 100% bit-perfect PCM to Loopback; AVRCP volume -> MA12070P HW mixer)
+  [bluealsa-aplay.service -S -D default --volume=none --single-audio]
+         │  (100% bit-perfect PCM at native rate; bt-manager -> audio-manager D-Bus volume)
          ▼
-  [ALSA Loopback Card 0: pcm.dsp_dmix @ 48kHz S32_LE]
+  [ALSA Loopback Card 0: plug -> hw:Loopback,0,0 (pcm_notify=1, 44.1-192 kHz)]
+         │  (audio-manager rate_watch pushes samplerate/chunksize via SetConfigJson)
+         ▼
+  [camilladsp.service (v5.0.0-beta.2, -w, Port 1234)]
+     └── Vanilla Stereo Passthrough (stop_on_rate_change + stop_on_inactive)
+         │  (audio-manager dsp_watch via SubscribeState -> MA12070P PLL-gated unmute)
+         ▼
+  [I2S DAC Card 1 (hw:sndrpihifiberry,0) -> Merus MA12070P Amp (I2C)]
          │
          ▼
-  [camilladsp.service (PID 434, Port 1234)]
-     ├── Mono Sum & Split (-6 dB)
-     ├── Ch0 (Subwoofer): 45Hz HPF + 180Hz LPF + Limiter (-3.5 dB)
-     └── Ch1 (Coax): 180Hz HPF + 3000Hz Shelf (-2 dB) + Limiter (-3.0 dB)
-         │
-         ▼
-  [InnoMaker Merus MA12070P Amp: Card 1 (hw:sndrpimerusamp,0)]
-         │
-         ▼
-  [Physical Speakers: Subwoofer + Coaxial Satellite]
+  [Physical Speakers]
 ```

@@ -142,6 +142,7 @@ fn dsp_status_calculations() {
         version: Some("4.1.3".into()),
         config_title: Some("Test".into()),
         config_path: Some("/etc/camilladsp/crossover.yml".into()),
+        config: None,
         capture_rate: Some(48000),
         state: ProcessingState::Running,
         processing_load: 5.0,
@@ -293,8 +294,6 @@ fn hardware_info_constants() {
     let hw = dsp.hardware_info();
     assert_eq!(hw.service_unit, "camilladsp.service");
     assert_eq!(hw.default_port, 1234);
-    assert_eq!(hw.chunk_size, 1024);
-    assert_eq!(hw.crossover_freq_hz, 180);
 
     assert_eq!(dsp.host().as_str(), DEFAULT_DSP_HOST);
     assert_eq!(dsp.port().as_u16(), DEFAULT_DSP_PORT);
@@ -323,8 +322,37 @@ fn hardware_info_constants() {
     assert_eq!(mock_status.capture_rate, Some(96000));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hardware_backend_websocket_roundtrip() {
+#[test]
+fn config_json_parsing_passthrough_and_pipeline() {
+    let passthrough = serde_json::json!(
+        r#"{"devices":{"samplerate":48000,"chunksize":1024,"capture":{"type":"Alsa","channels":2,"device":"hw:Loopback,1,0","format":"S32_LE"},"playback":{"type":"Alsa","channels":2,"device":"hw:sndrpihifiberry,0","format":"S32_LE"}},"mixers":null,"filters":null,"processors":null,"pipeline":null}"#
+    );
+    let cfg = dsp_test_helpers::helper_parse_config_json(&passthrough).unwrap();
+    assert_eq!(cfg.samplerate, Some(48000));
+    assert_eq!(cfg.chunksize, Some(1024));
+    assert_eq!(cfg.capture_device.as_deref(), Some("hw:Loopback,1,0"));
+    assert_eq!(cfg.capture_format.as_deref(), Some("S32_LE"));
+    assert_eq!(cfg.playback_device.as_deref(), Some("hw:sndrpihifiberry,0"));
+    assert_eq!(cfg.playback_format.as_deref(), Some("S32_LE"));
+    assert!(cfg.is_passthrough());
+
+    let with_pipeline = serde_json::json!(
+        r#"{"devices":{"samplerate":44100,"chunksize":512,"capture":{"type":"Alsa","channels":2,"device":"hw:0,0"},"playback":{"type":"Alsa","channels":2,"device":"hw:1,0"}},"mixers":{"m1":{"channels":{"in":2,"out":2},"mapping":[]}},"filters":{"f1":{"type":"Gain","parameters":{"gain":-3.0}},"f2":{"type":"Gain","parameters":{"gain":0.0}}},"processors":null,"pipeline":[{"type":"Filter","channels":[0],"names":["f1"]}]}"#
+    );
+    let cfg2 = dsp_test_helpers::helper_parse_config_json(&with_pipeline).unwrap();
+    assert_eq!(cfg2.samplerate, Some(44100));
+    assert_eq!(cfg2.chunksize, Some(512));
+    assert_eq!(cfg2.mixers.len(), 1);
+    assert_eq!(cfg2.filters.len(), 2);
+    assert_eq!(cfg2.processors.len(), 0);
+    assert_eq!(cfg2.pipeline_stages, 1);
+    assert!(!cfg2.is_passthrough());
+
+    assert!(dsp_test_helpers::helper_parse_config_json(&serde_json::json!("not json")).is_none());
+    assert!(dsp_test_helpers::helper_parse_config_json(&serde_json::json!(123)).is_none());
+}
+
+async fn spawn_mock_ws_server() -> (u16, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_port = listener.local_addr().unwrap().port();
 
@@ -337,65 +365,9 @@ async fn hardware_backend_websocket_roundtrip() {
                 while let Some(msg) = ws.next().await {
                     let Ok(msg) = msg else { break };
                     if let Message::Text(text) = msg {
-                        let cmd: String = serde_json::from_str(&text).unwrap();
-                        let resp = match cmd.as_str() {
-                            "GetVersion" => {
-                                serde_json::json!({"GetVersion": {"result": "Ok", "value": "4.1.3"}})
-                            }
-                            "GetConfigTitle" => {
-                                serde_json::json!({"GetConfigTitle": {"result": "Ok", "value": "Test Engine"}})
-                            }
-                            "GetConfigFilePath" => {
-                                serde_json::json!({"GetConfigFilePath": {"result": "Ok", "value": "/etc/camilladsp/crossover.yml"}})
-                            }
-                            "GetState" => {
-                                serde_json::json!({"GetState": {"result": "Ok", "value": "Running"}})
-                            }
-                            "GetProcessingLoad" => {
-                                serde_json::json!({"GetProcessingLoad": {"result": "Ok", "value": 4.25}})
-                            }
-                            "GetResamplerLoad" => {
-                                serde_json::json!({"GetResamplerLoad": {"result": "Ok", "value": 0.15}})
-                            }
-                            "GetRateAdjust" => {
-                                serde_json::json!({"GetRateAdjust": {"result": "Ok", "value": 1.000_010}})
-                            }
-                            "GetBufferLevel" => {
-                                serde_json::json!({"GetBufferLevel": {"result": "Ok", "value": 512}})
-                            }
-                            "GetClippedSamples" => {
-                                serde_json::json!({"GetClippedSamples": {"result": "Ok", "value": 0}})
-                            }
-                            "GetCaptureRate" => {
-                                serde_json::json!({"GetCaptureRate": {"result": "Ok", "value": 48000}})
-                            }
-                            "GetStopReason" => {
-                                serde_json::json!({"GetStopReason": {"result": "Ok", "value": "None"}})
-                            }
-                            "GetVolume" => {
-                                serde_json::json!({"GetVolume": {"result": "Ok", "value": -6.0}})
-                            }
-                            "GetMute" => {
-                                serde_json::json!({"GetMute": {"result": "Ok", "value": false}})
-                            }
-                            "GetSignalLevels" => serde_json::json!({
-                                "GetSignalLevels": {
-                                    "result": "Ok",
-                                    "value": {
-                                        "capture_peak": [-15.0, -14.5],
-                                        "capture_rms": [-20.0, -19.5],
-                                        "playback_peak": [-18.0, -17.5],
-                                        "playback_rms": [-23.0, -22.5]
-                                    }
-                                }
-                            }),
-                            "ResetClippedSamples" => {
-                                serde_json::json!({"ResetClippedSamples": {"result": "Ok"}})
-                            }
-                            other => {
-                                serde_json::json!({other: {"result": "Error", "value": "unsupported"}})
-                            }
-                        };
+                        let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        let cmd = req.get("command").and_then(|c| c.as_str()).unwrap();
+                        let resp = mock_ws_reply(cmd);
                         if ws
                             .send(Message::Text(serde_json::to_string(&resp).unwrap().into()))
                             .await
@@ -408,16 +380,87 @@ async fn hardware_backend_websocket_roundtrip() {
             });
         }
     });
+    (local_port, server_task)
+}
+
+fn mock_ws_reply(cmd: &str) -> serde_json::Value {
+    match cmd {
+        "GetVersion" => {
+            serde_json::json!({"reply": "GetVersion", "result": "Ok", "value": "5.0.0-beta.2"})
+        }
+        "GetConfigTitle" => {
+            serde_json::json!({"reply": "GetConfigTitle", "result": "Ok", "value": "Test Engine"})
+        }
+        "GetConfigFilePath" => {
+            serde_json::json!({"reply": "GetConfigFilePath", "result": "Ok", "value": "/etc/camilladsp/crossover.yml"})
+        }
+        "GetConfigJson" => {
+            serde_json::json!({
+                "reply": "GetConfigJson",
+                "result": "Ok",
+                "value": r#"{"devices":{"samplerate":96000,"chunksize":2048,"capture":{"type":"Alsa","channels":2,"device":"hw:Loopback,1,0","format":"S32_LE"},"playback":{"type":"Alsa","channels":2,"device":"hw:sndrpihifiberry,0","format":"S32_LE"}},"mixers":null,"filters":null,"processors":null,"pipeline":null}"#
+            })
+        }
+        "GetState" => serde_json::json!({"reply": "GetState", "result": "Ok", "value": "Running"}),
+        "GetProcessingLoad" => {
+            serde_json::json!({"reply": "GetProcessingLoad", "result": "Ok", "value": 4.25})
+        }
+        "GetResamplerLoad" => {
+            serde_json::json!({"reply": "GetResamplerLoad", "result": "Ok", "value": 0.15})
+        }
+        "GetRateAdjust" => {
+            serde_json::json!({"reply": "GetRateAdjust", "result": "Ok", "value": 1.000_010})
+        }
+        "GetBufferLevel" => {
+            serde_json::json!({"reply": "GetBufferLevel", "result": "Ok", "value": 512})
+        }
+        "GetClippedSamples" => {
+            serde_json::json!({"reply": "GetClippedSamples", "result": "Ok", "value": 0})
+        }
+        "GetCaptureRate" => {
+            serde_json::json!({"reply": "GetCaptureRate", "result": "Ok", "value": 48000})
+        }
+        "GetStopReason" => {
+            serde_json::json!({"reply": "GetStopReason", "result": "Ok", "value": "None"})
+        }
+        "GetVolume" => serde_json::json!({"reply": "GetVolume", "result": "Ok", "value": -6.0}),
+        "GetMute" => serde_json::json!({"reply": "GetMute", "result": "Ok", "value": false}),
+        "GetSignalLevels" => serde_json::json!({
+            "reply": "GetSignalLevels",
+            "result": "Ok",
+            "value": {
+                "capture_peak": [-15.0, -14.5],
+                "capture_rms": [-20.0, -19.5],
+                "playback_peak": [-18.0, -17.5],
+                "playback_rms": [-23.0, -22.5]
+            }
+        }),
+        "ResetClippedSamples" => {
+            serde_json::json!({"reply": "ResetClippedSamples", "result": "Ok"})
+        }
+        "SetConfig" => serde_json::json!({"reply": "SetConfig", "result": "Ok"}),
+        "SetConfigJson" => serde_json::json!({"reply": "SetConfigJson", "result": "Ok"}),
+        other => serde_json::json!({"reply": other, "result": "Error", "message": "unsupported"}),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hardware_backend_websocket_roundtrip() {
+    let (local_port, server_task) = spawn_mock_ws_server().await;
 
     let dsp = DspDevice::with_host_and_port(DspHost::default(), DspPort::new(local_port).unwrap());
 
     let status = dsp.read_status_async().await.unwrap();
-    assert_eq!(status.version.as_deref(), Some("4.1.3"));
+    assert_eq!(status.version.as_deref(), Some("5.0.0-beta.2"));
     assert_eq!(status.config_title.as_deref(), Some("Test Engine"));
+    let cfg = status.config.as_ref().expect("GetConfigJson parsed");
+    assert_eq!(cfg.samplerate, Some(96000));
+    assert_eq!(cfg.chunksize, Some(2048));
+    assert_eq!(status.buffer_capacity, 2048);
     assert_eq!(status.state, ProcessingState::Running);
     assert_eq!(status.processing_load, 4.25);
     assert_eq!(status.resampler_load, Some(0.15));
-    assert_eq!(status.rate_adjust, 1.000_010);
+    assert!((status.rate_adjust - 1.000_010).abs() < 1e-6);
     assert_eq!(status.buffer_level, 512);
     assert_eq!(status.volume_db, Some(-6.0));
     assert_eq!(status.muted, Some(false));
@@ -428,13 +471,115 @@ async fn hardware_backend_websocket_roundtrip() {
     let sync_status = dsp.read_status().unwrap();
     assert_eq!(sync_status.state, ProcessingState::Running);
 
+    // State-only queries (covers query_state)
+    assert_eq!(
+        dsp.read_state_async().await.unwrap(),
+        ProcessingState::Running
+    );
+    assert_eq!(dsp.read_state().unwrap(), ProcessingState::Running);
+
     // Async reset
     dsp.reset_clipped_samples_async().await.unwrap();
 
     // Sync reset
     dsp.reset_clipped_samples().unwrap();
 
+    // SetConfig and SetConfigJson roundtrip
+    dsp.set_config_async("devices:\n  samplerate: 48000\n")
+        .await
+        .unwrap();
+    dsp.set_config_json_async(r#"{"devices":{"samplerate":48000}}"#)
+        .await
+        .unwrap();
+
     server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hardware_backend_subscribe_state_roundtrip() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_port = listener.local_addr().unwrap().port();
+    let seeded = std::sync::Arc::new(tokio::sync::Notify::new());
+    let seeded_srv = std::sync::Arc::clone(&seeded);
+
+    let server_task = tokio::spawn(async move {
+        // Connection 1: SubscribeState
+        let (stream1, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream1).await.unwrap();
+        let msg = ws.next().await.unwrap().unwrap();
+        let req: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert_eq!(req["command"], "SubscribeState");
+        let resp = serde_json::json!({"reply": "SubscribeState", "result": "Ok"});
+        ws.send(Message::Text(resp.to_string().into()))
+            .await
+            .unwrap();
+
+        // Connection 2: GetState seed after subscription is active
+        let (stream2, _) = listener.accept().await.unwrap();
+        let mut ws2 = tokio_tungstenite::accept_async(stream2).await.unwrap();
+        let msg2 = ws2.next().await.unwrap().unwrap();
+        let req2: serde_json::Value = serde_json::from_str(msg2.to_text().unwrap()).unwrap();
+        assert_eq!(req2["command"], "GetState");
+        let resp2 = serde_json::json!({"reply": "GetState", "result": "Ok", "value": "Inactive"});
+        ws2.send(Message::Text(resp2.to_string().into()))
+            .await
+            .unwrap();
+
+        // Wait until the client has observed the initial seed before pushing StateEvents
+        seeded_srv.notified().await;
+
+        let ev1 = serde_json::json!({
+            "reply": "StateEvent",
+            "result": "Ok",
+            "value": {"state": "Running", "stop_reason": null}
+        });
+        ws.send(Message::Text(ev1.to_string().into()))
+            .await
+            .unwrap();
+        let ev2 = serde_json::json!({
+            "reply": "StateEvent",
+            "result": "ProcessingStopped",
+            "value": {"state": "Inactive", "stop_reason": "Done"}
+        });
+        ws.send(Message::Text(ev2.to_string().into()))
+            .await
+            .unwrap();
+
+        // Expect StopSubscription when receiver is dropped
+        let msg = ws
+            .next()
+            .await
+            .expect("expected StopSubscription frame")
+            .expect("websocket recv error");
+        let Message::Text(text) = msg else {
+            panic!("expected Text StopSubscription frame, got {msg:?}");
+        };
+        let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(req["command"], "StopSubscription");
+    });
+
+    let dsp = DspDevice::with_host_and_port(DspHost::default(), DspPort::new(local_port).unwrap());
+    let mut rx = dsp.subscribe_state().await.unwrap();
+    let timeout = std::time::Duration::from_secs(2);
+    assert_eq!(
+        tokio::time::timeout(timeout, rx.recv()).await.unwrap(),
+        Some(ProcessingState::Inactive)
+    );
+    seeded.notify_one();
+    assert_eq!(
+        tokio::time::timeout(timeout, rx.recv()).await.unwrap(),
+        Some(ProcessingState::Running)
+    );
+    assert_eq!(
+        tokio::time::timeout(timeout, rx.recv()).await.unwrap(),
+        Some(ProcessingState::Inactive)
+    );
+    drop(rx);
+
+    tokio::time::timeout(timeout, server_task)
+        .await
+        .expect("server task timed out waiting for StopSubscription")
+        .expect("server task panicked");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -448,43 +593,44 @@ async fn hardware_backend_levels_fallback_and_command_error() {
         while let Some(msg) = ws.next().await {
             let Ok(msg) = msg else { break };
             if let Message::Text(text) = msg {
-                let cmd: String = serde_json::from_str(&text).unwrap();
-                let resp = match cmd.as_str() {
+                let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let cmd = req.get("command").and_then(|c| c.as_str()).unwrap();
+                let resp = match cmd {
                     "GetState" => {
-                        serde_json::json!({"GetState": {"result": "Ok", "value": "Running"}})
+                        serde_json::json!({"reply": "GetState", "result": "Ok", "value": "Running"})
                     }
                     "GetProcessingLoad" => {
-                        serde_json::json!({"GetProcessingLoad": {"result": "Ok", "value": 1.5}})
+                        serde_json::json!({"reply": "GetProcessingLoad", "result": "Ok", "value": 1.5})
                     }
                     "GetBufferLevel" => {
-                        serde_json::json!({"GetBufferLevel": {"result": "Ok", "value": 512}})
+                        serde_json::json!({"reply": "GetBufferLevel", "result": "Ok", "value": 512})
                     }
                     "GetRateAdjust" => {
-                        serde_json::json!({"GetRateAdjust": {"result": "Ok", "value": 1.0}})
+                        serde_json::json!({"reply": "GetRateAdjust", "result": "Ok", "value": 1.0})
                     }
                     "GetClippedSamples" => {
-                        serde_json::json!({"GetClippedSamples": {"result": "Ok", "value": 0}})
+                        serde_json::json!({"reply": "GetClippedSamples", "result": "Ok", "value": 0})
                     }
                     "GetStopReason" => {
-                        serde_json::json!({"GetStopReason": {"result": "Ok", "value": "None"}})
+                        serde_json::json!({"reply": "GetStopReason", "result": "Ok", "value": "None"})
                     }
                     "GetSignalLevels" => {
-                        serde_json::json!({"GetSignalLevels": {"result": "Error", "value": "not implemented"}})
+                        serde_json::json!({"reply": "Invalid", "error": "GetSignalLevels not supported"})
                     }
                     "GetCaptureSignalPeak" => {
-                        serde_json::json!({"GetCaptureSignalPeak": {"result": "Ok", "value": [-10.0, -11.0]}})
+                        serde_json::json!({"reply": "GetCaptureSignalPeak", "result": "Ok", "value": [-10.0, -11.0]})
                     }
                     "GetCaptureSignalRms" => {
-                        serde_json::json!({"GetCaptureSignalRms": {"result": "Ok", "value": [-16.0, -17.0]}})
+                        serde_json::json!({"reply": "GetCaptureSignalRms", "result": "Ok", "value": [-16.0, -17.0]})
                     }
                     "GetPlaybackSignalPeak" => {
-                        serde_json::json!({"GetPlaybackSignalPeak": {"result": "Ok", "value": [-12.0, -13.0]}})
+                        serde_json::json!({"reply": "GetPlaybackSignalPeak", "result": "Ok", "value": [-12.0, -13.0]})
                     }
                     "GetPlaybackSignalRms" => {
-                        serde_json::json!({"GetPlaybackSignalRms": {"result": "Ok", "value": [-18.0, -19.0]}})
+                        serde_json::json!({"reply": "GetPlaybackSignalRms", "result": "Ok", "value": [-18.0, -19.0]})
                     }
                     other => {
-                        serde_json::json!({other: {"result": "Error", "value": "not implemented"}})
+                        serde_json::json!({"reply": "Invalid", "error": format!("{other} not supported")})
                     }
                 };
                 ws.send(Message::Text(serde_json::to_string(&resp).unwrap().into()))

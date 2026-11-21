@@ -78,6 +78,9 @@ bluesdp = "=0.1.1"
 libc = "=0.2.191"
 ctrlc = "=3.4.2"
 
+# CamillaDSP 5.0.0-beta.2 official typed protocol & config schema
+camilladsp-schema = { git = "https://github.com/HEnquist/camilladsp.git", rev = "1ea8b9c5518bf9df7ae612d3b51bd791ceb46269" }
+
 # UI Framework (Slint with Linux Framebuffer & KMS/DRM backends)
 slint = { version = "=1.19.0", default-features = false, features = [
   "std",

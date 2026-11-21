@@ -58,6 +58,7 @@ mod dsp_watch;
     reason = "bin-only compilation leaves mock/test helpers unused"
 )]
 mod error;
+mod rate_watch;
 mod state_file;
 
 use std::path::Path;
@@ -223,13 +224,14 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
         let dsp_device = speaker_dsp::DspDevice::new();
         let watcher_cmd_tx = cmd_tx.clone();
         tokio::spawn(dsp_watch::run(
-            dsp_device,
+            dsp_device.clone(),
             watcher_cmd_tx,
             Duration::from_millis(config.dsp_poll_interval_ms),
         ));
+        tokio::spawn(rate_watch::run(dsp_device));
         info!(
             poll_interval_ms = config.dsp_poll_interval_ms,
-            "DSP stream-lifecycle watcher enabled"
+            "DSP stream-lifecycle and loopback rate watchers enabled"
         );
     } else {
         warn!(

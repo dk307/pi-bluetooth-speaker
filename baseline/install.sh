@@ -67,6 +67,10 @@ fi
 # ------------------------------------------------------------------------------
 echo "==> [4/10] Configuring ALSA routing and loopback definitions..."
 cp "${SCRIPT_DIR}/etc/asound.conf" /etc/asound.conf
+if [ -f "${SCRIPT_DIR}/etc/modprobe.d/snd-aloop.conf" ]; then
+    mkdir -p /etc/modprobe.d
+    cp "${SCRIPT_DIR}/etc/modprobe.d/snd-aloop.conf" /etc/modprobe.d/
+fi
 if [ -f "${SCRIPT_DIR}/etc/alsa/20-bluealsa.conf" ]; then
     mkdir -p /etc/alsa/conf.d
     cp "${SCRIPT_DIR}/etc/alsa/20-bluealsa.conf" /etc/alsa/conf.d/
@@ -78,14 +82,19 @@ cp "${SCRIPT_DIR}/alsa/asound.state" /var/lib/alsa/asound.state
 alsactl restore || true
 
 # ------------------------------------------------------------------------------
-# 5. CamillaDSP Installation (v4.1.3)
+# 5. CamillaDSP Installation (v5.0.0-beta.2)
 # ------------------------------------------------------------------------------
-echo "==> [5/10] Setting up CamillaDSP binary, crossover filters, and service..."
+echo "==> [5/10] Setting up CamillaDSP binary, configuration, and service..."
 mkdir -p /etc/camilladsp /var/log/camilladsp /usr/local/bin
 
-if [ ! -f /usr/local/bin/camilladsp ]; then
-    echo "Downloading CamillaDSP v4.1.3 aarch64 release..."
-    wget -q https://github.com/HEnquist/camilladsp/releases/download/v4.1.3/camilladsp-linux-aarch64.tar.gz -O /tmp/camilladsp.tar.gz
+if [ ! -f /usr/local/bin/camilladsp ] || ! /usr/local/bin/camilladsp --version 2>/dev/null | grep -q '5\.0\.0-beta\.2'; then
+    if [ -f /usr/local/bin/camilladsp ] && [ ! -f /usr/local/bin/camilladsp-4.1.3 ]; then
+        cp -a /usr/local/bin/camilladsp /usr/local/bin/camilladsp-4.1.3
+    fi
+    CAMILLADSP_SHA256="f8e8e0b1dee43083eb61ab3f05a43984b41415854dbd7616d890b5a57719ecee"
+    echo "Downloading CamillaDSP v5.0.0-beta.2 aarch64 release (or build from source via scripts/build_camilladsp_pi.sh)..."
+    wget -q https://github.com/HEnquist/camilladsp/releases/download/v5.0.0-beta.2/camilladsp-linux-aarch64.tar.gz -O /tmp/camilladsp.tar.gz
+    echo "${CAMILLADSP_SHA256}  /tmp/camilladsp.tar.gz" | sha256sum -c -
     tar -xzf /tmp/camilladsp.tar.gz -C /usr/local/bin/
     chmod +x /usr/local/bin/camilladsp
     rm -f /tmp/camilladsp.tar.gz

@@ -11,6 +11,7 @@ publish = false
 speaker-common = { path = "../../crates/common" }
 speaker-hardware = { path = "../../crates/hardware" }
 speaker-dsp = { path = "../../crates/dsp" }
+camilladsp-schema = { workspace = true }
 rppal = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 zbus = { workspace = true, features = ["tokio", "blocking-api"] }

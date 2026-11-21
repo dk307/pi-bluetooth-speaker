@@ -100,7 +100,7 @@ const HELP_CASES: &[(&str, &str, &str)] = &[
     ),
     (
         env!("CARGO_BIN_EXE_dsp-info"),
-        "CamillaDSP Pipeline Diagnostic Utility",
+        "CamillaDSP Diagnostic Utility",
         "--repeat",
     ),
 ];
@@ -1134,6 +1134,7 @@ fn dsp_info_cli_argument_parsing_and_stats() {
         version: Some("4.1.3".into()),
         config_title: None,
         config_path: None,
+        config: None,
         capture_rate: Some(48000),
         state: ProcessingState::Running,
         processing_load: 10.0,
