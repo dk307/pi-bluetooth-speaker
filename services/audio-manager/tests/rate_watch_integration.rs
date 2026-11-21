@@ -250,8 +250,20 @@ async fn run_with_rx_reapplies_when_engine_inactive_and_exits_on_close() {
     ))
     .await
     .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(mock.last_set_config_json().is_some());
+
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Some(cfg) = mock.last_set_config_json() {
+                return cfg;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for initial config push");
+
+    // Mutate the config file so a re-push produces a distinct JSON payload.
+    std::fs::write(&cfg_path, SAMPLE_CONFIG_YAML.replace("-60", "-50")).unwrap();
 
     // Simulate engine going Inactive (fast close/reopen at same rate) with from_event=true
     mock.set_state(ProcessingState::Inactive);
@@ -264,7 +276,20 @@ async fn run_with_rx_reapplies_when_engine_inactive_and_exits_on_close() {
     ))
     .await
     .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let second = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Some(cfg) = mock.last_set_config_json()
+                && cfg != first
+            {
+                return cfg;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for re-push after Inactive");
+    assert_ne!(first, second, "Inactive engine must trigger a re-push");
 
     // Close channel -> task exits cleanly
     drop(tx);

@@ -546,10 +546,16 @@ async fn hardware_backend_subscribe_state_roundtrip() {
             .unwrap();
 
         // Expect StopSubscription when receiver is dropped
-        if let Some(Ok(Message::Text(text))) = ws.next().await {
-            let req: serde_json::Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(req["command"], "StopSubscription");
-        }
+        let msg = ws
+            .next()
+            .await
+            .expect("expected StopSubscription frame")
+            .expect("websocket recv error");
+        let Message::Text(text) = msg else {
+            panic!("expected Text StopSubscription frame, got {msg:?}");
+        };
+        let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(req["command"], "StopSubscription");
     });
 
     let dsp = DspDevice::with_host_and_port(DspHost::default(), DspPort::new(local_port).unwrap());
@@ -570,7 +576,10 @@ async fn hardware_backend_subscribe_state_roundtrip() {
     );
     drop(rx);
 
-    let _ = tokio::time::timeout(timeout, server_task).await;
+    tokio::time::timeout(timeout, server_task)
+        .await
+        .expect("server task timed out waiting for StopSubscription")
+        .expect("server task panicked");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -606,7 +615,7 @@ async fn hardware_backend_levels_fallback_and_command_error() {
                         serde_json::json!({"reply": "GetStopReason", "result": "Ok", "value": "None"})
                     }
                     "GetSignalLevels" => {
-                        serde_json::json!({"reply": "GetSignalLevels", "result": "Error", "message": "not implemented"})
+                        serde_json::json!({"reply": "Invalid", "error": "GetSignalLevels not supported"})
                     }
                     "GetCaptureSignalPeak" => {
                         serde_json::json!({"reply": "GetCaptureSignalPeak", "result": "Ok", "value": [-10.0, -11.0]})
@@ -621,7 +630,7 @@ async fn hardware_backend_levels_fallback_and_command_error() {
                         serde_json::json!({"reply": "GetPlaybackSignalRms", "result": "Ok", "value": [-18.0, -19.0]})
                     }
                     other => {
-                        serde_json::json!({"reply": other, "result": "Error", "message": "not implemented"})
+                        serde_json::json!({"reply": "Invalid", "error": format!("{other} not supported")})
                     }
                 };
                 ws.send(Message::Text(serde_json::to_string(&resp).unwrap().into()))

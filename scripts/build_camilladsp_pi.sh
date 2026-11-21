@@ -60,15 +60,16 @@ CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
 RUSTFLAGS="-C target-cpu=cortex-a53 -C target-feature=+neon,-aes,-sha2 -C link-arg=-Wl,--as-needed -C link-arg=-Wl,--gc-sections -C link-arg=-Wl,-O1" \
   cargo build --target aarch64-unknown-linux-gnu --release
 
-BIN_PATH="${BUILD_DIR}/target/aarch64-unknown-linux-gnu/release/camilladsp"
+BIN_PATH="${PWD}/target/aarch64-unknown-linux-gnu/release/camilladsp"
 if [[ ! -f "${BIN_PATH}" ]]; then
   echo "[camilladsp] Build artifact not found: ${BIN_PATH}" >&2
   exit 1
 fi
 
-if aarch64-linux-gnu-objdump -T "${BIN_PATH}" | grep -qE 'GLIBC_2\.(4[2-9]|[5-9][0-9])'; then
+OBJDUMP_OUT="$(aarch64-linux-gnu-objdump -T "${BIN_PATH}")"
+if grep -qE 'GLIBC_2\.(4[2-9]|[5-9][0-9])' <<<"${OBJDUMP_OUT}"; then
   echo "[camilladsp] ERROR: binary references GLIBC > 2.41 symbols:" >&2
-  aarch64-linux-gnu-objdump -T "${BIN_PATH}" | grep -E 'GLIBC_2\.(4[2-9]|[5-9][0-9])' >&2
+  grep -E 'GLIBC_2\.(4[2-9]|[5-9][0-9])' <<<"${OBJDUMP_OUT}" >&2
   exit 1
 fi
 
@@ -78,22 +79,25 @@ if [[ "${BUILD_ONLY}" == "1" ]]; then
   exit 0
 fi
 
-REMOTE_TMP="/tmp/camilladsp-${CAMILLADSP_TAG}"
+REMOTE_STAGE_DIR="$(ssh "${REMOTE_HOST}" mktemp -d)"
+REMOTE_TMP="${REMOTE_STAGE_DIR}/camilladsp"
 scp "${BIN_PATH}" "${REMOTE_HOST}:${REMOTE_TMP}"
 
-ssh "${REMOTE_HOST}" bash -s -- "${REMOTE_TMP}" <<'EOF'
+ssh "${REMOTE_HOST}" bash -s -- "${REMOTE_TMP}" "${REMOTE_STAGE_DIR}" <<'EOF'
 set -euo pipefail
 
 REMOTE_TMP="$1"
+REMOTE_STAGE_DIR="$2"
 chmod +x "${REMOTE_TMP}"
 
 "${REMOTE_TMP}" --version
 "${REMOTE_TMP}" -c /etc/camilladsp/crossover.yml
 
-restart_camilladsp() {
+cleanup_and_restart() {
+  rm -rf "${REMOTE_STAGE_DIR}" || true
   systemctl start camilladsp.service || true
 }
-trap restart_camilladsp EXIT
+trap cleanup_and_restart EXIT
 
 systemctl stop camilladsp.service || true
 if [[ -f /usr/local/bin/camilladsp && ! -f /usr/local/bin/camilladsp-4.1.3 ]]; then
@@ -103,6 +107,7 @@ if [[ -f /usr/local/bin/camilladsp && ! -f /usr/local/bin/camilladsp-4.1.3 ]]; t
 fi
 
 mv "${REMOTE_TMP}" /usr/local/bin/camilladsp
+rm -rf "${REMOTE_STAGE_DIR}"
 trap - EXIT
 systemctl start camilladsp.service
 systemctl status camilladsp.service --no-pager -l | head -n 12

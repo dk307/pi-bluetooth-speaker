@@ -1210,16 +1210,26 @@ impl DspDevice {
             other => return Err(unexpected_reply("SubscribeState", &other)),
         }
 
-        let mut initial_state = Self::query_state(host, port).await?;
+        let mut initial_state = Self::query_state(host.clone(), port).await?;
 
         // Drain any StateEvent frames that arrived between SubscribeState and
-        // GetState so older buffered events are not delivered after the newer seed.
-        while let Some(Some(Ok(Message::Text(text)))) = ws.next().now_or_never() {
-            if let Ok(reply) = serde_json::from_str::<WsReply>(&text)
-                && let Some(state) = extract_state_event(reply)
-            {
-                initial_state = state;
+        // GetState. Because GetState runs on a separate socket, a drained event
+        // could be older than `initial_state`; re-query GetState if any event
+        // arrived during bootstrap so we never overwrite a newer snapshot with
+        // an older event.
+        for _ in 0..4 {
+            let mut saw_event = false;
+            while let Some(Some(Ok(Message::Text(text)))) = ws.next().now_or_never() {
+                if let Ok(reply) = serde_json::from_str::<WsReply>(&text)
+                    && extract_state_event(reply).is_some()
+                {
+                    saw_event = true;
+                }
             }
+            if !saw_event {
+                break;
+            }
+            initial_state = Self::query_state(host.clone(), port).await?;
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -1241,8 +1251,12 @@ impl DspDevice {
                         break;
                     }
                     msg = ws.next() => {
-                        let Some(Ok(Message::Text(text))) = msg else {
-                            break;
+                        let text = match msg {
+                            Some(Ok(Message::Text(text))) => text,
+                            Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_))) => {
+                                continue;
+                            }
+                            _ => break,
                         };
                         let Ok(reply) = serde_json::from_str::<WsReply>(&text) else {
                             continue;
@@ -1584,8 +1598,6 @@ impl DspDevice {
     ) -> Result<DspStatus, DspError> {
         let mut ws = Self::connect_ws(&host, port).await?;
 
-        let opt = Self::query_optional_metadata(&mut ws).await;
-
         let state = match Self::send_ws_command(&mut ws, &WsCommand::GetState).await? {
             WsReply::GetState { result, value } => {
                 check_ws_result("GetState", result)?;
@@ -1633,6 +1645,7 @@ impl DspDevice {
             other => return Err(unexpected_reply("GetStopReason", &other)),
         };
 
+        let opt = Self::query_optional_metadata(&mut ws).await;
         let (capture_peaks, capture_rms, playback_peaks, playback_rms) =
             Self::query_signal_levels(&mut ws).await;
         let _ = ws.close(None).await;
