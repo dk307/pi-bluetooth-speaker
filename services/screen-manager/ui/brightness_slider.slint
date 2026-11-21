@@ -1,0 +1,90 @@
+// Dedicated thick brightness slider.
+//
+// Kept separate from the volume HUD's LevelSlider on purpose: brightness uses a
+// thick pill bar with no giant circular thumb and no numeric readout, while the
+// volume overlay keeps its existing slider untouched. This component is
+// Rectangle-rooted because it is only composed inside BrightnessHudOverlay (no
+// Rust struct is generated for it — screen-manager AGENTS.md item 11).
+
+import {
+    MaterialPalette,
+    TouchScale,
+} from "@material/material.slint";
+
+export component BrightnessSlider inherits Rectangle {
+    // Current brightness in the 0..100 percent range.
+    in-out property <float> value: 100.0;
+    // Height of the thick pill track.
+    in property <length> track-height: 40px * TouchScale.widget_scale;
+    // Height of the surrounding touch target.
+    in property <length> touch-height: 88px * TouchScale.widget_scale;
+    // Fill color for the active portion of the bar.
+    in property <color> fill-color: MaterialPalette.primary;
+    // True while a pointer is dragging the bar.
+    out property <bool> dragging: false;
+
+    // Fired with the new integer percent whenever the user moves along the bar.
+    callback changed(float);
+    // Fired on every touch so the owner can keep its HUD alive.
+    callback interaction_activity();
+
+    // NaN-safe normalized brightness ratio (0.0 .. 1.0).
+    property <float> clamped-ratio: root.value >= 0.0 ? Math.min(1.0, root.value / 100.0) : 0.0;
+
+    height: root.touch-height;
+
+    slider_box := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 100%;
+        height: root.touch-height;
+        background: transparent;
+
+        function update_from_touch(mx: length) {
+            let eff_x = Math.max(0px, Math.min(track_bar.width, mx - track_bar.x));
+            let pct = Math.round((eff_x / track_bar.width) * 100.0);
+            root.value = pct;
+            root.interaction_activity();
+            root.changed(pct);
+        }
+
+        // Thick rounded bar. No thumb inset is needed because there is no
+        // circular handle, so the full width is usable from 0% to 100%.
+        track_bar := Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: parent.width;
+            height: root.track-height;
+            border-radius: self.height / 2;
+            background: MaterialPalette.surface_container_highest;
+            border-width: 2px;
+            border-color: MaterialPalette.outline_variant;
+            clip: true;
+
+            Rectangle {
+                width: parent.width * root.clamped-ratio;
+                height: parent.height;
+                border-radius: self.height / 2;
+                background: root.fill-color;
+            }
+        }
+
+        slider_touch := TouchArea {
+            width: 100%;
+            height: 100%;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.dragging = true;
+                    slider_box.update_from_touch(self.mouse-x);
+                } else if (event.kind == PointerEventKind.up) {
+                    root.dragging = false;
+                }
+            }
+            moved => {
+                if (self.pressed) {
+                    slider_box.update_from_touch(self.mouse-x);
+                }
+            }
+        }
+    }
+}

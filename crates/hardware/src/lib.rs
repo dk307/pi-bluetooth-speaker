@@ -3,7 +3,6 @@
 //! Exposes drivers for:
 //! - MA12070P I2C Audio Amplifier (`amp`)
 //! - Kernel Sysfs Backlight & Mock Controller (`backlight`)
-//! - Ambient Brightness Control Policy (`brightness`)
 //! - EC12 Rotary Encoder & RGB Status LED (`encoder`)
 //! - BH1750 Ambient Light Sensor (`light`)
 //! - DS18B20 1-Wire Temperature Sensor & `SoC` Thermals (`temp`)
@@ -11,7 +10,6 @@
 
 pub mod amp;
 pub mod backlight;
-pub mod brightness;
 pub mod encoder;
 pub mod light;
 pub mod pins;
@@ -38,9 +36,6 @@ pub use amp::test_helpers as amp_test_helpers;
 pub use backlight::{
     BACKLIGHT_SYSFS_BASE, Backlight, BacklightError, BacklightMockCtrl, DEFAULT_BACKLIGHT_DEVICE,
 };
-
-#[doc(inline)]
-pub use brightness::{AutoBrightness, Config, ConfigError, DEFAULT_CONFIG};
 
 #[doc(inline)]
 pub use light::{

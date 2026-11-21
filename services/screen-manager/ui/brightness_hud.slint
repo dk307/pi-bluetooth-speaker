@@ -1,9 +1,9 @@
 // Brightness / auto-brightness overlay, opened from the top-bar brightness button.
 //
-// Mirrors the Volume HUD panel: a translucent backdrop-aware panel, a full-viewport
-// touch catcher that dismisses on outside taps, a non-swallowing focus scope and
-// a centered OverlayAppBar header. The body adds the brightness slider, an AUTO
-// toggle chip and an ambient-lux readout.
+// Unlike the Volume HUD, this overlay has no giant numeric readout and no big
+// circular thumb. It shows a dedicated thick pill slider plus the AUTO/MANUAL
+// toggle chip and ambient-lux readout. The slider lives in its own component so
+// the volume overlay and its slider stay completely separate.
 
 import {
     MaterialPalette,
@@ -11,8 +11,7 @@ import {
     TouchScale,
 } from "@material/material.slint";
 import { OverlayAppBar } from "screen_app_bar.slint";
-import { LevelSlider } from "level_slider.slint";
-import "./fonts/InterTabular-Bold.ttf";
+import { BrightnessSlider } from "brightness_slider.slint";
 
 export component BrightnessHudOverlay inherits Rectangle {
     width: 100%;
@@ -47,8 +46,6 @@ export component BrightnessHudOverlay inherits Rectangle {
         focus_scope.clear-focus();
     }
 
-    // NaN-safe normalized brightness ratio (0.0 .. 1.0).
-    property <float> clamped-ratio: root.brightness_value >= 0.0 ? Math.min(1.0, root.brightness_value / 100.0) : 0.0;
     // NaN-safe ambient reading for the text readout.
     property <float> clamped-lux: root.ambient_lux >= 0.0 ? root.ambient_lux : 0.0;
 
@@ -96,7 +93,8 @@ export component BrightnessHudOverlay inherits Rectangle {
             padding-left: 24px;
             padding-right: 24px;
 
-            // 1. Giant center brightness readout with a caption underneath.
+            // Thick brightness bar, centered in the space below the app bar.
+            // No large percentage number: the bar itself is the readout.
             Rectangle {
                 vertical-stretch: 1;
                 background: transparent;
@@ -104,55 +102,18 @@ export component BrightnessHudOverlay inherits Rectangle {
                 VerticalLayout {
                     alignment: center;
 
-                    HorizontalLayout {
-                        alignment: center;
-                        spacing: 4px;
-
-                        Text {
-                            text: Math.round(root.clamped-ratio * 100.0);
-                            color: MaterialPalette.primary;
-                            font-family: "Inter Tabular";
-                            font-weight: 700;
-                            font-size: 174px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                    BrightnessSlider {
+                        width: 100%;
+                        value <=> root.brightness_value;
+                        changed(pct) => {
+                            root.brightness_value = pct;
+                            root.brightness_changed(pct);
                         }
-
-                        Text {
-                            text: "%";
-                            color: MaterialPalette.primary;
-                            font-family: "Inter Tabular";
-                            font-weight: 700;
-                            font-size: 87px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    Text {
-                        text: "BRIGHTNESS";
-                        color: MaterialPalette.on_surface_variant;
-                        font-size: 16px * TouchScale.clamped_font_scale;
-                        font-weight: 800;
-                        letter-spacing: 2px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
                     }
                 }
             }
 
-            // 2. Interactive brightness slider — shares the volume HUD's touch math.
-            LevelSlider {
-                width: 100%;
-                value <=> root.brightness_value;
-                changed(pct) => {
-                    root.brightness_value = pct;
-                    root.brightness_changed(pct);
-                }
-                interaction_activity => { root.interaction_activity(); }
-            }
-
-            // 3. Bottom row: AUTO/MANUAL toggle chip + ambient lux readout.
+            // AUTO/MANUAL toggle chip + ambient lux readout.
             Rectangle {
                 height: max(MaterialStyleMetrics.size_48, auto_chip.min-height);
                 background: transparent;

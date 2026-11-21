@@ -351,7 +351,7 @@ pub struct ShellInit {
     /// Queue bridging render-thread volume/mute actions to the `amp-volume` worker.
     pub amp_commands: crate::volume::AmpVolumeCommandQueue,
     /// Queue bridging render-thread brightness actions to the `brightness` worker.
-    pub brightness_commands: crate::brightness::BrightnessCommandQueue,
+    pub brightness_commands: crate::screen_brightness::BrightnessCommandQueue,
     /// Initial auto-mode preference from the appliance configuration.
     pub brightness_auto_enabled: bool,
     /// Initial manual percent used when auto mode is disabled at boot.
@@ -396,7 +396,7 @@ pub fn init_shell_with_config(
     // Brightness is controlled by the embedded engine on the brightness
     // worker (single sysfs writer), so its queue is wired unconditionally,
     // like the amp queue.
-    let brightness_commands = crate::brightness::BrightnessCommandQueue::new();
+    let brightness_commands = crate::screen_brightness::BrightnessCommandQueue::new();
     shell.wire_brightness(&brightness_commands);
     // The Devices screen is always present in the shell, so its command queue
     // is wired unconditionally (parity with the amp queue): navigation
@@ -641,7 +641,7 @@ pub struct BtSharedUpdate {
     pub amp_volume: Option<crate::volume::AmpVolumeState>,
     /// Authoritative display brightness snapshot, published by the dedicated
     /// `brightness` worker (never read from D-Bus on the render thread).
-    pub brightness: Option<crate::brightness::BrightnessState>,
+    pub brightness: Option<crate::screen_brightness::BrightnessState>,
     /// Bluetooth Devices screen delta (rows/discovery/pairing/toast), if any
     /// screen-visible state changed since the last publish.
     pub devices: Option<crate::ui::BtDevicesUpdate>,
@@ -2005,7 +2005,7 @@ pub fn join_brightness_worker(brightness_worker: std::io::Result<std::thread::Jo
 pub fn spawn_brightness_worker(
     shared: &Arc<Mutex<BtSharedUpdate>>,
     running: &Arc<AtomicBool>,
-    brightness_commands: &crate::brightness::BrightnessCommandQueue,
+    brightness_commands: &crate::screen_brightness::BrightnessCommandQueue,
     mocked: bool,
     auto_enabled: bool,
     manual_percent: u8,
@@ -2013,7 +2013,7 @@ pub fn spawn_brightness_worker(
     let shared = Arc::clone(shared);
     let running = Arc::clone(running);
     let brightness_commands = brightness_commands.clone();
-    let policy = crate::brightness::default_policy();
+    let policy = crate::screen_brightness::default_policy();
     std::thread::Builder::new()
         .name("brightness".into())
         .spawn(move || {
@@ -2043,7 +2043,7 @@ pub fn spawn_brightness_worker(
                 tracing::info!(device = %device, "Backlight sysfs device selected");
                 (sensor, backlight)
             };
-            let mut engine = match crate::brightness::BrightnessEngine::try_new(
+            let mut engine = match crate::screen_brightness::BrightnessEngine::try_new(
                 sensor,
                 backlight,
                 policy,
@@ -2056,22 +2056,22 @@ pub fn spawn_brightness_worker(
                 }
             };
             if !auto_enabled {
-                let command = crate::brightness::BrightnessCommand::SetPercent(f32::from(
+                let command = crate::screen_brightness::BrightnessCommand::SetPercent(f32::from(
                     manual_percent,
                 ));
                 let _ = engine.tick(
                     std::time::Instant::now(),
                     0.0,
                     &[command],
-                    crate::brightness::BRIGHTNESS_IDLE_RESET,
+                    crate::screen_brightness::BRIGHTNESS_IDLE_RESET,
                 );
             }
-            crate::brightness::run_worker(
+            crate::screen_brightness::run_worker(
                 &mut engine,
                 &shared,
                 &brightness_commands,
                 &running,
-                crate::brightness::BRIGHTNESS_IDLE_RESET,
+                crate::screen_brightness::BRIGHTNESS_IDLE_RESET,
             );
         })
 }

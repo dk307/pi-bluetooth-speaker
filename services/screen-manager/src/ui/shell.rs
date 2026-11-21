@@ -17,15 +17,15 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 /// Optimistic-command settle tracker: `(issued at, percent if slider change)`.
 type BrightnessSettle = Rc<Cell<Option<(Instant, Option<f32>)>>>;
 
-use crate::brightness::{
-    BRIGHTNESS_SETTLE_WINDOW, BrightnessCommand, BrightnessCommandQueue, BrightnessState,
-};
 use crate::config::{
     CodecHudTimeoutMs, CoreConfig, DEFAULT_FONT_SCALE, DEFAULT_VOLUME_STEP_PERCENT, FontScale,
     MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
     MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE, MIN_VOLUME_HUD_TIMEOUT_MS,
     MIN_VOLUME_STEP_PERCENT, MarqueeFps, TitleDisplayMode, VolumeHudFadeMs, VolumeHudTimeoutMs,
     VolumeStepPercent,
+};
+use crate::screen_brightness::{
+    BRIGHTNESS_SETTLE_WINDOW, BrightnessCommand, BrightnessCommandQueue, BrightnessState,
 };
 use crate::settings_catalog::{
     SETTINGS_CATALOG, SettingControl, SettingId, SettingTier, apply_step, apply_toggle, row_state,

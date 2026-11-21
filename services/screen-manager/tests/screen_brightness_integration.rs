@@ -7,13 +7,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use screen_manager::brightness::{
-    BacklightIo, BrightnessCommand, BrightnessCommandQueue, BrightnessEngine, BrightnessError,
-    BrightnessState, LoopState, LuxSource, TickAction, TickInput, coalesce, default_policy,
-    run_tick, run_worker,
-};
 use screen_manager::daemon::BtSharedUpdate;
-use speaker_hardware::{AutoBrightness, Config as BrightnessConfig};
+use screen_manager::screen_brightness::{
+    AutoBrightness, BacklightIo, BrightnessCommand, BrightnessCommandQueue, BrightnessConfig,
+    BrightnessEngine, BrightnessError, BrightnessState, LoopState, LuxSource, TickAction,
+    TickInput, coalesce, default_policy, run_tick, run_worker,
+};
 
 const MAX: u32 = 255;
 const IDLE_RESET: Duration = Duration::from_secs(600);

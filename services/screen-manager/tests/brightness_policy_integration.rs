@@ -4,20 +4,24 @@
 //! slew timing, manual gamma bias, input sanitization, and configuration
 //! validation without any I2C or sysfs hardware.
 
-use speaker_hardware::{AutoBrightness, Config, ConfigError, DEFAULT_CONFIG};
+#![cfg(feature = "ui")]
 
-type ConfigMutation = (&'static str, fn(&mut Config));
+use screen_manager::screen_brightness::{
+    AutoBrightness, BrightnessConfig, BrightnessConfigError, DEFAULT_BRIGHTNESS_CONFIG,
+};
+
+type BrightnessConfigMutation = (&'static str, fn(&mut BrightnessConfig));
 
 #[test]
 fn default_config_is_valid_and_matches_documented_values() {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<AutoBrightness>();
-    assert_send_sync::<Config>();
-    assert_send_sync::<ConfigError>();
+    assert_send_sync::<BrightnessConfig>();
+    assert_send_sync::<BrightnessConfigError>();
 
-    DEFAULT_CONFIG.validate().unwrap();
-    let cfg = Config::default();
-    assert_eq!(cfg, DEFAULT_CONFIG);
+    DEFAULT_BRIGHTNESS_CONFIG.validate().unwrap();
+    let cfg = BrightnessConfig::default();
+    assert_eq!(cfg, DEFAULT_BRIGHTNESS_CONFIG);
     assert!((cfg.ema_alpha - 0.2).abs() < 1e-6);
     assert!((cfg.hyst_up - 0.25).abs() < 1e-6);
     assert!((cfg.hyst_down - 0.30).abs() < 1e-6);
@@ -33,8 +37,8 @@ fn default_config_is_valid_and_matches_documented_values() {
 
 #[test]
 fn base_curve_and_target_are_clamped_to_floor_and_ceiling() {
-    const B_MIN: f32 = DEFAULT_CONFIG.b_min;
-    let state = AutoBrightness::new(100.0, DEFAULT_CONFIG);
+    const B_MIN: f32 = DEFAULT_BRIGHTNESS_CONFIG.b_min;
+    let state = AutoBrightness::new(100.0, DEFAULT_BRIGHTNESS_CONFIG);
 
     let dark = state.base_curve(0.0);
     assert!((dark - B_MIN).abs() < 1e-6);
@@ -49,7 +53,7 @@ fn base_curve_and_target_are_clamped_to_floor_and_ceiling() {
 #[test]
 fn brightness_stays_inside_deadband() {
     let initial_lux = 100.0;
-    let mut state = AutoBrightness::new(initial_lux, DEFAULT_CONFIG);
+    let mut state = AutoBrightness::new(initial_lux, DEFAULT_BRIGHTNESS_CONFIG);
     let initial_target = state.target();
     let initial_anchor = state.lux_anchor();
 
@@ -63,8 +67,8 @@ fn brightness_stays_inside_deadband() {
 
 #[test]
 fn zero_lux_holds_floor_without_chatter() {
-    let mut state = AutoBrightness::new(0.0, DEFAULT_CONFIG);
-    let floor = DEFAULT_CONFIG.b_min;
+    let mut state = AutoBrightness::new(0.0, DEFAULT_BRIGHTNESS_CONFIG);
+    let floor = DEFAULT_BRIGHTNESS_CONFIG.b_min;
     assert!((state.brightness() - floor).abs() < 1e-6);
     assert!((state.lux_anchor() - 0.0).abs() < 1e-6);
 
@@ -73,14 +77,14 @@ fn zero_lux_holds_floor_without_chatter() {
         assert!((state.brightness() - floor).abs() < 1e-6);
         assert!((state.target() - floor).abs() < 1e-6);
         assert!((state.lux_anchor() - 0.0).abs() < 1e-6);
-        assert!((duty - floor.powf(DEFAULT_CONFIG.pwm_gamma)).abs() < 1e-6);
+        assert!((duty - floor.powf(DEFAULT_BRIGHTNESS_CONFIG.pwm_gamma)).abs() < 1e-6);
     }
 }
 
 #[test]
 fn upward_deviation_commits_before_downward_deviation() {
-    let mut rising = AutoBrightness::new(100.0, DEFAULT_CONFIG);
-    let mut falling = AutoBrightness::new(100.0, DEFAULT_CONFIG);
+    let mut rising = AutoBrightness::new(100.0, DEFAULT_BRIGHTNESS_CONFIG);
+    let mut falling = AutoBrightness::new(100.0, DEFAULT_BRIGHTNESS_CONFIG);
     let rising_initial = rising.target();
     let falling_initial = falling.target();
 
@@ -113,14 +117,14 @@ fn upward_deviation_commits_before_downward_deviation() {
 
 #[test]
 fn upward_and_downward_ramp_rates_are_asymmetric() {
-    let mut rising = AutoBrightness::new(1000.0, DEFAULT_CONFIG);
-    rising.on_manual_change(DEFAULT_CONFIG.b_min);
+    let mut rising = AutoBrightness::new(1000.0, DEFAULT_BRIGHTNESS_CONFIG);
+    rising.on_manual_change(DEFAULT_BRIGHTNESS_CONFIG.b_min);
     rising.reset_manual_bias();
     let rise_start = rising.brightness();
     let rise_next = rising.update(1000.0, 0.1);
     let rise_delta = rising.brightness() - rise_start;
 
-    let mut falling = AutoBrightness::new(0.0, DEFAULT_CONFIG);
+    let mut falling = AutoBrightness::new(0.0, DEFAULT_BRIGHTNESS_CONFIG);
     falling.on_manual_change(1.0);
     falling.reset_manual_bias();
     let fall_start = falling.brightness();
@@ -139,14 +143,14 @@ fn upward_and_downward_ramp_rates_are_asymmetric() {
 
 #[test]
 fn integration_step_is_clamped_to_half_a_second() {
-    let mut state = AutoBrightness::new(1000.0, DEFAULT_CONFIG);
-    state.on_manual_change(DEFAULT_CONFIG.b_min);
+    let mut state = AutoBrightness::new(1000.0, DEFAULT_BRIGHTNESS_CONFIG);
+    state.on_manual_change(DEFAULT_BRIGHTNESS_CONFIG.b_min);
     state.reset_manual_bias();
     let before = state.brightness();
 
     let _ = state.update(1000.0, 3600.0);
     let huge_delta = state.brightness() - before;
-    let max_delta = DEFAULT_CONFIG.rate_up * 0.5 + 1e-6;
+    let max_delta = DEFAULT_BRIGHTNESS_CONFIG.rate_up * 0.5 + 1e-6;
     assert!(huge_delta <= max_delta, "dt clamp ignored: {huge_delta}");
 
     let before_nan = state.brightness();
@@ -160,14 +164,14 @@ fn integration_step_is_clamped_to_half_a_second() {
 
 #[test]
 fn manual_change_sets_gamma_and_snap_then_reset_clears_gamma_only() {
-    let mut state = AutoBrightness::new(200.0, DEFAULT_CONFIG);
+    let mut state = AutoBrightness::new(200.0, DEFAULT_BRIGHTNESS_CONFIG);
     let initial_brightness = state.brightness();
 
     state.on_manual_change(0.6);
     assert!((state.brightness() - 0.6).abs() < 1e-6);
     assert!((state.target() - 0.6).abs() < 1e-6);
-    assert!(state.manual_gamma() >= DEFAULT_CONFIG.gamma_min);
-    assert!(state.manual_gamma() <= DEFAULT_CONFIG.gamma_max);
+    assert!(state.manual_gamma() >= DEFAULT_BRIGHTNESS_CONFIG.gamma_min);
+    assert!(state.manual_gamma() <= DEFAULT_BRIGHTNESS_CONFIG.gamma_max);
     assert_ne!(initial_brightness, state.brightness());
 
     let snapped = state.brightness();
@@ -182,10 +186,10 @@ fn manual_change_sets_gamma_and_snap_then_reset_clears_gamma_only() {
 
 #[test]
 fn manual_change_clamps_bounds_and_ignores_non_finite_input() {
-    let mut state = AutoBrightness::new(200.0, DEFAULT_CONFIG);
+    let mut state = AutoBrightness::new(200.0, DEFAULT_BRIGHTNESS_CONFIG);
 
     state.on_manual_change(0.0001);
-    assert!((state.brightness() - DEFAULT_CONFIG.b_min).abs() < 1e-6);
+    assert!((state.brightness() - DEFAULT_BRIGHTNESS_CONFIG.b_min).abs() < 1e-6);
     state.on_manual_change(25.0);
     assert!((state.brightness() - 1.0).abs() < 1e-6);
 
@@ -197,7 +201,7 @@ fn manual_change_clamps_bounds_and_ignores_non_finite_input() {
 
 #[test]
 fn non_finite_and_negative_lux_do_not_poison_state() {
-    let mut state = AutoBrightness::new(120.0, DEFAULT_CONFIG);
+    let mut state = AutoBrightness::new(120.0, DEFAULT_BRIGHTNESS_CONFIG);
     let initial_ema = state.lux_ema();
 
     for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -25.0] {
@@ -211,14 +215,14 @@ fn non_finite_and_negative_lux_do_not_poison_state() {
         );
     }
 
-    let floor = DEFAULT_CONFIG.b_min;
+    let floor = DEFAULT_BRIGHTNESS_CONFIG.b_min;
     assert!((state.base_curve(f32::NAN) - floor).abs() < 1e-6);
     assert!((state.target_from_lux(f32::INFINITY) - 1.0).abs() < 1e-6);
 }
 
 #[test]
 fn config_validation_rejects_each_invalid_boundary() {
-    let mut changes: Vec<ConfigMutation> = vec![
+    let mut changes: Vec<BrightnessConfigMutation> = vec![
         ("ema_alpha_nan", |c| c.ema_alpha = f32::NAN),
         ("hyst_inf", |c| c.hyst_down = f32::INFINITY),
         ("ema_zero", |c| c.ema_alpha = 0.0),
@@ -234,7 +238,7 @@ fn config_validation_rejects_each_invalid_boundary() {
     ];
 
     for (name, mutate) in changes.drain(..) {
-        let mut cfg = DEFAULT_CONFIG;
+        let mut cfg = DEFAULT_BRIGHTNESS_CONFIG;
         mutate(&mut cfg);
         let err = cfg.validate().unwrap_err();
         assert!(
