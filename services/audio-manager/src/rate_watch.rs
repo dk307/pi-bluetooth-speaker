@@ -92,13 +92,17 @@ pub fn build_reconfigured_config_json(
 #[derive(Debug, Default)]
 pub struct RateWatchController {
     applied_rate: Option<u32>,
+    warned_failure: bool,
 }
 
 impl RateWatchController {
     /// Creates a new controller with no applied rate yet.
     #[must_use]
     pub const fn new() -> Self {
-        Self { applied_rate: None }
+        Self {
+            applied_rate: None,
+            warned_failure: false,
+        }
     }
 
     /// Evaluates a new [`LoopbackState`] and returns `Some(rate_hz)` if `CamillaDSP`
@@ -109,6 +113,7 @@ impl RateWatchController {
     pub fn pending_rate(&mut self, state: LoopbackState) -> Option<u32> {
         if !state.active || state.rate_hz == 0 {
             self.applied_rate = None;
+            self.warned_failure = false;
             return None;
         }
         if self.applied_rate == Some(state.rate_hz) {
@@ -121,6 +126,17 @@ impl RateWatchController {
     /// Records that `rate_hz` was successfully applied to `CamillaDSP`.
     pub fn confirm_applied(&mut self, rate_hz: u32) {
         self.applied_rate = Some(rate_hz);
+        self.warned_failure = false;
+    }
+
+    /// Returns `true` on the first failure in a streak (for `warn!`), then `false` (`debug!`).
+    fn should_warn_failure(&mut self) -> bool {
+        if self.warned_failure {
+            false
+        } else {
+            self.warned_failure = true;
+            true
+        }
     }
 
     /// Returns the currently applied sample rate, if any.
@@ -170,11 +186,11 @@ async fn apply_loopback_state_ext(
     let raw_yaml = match tokio::fs::read_to_string(config_path).await {
         Ok(contents) => contents,
         Err(e) => {
-            warn!(
-                path = %config_path.display(),
-                error = %e,
-                "Failed to read CamillaDSP base config; will retry"
-            );
+            if ctrl.should_warn_failure() {
+                warn!(path = %config_path.display(), error = %e, "Failed to read CamillaDSP base config; will retry");
+            } else {
+                debug!(path = %config_path.display(), error = %e, "Failed to read CamillaDSP base config; retrying");
+            }
             return false;
         }
     };
@@ -182,11 +198,11 @@ async fn apply_loopback_state_ext(
     let config_json = match build_reconfigured_config_json(&raw_yaml, rate_hz, chunksize) {
         Ok(json) => json,
         Err(e) => {
-            warn!(
-                path = %config_path.display(),
-                error = %e,
-                "Failed to build/validate CamillaDSP config via camilladsp-schema"
-            );
+            if ctrl.should_warn_failure() {
+                warn!(path = %config_path.display(), error = %e, "Failed to build/validate CamillaDSP config via camilladsp-schema");
+            } else {
+                debug!(path = %config_path.display(), error = %e, "Failed to build/validate CamillaDSP config via camilladsp-schema");
+            }
             return false;
         }
     };
@@ -203,7 +219,11 @@ async fn apply_loopback_state_ext(
             true
         }
         Err(e) => {
-            warn!(rate_hz, error = %e, "Failed to configure CamillaDSP sample rate; will retry");
+            if ctrl.should_warn_failure() {
+                warn!(rate_hz, error = %e, "Failed to configure CamillaDSP sample rate; will retry");
+            } else {
+                debug!(rate_hz, error = %e, "Failed to configure CamillaDSP sample rate; retrying");
+            }
             false
         }
     }

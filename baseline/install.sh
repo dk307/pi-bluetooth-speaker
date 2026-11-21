@@ -91,8 +91,10 @@ if [ ! -f /usr/local/bin/camilladsp ] || ! /usr/local/bin/camilladsp --version 2
     if [ -f /usr/local/bin/camilladsp ] && [ ! -f /usr/local/bin/camilladsp-4.1.3 ]; then
         cp -a /usr/local/bin/camilladsp /usr/local/bin/camilladsp-4.1.3
     fi
+    CAMILLADSP_SHA256="f8e8e0b1dee43083eb61ab3f05a43984b41415854dbd7616d890b5a57719ecee"
     echo "Downloading CamillaDSP v5.0.0-beta.2 aarch64 release (or build from source via scripts/build_camilladsp_pi.sh)..."
     wget -q https://github.com/HEnquist/camilladsp/releases/download/v5.0.0-beta.2/camilladsp-linux-aarch64.tar.gz -O /tmp/camilladsp.tar.gz
+    echo "${CAMILLADSP_SHA256}  /tmp/camilladsp.tar.gz" | sha256sum -c -
     tar -xzf /tmp/camilladsp.tar.gz -C /usr/local/bin/
     chmod +x /usr/local/bin/camilladsp
     rm -f /tmp/camilladsp.tar.gz
