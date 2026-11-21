@@ -77,6 +77,7 @@ export component MainWindow inherits Window {
     in-out property <float> brightness_value: 100.0;
     in-out property <bool> auto_brightness_enabled: true;
     in-out property <float> ambient_lux: 0.0;
+    in-out property <bool> ambient_lux_available: false;
     in-out property <bool> brightness_hud_visible: false;
     in-out property <int> brightness_hud_timeout_ms: 8000;
     in-out property <int> brightness_hud_elapsed_ms: 0;
@@ -565,6 +566,7 @@ export component MainWindow inherits Window {
             brightness_value <=> root.brightness_value;
             auto_enabled <=> root.auto_brightness_enabled;
             ambient_lux: root.ambient_lux;
+            ambient_lux_available: root.ambient_lux_available;
             brightness_changed(val) => { root.brightness_changed(val); }
             auto_toggled(on) => { root.auto_brightness_toggled(on); }
             dismiss_requested => { root.dismiss_brightness_hud(); }

@@ -33,8 +33,9 @@ export component BrightnessHudOverlay inherits Rectangle {
     in-out property <float> brightness_value: 100.0;
     // True while the auto-brightness policy owns the backlight.
     in-out property <bool> auto_enabled: true;
-    // Latest ambient sensor reading in lux.
+    // Latest real ambient sensor reading in lux; only shown when available.
     in property <float> ambient_lux: 0.0;
+    in property <bool> ambient_lux_available: false;
     // Mirrors `MainWindow.overlay_backdrop_available`; keys panel translucency.
     in property <bool> overlay_backdrop_available: false;
 
@@ -106,7 +107,7 @@ export component BrightnessHudOverlay inherits Rectangle {
                     // keep the HUD alive; no brightness state is changed here.
                     Rectangle {
                         Text {
-                            text: "AMBIENT  " + Math.round(root.clamped-lux) + " lx";
+                            text: root.ambient_lux_available ? "AMBIENT  " + Math.round(root.clamped-lux) + " lx" : "AMBIENT  --";
                             color: MaterialPalette.on_surface_variant;
                             font-size: MaterialTypography.title_large.font_size;
                             font-weight: MaterialTypography.semibold;

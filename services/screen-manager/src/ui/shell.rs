@@ -1129,7 +1129,10 @@ impl AppShell {
     /// only suppresses that redundant set while the optimistic value is fresh.
     pub fn apply_brightness(&self, state: &BrightnessState) {
         self.window.set_auto_brightness_enabled(state.auto_enabled);
-        self.window.set_ambient_lux(state.ambient_lux);
+        self.window
+            .set_ambient_lux(state.ambient_lux.unwrap_or(f32::NAN));
+        self.window
+            .set_ambient_lux_available(state.ambient_lux.is_some());
         let authoritative_percent = state.brightness_percent.clamp(0.0, 100.0);
         let settle = self.last_brightness_command.get();
         let hold_optimistic = settle.is_some_and(|(at, optimistic)| {
@@ -1142,7 +1145,7 @@ impl AppShell {
         tracing::debug!(
             auto_enabled = state.auto_enabled,
             brightness_percent = state.brightness_percent,
-            ambient_lux = state.ambient_lux,
+            ambient_lux = ?state.ambient_lux,
             hold_optimistic,
             "Applied brightness state"
         );

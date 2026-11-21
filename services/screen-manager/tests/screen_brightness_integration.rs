@@ -19,7 +19,7 @@ const MAX: u32 = 255;
 const IDLE_RESET: Duration = Duration::from_secs(600);
 
 fn state(auto: bool, percent: f32) -> BrightnessState {
-    BrightnessState::new(auto, f64::from(percent), 120.0, 1.0)
+    BrightnessState::new(auto, f64::from(percent), Some(120.0), 1.0)
 }
 
 #[derive(Debug)]
@@ -111,14 +111,37 @@ fn tick(
 }
 
 #[test]
+fn floor_writes_a_nonzero_raw_duty() {
+    let cfg = default_policy();
+    let sensor = FakeSensor::new(0.0);
+    let backlight = FakeBacklight::new(100);
+    let mut ab = AutoBrightness::new(0.0, cfg);
+    let mut loop_state = LoopState::new(100);
+
+    let auto = tick(&sensor, &backlight, &mut ab, &cfg, &mut loop_state, &[]);
+    assert!(matches!(auto, TickAction::AutoWrite { raw } if raw >= 1));
+
+    let manual = tick(
+        &sensor,
+        &backlight,
+        &mut ab,
+        &cfg,
+        &mut loop_state,
+        &[BrightnessCommand::SetPercent(1.0)],
+    );
+    assert!(matches!(manual, TickAction::ManualWrite { raw } if raw >= 1));
+    assert!(backlight.writes.borrow().iter().all(|&raw| raw >= 1));
+}
+
+#[test]
 fn state_sanitizes_non_finite_values() {
-    let s = BrightnessState::new(true, f64::NAN, f64::INFINITY, f64::NAN);
+    let s = BrightnessState::new(true, f64::NAN, Some(f64::INFINITY), f64::NAN);
     assert_eq!(s.brightness_percent, 0.0);
-    assert_eq!(s.ambient_lux, 0.0);
+    assert_eq!(s.ambient_lux, None);
     assert_eq!(s.manual_gamma, 1.0);
-    let clamped = BrightnessState::new(false, 250.0, -5.0, -1.0);
+    let clamped = BrightnessState::new(false, 250.0, Some(-5.0), -1.0);
     assert_eq!(clamped.brightness_percent, 100.0);
-    assert_eq!(clamped.ambient_lux, 0.0);
+    assert_eq!(clamped.ambient_lux, None);
     assert_eq!(clamped.manual_gamma, 0.0);
 }
 
@@ -245,7 +268,7 @@ fn manual_mode_keeps_ambient_lux_fresh() {
         },
     );
     assert_eq!(first.action, TickAction::AutoDisabled);
-    assert!((first.state.ambient_lux - 321.0).abs() < f32::EPSILON);
+    assert!((first.state.ambient_lux.unwrap() - 321.0).abs() < f32::EPSILON);
 
     let brighter = FakeSensor::new(654.0);
     let second = run_tick(
@@ -262,7 +285,7 @@ fn manual_mode_keeps_ambient_lux_fresh() {
         },
     );
     assert_eq!(second.action, TickAction::AutoDisabled);
-    assert!((second.state.ambient_lux - 654.0).abs() < f32::EPSILON);
+    assert!((second.state.ambient_lux.unwrap() - 654.0).abs() < f32::EPSILON);
     assert!((second.state.brightness_percent - first.state.brightness_percent).abs() < 0.5);
 }
 
@@ -513,7 +536,7 @@ fn published_state_reflects_policy_telemetry() {
 
     assert!(outcome.state.auto_enabled);
     assert!((0.0..=100.0).contains(&outcome.state.brightness_percent));
-    assert!((outcome.state.ambient_lux - 100.0).abs() < f32::EPSILON);
+    assert!((outcome.state.ambient_lux.unwrap() - 100.0).abs() < f32::EPSILON);
     assert!((outcome.state.manual_gamma - 1.0).abs() < f32::EPSILON);
 }
 
@@ -545,6 +568,7 @@ fn unavailable_sensor_keeps_manual_brightness_usable() {
 
     let auto = engine.tick(Instant::now(), 0.05, &[], IDLE_RESET);
     assert!(matches!(auto.action, TickAction::SensorFault));
+    assert_eq!(auto.state.ambient_lux, None);
     assert!(engine.state().auto_enabled);
 
     let manual = engine.tick(
@@ -740,6 +764,9 @@ fn shell_brightness_overlay_callbacks_drive_the_engine() {
     assert_eq!(shell.window().get_brightness_value(), 63.0);
     shell.apply_brightness(&state(false, 100.0));
     assert_eq!(shell.window().get_brightness_value(), 100.0);
+    assert!(shell.window().get_ambient_lux_available());
+    shell.apply_brightness(&BrightnessState::new(false, 50.0, None, 1.0));
+    assert!(!shell.window().get_ambient_lux_available());
     let _ = queue.drain();
 
     // The Settings row must match the HUD toggle: disabling AUTO also drops

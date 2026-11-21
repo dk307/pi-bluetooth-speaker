@@ -2044,22 +2044,18 @@ pub fn spawn_brightness_worker(
             if !running.load(Ordering::Relaxed) {
                 return;
             }
-            let (sensor, backlight, sensor_available) = if mocked {
+            let (sensor, backlight, sensor_available, initial_raw) = if mocked {
                 let (sensor, _sensor_ctrl) = speaker_hardware::LightSensor::new_mocked();
                 let (backlight, _backlight_ctrl) = speaker_hardware::Backlight::new_mocked();
-                (WorkerLuxSource::Hardware(sensor), backlight, true)
+                let initial_raw = match backlight.read() {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Mock backlight read failed; using boot default");
+                        100
+                    }
+                };
+                (WorkerLuxSource::Hardware(sensor), backlight, true, initial_raw)
             } else {
-                // The backlight is mandatory: without it neither manual nor
-                // automatic brightness can be applied.
-                let (backlight, device) =
-                    match speaker_hardware::Backlight::with_appliance_default() {
-                        Ok(handle) => handle,
-                        Err(e) => {
-                            tracing::error!(error = %e, "Failed to open backlight sysfs device; brightness disabled");
-                            return;
-                        }
-                    };
-                tracing::info!(device = %device, "Backlight sysfs device selected");
                 // The ambient sensor is optional: keep the worker alive with a
                 // faulting source so the manual slider remains functional.
                 let (sensor, sensor_available) = match speaker_hardware::LightSensor::new() {
@@ -2069,7 +2065,39 @@ pub fn spawn_brightness_worker(
                         (WorkerLuxSource::Unavailable, false)
                     }
                 };
-                (sensor, backlight, sensor_available)
+                // The backlight is mandatory, but the sysfs device can appear
+                // after screen-manager starts (boot-order race). Retry with
+                // exponential backoff instead of killing the worker forever.
+                let mut backoff = Duration::from_secs(1);
+                let mut first_failure = true;
+                let (backlight, device, initial_raw) = loop {
+                    if !running.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let attempt = match speaker_hardware::Backlight::with_appliance_default() {
+                        Ok((handle, device)) => match handle.read() {
+                            Ok(raw) => break (handle, device, raw),
+                            Err(e) => {
+                                tracing::warn!(error = %e, device = %device, "Backlight bootstrap read failed");
+                                "backlight read"
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Backlight sysfs device not available yet");
+                            "backlight open"
+                        }
+                    };
+                    if first_failure {
+                        tracing::error!(stage = attempt, retry_secs = backoff.as_secs(), "Brightness worker waiting for backlight");
+                        first_failure = false;
+                    } else {
+                        tracing::warn!(stage = attempt, retry_secs = backoff.as_secs(), "Retrying brightness backlight establishment");
+                    }
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(Duration::from_secs(60));
+                };
+                tracing::info!(device = %device, "Backlight sysfs device selected");
+                (sensor, backlight, sensor_available, initial_raw)
             };
             // A transient first lux conversion must not kill the worker: seed
             // the policy nominally and let the normal tick path report the
@@ -2085,19 +2113,14 @@ pub fn spawn_brightness_worker(
             } else {
                 50.0
             };
-            let mut engine = match crate::screen_brightness::BrightnessEngine::new_seeded(
+            let mut engine = crate::screen_brightness::BrightnessEngine::new_seeded_with_raw(
                 sensor,
                 backlight,
                 policy,
                 auto_enabled,
                 initial_lux,
-            ) {
-                Ok(engine) => engine,
-                Err(e) => {
-                    tracing::error!(error = %e, "Brightness hardware bootstrap failed; brightness disabled");
-                    return;
-                }
-            };
+                initial_raw,
+            );
             if !auto_enabled {
                 let command = crate::screen_brightness::BrightnessCommand::SetPercent(f32::from(
                     manual_percent.value(),

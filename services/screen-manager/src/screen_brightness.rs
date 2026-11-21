@@ -113,8 +113,8 @@ pub struct BrightnessState {
     pub auto_enabled: bool,
     /// Current brightness as a percent of panel maximum.
     pub brightness_percent: f32,
-    /// Latest ambient reading in lux.
-    pub ambient_lux: f32,
+    /// Latest real ambient reading in lux; `None` when the sensor is unavailable.
+    pub ambient_lux: Option<f32>,
     /// Current manual gamma bias applied to the auto curve.
     pub manual_gamma: f32,
 }
@@ -125,7 +125,7 @@ impl BrightnessState {
     pub fn new(
         auto_enabled: bool,
         brightness_percent: f64,
-        ambient_lux: f64,
+        ambient_lux: Option<f64>,
         manual_gamma: f64,
     ) -> Self {
         let finite = |v: f64, fallback: f32| {
@@ -143,7 +143,8 @@ impl BrightnessState {
         Self {
             auto_enabled,
             brightness_percent: finite(brightness_percent, 0.0).clamp(0.0, 100.0),
-            ambient_lux: finite(ambient_lux, 0.0).max(0.0),
+            ambient_lux: ambient_lux
+                .and_then(|v| (v.is_finite() && v >= 0.0).then(|| finite(v, 0.0).max(0.0))),
             manual_gamma: finite(manual_gamma, 1.0).max(0.0),
         }
     }
@@ -220,8 +221,8 @@ pub struct LoopState {
     pub last_manual: Option<Instant>,
     /// Whether automatic writes are currently enabled.
     pub auto_enabled: bool,
-    /// Last successfully read lux value (telemetry readout).
-    pub last_lux: f32,
+    /// Last real lux sample (telemetry readout); `None` until one succeeds.
+    pub last_lux: Option<f32>,
     /// Manual percent/raw pair whose write failed and must be retried before
     /// any further automatic or external-write processing.
     pub pending_manual: Option<(f32, u32)>,
@@ -244,7 +245,7 @@ impl LoopState {
             last_written: initial_raw,
             last_manual: None,
             auto_enabled,
-            last_lux: 50.0,
+            last_lux: None,
             pending_manual: None,
             sensor_fault_logged: false,
         }
@@ -317,7 +318,7 @@ where
     match sensor.read_lux() {
         Ok(lux) if lux.is_finite() => {
             state.sensor_fault_logged = false;
-            state.last_lux = lux;
+            state.last_lux = Some(lux);
             Some(lux)
         }
         Ok(lux) => {
@@ -525,12 +526,19 @@ where
     }
 }
 
-#[expect(
-    clippy::cast_sign_loss,
-    reason = "duty is clamped to the non-negative range 0..=max before the cast"
-)]
 fn raw_from_duty(duty: f32, max: u32) -> u32 {
-    (duty * max as f32).round().clamp(0.0, max as f32) as u32
+    if max == 0 {
+        return 0;
+    }
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "duty is clamped to the non-negative range 0..=max before the cast"
+    )]
+    let scaled = (duty * max as f32).round().clamp(0.0, max as f32) as u32;
+    // The perceptual floor still rounds to raw 0 for the shipped gamma/max,
+    // which would turn the panel fully off. Never emit a fully-off write: raw 1
+    // is the dimmest real duty cycle and keeps the documented floor meaningful.
+    scaled.max(1)
 }
 
 fn round_percent(perceptual: f32) -> f64 {
@@ -541,7 +549,7 @@ fn snapshot(ab: &AutoBrightness, state: &LoopState) -> BrightnessState {
     BrightnessState::new(
         state.auto_enabled,
         round_percent(ab.brightness()),
-        f64::from(state.last_lux),
+        state.last_lux.map(f64::from),
         f64::from(ab.manual_gamma()),
     )
 }
@@ -594,6 +602,29 @@ where
         initial_lux: f32,
     ) -> Result<Self, BrightnessError> {
         let initial_raw = backlight.read()?;
+        Ok(Self::new_seeded_with_raw(
+            sensor,
+            backlight,
+            cfg,
+            auto_enabled,
+            initial_lux,
+            initial_raw,
+        ))
+    }
+
+    /// Builds an engine from an already-read authoritative raw backlight value.
+    ///
+    /// Lets the worker retry backlight establishment without consuming the
+    /// sensor or re-reading sysfs on a transient failure.
+    #[must_use]
+    pub fn new_seeded_with_raw(
+        sensor: S,
+        backlight: B,
+        cfg: BrightnessConfig,
+        auto_enabled: bool,
+        initial_lux: f32,
+        initial_raw: u32,
+    ) -> Self {
         let ab = AutoBrightness::new(initial_lux, cfg);
         let state = LoopState::with_auto(initial_raw, auto_enabled);
         info!(
@@ -611,13 +642,13 @@ where
             pwm_gamma = cfg.pwm_gamma,
             "Brightness engine initialized"
         );
-        Ok(Self {
+        Self {
             sensor,
             backlight,
             ab,
             cfg,
             state,
-        })
+        }
     }
 
     /// Returns the current authoritative snapshot without touching hardware.
