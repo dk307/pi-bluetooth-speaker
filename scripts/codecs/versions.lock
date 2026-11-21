@@ -1,0 +1,11 @@
+# Verified source pins for scripts/build_bluealsa_pi.sh
+# Format: name version url sha256
+# Verify with: curl -fsSL "$url" | sha256sum   (or git ls-remote for bluez-alsa)
+# bluez-alsa: v5.0.0 annotated tag dereferenced to its commit (git ls-remote refs/tags/v5.0.0^{})
+#             and matched to /usr/src/bluez-alsa HEAD on the live Pi.
+bluez-alsa v5.0.0 https://github.com/arkq/bluez-alsa.git 1935d6dcb8975f2d7a51aaafe61538d157224623
+# freeaptx 0.2.2 — GitHub mirror of upstream libfreeaptx; tag commit 6dee419f934ec781e531f885f7e8e740752e67d1
+# matches github.com/regularhunter/libfreeaptx (upstream repo renamed; both resolve to the same commit).
+freeaptx 0.2.2 https://github.com/iamthehorker/libfreeaptx/archive/refs/tags/0.2.2.tar.gz 5ab5ebddf3f2eb7ce47a505b87460b00fc1ede99c70010796d3575ab31ea80bf
+# fdk-aac 2.0.3 GitHub tarball, sha256 verified 2026-11-21.
+fdk-aac 2.0.3 https://github.com/mstorsjo/fdk-aac/archive/refs/tags/v2.0.3.tar.gz e25671cd96b10bad896aa42ab91a695a9e573395262baed4e4a2ff178d6a3a78
