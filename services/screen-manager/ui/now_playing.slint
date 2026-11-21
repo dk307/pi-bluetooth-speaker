@@ -9,13 +9,13 @@ import {
 import { AmbientWaveSprites, MarqueeCompose } from "marquee_state.slint";
 import "./fonts/InterTabular-Bold.ttf";
 
-// Scrolling marquee over live text.
+// Scrolling marquee over pre-rendered strip or live text.
 //
-// The KMS/FemtoVG migration removed the offscreen strip rasterizer: under
-// `backend-linuxkms` any secondary Slint component creates a real DRM/GL
-// window whose teardown crashed Mesa (SEGV in `driUnbindContext`). FemtoVG
-// caches glyph shapes in its atlas, so scrolling live `Text` costs a GPU blit
-// of the dirty marquee rows per frame instead of CPU glyph shaping.
+// The KMS migration removed the offscreen secondary-component strip rasterizer:
+// under `backend-linuxkms` any secondary Slint component creates a real DRM/GL
+// window whose teardown crashed Mesa (SEGV in `driUnbindContext`). Instead,
+// `ui/marquee.rs` rasterizes overflowing titles in-process via `swash` into a
+// premultiplied `SharedPixelBuffer` uploaded once to Skia's GPU texture cache.
 component MarqueeText inherits Rectangle {
     in property <string> text;
     in property <image> strip_image;
@@ -41,15 +41,38 @@ component MarqueeText inherits Rectangle {
 
     property <bool> use_strip: root.is_overflow && root.strip_image.width > 0;
 
-    main_text := Text {
-        x: root.scroll_offset;
-        text: root.text;
-        color: root.font_color;
-        font-size: root.font_size;
-        font-weight: root.font_weight;
-        wrap: no-wrap;
-        vertical-alignment: center;
-        visible: !root.use_strip;
+    // Wrap the live fallback `Text` items in a `cache-rendering-hint: true`
+    // container so when `use_strip == true` (both texts have `visible: false`),
+    // Slint's `render_layer` computes a `0x0` bounding box, allocates zero FBO
+    // memory (`layer_cache` stores `None`), and prunes both hidden `ComplexText`
+    // subtrees in one lookup per 60 Hz frame.
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        cache-rendering-hint: true;
+
+        main_text := Text {
+            x: root.use_strip ? 0px : root.scroll_offset;
+            text: root.text;
+            color: root.font_color;
+            font-size: root.font_size;
+            font-weight: root.font_weight;
+            wrap: no-wrap;
+            vertical-alignment: center;
+            visible: !root.use_strip;
+        }
+
+        // Fallback wrap-around Text when no SharedPixelBuffer strip is published.
+        Text {
+            x: Math.round((root.scroll_offset + root.cycle_distance) / 1px) * 1px;
+            text: root.text;
+            color: root.font_color;
+            font-size: root.font_size;
+            font-weight: root.font_weight;
+            wrap: no-wrap;
+            vertical-alignment: center;
+            visible: !root.use_strip && root.wrap_visible;
+        }
     }
 
     property <length> text_width: main_text.width;
@@ -86,36 +109,31 @@ component MarqueeText inherits Rectangle {
 
     // Pre-rendered SharedPixelBuffer strip copies (primary + wrap-around) so
     // 60 Hz scrolling translates GPU quads without per-frame text shaping.
+    // Snap `y` to whole physical pixels and use `image-rendering: pixelated`
+    // (`FilterMode::Nearest`) so VideoCore IV's TMU performs a 1-tap texel
+    // fetch instead of 4-tap bilinear filtering on the 1:1 rasterized strip.
+    property <length> strip_y: Math.round(((root.height - root.strip_image.height * 1px) / 2) / 1px) * 1px;
+
     Image {
         x: root.scroll_offset;
-        y: (parent.height - self.height) / 2;
+        y: root.strip_y;
         width: root.strip_image.width * 1px;
         height: root.strip_image.height * 1px;
         source: root.strip_image;
         image-fit: fill;
+        image-rendering: pixelated;
         visible: root.use_strip;
     }
 
     Image {
         x: Math.round((root.scroll_offset + root.cycle_distance) / 1px) * 1px;
-        y: (parent.height - self.height) / 2;
+        y: root.strip_y;
         width: root.strip_image.width * 1px;
         height: root.strip_image.height * 1px;
         source: root.strip_image;
         image-fit: fill;
+        image-rendering: pixelated;
         visible: root.use_strip && root.wrap_visible;
-    }
-
-    // Fallback wrap-around Text when no SharedPixelBuffer strip is published.
-    Text {
-        x: Math.round((root.scroll_offset + root.cycle_distance) / 1px) * 1px;
-        text: root.text;
-        color: root.font_color;
-        font-size: root.font_size;
-        font-weight: root.font_weight;
-        wrap: no-wrap;
-        vertical-alignment: center;
-        visible: !root.use_strip && root.wrap_visible;
     }
 }
 
@@ -126,6 +144,7 @@ component AmbientWaveIndicator inherits Rectangle {
     background: transparent;
 
     property <int> tick: 0;
+    property <int> active_frame: root.is_playing ? root.tick : 6;
 
     Timer {
         interval: 180ms;
@@ -135,11 +154,20 @@ component AmbientWaveIndicator inherits Rectangle {
         }
     }
 
+    // Render from a single 448x24 (`7 * 64x24`) horizontal sprite-sheet texture
+    // using `source-clip-x`. In `SkiaItemRenderer::draw_image_impl`, `source`
+    // stays constant across 180 ms ticks (zero `image_cache` invalidations or
+    // `glTexImage2D` uploads) while avoiding 6 hidden `_visibility` Clip items.
     Image {
         width: 100%;
         height: 100%;
-        source: AmbientWaveSprites.frames[root.is_playing ? root.tick : 6];
+        source: AmbientWaveSprites.sprite_sheet;
+        source-clip-x: root.active_frame * 64;
+        source-clip-y: 0;
+        source-clip-width: 64;
+        source-clip-height: 24;
         image-fit: fill;
+        image-rendering: pixelated;
     }
 }
 
@@ -156,10 +184,6 @@ component TransportButton inherits Rectangle {
     property <length> glyph_size: (root.is_hero ? 26px : 32px) * TouchScale.widget_scale;
     width: root.button_size;
     height: root.button_size;
-    // Static-button caching (perf: commit 7a92c44 "cache static buttons"). The
-    // M3 children animate only their own state-layer/ripple properties; this
-    // layer is reused for the whole button while it is idle.
-    cache-rendering-hint: true;
 
     if root.is_hero : FilledIconButton {
         width: 100%;
@@ -223,7 +247,6 @@ export component NowPlayingView inherits Rectangle {
     in property <int> marquee_fps: MarqueeCompose.marquee_fps;
     in-out property <int> marquee_clock <=> MarqueeCompose.clock;
     property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
-    property <int> raw_tick: 0;
     out property <bool> is_animating: (!root.title_split_mode && title_marquee.is_overflow) || root.is_playing;
 
     // Indeterminate-seek shimmer clock. One full sweep takes
@@ -251,13 +274,10 @@ export component NowPlayingView inherits Rectangle {
     }
 
     Timer {
-        interval: 16.65ms;
+        interval: root.step_frames * 16.65ms;
         running: !root.title_split_mode && title_marquee.is_overflow;
         triggered() => {
-            root.raw_tick += 1;
-            if (Math.mod(root.raw_tick, root.step_frames) == 0) {
-                root.marquee_clock += 1;
-            }
+            root.marquee_clock += 1;
         }
     }
 
@@ -274,6 +294,10 @@ export component NowPlayingView inherits Rectangle {
 
     // Pre-warm the glyph atlas on the first frame for tabular playback timer
     // digits so 1 Hz mm:ss updates never trigger cold glyph rasterization.
+    // Uses `cache-rendering-hint: true` + near-zero brush alpha (`#00000001`)
+    // instead of `opacity: 0.001`: in Skia, a non-unit `Opacity` item with
+    // children executes an uncached `canvas.save_layer()` offscreen FBO pass
+    // every frame (`SkiaItemRenderer::visit_opacity`).
     Rectangle {
         x: 0px;
         y: 0px;
@@ -281,10 +305,11 @@ export component NowPlayingView inherits Rectangle {
         height: 1px;
         clip: true;
         border-radius: 0px;
-        opacity: 0.001;
+        cache-rendering-hint: true;
 
         Text {
             text: "0123456789:";
+            color: #00000001;
             font-family: "Inter Tabular";
             font-size: 18px * TouchScale.clamped_font_scale;
             font-weight: 700;
@@ -314,6 +339,11 @@ export component NowPlayingView inherits Rectangle {
                 background: @linear-gradient(145deg, MaterialPalette.surface 0%, MaterialPalette.background 100%);
                 border-width: 1px;
                 border-color: MaterialPalette.outline_variant;
+                // Cache the 360x360 rounded cover-art card into a GPU FBO texture
+                // (`SkiaItemRenderer` `LayerRenderer`) so 60 Hz marquee ticks blit
+                // one axis-aligned texture instead of re-clipping `rrect` and
+                // re-shading the 145deg gradient every frame.
+                cache-rendering-hint: true;
 
                 // Ambient glowing aura behind the turntable when music is playing
                 Rectangle {
@@ -333,6 +363,7 @@ export component NowPlayingView inherits Rectangle {
                     height: 100%;
                     source: root.cover_image;
                     image-fit: contain;
+                    image-rendering: pixelated;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
@@ -382,44 +413,88 @@ export component NowPlayingView inherits Rectangle {
 
                     property <string> split_line1_text: root.track_title_line1 != "" ? root.track_title_line1 : root.track_title;
 
-                    // Off-layout single-line probes (placed in the Rectangle, outside
-                    // VerticalLayout, so they never affect preferred-height) to pick the
-                    // largest font size (32px -> 30px -> 28px) that fits without ellipsis.
-                    probe_32_l1 := Text {
-                        x: 0;
-                        y: 0;
-                        visible: false;
-                        text: title_slot.split_line1_text;
-                        font-size: 32px * TouchScale.clamped_font_scale;
-                        font-weight: 800;
-                        wrap: no-wrap;
-                    }
-                    probe_32_l2 := Text {
-                        x: 0;
-                        y: 0;
-                        visible: false;
-                        text: root.track_title_line2;
-                        font-size: 32px * TouchScale.clamped_font_scale;
-                        font-weight: 800;
-                        wrap: no-wrap;
-                    }
-                    probe_30_l1 := Text {
-                        x: 0;
-                        y: 0;
-                        visible: false;
-                        text: title_slot.split_line1_text;
-                        font-size: 30px * TouchScale.clamped_font_scale;
-                        font-weight: 800;
-                        wrap: no-wrap;
-                    }
-                    probe_30_l2 := Text {
-                        x: 0;
-                        y: 0;
-                        visible: false;
-                        text: root.track_title_line2;
-                        font-size: 30px * TouchScale.clamped_font_scale;
-                        font-weight: 800;
-                        wrap: no-wrap;
+                    // Wrap the 4 off-layout single-line probes and the two-line
+                    // `split_title` container inside a `cache-rendering-hint: true`
+                    // layer. While `title_split_mode == false` (single-line /
+                    // marquee scrolling mode), all 5 children have `visible: false`,
+                    // so `i_slint_core::item_rendering::render_layer` computes a
+                    // `0x0` bounding rect, allocates zero GPU FBO memory
+                    // (`layer_cache` stores `None`), and prunes all 13 child items
+                    // in a single HashMap lookup per 60 Hz frame.
+                    Rectangle {
+                        x: 0px;
+                        y: 0px;
+                        width: 100%;
+                        height: 100%;
+                        cache-rendering-hint: true;
+
+                        // Off-layout single-line probes (placed in the Rectangle, outside
+                        // VerticalLayout, so they never affect preferred-height) to pick the
+                        // largest font size (32px -> 30px -> 28px) that fits without ellipsis.
+                        probe_32_l1 := Text {
+                            x: 0;
+                            y: 0;
+                            visible: false;
+                            text: title_slot.split_line1_text;
+                            font-size: 32px * TouchScale.clamped_font_scale;
+                            font-weight: 800;
+                            wrap: no-wrap;
+                        }
+                        probe_32_l2 := Text {
+                            x: 0;
+                            y: 0;
+                            visible: false;
+                            text: root.track_title_line2;
+                            font-size: 32px * TouchScale.clamped_font_scale;
+                            font-weight: 800;
+                            wrap: no-wrap;
+                        }
+                        probe_30_l1 := Text {
+                            x: 0;
+                            y: 0;
+                            visible: false;
+                            text: title_slot.split_line1_text;
+                            font-size: 30px * TouchScale.clamped_font_scale;
+                            font-weight: 800;
+                            wrap: no-wrap;
+                        }
+                        probe_30_l2 := Text {
+                            x: 0;
+                            y: 0;
+                            visible: false;
+                            text: root.track_title_line2;
+                            font-size: 30px * TouchScale.clamped_font_scale;
+                            font-weight: 800;
+                            wrap: no-wrap;
+                        }
+
+                        split_title := VerticalLayout {
+                            x: 0px;
+                            y: 0px;
+                            width: 100%;
+                            visible: root.title_split_mode;
+                            spacing: 2px;
+
+                            Text {
+                                text: title_slot.split_line1_text;
+                                color: MaterialPalette.on_background;
+                                font-size: title_slot.split_font_size;
+                                font-weight: 800;
+                                overflow: elide;
+                                wrap: no-wrap;
+                                vertical-alignment: center;
+                            }
+
+                            if root.track_title_line2 != "" : Text {
+                                text: root.track_title_line2;
+                                color: MaterialPalette.on_background;
+                                font-size: title_slot.split_font_size;
+                                font-weight: 800;
+                                overflow: elide;
+                                wrap: no-wrap;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
 
                     property <bool> fits_32: probe_32_l1.preferred-width <= title_slot.width
@@ -438,50 +513,31 @@ export component NowPlayingView inherits Rectangle {
                         clock_frame: root.marquee_clock;
                         marquee_fps: root.marquee_fps;
                     }
-
-                    split_title := VerticalLayout {
-                        x: 0px;
-                        y: 0px;
-                        width: 100%;
-                        visible: root.title_split_mode;
-                        spacing: 2px;
-
-                        Text {
-                            text: title_slot.split_line1_text;
-                            color: MaterialPalette.on_background;
-                            font-size: title_slot.split_font_size;
-                            font-weight: 800;
-                            overflow: elide;
-                            wrap: no-wrap;
-                            vertical-alignment: center;
-                        }
-
-                        if root.track_title_line2 != "" : Text {
-                            text: root.track_title_line2;
-                            color: MaterialPalette.on_background;
-                            font-size: title_slot.split_font_size;
-                            font-weight: 800;
-                            overflow: elide;
-                            wrap: no-wrap;
-                            vertical-alignment: center;
-                        }
-                    }
                 }
 
                 HorizontalLayout {
                     spacing: 12px;
 
                     // The artist/album line is intentionally static (no marquee): long
-                    // text is truncated with an ellipsis instead of scrolling.
-                    Text {
+                    // text is truncated with an ellipsis instead of scrolling. Cache the
+                    // shaped glyph run into a GPU texture layer so 60 Hz title-marquee
+                    // frames blit one texture instead of re-running Parley + `draw_glyphs_at`.
+                    Rectangle {
                         horizontal-stretch: 1;
-                        text: root.artist_marquee_text;
-                        color: MaterialPalette.secondary;
-                        font-size: 22px * TouchScale.clamped_font_scale;
-                        font-weight: 700;
-                        overflow: elide;
-                        wrap: no-wrap;
-                        vertical-alignment: center;
+                        height: artist_text.preferred-height;
+                        cache-rendering-hint: true;
+
+                        artist_text := Text {
+                            width: 100%;
+                            height: 100%;
+                            text: root.artist_marquee_text;
+                            color: MaterialPalette.secondary;
+                            font-size: 22px * TouchScale.clamped_font_scale;
+                            font-weight: 700;
+                            overflow: elide;
+                            wrap: no-wrap;
+                            vertical-alignment: center;
+                        }
                     }
 
                     AmbientWaveIndicator {
@@ -499,127 +555,165 @@ export component NowPlayingView inherits Rectangle {
                 //   * position only       -> thin thumb-less track with a slow
                 //                            shimmer sweep (reads as active, not stuck)
                 //   * neither             -> row hidden (nothing to show)
-                HorizontalLayout {
+                //
+                // Cache the outer seek-bar row (`cache-rendering-hint: true`) so
+                // for 59 out of 60 frames/sec `SkiaItemRenderer::visit_layer`
+                // returns `ContinueRenderingWithoutChildren` and prunes all 15
+                // child items at the root, while keeping `dur_readout` cached
+                // inside its own compact layer across 1 Hz progress ticks.
+                Rectangle {
                     y: right_col.seek_center_y - self.height / 2;
                     width: 100%;
                     height: 24px * TouchScale.widget_scale;
-                    spacing: 16px;
                     visible: !root.seek_hidden;
+                    cache-rendering-hint: true;
 
-                    // The readouts size to their content: a fixed 64 px slot
-                    // clipped longer timestamps (`1:23:45`) with no way to grow.
-                    // `min-width` keeps a stable slot for short values while the
-                    // elastic track below yields the extra pixels. The columns
-                    // are conditional (not `visible: false`) so an unreported
-                    // side leaves no empty gap in the row.
-                    if root.position_known : Text {
-                        text: root.position_text;
-                        font-family: "Inter Tabular";
-                        font-size: 18px * TouchScale.clamped_font_scale;
-                        font-weight: 700;
-                        color: MaterialPalette.on_surface;
-                        vertical-alignment: center;
-                        min-width: 64px * TouchScale.widget_scale;
-                        horizontal-alignment: right;
-                    }
+                    HorizontalLayout {
+                        width: 100%;
+                        height: 100%;
+                        spacing: 16px;
 
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        height: parent.height;
-                        background: transparent;
+                        // The readouts size to their content: a fixed 64 px slot
+                        // clipped longer timestamps (`1:23:45`) with no way to grow.
+                        // `min-width` keeps a stable slot for short values while the
+                        // elastic track below yields the extra pixels. The columns
+                        // are conditional (not `visible: false`) so an unreported
+                        // side leaves no empty gap in the row.
+                        if root.position_known : Rectangle {
+                            min-width: Math.max(pos_readout.preferred-width, 64px * TouchScale.widget_scale);
+                            height: parent.height;
 
-                        // Background track (Vertically centered)
-                        track := Rectangle {
-                            x: 0px;
-                            y: (parent.height - self.height) / 2;
-                            width: parent.width;
-                            // A thin track (plus the absent thumb) signals that
-                            // dragging is disabled: there is no seek target.
-                            height: root.seek_indeterminate ? 2px : 10px;
-                            background: MaterialPalette.surface_container_highest;
-                            border-radius: self.height / 2;
-                            clip: true;
-
-                            // Filled played position bar (determinate timeline only)
-                            if root.seek_determinate : Rectangle {
-                                x: 0px;
-                                y: 0px;
-                                width: parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio));
-                                height: parent.height;
-                                background: MaterialPalette.primary;
-                                border-radius: parent.height / 2;
-                            }
-
-                            // Soft gradient sweep for the indeterminate track: a
-                            // slow 2.5 s "still active" cue instead of a bar stuck
-                            // at 0%. The band's centre travels from the left edge
-                            // to the right edge (`parent.width`, not
-                            // `parent.width + sweep_width`), so at every tick at
-                            // least half the band is still on the track and the
-                            // bar is never completely static. Ticks stop while
-                            // paused, freezing the sweep.
-                            if root.seek_indeterminate : Rectangle {
-                                property <length> sweep_width: parent.width * 0.35;
-                                width: self.sweep_width;
-                                height: parent.height;
-                                x: root.shimmer_progress * parent.width - self.sweep_width / 2;
-                                background: @linear-gradient(90deg, transparent 0%, MaterialPalette.primary 50%, transparent 100%);
-                                opacity: 0.55;
+                            pos_readout := Text {
+                                width: 100%;
+                                height: 100%;
+                                text: root.position_text;
+                                font-family: "Inter Tabular";
+                                font-size: 18px * TouchScale.clamped_font_scale;
+                                font-weight: 700;
+                                color: MaterialPalette.on_surface;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
                             }
                         }
-                    }
 
-                    if root.duration_known : Text {
-                        text: root.duration_text;
-                        font-family: "Inter Tabular";
-                        font-size: 18px * TouchScale.clamped_font_scale;
-                        font-weight: 700;
-                        color: MaterialPalette.on_surface_variant;
-                        vertical-alignment: center;
-                        min-width: 64px * TouchScale.widget_scale;
-                        horizontal-alignment: left;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: parent.height;
+                            background: transparent;
+
+                            // Background track (Vertically centered)
+                            track := Rectangle {
+                                x: 0px;
+                                y: (parent.height - self.height) / 2;
+                                width: parent.width;
+                                // A thin track (plus the absent thumb) signals that
+                                // dragging is disabled: there is no seek target.
+                                height: root.seek_indeterminate ? 2px : 10px;
+                                background: MaterialPalette.surface_container_highest;
+                                border-radius: self.height / 2;
+                                // Only enable rounded-rect clipping for the indeterminate
+                                // shimmer sweep (which overhangs the ends); the determinate
+                                // fill bar is already clamped to `[0, parent.width]` with
+                                // matching `border-radius`, avoiding Skia's analytic `clip_rrect`.
+                                clip: root.seek_indeterminate;
+
+                                // Filled played position bar (determinate timeline only)
+                                if root.seek_determinate : Rectangle {
+                                    x: 0px;
+                                    y: 0px;
+                                    width: parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio));
+                                    height: parent.height;
+                                    background: MaterialPalette.primary;
+                                    border-radius: parent.height / 2;
+                                }
+
+                                // Soft gradient sweep for the indeterminate track: a
+                                // slow 2.5 s "still active" cue instead of a bar stuck
+                                // at 0%. The band's centre travels from the left edge
+                                // to the right edge (`parent.width`, not
+                                // `parent.width + sweep_width`), so at every tick at
+                                // least half the band is still on the track and the
+                                // bar is never completely static. Ticks stop while
+                                // paused, freezing the sweep.
+                                if root.seek_indeterminate : Rectangle {
+                                    property <length> sweep_width: parent.width * 0.35;
+                                    width: self.sweep_width;
+                                    height: parent.height;
+                                    x: root.shimmer_progress * parent.width - self.sweep_width / 2;
+                                    background: @linear-gradient(90deg, transparent 0%, MaterialPalette.primary 50%, transparent 100%);
+                                    opacity: 0.55;
+                                }
+                            }
+                        }
+
+                        if root.duration_known : Rectangle {
+                            min-width: Math.max(dur_readout.preferred-width, 64px * TouchScale.widget_scale);
+                            height: parent.height;
+                            cache-rendering-hint: true;
+
+                            dur_readout := Text {
+                                width: 100%;
+                                height: 100%;
+                                text: root.duration_text;
+                                font-family: "Inter Tabular";
+                                font-size: 18px * TouchScale.clamped_font_scale;
+                                font-weight: 700;
+                                color: MaterialPalette.on_surface_variant;
+                                vertical-alignment: center;
+                                horizontal-alignment: left;
+                            }
+                        }
                     }
                 }
 
-                // Transport controls row - transport center = artist center + 2D
-                HorizontalLayout {
+                // Transport controls row - transport center = artist center + 2D.
+                // Cache the entire 3-button row into a single GPU FBO layer so
+                // 60 Hz marquee ticks prune all 3 buttons at their parent root
+                // (1 item visited + 1 texture blit instead of 3 separate blits).
+                Rectangle {
                     y: right_col.transport_center_y - self.height / 2;
                     width: 100%;
                     height: 86px * TouchScale.widget_scale;
-                    alignment: center;
-                    spacing: 36px;
+                    cache-rendering-hint: true;
 
-                    // Previous Button - tonal filled circle (M3 button group)
-                    VerticalLayout {
+                    HorizontalLayout {
+                        width: 100%;
+                        height: 100%;
                         alignment: center;
-                        TransportButton {
-                            icon: @image-url("../../../assets/icons/previous.svg");
-                            enabled: root.transport_available;
-                            is_hero: false;
-                            clicked => { root.previous_track(); }
+                        spacing: 36px;
+
+                        // Previous Button - tonal filled circle (M3 button group)
+                        VerticalLayout {
+                            alignment: center;
+                            TransportButton {
+                                icon: @image-url("../../../assets/icons/previous.svg");
+                                enabled: root.transport_available;
+                                is_hero: false;
+                                clicked => { root.previous_track(); }
+                            }
                         }
-                    }
 
-                    // Play / Pause (Hero Button) - large filled primary circle (M3 filled button)
-                    VerticalLayout {
-                        alignment: center;
-                        TransportButton {
-                            icon: @image-url("../../../assets/icons/play.svg");
-                            is_playing: root.is_playing;
-                            enabled: root.transport_available;
-                            is_hero: true;
-                            clicked => { root.toggle_play_pause(); }
+                        // Play / Pause (Hero Button) - large filled primary circle (M3 filled button)
+                        VerticalLayout {
+                            alignment: center;
+                            TransportButton {
+                                icon: @image-url("../../../assets/icons/play.svg");
+                                is_playing: root.is_playing;
+                                enabled: root.transport_available;
+                                is_hero: true;
+                                clicked => { root.toggle_play_pause(); }
+                            }
                         }
-                    }
 
-                    // Next Button - tonal filled circle (M3 button group)
-                    VerticalLayout {
-                        alignment: center;
-                        TransportButton {
-                            icon: @image-url("../../../assets/icons/next.svg");
-                            enabled: root.transport_available;
-                            is_hero: false;
-                            clicked => { root.next_track(); }
+                        // Next Button - tonal filled circle (M3 button group)
+                        VerticalLayout {
+                            alignment: center;
+                            TransportButton {
+                                icon: @image-url("../../../assets/icons/next.svg");
+                                enabled: root.transport_available;
+                                is_hero: false;
+                                clicked => { root.next_track(); }
+                            }
                         }
                     }
                 }

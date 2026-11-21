@@ -255,13 +255,12 @@ struct Session {
     brightness_worker: std::io::Result<std::thread::JoinHandle<()>>,
     bt_worker: Option<std::io::Result<std::thread::JoinHandle<()>>>,
     _sync_timer: Timer,
-    _encoder_timer: Option<Timer>,
 }
 
 impl Session {
-    /// Spawns the Bluetooth/amp workers and starts the state-sync and
-    /// rotary-encoder timers. The `AppShell` stays alive through the `Rc`
-    /// clones captured by those timers.
+    /// Spawns the Bluetooth/amp workers and starts the shared state-sync +
+    /// rotary-encoder poll timer. The `AppShell` stays alive through the `Rc`
+    /// clones captured by that timer.
     ///
     /// Mocked sessions spawn the `bt-monitor` worker eagerly from the mock
     /// device; live sessions spawn the `bt-bootstrap` worker, which performs
@@ -319,13 +318,39 @@ impl Session {
             },
         ));
 
-        // Periodic reconciliation of worker-published Bluetooth/amp state.
+        // Physical EC12 encoder only exists on the live appliance (mocked
+        // sessions must never open GPIO). Hardware GPIO interrupt threads
+        // accumulate detents and debounced switch transitions atomically in
+        // `SharedEncoderState`, so polling inside the shared sync timer never
+        // misses transitions and avoids a second ~16 ms timer beating against
+        // the 16.65 ms marquee timer (`AGENTS.md` single-rate timer rule).
+        let encoder = if mocked {
+            None
+        } else {
+            match speaker_hardware::EncoderDevice::new() {
+                Ok(enc) => Some(enc),
+                Err(err) => {
+                    report_display(
+                        tracing::Level::WARN,
+                        "Failed to initialize EC12 rotary encoder for volume control",
+                        &err,
+                    );
+                    None
+                }
+            }
+        };
+
+        // Periodic reconciliation of worker-published Bluetooth/amp state and
+        // interrupt-accumulated rotary-encoder detents.
         let sync_timer = Timer::default();
         let shell_sync = Rc::clone(&shell);
         let commands_sync = commands.clone();
         let connected_sync = Arc::clone(&bt_connected);
         let transport_wired = Cell::new(false);
+        let mut tracker = crate::ui::EncoderVolumeTracker::new();
+        let mut warned = false;
         sync_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
+            daemon::poll_encoder_input(encoder.as_ref(), &mut tracker, &shell_sync, &mut warned);
             // Wire the transport once the live connect succeeded: before that
             // a transport tap has no worker to execute it, so it must stay a
             // no-op instead of flipping the optimistic UI state.
@@ -346,43 +371,12 @@ impl Session {
             }
         });
 
-        // Physical EC12 encoder only exists on the live appliance (mocked
-        // sessions must never open GPIO).
-        let encoder_timer = (!mocked).then(|| {
-            let timer = Timer::default();
-            match speaker_hardware::EncoderDevice::new() {
-                Ok(encoder) => {
-                    let shell = Rc::clone(&shell);
-                    let mut tracker = crate::ui::EncoderVolumeTracker::new();
-                    let mut warned = false;
-                    let encoder = Some(encoder);
-                    timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
-                        daemon::poll_encoder_input(
-                            encoder.as_ref(),
-                            &mut tracker,
-                            &shell,
-                            &mut warned,
-                        );
-                    });
-                }
-                Err(err) => {
-                    report_display(
-                        tracing::Level::WARN,
-                        "Failed to initialize EC12 rotary encoder for volume control",
-                        &err,
-                    );
-                }
-            }
-            timer
-        });
-
         Self {
             bg_running,
             amp_worker,
             brightness_worker,
             bt_worker,
             _sync_timer: sync_timer,
-            _encoder_timer: encoder_timer,
         }
     }
 

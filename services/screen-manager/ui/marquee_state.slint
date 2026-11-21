@@ -12,7 +12,10 @@ export global MarqueeCompose {
     in-out property <image> title_strip;
 }
 
-// Pre-rendered 64x24 frames for AmbientWaveIndicator (6 playing + 1 idle).
+// Pre-rendered 64x24 frames for AmbientWaveIndicator (6 playing + 1 idle),
+// plus a combined 448x24 horizontal sprite sheet (`7 * 64x24`) so the active
+// frame can be selected via `source-clip-x` on a single cached GPU texture.
 export global AmbientWaveSprites {
     in-out property <[image]> frames;
+    in-out property <image> sprite_sheet;
 }

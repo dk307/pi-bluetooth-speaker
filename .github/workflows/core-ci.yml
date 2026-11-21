@@ -25,15 +25,16 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install System Dependencies
-        # `yeslogic-fontconfig-sys` (via Slint's fontdb) needs pkg-config and the
-        # fontconfig headers; `alsa-sys` (via audio-manager) needs the ALSA
-        # headers discovered through pkg-config; `lld` accelerates linking
-        # 32 instrumented test binaries. libinput/xkbcommon/gbm/egl/gles/udev
-        # are required by Slint's backend-linuxkms-noseat + renderer-femtovg.
+        # `yeslogic-fontconfig-sys` (via Slint's fontdb) and `skia-bindings` need
+        # pkg-config, fontconfig, and freetype headers; `alsa-sys` (via
+        # audio-manager) needs the ALSA headers discovered through pkg-config;
+        # `lld` accelerates linking 32 instrumented test binaries.
+        # libinput/xkbcommon/gbm/egl/gles/udev/curl/libstdc++ are required by
+        # Slint's backend-linuxkms-libinput + renderer-skia-opengl.
         run: |
-          if ! dpkg -s pkg-config libfontconfig-dev libasound2-dev lld libinput-dev libxkbcommon-dev libgbm-dev libegl-dev libgles-dev libudev-dev &>/dev/null; then
+          if ! dpkg -s pkg-config libfontconfig-dev libfreetype-dev libasound2-dev lld libinput-dev libxkbcommon-dev libgbm-dev libegl-dev libgles-dev libudev-dev g++ curl &>/dev/null; then
             sudo apt-get update -o Acquire::Languages=none
-            sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev libasound2-dev lld libinput-dev libxkbcommon-dev libgbm-dev libegl-dev libgles-dev libudev-dev
+            sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev libfreetype-dev libasound2-dev lld libinput-dev libxkbcommon-dev libgbm-dev libegl-dev libgles-dev libudev-dev g++ curl
           fi
 
       - name: Setup Rust Toolchain
@@ -91,14 +92,14 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install System Dependencies
-        # `yeslogic-fontconfig-sys` (via Slint's fontdb) needs pkg-config and the
-        # fontconfig headers; the ubuntu-24.04-arm image ships neither by default.
-        # libinput/xkbcommon/gbm/egl/gles/udev are required by Slint's
-        # backend-linuxkms-noseat + renderer-femtovg.
+        # `yeslogic-fontconfig-sys` (via Slint's fontdb) and `skia-bindings` need
+        # pkg-config, fontconfig, and freetype headers; the ubuntu-24.04-arm
+        # image ships neither by default. libinput/xkbcommon/gbm/egl/gles/udev/g++/curl
+        # are required by Slint's backend-linuxkms-libinput + renderer-skia-opengl.
         run: |
-          if ! dpkg -s pkg-config libfontconfig-dev libasound2-dev libinput-dev libxkbcommon-dev libgbm-dev libegl-dev libgles-dev libudev-dev &>/dev/null; then
+          if ! dpkg -s pkg-config libfontconfig-dev libfreetype-dev libasound2-dev libinput-dev libxkbcommon-dev libgbm-dev libegl-dev libgles-dev libudev-dev g++ curl &>/dev/null; then
             sudo apt-get update -o Acquire::Languages=none
-            sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev libasound2-dev libinput-dev libxkbcommon-dev libgbm-dev libegl-dev libgles-dev libudev-dev
+            sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev libfreetype-dev libasound2-dev libinput-dev libxkbcommon-dev libgbm-dev libegl-dev libgles-dev libudev-dev g++ curl
           fi
 
       - name: Setup Rust Toolchain
@@ -164,12 +165,12 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install System Dependencies
-        # libinput/xkbcommon/gbm/egl/gles/udev are required by Slint's
-        # backend-linuxkms-noseat + renderer-femtovg.
+        # libinput/xkbcommon/gbm/egl/gles/udev/freetype/g++/curl are required by
+        # Slint's backend-linuxkms-libinput + renderer-skia-opengl.
         run: |
-          if ! dpkg -s pkg-config libfontconfig-dev libasound2-dev lld libinput-dev libxkbcommon-dev libgbm-dev libegl-dev libgles-dev libudev-dev &>/dev/null; then
+          if ! dpkg -s pkg-config libfontconfig-dev libfreetype-dev libasound2-dev lld libinput-dev libxkbcommon-dev libgbm-dev libegl-dev libgles-dev libudev-dev g++ curl &>/dev/null; then
             sudo apt-get update -o Acquire::Languages=none
-            sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev libasound2-dev lld libinput-dev libxkbcommon-dev libgbm-dev libegl-dev libgles-dev libudev-dev
+            sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev libfreetype-dev libasound2-dev lld libinput-dev libxkbcommon-dev libgbm-dev libegl-dev libgles-dev libudev-dev g++ curl
           fi
 
       - name: Setup Rust Toolchain

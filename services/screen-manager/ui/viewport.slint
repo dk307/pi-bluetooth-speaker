@@ -10,7 +10,10 @@ import { NowPlayingView } from "now_playing.slint";
 import { SettingsView, SettingRowItem } from "settings_view.slint";
 
 export component MainViewport inherits Rectangle {
-    background: MaterialPalette.background;
+    // `MainWindow` already clears the 800x480 backbuffer to `MaterialPalette.background`
+    // and Tab 0 draws its full 800x420 cached gradient layer, so leave the root
+    // container transparent to avoid 336,000 pixels of full-viewport overdraw per frame.
+    background: transparent;
 
     in-out property <int> active_tab: 0;
     in property <bool> cd_enabled: false;
@@ -66,13 +69,25 @@ export component MainViewport inherits Rectangle {
         padding: 0px;
 
         Rectangle {
-            background: @linear-gradient(150deg, MaterialPalette.surface 0%, MaterialPalette.background 100%);
-            border-radius: 0px;
-            border-width: 1px;
-            border-color: MaterialPalette.outline_variant;
             clip: true;
 
+            // Static 800x420 background layer with `cache-rendering-hint: true`
+            // so Skia's dithered 150deg linear gradient shader (`set_dither(true)`)
+            // and 1px outline border are rasterized once per theme into a GPU FBO
+            // texture instead of re-shading 336,000 pixels on every 60 Hz frame.
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                background: @linear-gradient(150deg, MaterialPalette.surface 0%, MaterialPalette.background 100%);
+                border-radius: 0px;
+                border-width: 1px;
+                border-color: MaterialPalette.outline_variant;
+                cache-rendering-hint: true;
+            }
+
             now_playing := NowPlayingView {
+                width: 100%;
+                height: 100%;
                 track_title: root.track_title;
                 track_title_line1: root.track_title_line1;
                 track_title_line2: root.track_title_line2;

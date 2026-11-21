@@ -1183,10 +1183,14 @@ impl AppShell {
     /// authoritative snapshot is always applied, forcing convergence even if a
     /// write failed.
     pub fn apply_brightness(&self, state: &BrightnessState) {
-        self.window
-            .set_ambient_lux(state.ambient_lux.unwrap_or(f32::NAN));
-        self.window
-            .set_ambient_lux_available(state.ambient_lux.is_some());
+        let next_lux = state.ambient_lux.unwrap_or(f32::NAN);
+        if self.window.get_ambient_lux().to_bits() != next_lux.to_bits() {
+            self.window.set_ambient_lux(next_lux);
+        }
+        let lux_available = state.ambient_lux.is_some();
+        if self.window.get_ambient_lux_available() != lux_available {
+            self.window.set_ambient_lux_available(lux_available);
+        }
         let authoritative_percent = state.brightness_percent.clamp(0.0, 100.0);
         let (hold_percent, hold_auto) = self
             .last_brightness_command
@@ -1195,10 +1199,12 @@ impl AppShell {
             .map_or((false, false), |marker| {
                 (marker.percent.is_some(), marker.auto.is_some())
             });
-        if !hold_auto {
+        if !hold_auto && self.window.get_auto_brightness_enabled() != state.auto_enabled {
             self.window.set_auto_brightness_enabled(state.auto_enabled);
         }
-        if !hold_percent {
+        if !hold_percent
+            && (self.window.get_brightness_value() - authoritative_percent).abs() >= 0.05
+        {
             self.window.set_brightness_value(authoritative_percent);
         }
         tracing::debug!(
@@ -1316,7 +1322,7 @@ impl AppShell {
         /// Minimum progress-bar ratio delta (~1 px on a ~320 px seek bar)
         /// before dirtying Slint's `progress_ratio` binding; sub-pixel 250 ms
         /// increments are visually imperceptible yet trigger full-window
-        /// `FemtoVG` redraws.
+        /// GPU redraws.
         const PROGRESS_RATIO_MIN_STEP: f32 = 1.0 / 320.0;
 
         let row = SeekRow::new(position_ms, duration_ms);
