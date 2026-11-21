@@ -208,10 +208,10 @@ pub struct AppShell {
     amp_commands: Rc<RefCell<Option<crate::volume::AmpVolumeCommandQueue>>>,
     brightness_commands: Rc<RefCell<Option<BrightnessCommandQueue>>>,
     /// Set when the overlay last issued an optimistic brightness command:
-    /// `(timestamp, optimistic percent for a slider change)`. The authoritative
-    /// snapshot is held off only while it still matches the optimistic percent;
-    /// a differing state (e.g. a rejected write) is applied immediately so the
-    /// overlay converges instead of diverging for the whole settle window.
+    /// `(timestamp, Some(percent) for a slider drag, None for an AUTO toggle)`.
+    /// While the percent marker is fresh, both the percent and AUTO state are
+    /// held so a stale in-flight snapshot cannot yank the thumb or flip the
+    /// chip; once the window expires the next authoritative snapshot wins.
     last_brightness_command: BrightnessSettle,
     device_commands: Rc<RefCell<Option<speaker_bluetooth::DeviceCommandQueue>>>,
     bt_devices: Rc<RefCell<crate::ui::BtDevicesController>>,
@@ -1123,12 +1123,12 @@ impl AppShell {
 
     /// Applies an authoritative brightness snapshot published by the worker.
     ///
-    /// AUTO mode and the ambient lux readout always update. During the settle
-    /// window the optimistic percent is preserved so an in-flight stale snapshot
-    /// cannot yank the thumb back; once the window expires the next authoritative
-    /// snapshot is always applied, forcing convergence even if a write failed.
+    /// The ambient lux readout always updates. During the settle window the
+    /// optimistic percent *and* AUTO state are preserved so an in-flight stale
+    /// snapshot cannot yank the thumb back or flip the AUTO/MANUAL chip; once
+    /// the window expires the next authoritative snapshot is always applied,
+    /// forcing convergence even if a write failed.
     pub fn apply_brightness(&self, state: &BrightnessState) {
-        self.window.set_auto_brightness_enabled(state.auto_enabled);
         self.window
             .set_ambient_lux(state.ambient_lux.unwrap_or(f32::NAN));
         self.window
@@ -1139,6 +1139,7 @@ impl AppShell {
             at.elapsed() < BRIGHTNESS_SETTLE_WINDOW && optimistic.is_some()
         });
         if !hold_optimistic {
+            self.window.set_auto_brightness_enabled(state.auto_enabled);
             self.window.set_brightness_value(authoritative_percent);
         }
         tracing::debug!(

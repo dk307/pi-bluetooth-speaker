@@ -212,6 +212,37 @@ impl BacklightIo for Backlight {
     }
 }
 
+/// Whether a persistent fault episode has already been reported at `warn!`.
+///
+/// The first occurrence is logged at `warn!`, later ticks at `debug!`, and a
+/// successful operation of the same kind resets the episode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FaultLogged(bool);
+
+impl FaultLogged {
+    /// Creates an episode that has not been reported at `warn!` yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(false)
+    }
+
+    /// Returns `true` once the episode has been reported at `warn!` level.
+    #[must_use]
+    pub const fn is_logged(self) -> bool {
+        self.0
+    }
+
+    /// Marks the episode as already reported.
+    pub const fn mark(&mut self) {
+        self.0 = true;
+    }
+
+    /// Clears the episode after a successful operation.
+    pub const fn clear(&mut self) {
+        self.0 = false;
+    }
+}
+
 /// Mutable state persisted across brightness ticks.
 #[derive(Debug, Clone)]
 pub struct LoopState {
@@ -226,12 +257,14 @@ pub struct LoopState {
     /// Manual percent/raw pair whose write failed and must be retried before
     /// any further automatic or external-write processing.
     pub pending_manual: Option<(f32, u32)>,
-    /// Whether the current sensor-fault episode has already been logged at
-    /// `warn!` level; subsequent ticks are downgraded to `debug!`.
-    pub sensor_fault_logged: bool,
-    /// Whether the current backlight read/write fault episode has already been
-    /// logged at `warn!` level; subsequent ticks are downgraded to `debug!`.
-    pub backlight_fault_logged: bool,
+    /// Current ambient-sensor fault episode.
+    pub sensor_fault_logged: FaultLogged,
+    /// Current backlight *read* fault episode. Kept separate from writes: a
+    /// write-only sysfs fault (e.g. a read-only `brightness` node) with healthy
+    /// reads must not re-warn every tick.
+    pub backlight_read_fault_logged: FaultLogged,
+    /// Current backlight *write* fault episode.
+    pub backlight_write_fault_logged: FaultLogged,
 }
 
 impl LoopState {
@@ -250,8 +283,9 @@ impl LoopState {
             auto_enabled,
             last_lux: None,
             pending_manual: None,
-            sensor_fault_logged: false,
-            backlight_fault_logged: false,
+            sensor_fault_logged: FaultLogged::new(),
+            backlight_read_fault_logged: FaultLogged::new(),
+            backlight_write_fault_logged: FaultLogged::new(),
         }
     }
 }
@@ -321,26 +355,26 @@ where
 {
     match sensor.read_lux() {
         Ok(lux) if lux.is_finite() => {
-            state.sensor_fault_logged = false;
+            state.sensor_fault_logged.clear();
             state.last_lux = Some(lux);
             Some(lux)
         }
         Ok(lux) => {
-            if state.sensor_fault_logged {
+            if state.sensor_fault_logged.is_logged() {
                 debug!(lux, "non-finite lux sample; holding brightness");
             } else {
                 warn!(lux, "ignored non-finite lux sample; holding brightness");
-                state.sensor_fault_logged = true;
+                state.sensor_fault_logged.mark();
             }
             *action = TickAction::SensorFault;
             None
         }
         Err(e) => {
-            if state.sensor_fault_logged {
+            if state.sensor_fault_logged.is_logged() {
                 debug!(error = %e, "lux read still failing; holding last brightness");
             } else {
                 warn!(error = %e, "lux read failed; holding last brightness");
-                state.sensor_fault_logged = true;
+                state.sensor_fault_logged.mark();
             }
             *action = TickAction::SensorFault;
             None
@@ -348,16 +382,30 @@ where
     }
 }
 
+/// The sysfs operation a backlight fault episode belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BacklightFaultOp {
+    /// Reading the panel's current raw brightness.
+    Read,
+    /// Writing a new raw brightness value.
+    Write,
+}
+
 /// Logs a backlight I/O fault once at `warn!`, then at `debug!` until the next
-/// successful operation clears the episode flag, so a persistent sysfs fault
-/// cannot flood the journal at 20 Hz.
+/// successful operation of the *same kind* clears its episode flag, so a
+/// persistent read- or write-only sysfs fault cannot flood the journal at 20 Hz.
 fn report_backlight_fault(
     state: &mut LoopState,
+    op: BacklightFaultOp,
     context: &'static str,
     raw: Option<u32>,
     error: &BrightnessError,
 ) {
-    if state.backlight_fault_logged {
+    let logged = match op {
+        BacklightFaultOp::Read => &mut state.backlight_read_fault_logged,
+        BacklightFaultOp::Write => &mut state.backlight_write_fault_logged,
+    };
+    if logged.is_logged() {
         debug!(error = %error, ?raw, context, "backlight operation still failing");
     } else {
         warn!(
@@ -366,7 +414,7 @@ fn report_backlight_fault(
             context,
             "backlight operation failed; retrying next tick"
         );
-        state.backlight_fault_logged = true;
+        logged.mark();
     }
 }
 
@@ -419,7 +467,7 @@ where
                         ab.on_manual_change(perceptual);
                         loop_state.last_written = raw;
                         loop_state.pending_manual = None;
-                        loop_state.backlight_fault_logged = false;
+                        loop_state.backlight_write_fault_logged.clear();
                         info!(
                             percent,
                             raw,
@@ -430,7 +478,13 @@ where
                     }
                     Err(e) => {
                         loop_state.pending_manual = Some((perceptual, raw));
-                        report_backlight_fault(loop_state, "manual write", Some(raw), &e);
+                        report_backlight_fault(
+                            loop_state,
+                            BacklightFaultOp::Write,
+                            "manual write",
+                            Some(raw),
+                            &e,
+                        );
                         action = TickAction::WriteFault { raw };
                     }
                 }
@@ -469,12 +523,18 @@ where
                 ab.on_manual_change(percent);
                 loop_state.last_written = raw;
                 loop_state.pending_manual = None;
-                loop_state.backlight_fault_logged = false;
+                loop_state.backlight_write_fault_logged.clear();
                 info!(percent, raw, "retried manual brightness applied");
                 action = TickAction::ManualWrite { raw };
             }
             Err(e) => {
-                report_backlight_fault(loop_state, "manual write retry", Some(raw), &e);
+                report_backlight_fault(
+                    loop_state,
+                    BacklightFaultOp::Write,
+                    "manual write retry",
+                    Some(raw),
+                    &e,
+                );
                 action = TickAction::WriteFault { raw };
             }
         }
@@ -488,7 +548,7 @@ where
                 let perceptual = ratio.powf(1.0 / cfg.pwm_gamma).clamp(cfg.b_min, 1.0);
                 ab.on_manual_change(perceptual);
                 loop_state.last_written = hw;
-                loop_state.backlight_fault_logged = false;
+                loop_state.backlight_read_fault_logged.clear();
                 loop_state.last_manual = Some(input.now);
                 info!(
                     raw = hw,
@@ -498,10 +558,18 @@ where
                 action = TickAction::ExternalAdopt { raw: hw };
                 suppressed = true;
             }
-            Ok(_) => loop_state.backlight_fault_logged = false,
-            Err(e) => report_backlight_fault(loop_state, "read", None, &e),
+            Ok(_) => loop_state.backlight_read_fault_logged.clear(),
+            Err(e) => report_backlight_fault(loop_state, BacklightFaultOp::Read, "read", None, &e),
         }
     }
+
+    // Always sample ambient light for telemetry, including ticks where a manual
+    // write (or its retry) suppressed the auto path. Otherwise a sustained sysfs
+    // write fault would keep `suppressed` set and freeze the HUD's lux readout.
+    // A sensor fault on a suppressed tick is logged by `sample_lux` but must not
+    // mask the more informative manual-write/write-fault action.
+    let mut telemetry_action = TickAction::Idle;
+    let lux = sample_lux(sensor, loop_state, &mut telemetry_action);
 
     if !suppressed {
         if let Some(last) = loop_state.last_manual
@@ -516,7 +584,9 @@ where
             action = TickAction::IdleReset;
         }
 
-        if let Some(lux) = sample_lux(sensor, loop_state, &mut action) {
+        if telemetry_action == TickAction::SensorFault {
+            action = telemetry_action;
+        } else if let Some(lux) = lux {
             if loop_state.auto_enabled {
                 let duty = ab.update(lux, input.dt);
                 let raw = raw_from_duty(duty, max);
@@ -524,12 +594,18 @@ where
                     match backlight.write(raw) {
                         Ok(()) => {
                             loop_state.last_written = raw;
-                            loop_state.backlight_fault_logged = false;
+                            loop_state.backlight_write_fault_logged.clear();
                             action = TickAction::AutoWrite { raw };
                             debug!(raw, lux, dt = input.dt, "auto brightness write");
                         }
                         Err(e) => {
-                            report_backlight_fault(loop_state, "auto write", Some(raw), &e);
+                            report_backlight_fault(
+                                loop_state,
+                                BacklightFaultOp::Write,
+                                "auto write",
+                                Some(raw),
+                                &e,
+                            );
                             action = TickAction::WriteFault { raw };
                         }
                     }

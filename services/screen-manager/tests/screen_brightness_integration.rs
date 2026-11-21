@@ -24,24 +24,30 @@ fn state(auto: bool, percent: f32) -> BrightnessState {
 
 #[derive(Debug)]
 struct FakeSensor {
-    reading: Result<f32, &'static str>,
+    reading: Cell<Result<f32, &'static str>>,
 }
 
 impl FakeSensor {
     const fn new(lux: f32) -> Self {
-        Self { reading: Ok(lux) }
+        Self {
+            reading: Cell::new(Ok(lux)),
+        }
     }
 
     const fn fault() -> Self {
         Self {
-            reading: Err("simulated I2C fault"),
+            reading: Cell::new(Err("simulated I2C fault")),
         }
+    }
+
+    fn set_lux(&self, lux: f32) {
+        self.reading.set(Ok(lux));
     }
 }
 
 impl LuxSource for FakeSensor {
     fn read_lux(&self) -> Result<f32, BrightnessError> {
-        self.reading.map_err(BrightnessError::failed)
+        self.reading.get().map_err(BrightnessError::failed)
     }
 }
 
@@ -410,7 +416,10 @@ fn write_fault_retries_on_a_later_tick() {
 
     let failed = tick(&sensor, &backlight, &mut ab, &cfg, &mut loop_state, &[]);
     assert!(matches!(failed, TickAction::WriteFault { .. }));
-    assert!(loop_state.backlight_fault_logged);
+    // A healthy read in the same tick must not clear the *write* fault episode:
+    // otherwise a write-only fault re-warns at 20 Hz.
+    assert!(loop_state.backlight_write_fault_logged.is_logged());
+    assert!(!loop_state.backlight_read_fault_logged.is_logged());
     assert_eq!(
         loop_state.last_written, 0,
         "failed write must not advance last_written"
@@ -419,8 +428,47 @@ fn write_fault_retries_on_a_later_tick() {
     backlight.write_error.set(false);
     let recovered = tick(&sensor, &backlight, &mut ab, &cfg, &mut loop_state, &[]);
     assert!(matches!(recovered, TickAction::AutoWrite { raw } if raw > 0));
-    assert!(!loop_state.backlight_fault_logged);
+    assert!(!loop_state.backlight_write_fault_logged.is_logged());
     assert_eq!(loop_state.last_written, backlight.writes.borrow()[0]);
+}
+
+#[test]
+fn sustained_write_fault_keeps_lux_telemetry_fresh() {
+    let cfg = default_policy();
+    let sensor = FakeSensor::new(100.0);
+    let backlight = FakeBacklight::new(100);
+    backlight.write_error.set(true);
+    let mut ab = AutoBrightness::new(100.0, cfg);
+
+    // Auto mode: a failed auto write suppresses the auto path but telemetry
+    // must still be sampled and published every tick.
+    let mut loop_state = LoopState::new(100);
+    let first = tick(&sensor, &backlight, &mut ab, &cfg, &mut loop_state, &[]);
+    assert!(matches!(first, TickAction::WriteFault { .. }));
+    assert_eq!(loop_state.last_lux, Some(100.0));
+
+    sensor.set_lux(275.0);
+    let second = tick(&sensor, &backlight, &mut ab, &cfg, &mut loop_state, &[]);
+    assert!(matches!(second, TickAction::WriteFault { .. }));
+    assert_eq!(loop_state.last_lux, Some(275.0));
+    assert!(loop_state.backlight_write_fault_logged.is_logged());
+    assert!(!loop_state.backlight_read_fault_logged.is_logged());
+
+    // Manual mode behaves the same on a failed SetPercent write/retry.
+    let mut manual_state = LoopState::with_auto(100, false);
+    let manual = tick(
+        &sensor,
+        &backlight,
+        &mut ab,
+        &cfg,
+        &mut manual_state,
+        &[BrightnessCommand::SetPercent(42.0)],
+    );
+    assert!(matches!(manual, TickAction::WriteFault { .. }));
+    assert_eq!(manual_state.last_lux, Some(275.0));
+    let retry = tick(&sensor, &backlight, &mut ab, &cfg, &mut manual_state, &[]);
+    assert!(matches!(retry, TickAction::WriteFault { .. }));
+    assert_eq!(manual_state.last_lux, Some(275.0));
 }
 
 #[test]
@@ -760,10 +808,14 @@ fn shell_brightness_overlay_callbacks_drive_the_engine() {
     }
     assert!(shell.window().get_auto_brightness_enabled());
 
-    // A stale in-flight snapshot must not yank the thumb back while the settle
-    // window is fresh; after the window expires the authoritative value wins.
+    // A stale in-flight snapshot must not yank the thumb back or flip the AUTO
+    // chip while the settle window is fresh; after expiry authoritative wins.
     shell.window().invoke_brightness_changed(63.0);
     assert_eq!(shell.window().get_brightness_value(), 63.0);
+    assert!(!shell.window().get_auto_brightness_enabled());
+    shell.apply_brightness(&state(true, 100.0));
+    assert_eq!(shell.window().get_brightness_value(), 63.0);
+    assert!(!shell.window().get_auto_brightness_enabled());
     shell.apply_brightness(&state(false, 100.0));
     assert_eq!(shell.window().get_brightness_value(), 63.0);
     std::thread::sleep(std::time::Duration::from_millis(1_600));
