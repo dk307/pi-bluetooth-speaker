@@ -53,6 +53,10 @@ export component MainWindow inherits Window {
     in-out property <string> position_text: "0:00";
     in-out property <string> duration_text: "0:00";
     in-out property <int> duration_ms: 0;
+    // `false` when BlueZ reports the timeline as unknown (`u32::MAX` / absent):
+    // the Now Playing view then hides or degrades the seek bar.
+    in-out property <bool> duration_known: true;
+    in-out property <bool> position_known: true;
     in-out property <float> progress_ratio: 0.0;
     in-out property <float> volume_value: 75.0;
     in-out property <bool> is_playing: false;
@@ -367,6 +371,8 @@ export component MainWindow inherits Window {
                 position_text: root.position_text;
                 duration_text: root.duration_text;
                 duration_ms: root.duration_ms;
+                duration_known: root.duration_known;
+                position_known: root.position_known;
                 progress_ratio: root.progress_ratio;
                 volume_value <=> root.volume_value;
                 is_playing: root.is_playing;

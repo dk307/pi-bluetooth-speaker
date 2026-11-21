@@ -1242,6 +1242,16 @@ fn playback_state_and_duration_formatting() {
     assert_eq!(state.progress_ratio(), 1.0);
     state.duration_ms = 0;
     assert_eq!(state.progress_ratio(), 0.0);
+
+    // `u32::MAX` is BlueZ's "unknown timeline" sentinel: it must never be
+    // formatted as a timestamp (that produced the bogus `1193:...` readout).
+    state.duration_ms = u32::MAX;
+    assert!(!state.duration_known());
+    assert_eq!(state.progress_ratio(), 0.0);
+    state.position_ms = u32::MAX;
+    assert!(!state.position_known());
+    state.duration_ms = 415_000;
+    assert!(state.duration_known());
 }
 
 #[test]
