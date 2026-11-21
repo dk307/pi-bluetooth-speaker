@@ -112,6 +112,19 @@ fn dump_single_frame_for_layout_analysis() {
             duration_ms: u32::MAX,
             ..speaker_bluetooth::BtPlaybackState::default()
         }),
+        // Duration known, position unknown: indeterminate shimmer track that
+        // still shows the total length.
+        Some("duration_only") => {
+            shell.apply_bluetooth_playback(&speaker_bluetooth::BtPlaybackState {
+                status: "playing".into(),
+                title: "Test Track Title".into(),
+                artist: "Some Artist Name".into(),
+                album: "Audiophile DSP Sink".into(),
+                position_ms: u32::MAX,
+                duration_ms: 860_000,
+                ..speaker_bluetooth::BtPlaybackState::default()
+            })
+        }
         // Multi-hour track: `H:MM:SS` readouts are the widest strings the seek
         // row can produce and used to be clipped by the fixed 64 px slots.
         Some("long") => shell.set_playback_state(true, 3_723_000, 7_384_000),

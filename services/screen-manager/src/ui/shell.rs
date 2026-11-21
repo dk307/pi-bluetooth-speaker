@@ -199,9 +199,10 @@ struct SettingsModels {
 /// | yes | yes | determinate bar with fill and both readouts |
 /// | no | yes | thin thumb-less track with a shimmer sweep, position only |
 /// | no | no | row hidden, both readouts blank |
+/// | yes | no | thin shimmer track with the duration readout, no fill |
 ///
-/// A known duration with an unreported position is treated as indeterminate:
-/// there is no meaningful fill without a position.
+/// A fill needs a position and the geometry needs a total, so anything short of
+/// both is indeterminate rather than a permanently empty determinate bar.
 #[derive(Debug)]
 struct SeekRow {
     duration_known: bool,

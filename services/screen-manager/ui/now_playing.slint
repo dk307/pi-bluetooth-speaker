@@ -205,11 +205,15 @@ export component NowPlayingView inherits Rectangle {
     // not describe the timeline", which must not be formatted as a timestamp.
     in property <bool> duration_known: true;
     in property <bool> position_known: true;
-    // Position known but total unknown: the bar cannot show progress, so it
-    // degrades to a thin, thumb-less track with a slow shimmer sweep.
-    property <bool> seek_indeterminate: !root.duration_known && root.position_known;
-    // Neither position nor total known: there is nothing meaningful to draw.
+    // Determinate only when both sides of the timeline are known: a fill needs a
+    // position and a geometry needs a total.
+    property <bool> seek_determinate: root.duration_known && root.position_known;
+    // Neither known: there is nothing meaningful to draw.
     property <bool> seek_hidden: !root.duration_known && !root.position_known;
+    // Exactly one side known (e.g. a total length with no playhead yet): the bar
+    // has no meaningful fill, so it degrades to a thin, thumb-less track with a
+    // slow shimmer sweep instead of a permanently empty determinate bar.
+    property <bool> seek_indeterminate: !root.seek_determinate && !root.seek_hidden;
     in property <float> progress_ratio: 0.0;
     in property <bool> is_playing: false;
     in property <bool> has_cover_art: false;
@@ -228,12 +232,18 @@ export component NowPlayingView inherits Rectangle {
     // Indeterminate-seek shimmer clock. One full sweep takes
     // `shimmer_sweep_ms` (2.5 s) sampled every `shimmer_step_ms` (50 ms), i.e.
     // `shimmer_steps` discrete positions. Ticks only advance while playing, so
-    // pausing freezes the sweep in place instead of leaving it oscillating.
+    // pausing freezes the sweep in place instead of leaving it oscillating, and
+    // the phase resets whenever the row stops being indeterminate so each
+    // episode restarts from the documented "half-on at the left edge" frame.
     property <int> shimmer_sweep_ms: 2500;
     property <int> shimmer_step_ms: 50;
     property <int> shimmer_steps: root.shimmer_sweep_ms / root.shimmer_step_ms;
     property <int> shimmer_tick: 0;
     property <float> shimmer_progress: root.shimmer_tick * 1.0 / root.shimmer_steps;
+
+    changed seek_indeterminate => {
+        root.shimmer_tick = 0;
+    }
 
     Timer {
         interval: root.shimmer_step_ms * 1ms;
@@ -534,7 +544,7 @@ export component NowPlayingView inherits Rectangle {
                             clip: true;
 
                             // Filled played position bar (determinate timeline only)
-                            if root.duration_known : Rectangle {
+                            if root.seek_determinate : Rectangle {
                                 x: 0px;
                                 y: 0px;
                                 width: parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio));

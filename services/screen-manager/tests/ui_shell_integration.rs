@@ -457,7 +457,20 @@ fn ui_shell_unknown_timeline_degrades_seek_row() {
     assert_eq!(shell.window().get_position_text(), "");
     assert_eq!(shell.window().get_duration_text(), "");
 
-    // All three seek-row presentations must render without error.
+    // A total length with no playhead: still indeterminate (no meaningful fill),
+    // but the duration readout is known.
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        duration_ms: 860_000,
+        position_ms: u32::MAX,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert!(shell.window().get_duration_known());
+    assert!(!shell.window().get_position_known());
+    assert_eq!(shell.window().get_position_text(), "");
+    assert_eq!(shell.window().get_duration_text(), "14:20");
+
+    // All four seek-row presentations must render without error.
     shell.window().show().expect("Failed to show MainWindow");
     shell.apply_bluetooth_playback(&known);
     assert!(
@@ -473,6 +486,16 @@ fn ui_shell_unknown_timeline_degrades_seek_row() {
     assert!(
         fb.render_frame(&window)
             .expect("render indeterminate shimmer track")
+    );
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        duration_ms: 860_000,
+        position_ms: u32::MAX,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert!(
+        fb.render_frame(&window)
+            .expect("render shimmer track with duration only")
     );
     shell.apply_bluetooth_playback(&BtPlaybackState {
         duration_ms: u32::MAX,
