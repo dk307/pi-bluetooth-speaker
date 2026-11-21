@@ -177,6 +177,13 @@ pattern: `scripts/build_bluealsa_pi.sh` in the repo's `scripts/` folder**, no
 ad-hoc shell on the Pi. The script is a host-side driver that SSHes to the Pi
 and executes each phase there.
 
+**No more two build paths:** `baseline/install.sh` §7 is now **bootstrap-only**
+(it just installs the distro `bluez-alsa-utils` so a fresh image has working
+audio, exactly as it already does for BlueZ). The authoritative A53-tuned v5
+build lives solely in `scripts/build_bluealsa_pi.sh`, run after the baseline
+install to replace the bootstrap with the private stack. This removes the
+duplication where `install.sh` previously compiled v4.3.1 inline.
+
 ### 5.1 `scripts/build_bluealsa_pi.sh`
 
 ```sh
@@ -508,11 +515,15 @@ codec `.so` copies in `/usr/local/lib/variants/stock/` for A/B.
 6. **A/B:** keep copies of the distro `.so` files in
    `/usr/local/lib/variants/stock/`. Swapping the real file (or its symlink)
    and restarting `bluealsa` switches codec implementation without relinking.
-7. Update `baseline/install.sh` §10.6 recipe,
-   `baseline/etc/systemd/system/*.service`,
-   `docs/rpi_audio_bluetooth_report.md` §10.6/§10.7 and the other `docs/*.md`
-   path references (`volume_sync_plan.md`, `single_active_bt_source.md`,
-   `ui_architecture_plan_rust.md`) so a clean install reproduces this layout.
+7. Doc/recipe alignment for a clean install:
+   - ✅ `baseline/install.sh` §7 — now bootstrap-only (distro package), private
+     v5 built by `scripts/build_bluealsa_pi.sh` (done in this PR).
+   - ✅ `docs/rpi_audio_bluetooth_report.md` §10.6 — points at the script as
+     authoritative and flags the old `-O2`/`--prefix=/usr`/`--disable-opus`
+     divergences as wrong (done in this PR).
+   - ☐ Remaining `docs/*.md` `/usr/bin/bluealsa*` path references still to
+     update: `volume_sync_plan.md`, `single_active_bt_source.md`,
+     `ui_architecture_plan_rust.md`, and report §10.7 unit listings.
 
 **Rollback:** `apt-get install bluez-alsa-utils=4.3.1-3`, restore the two units
 and `20-bluealsa.conf` from the timestamped backup directory created by the

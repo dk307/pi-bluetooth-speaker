@@ -734,6 +734,16 @@ systemctl restart bluetooth
 ```
 
 ### 10.6. Building Fraunhofer LC3plus & BlueALSA v5.0.0 from Source (with NEON & Cortex-A53 Tuning)
+
+> **Authoritative build (current):** the BlueALSA v5.0.0 stack is now built by
+> the script-driven host driver `scripts/build_bluealsa_pi.sh` (pinned commits /
+> SHA-256 in `scripts/codecs/versions.lock`, A53 `TUNE` flags, private
+> `/usr/local` install, apt `bluez-alsa-utils` removed). See
+> `docs/private_bluealsa_plan.md`. The manual recipe below is kept for
+> historical reference; where it disagrees (it uses `-O2`, `--prefix=/usr`,
+> `--disable-opus`), **the script is correct** — Opus must be `--enable-opus`
+> so the service's `-c-opus` flag is accepted at runtime.
+
 Custom build targeting the Raspberry Pi 3's ARM Cortex-A53 CPU with hardware ARM NEON SIMD auto-vectorization (`-O2 -mcpu=cortex-a53+crc+simd -ftree-vectorize`) to ensure maximum DSP throughput with rock-solid stability and zero L1 instruction cache bloat:
 
 ```bash

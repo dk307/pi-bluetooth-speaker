@@ -121,45 +121,19 @@ if [ ! -f /usr/lib/aarch64-linux-gnu/libldacBT_enc.so ] && [ ! -f /usr/lib/libld
 fi
 
 # ------------------------------------------------------------------------------
-# 7. Build BlueALSA v4.3.1 from Source with Full Codec Support
+# 7. BlueALSA — bootstrap only (private v5 stack is built separately)
 # ------------------------------------------------------------------------------
-echo "==> [7/10] Building and installing BlueALSA v4.3.1 from source..."
-cd /usr/src
-if [ ! -d bluez-alsa ]; then
-    git clone https://github.com/arkq/bluez-alsa.git
-fi
-cd bluez-alsa
-git checkout v4.3.1
-autoreconf --install --force
+# BlueZ precedent: this script only bootstraps the distro bluez-alsa-utils
+# (already installed in step 1) so audio works on a fresh image. The
+# authoritative, A53-tuned BlueALSA v5.0.0 stack (private binaries + codec
+# libraries under /usr/local, apt package removed) is built by the host-side
+# driver `scripts/build_bluealsa_pi.sh` against the pinned commits in
+# `scripts/codecs/versions.lock`. Run that after this baseline install to
+# replace the bootstrap with the private stack. Keeping the build in one
+# place avoids two divergent recipes (this file previously built v4.3.1).
+echo "==> [7/10] BlueALSA bootstrap (distro package); private v5 via scripts/build_bluealsa_pi.sh"
 
-mkdir -p build && cd build
-make clean || true
-
-../configure \
-    --prefix=/usr \
-    --sysconfdir=/etc \
-    --localstatedir=/var \
-    --with-alsaconfdir=/etc/alsa/conf.d \
-    --enable-systemd \
-    --enable-aplay \
-    --enable-faststream \
-    --enable-opus \
-    --enable-mp3lame \
-    --enable-mpg123 \
-    --enable-aptx \
-    --enable-aptx-hd \
-    --with-libfreeaptx \
-    --enable-aac \
-    --enable-ldac \
-    --enable-lc3-swb \
-    --enable-msbc \
-    --enable-midi
-
-make -j"$(nproc)"
-make install
-ldconfig
-
-# BlueALSA runtime state paths & compatibility symlinks
+# BlueALSA runtime state path (survives the later private install)
 mkdir -p /var/lib/bluealsa
 mkdir -p /usr/var/lib
 ln -sfn /var/lib/bluealsa /usr/var/lib/bluealsa
