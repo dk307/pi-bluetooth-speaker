@@ -18,7 +18,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 #[cfg(feature = "ui")]
-use crate::config::CoreConfig;
+use crate::config::{CoreConfig, ManualBrightnessPercent};
 #[cfg(feature = "ui")]
 use crate::ui::{
     AppShell, BootCheckLine, BootCheckStatus, BootCheckUpdate, BootProbe, BtDeviceRow,
@@ -355,7 +355,7 @@ pub struct ShellInit {
     /// Initial auto-mode preference from the appliance configuration.
     pub brightness_auto_enabled: bool,
     /// Initial manual percent used when auto mode is disabled at boot.
-    pub brightness_manual_percent: u8,
+    pub brightness_manual_percent: ManualBrightnessPercent,
     /// Queue bridging render-thread Devices-screen actions to the `bt-monitor` worker.
     pub device_commands: speaker_bluetooth::DeviceCommandQueue,
 }
@@ -2032,7 +2032,7 @@ pub fn spawn_brightness_worker(
     brightness_commands: &crate::screen_brightness::BrightnessCommandQueue,
     mocked: bool,
     auto_enabled: bool,
-    manual_percent: u8,
+    manual_percent: ManualBrightnessPercent,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let shared = Arc::clone(shared);
     let running = Arc::clone(running);
@@ -2071,17 +2071,27 @@ pub fn spawn_brightness_worker(
                 };
                 (sensor, backlight, sensor_available)
             };
-            let mut engine = match if sensor_available {
-                crate::screen_brightness::BrightnessEngine::try_new(sensor, backlight, policy, auto_enabled)
+            // A transient first lux conversion must not kill the worker: seed
+            // the policy nominally and let the normal tick path report the
+            // sensor fault while manual brightness stays available.
+            let initial_lux = if sensor_available {
+                match crate::screen_brightness::LuxSource::read_lux(&sensor) {
+                    Ok(lux) => lux,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Initial ambient read failed; using nominal seed");
+                        50.0
+                    }
+                }
             } else {
-                crate::screen_brightness::BrightnessEngine::new_seeded(
-                    sensor,
-                    backlight,
-                    policy,
-                    auto_enabled,
-                    50.0,
-                )
-            } {
+                50.0
+            };
+            let mut engine = match crate::screen_brightness::BrightnessEngine::new_seeded(
+                sensor,
+                backlight,
+                policy,
+                auto_enabled,
+                initial_lux,
+            ) {
                 Ok(engine) => engine,
                 Err(e) => {
                     tracing::error!(error = %e, "Brightness hardware bootstrap failed; brightness disabled");
@@ -2090,7 +2100,7 @@ pub fn spawn_brightness_worker(
             };
             if !auto_enabled {
                 let command = crate::screen_brightness::BrightnessCommand::SetPercent(f32::from(
-                    manual_percent,
+                    manual_percent.value(),
                 ));
                 let _ = engine.tick(
                     std::time::Instant::now(),

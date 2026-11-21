@@ -1233,8 +1233,8 @@ fn ui_shell_generic_settings_callbacks_clamp_and_sync_models() {
 #[test]
 fn ui_shell_screen_settings_save_round_trip_and_clamping() {
     use screen_manager::config::{
-        CodecHudTimeoutMs, CoreConfig, FontScale, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
-        VolumeStepPercent,
+        CodecHudTimeoutMs, CoreConfig, FontScale, ManualBrightnessPercent, MarqueeFps,
+        VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
     };
     use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
     use speaker_common::diag::ScopedTempDir;
@@ -1283,7 +1283,7 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
         codec_hud_timeout_ms: CodecHudTimeoutMs::new(45_000),
         font_scale: FontScale::from_percent(125),
         auto_brightness_enabled: false,
-        brightness_manual_percent: 60,
+        brightness_manual_percent: ManualBrightnessPercent::new(60),
     };
     shell.apply_config(&cfg);
 

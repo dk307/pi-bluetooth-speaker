@@ -2,8 +2,8 @@
 #![cfg(feature = "ui")]
 
 use screen_manager::config::{
-    ConfigError, CoreConfig, DEFAULT_MARQUEE_FPS, FontScale, MarqueeFps, TitleDisplayMode,
-    VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+    ConfigError, CoreConfig, DEFAULT_MARQUEE_FPS, FontScale, ManualBrightnessPercent, MarqueeFps,
+    TitleDisplayMode, VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
 };
 use screen_manager::ui::ThemePreset;
 use speaker_common::diag::ScopedTempDir;
@@ -174,6 +174,31 @@ fn marquee_fps_tryfrom_enforces_allowed_values() {
             format!("invalid marquee fps '{bad}': expected 30 or 60")
         );
     }
+}
+
+#[test]
+fn manual_brightness_percent_serde_rejects_out_of_range() {
+    let err = serde_json::from_str::<ManualBrightnessPercent>("101")
+        .expect_err("percent above 100 must be rejected");
+    assert!(
+        err.to_string()
+            .contains("invalid brightness_manual_percent '101'"),
+        "{err}"
+    );
+    let percent: ManualBrightnessPercent = serde_json::from_str("42").expect("allowed percent");
+    assert_eq!(percent.value(), 42);
+    assert_eq!(
+        serde_json::to_string(&ManualBrightnessPercent::DEFAULT).expect("serialize"),
+        "100"
+    );
+
+    // A hand-edited config with an out-of-range value cannot be loaded at all.
+    let err = serde_json::from_str::<CoreConfig>(r#"{"brightness_manual_percent": 200}"#)
+        .expect_err("CoreConfig must reject the invalid field");
+    assert!(
+        err.to_string().contains("brightness_manual_percent"),
+        "{err}"
+    );
 }
 
 #[test]

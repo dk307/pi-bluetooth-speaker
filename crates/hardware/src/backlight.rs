@@ -11,7 +11,7 @@ use std::fmt::{self, Formatter};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use speaker_common::runtime::{FromJoinError, run_blocking};
 
@@ -177,6 +177,14 @@ impl Default for MockState {
     }
 }
 
+/// Recovers a poisoned mock-state mutex instead of panicking in production code.
+fn lock_mock_state(state: &Arc<Mutex<MockState>>) -> MutexGuard<'_, MockState> {
+    state.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("backlight mock state lock poisoned; recovering inner state");
+        poisoned.into_inner()
+    })
+}
+
 /// Backend selection for a [`Backlight`] handle.
 #[derive(Debug)]
 enum Backend {
@@ -325,14 +333,11 @@ impl Backlight {
 
     /// Returns the maximum writable raw brightness value.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     #[must_use]
     pub fn max_brightness(&self) -> u32 {
         match self.inner.as_ref() {
             Backend::Sysfs { max_brightness, .. } => *max_brightness,
-            Backend::Mock(state) => state.lock().expect("mock state lock poisoned").max,
+            Backend::Mock(state) => lock_mock_state(state).max,
         }
     }
 
@@ -343,9 +348,6 @@ impl Backlight {
     /// Returns [`BacklightError`] if the sysfs node cannot be read or parsed,
     /// or if the mock controller has injected a read fault.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     pub fn read(&self) -> Result<u32, BacklightError> {
         match self.inner.as_ref() {
             Backend::Sysfs {
@@ -355,7 +357,7 @@ impl Backlight {
                 parse_u32(&raw, brightness_path, "brightness")
             }
             Backend::Mock(state) => {
-                let mut guard = state.lock().expect("mock state lock poisoned");
+                let mut guard = lock_mock_state(state);
                 guard.read_count += 1;
                 if let Some(message) = &guard.read_error {
                     return Err(BacklightError::mock_fault(message.clone()));
@@ -372,9 +374,6 @@ impl Backlight {
     /// Returns [`BacklightError`] if the sysfs node cannot be written or if
     /// the mock controller has injected a write fault.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     pub fn write(&self, raw: u32) -> Result<(), BacklightError> {
         let clamped = raw.min(self.max_brightness());
         match self.inner.as_ref() {
@@ -385,7 +384,7 @@ impl Backlight {
                 Ok(())
             }
             Backend::Mock(state) => {
-                let mut guard = state.lock().expect("mock state lock poisoned");
+                let mut guard = lock_mock_state(state);
                 guard.write_count += 1;
                 if let Some(message) = &guard.write_error {
                     return Err(BacklightError::mock_fault(message.clone()));
@@ -447,45 +446,30 @@ pub struct BacklightMockCtrl {
 impl BacklightMockCtrl {
     /// Overwrites the raw brightness reported by subsequent mock reads.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     pub fn set_raw(&self, raw: u32) {
         self.lock().raw = raw;
     }
 
     /// Overwrites the maximum brightness used to clamp mock writes.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     pub fn set_max_brightness(&self, max: u32) {
         self.lock().max = max;
     }
 
     /// Sets or clears the fault text returned by subsequent mock reads.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     pub fn set_read_error(&self, message: Option<Box<str>>) {
         self.lock().read_error = message;
     }
 
     /// Sets or clears the fault text returned by subsequent mock writes.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     pub fn set_write_error(&self, message: Option<Box<str>>) {
         self.lock().write_error = message;
     }
 
     /// Returns the number of mock read calls made so far.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     #[must_use]
     pub fn read_count(&self) -> u64 {
         self.lock().read_count
@@ -493,9 +477,6 @@ impl BacklightMockCtrl {
 
     /// Returns the number of mock write calls made so far.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     #[must_use]
     pub fn write_count(&self) -> u64 {
         self.lock().write_count
@@ -503,16 +484,13 @@ impl BacklightMockCtrl {
 
     /// Returns the last raw brightness successfully written to the mock.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mock mutex has been poisoned by a prior test panic.
     #[must_use]
     pub fn last_written(&self) -> u32 {
         self.lock().last_written
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, MockState> {
-        self.state.lock().expect("mock state lock poisoned")
+    fn lock(&self) -> MutexGuard<'_, MockState> {
+        lock_mock_state(&self.state)
     }
 }
 

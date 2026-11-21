@@ -138,6 +138,7 @@ export component BrightnessHudOverlay inherits Rectangle {
                             root.brightness_value = pct;
                             root.brightness_changed(pct);
                         }
+                        interaction_activity => { root.interaction_activity(); }
                     }
                 }
             }

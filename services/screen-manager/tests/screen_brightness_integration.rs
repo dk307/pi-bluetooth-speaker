@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use screen_manager::config::ManualBrightnessPercent;
 use screen_manager::daemon::BtSharedUpdate;
 use screen_manager::screen_brightness::{
     AutoBrightness, BacklightIo, BrightnessCommand, BrightnessCommandQueue, BrightnessConfig,
@@ -515,6 +516,30 @@ fn unavailable_sensor_keeps_manual_brightness_usable() {
 }
 
 #[test]
+fn transient_first_lux_read_falls_back_to_manual_control() {
+    let cfg = default_policy();
+    assert!(
+        BrightnessEngine::try_new(FakeSensor::fault(), FakeBacklight::new(10), cfg, true).is_err(),
+        "try_new still reports a genuine bootstrap sensor fault"
+    );
+
+    // The worker seeds nominally in this case so a transient I2C hiccup cannot
+    // kill manual brightness for the whole process lifetime.
+    let mut engine =
+        BrightnessEngine::new_seeded(FakeSensor::fault(), FakeBacklight::new(10), cfg, true, 50.0)
+            .expect("seeded bootstrap succeeds");
+    let manual = engine.tick(
+        Instant::now(),
+        0.0,
+        &[BrightnessCommand::SetPercent(55.0)],
+        IDLE_RESET,
+    );
+    assert!(matches!(manual.action, TickAction::ManualWrite { .. }));
+    assert!(!engine.state().auto_enabled);
+    assert!((engine.state().brightness_percent - 55.0).abs() < 0.5);
+}
+
+#[test]
 fn engine_applies_manual_percent_when_auto_disabled_at_boot() {
     let cfg = default_policy();
     let sensor = FakeSensor::new(100.0);
@@ -573,13 +598,16 @@ fn config_round_trips_brightness_preferences() {
     let path = dir.path().join("config.json");
     let config = CoreConfig {
         auto_brightness_enabled: false,
-        brightness_manual_percent: 37,
+        brightness_manual_percent: ManualBrightnessPercent::new(37),
         ..CoreConfig::default()
     };
     config.save(&path).expect("save config");
     let loaded = CoreConfig::load(&path).expect("load config");
     assert!(!loaded.auto_brightness_enabled);
-    assert_eq!(loaded.brightness_manual_percent, 37);
+    assert_eq!(
+        loaded.brightness_manual_percent,
+        ManualBrightnessPercent::new(37)
+    );
 }
 
 #[test]
@@ -848,9 +876,15 @@ fn spawned_mocked_brightness_worker_publishes_and_joins() {
     let running = Arc::new(AtomicBool::new(true));
     let queue = BrightnessCommandQueue::new();
 
-    let handle =
-        screen_manager::daemon::spawn_brightness_worker(&shared, &running, &queue, true, true, 100)
-            .expect("spawn mocked brightness worker");
+    let handle = screen_manager::daemon::spawn_brightness_worker(
+        &shared,
+        &running,
+        &queue,
+        true,
+        true,
+        ManualBrightnessPercent::DEFAULT,
+    )
+    .expect("spawn mocked brightness worker");
     let deadline = Instant::now() + Duration::from_secs(3);
     while shared
         .lock()
@@ -876,7 +910,12 @@ fn live_brightness_worker_exits_when_stopped_before_hardware_setup() {
     // The worker checks the stop flag before opening I²C or sysfs, so this
     // stays hermetic on developer hosts.
     let handle = screen_manager::daemon::spawn_brightness_worker(
-        &shared, &running, &queue, false, true, 100,
+        &shared,
+        &running,
+        &queue,
+        false,
+        true,
+        ManualBrightnessPercent::DEFAULT,
     )
     .expect("spawn brightness worker");
     handle.join().expect("brightness worker panicked");

@@ -10,7 +10,8 @@ use std::cell::{Cell, RefCell};
 use std::fmt::{self, Debug, Formatter};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Instant;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
@@ -21,8 +22,8 @@ use crate::config::{
     CodecHudTimeoutMs, CoreConfig, DEFAULT_FONT_SCALE, DEFAULT_VOLUME_STEP_PERCENT, FontScale,
     MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
     MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE, MIN_VOLUME_HUD_TIMEOUT_MS,
-    MIN_VOLUME_STEP_PERCENT, MarqueeFps, TitleDisplayMode, VolumeHudFadeMs, VolumeHudTimeoutMs,
-    VolumeStepPercent,
+    MIN_VOLUME_STEP_PERCENT, ManualBrightnessPercent, MarqueeFps, TitleDisplayMode,
+    VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
 };
 use crate::screen_brightness::{
     BRIGHTNESS_SETTLE_WINDOW, BrightnessCommand, BrightnessCommandQueue, BrightnessState,
@@ -324,7 +325,7 @@ impl AppShell {
             "codec_hud_timeout_ms",
         ));
         window.set_auto_brightness_enabled(config.auto_brightness_enabled);
-        window.set_brightness_value(f32::from(config.brightness_manual_percent.min(100)));
+        window.set_brightness_value(f32::from(config.brightness_manual_percent.value()));
     }
 
     fn build_setting_rows(config: &CoreConfig, tier: SettingTier) -> Vec<SettingRowItem> {
@@ -610,18 +611,35 @@ impl AppShell {
         let spawned = std::thread::Builder::new()
             .name("screen-settings-persist".into())
             .spawn(move || {
-                for config in rx {
-                    // M-PANIC-ON-BUG: a worker crash is a bug, not a
-                    // recoverable I/O hiccup — re-raise instead of silently
-                    // killing the worker and dropping queued snapshots.
-                    // A failed save is logged by persist_config and dropped:
-                    // the worker must survive to persist the next edit.
+                // M-PANIC-ON-BUG: a worker crash is a bug, not a recoverable
+                // I/O hiccup — re-raise instead of silently killing the worker.
+                // A failed save is logged by persist_config and dropped: the
+                // worker must survive to persist the next edit.
+                let save = |config: &CoreConfig| {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let _ = Self::persist_config(&config, &worker_path);
+                        let _ = Self::persist_config(config, &worker_path);
                     }));
                     if let Err(p) = result {
                         std::panic::resume_unwind(p);
                     }
+                };
+
+                // Slider drags enqueue a snapshot per pointer-move. Coalesce
+                // them inside the worker so only the final value hits the SD
+                // card; the 120 ms quiet period is imperceptible to users.
+                while let Ok(config) = rx.recv() {
+                    let mut latest = config;
+                    loop {
+                        match rx.recv_timeout(Duration::from_millis(120)) {
+                            Ok(config) => latest = config,
+                            Err(RecvTimeoutError::Timeout) => break,
+                            Err(RecvTimeoutError::Disconnected) => {
+                                save(&latest);
+                                return;
+                            }
+                        }
+                    }
+                    save(&latest);
                 }
             });
         match spawned {
@@ -680,19 +698,19 @@ impl AppShell {
     }
 
     /// Reads the overlay brightness percent, sanitizing NaN and clamping to `0..=100`.
-    fn brightness_percent_from_window(window: &MainWindow) -> u8 {
+    fn brightness_percent_from_window(window: &MainWindow) -> ManualBrightnessPercent {
         let value = window.get_brightness_value();
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "clamped 0.0..=100.0 fits in u8"
         )]
-        let clamped = if value.is_finite() {
+        let clamped: u8 = if value.is_finite() {
             value.round().clamp(0.0, 100.0) as u8
         } else {
             100
         };
-        clamped
+        ManualBrightnessPercent::new(clamped)
     }
 
     /// Saves a config snapshot to `path` and logs the outcome with structured fields.
@@ -713,7 +731,7 @@ impl AppShell {
                 volume_hud_fade_ms = config.volume_hud_fade_ms.value(),
                 codec_hud_timeout_ms = config.codec_hud_timeout_ms.value(),
                 auto_brightness = config.auto_brightness_enabled,
-                brightness_percent = config.brightness_manual_percent,
+                brightness_percent = config.brightness_manual_percent.value(),
                 "Screen settings saved"
             ),
             Err(e) => tracing::error!(
