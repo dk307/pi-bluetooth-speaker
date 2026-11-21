@@ -156,6 +156,10 @@ component TransportButton inherits Rectangle {
     property <length> glyph_size: (root.is_hero ? 26px : 32px) * TouchScale.widget_scale;
     width: root.button_size;
     height: root.button_size;
+    // Static-button caching (perf: commit 7a92c44 "cache static buttons"). The
+    // M3 children animate only their own state-layer/ripple properties; this
+    // layer is reused for the whole button while it is idle.
+    cache-rendering-hint: true;
 
     if root.is_hero : FilledIconButton {
         width: 100%;
@@ -635,6 +639,7 @@ export component NowPlayingView inherits Rectangle {
         icon_color: MaterialPalette.primary;
         background_color: MaterialPalette.surface;
         border_color: MaterialPalette.outline_variant;
+        cache-rendering-hint: true;
         clicked => { root.settings_clicked(); }
     }
 }
