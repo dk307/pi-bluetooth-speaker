@@ -201,6 +201,15 @@ export component NowPlayingView inherits Rectangle {
     in property <string> position_text: "0:00";
     in property <string> duration_text: "0:00";
     in property <int> duration_ms: 0;
+    // Timeline availability reported by BlueZ. `u32::MAX` means "the peer did
+    // not describe the timeline", which must not be formatted as a timestamp.
+    in property <bool> duration_known: true;
+    in property <bool> position_known: true;
+    // Position known but total unknown: the bar cannot show progress, so it
+    // degrades to a thin, thumb-less track with a slow shimmer sweep.
+    property <bool> seek_indeterminate: !root.duration_known && root.position_known;
+    // Neither position nor total known: there is nothing meaningful to draw.
+    property <bool> seek_hidden: !root.duration_known && !root.position_known;
     in property <float> progress_ratio: 0.0;
     in property <bool> is_playing: false;
     in property <bool> has_cover_art: false;
@@ -215,6 +224,21 @@ export component NowPlayingView inherits Rectangle {
     property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
     property <int> raw_tick: 0;
     out property <bool> is_animating: (!root.title_split_mode && title_marquee.is_overflow) || root.is_playing;
+
+    // Indeterminate-seek shimmer clock: 50 ticks of 50 ms = one 2.5 s sweep.
+    // Ticks only advance while playing, so pausing freezes the sweep in place
+    // instead of leaving the bar oscillating.
+    property <int> shimmer_ticks: 50;
+    property <int> shimmer_tick: 0;
+    property <float> shimmer_progress: root.shimmer_tick * 1.0 / root.shimmer_ticks;
+
+    Timer {
+        interval: 50ms;
+        running: root.seek_indeterminate && root.is_playing;
+        triggered() => {
+            root.shimmer_tick = Math.mod(root.shimmer_tick + 1, root.shimmer_ticks);
+        }
+    }
 
     Timer {
         interval: 16.65ms;
@@ -458,11 +482,19 @@ export component NowPlayingView inherits Rectangle {
             }
 
                 // Playback progress bar - seek center = artist center + D (equal center distances)
+                //
+                // Three presentation states driven by what the peer actually
+                // reported (BlueZ uses `u32::MAX` for "unknown"):
+                //   * position + duration -> determinate seek bar with fill
+                //   * position only       -> thin thumb-less track with a slow
+                //                            shimmer sweep (reads as active, not stuck)
+                //   * neither             -> row hidden (nothing to show)
                 HorizontalLayout {
                     y: right_col.seek_center_y - self.height / 2;
                     width: 100%;
                     height: 24px * TouchScale.widget_scale;
                     spacing: 16px;
+                    visible: !root.seek_hidden;
 
                     Text {
                         text: root.position_text;
@@ -473,6 +505,7 @@ export component NowPlayingView inherits Rectangle {
                         vertical-alignment: center;
                         width: 64px * TouchScale.widget_scale;
                         horizontal-alignment: right;
+                        visible: root.position_known;
                     }
 
                     Rectangle {
@@ -485,18 +518,33 @@ export component NowPlayingView inherits Rectangle {
                             x: 0px;
                             y: (parent.height - self.height) / 2;
                             width: parent.width;
-                            height: 10px;
+                            // A thin track (plus the absent thumb) signals that
+                            // dragging is disabled: there is no seek target.
+                            height: root.seek_indeterminate ? 2px : 10px;
                             background: MaterialPalette.surface_container_highest;
-                            border-radius: 5px;
+                            border-radius: self.height / 2;
                             clip: true;
 
-                            // Filled played position bar
-                            Rectangle {
+                            // Filled played position bar (determinate timeline only)
+                            if root.duration_known : Rectangle {
                                 x: 0px;
                                 y: 0px;
-                                width: root.duration_ms > 0 ? (parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio))) : 0px;
+                                width: parent.width * Math.max(0.0, Math.min(1.0, root.progress_ratio));
                                 height: parent.height;
                                 background: MaterialPalette.primary;
+                                border-radius: parent.height / 2;
+                            }
+
+                            // Soft gradient sweep for the indeterminate track: a
+                            // slow 2.5 s "still active" cue instead of a bar stuck
+                            // at 0%. Ticks stop while paused, freezing the sweep.
+                            if root.seek_indeterminate : Rectangle {
+                                property <length> sweep_width: parent.width * 0.35;
+                                width: self.sweep_width;
+                                height: parent.height;
+                                x: -self.sweep_width + root.shimmer_progress * (parent.width + self.sweep_width);
+                                background: @linear-gradient(90deg, transparent 0%, MaterialPalette.primary 50%, transparent 100%);
+                                opacity: 0.55;
                             }
                         }
                     }
@@ -510,6 +558,7 @@ export component NowPlayingView inherits Rectangle {
                         vertical-alignment: center;
                         width: 64px * TouchScale.widget_scale;
                         horizontal-alignment: left;
+                        visible: root.duration_known;
                     }
                 }
 

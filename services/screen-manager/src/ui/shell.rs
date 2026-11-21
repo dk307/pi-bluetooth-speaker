@@ -1093,17 +1093,37 @@ impl AppShell {
         /// `FemtoVG` redraws.
         const PROGRESS_RATIO_MIN_STEP: f32 = 1.0 / 320.0;
 
+        // `BlueZ` reports an unknown timeline as `u32::MAX` (`1193` hours once
+        // formatted). The domain keeps the raw wire value; the presentation
+        // layer decides how much of the seek row is meaningful:
+        //   * duration + position known -> determinate seek bar
+        //   * position only             -> indeterminate shimmer track
+        //   * neither                   -> seek row hidden entirely
+        let duration_known =
+            duration_ms != speaker_bluetooth::UNKNOWN_TRACK_TIME_MS && duration_ms != 0;
+        let position_known = position_ms != speaker_bluetooth::UNKNOWN_TRACK_TIME_MS;
+        // Only a determinate timeline feeds the ratio/bar geometry; the
+        // indeterminate track ignores it and animates a shimmer instead.
+        let timeline_ms = if duration_known { duration_ms } else { 0 };
+
+        if w.get_duration_known() != duration_known {
+            w.set_duration_known(duration_known);
+        }
+        if w.get_position_known() != position_known {
+            w.set_position_known(position_known);
+        }
+
         #[expect(
             clippy::cast_possible_wrap,
-            reason = "duration_ms up to i32::MAX fits cleanly in slint int"
+            reason = "timeline_ms is 0 or a real duration <= i32::MAX; fits cleanly in slint int"
         )]
-        if w.get_duration_ms() != duration_ms as i32 {
-            w.set_duration_ms(duration_ms as i32);
+        if w.get_duration_ms() != timeline_ms as i32 {
+            w.set_duration_ms(timeline_ms as i32);
         }
         if w.get_is_playing() != is_playing {
             w.set_is_playing(is_playing);
         }
-        let ratio = speaker_bluetooth::playback_progress_ratio(position_ms, duration_ms);
+        let ratio = speaker_bluetooth::playback_progress_ratio(position_ms, timeline_ms);
         let prev_ratio = w.get_progress_ratio();
         let (ratio_bits, prev_bits) = (ratio.to_bits(), prev_ratio.to_bits());
         let at_boundary = (ratio_bits == 0.0_f32.to_bits() && prev_bits != 0.0_f32.to_bits())
@@ -1111,11 +1131,23 @@ impl AppShell {
         if at_boundary || (ratio - prev_ratio).abs() >= PROGRESS_RATIO_MIN_STEP {
             w.set_progress_ratio(ratio);
         }
-        let position_text = speaker_bluetooth::format_duration_ms_ui(position_ms, duration_ms);
+        // Blank the elapsed readout when the peer never reported a position;
+        // a stale `0:00` next to a live shimmer would read as "stuck".
+        let position_text = if position_known {
+            speaker_bluetooth::format_duration_ms_ui(position_ms, timeline_ms)
+        } else {
+            String::new()
+        };
         if w.get_position_text().as_str() != position_text.as_str() {
             w.set_position_text(position_text.into());
         }
-        let duration_text = speaker_bluetooth::format_duration_ms_ui(duration_ms, duration_ms);
+        // No total length -> no duration readout; the shimmer carries the
+        // "playing, timeline unknown" signal instead.
+        let duration_text = if duration_known {
+            speaker_bluetooth::format_duration_ms_ui(duration_ms, duration_ms)
+        } else {
+            String::new()
+        };
         if w.get_duration_text().as_str() != duration_text.as_str() {
             w.set_duration_text(duration_text.into());
         }

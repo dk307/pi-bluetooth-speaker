@@ -56,6 +56,16 @@ fn dump_single_frame_for_layout_analysis() {
     let open_hud = std::env::var("RENDER_DUMP_HUD").ok().as_deref() == Some("1");
     let show_themes = std::env::var("RENDER_DUMP_THEMES").ok().as_deref() == Some("1");
     let at_min = std::env::var("RENDER_DUMP_AT_MIN").ok().as_deref() == Some("1");
+    // Timeline states for the Now Playing seek row:
+    //   `unknown` -> position only (indeterminate shimmer track)
+    //   `none`    -> neither position nor duration (row hidden)
+    let timeline = std::env::var("RENDER_DUMP_TIMELINE").ok();
+    // Number of 20 ms timer steps to advance before rendering (lets the
+    // indeterminate shimmer sweep reach a deterministic phase).
+    let advance: u32 = std::env::var("RENDER_DUMP_ADVANCE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
 
     let fb = Framebuffer::new_mocked().0;
     let window = fb.init_platform().expect("platform init");
@@ -76,6 +86,27 @@ fn dump_single_frame_for_layout_analysis() {
         "Audiophile DSP Sink",
     );
     shell.set_playing(true);
+    match timeline.as_deref() {
+        Some("unknown") => shell.apply_bluetooth_playback(&speaker_bluetooth::BtPlaybackState {
+            status: "playing".into(),
+            title: "Test Track Title".into(),
+            artist: "Some Artist Name".into(),
+            album: "Audiophile DSP Sink".into(),
+            position_ms: 65_000,
+            duration_ms: u32::MAX,
+            ..speaker_bluetooth::BtPlaybackState::default()
+        }),
+        Some("none") => shell.apply_bluetooth_playback(&speaker_bluetooth::BtPlaybackState {
+            status: "playing".into(),
+            title: "Test Track Title".into(),
+            artist: "Some Artist Name".into(),
+            album: "Audiophile DSP Sink".into(),
+            position_ms: u32::MAX,
+            duration_ms: u32::MAX,
+            ..speaker_bluetooth::BtPlaybackState::default()
+        }),
+        _ => shell.set_playback_state(true, 60_000, 500_000),
+    }
     shell.set_tab(tab);
     if open_hud {
         // Open the HUD the way the touch UI does: tap the volume icon in the
@@ -96,6 +127,11 @@ fn dump_single_frame_for_layout_analysis() {
             std::thread::sleep(std::time::Duration::from_millis(20));
             slint::platform::update_timers_and_animations();
         }
+    }
+
+    for _ in 0..advance {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        slint::platform::update_timers_and_animations();
     }
 
     slint::platform::update_timers_and_animations();

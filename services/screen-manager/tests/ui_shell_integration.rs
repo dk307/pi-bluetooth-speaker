@@ -400,6 +400,94 @@ fn ui_shell_now_playing_properties_and_playback_state() {
     assert!(shell.is_playing());
 }
 
+/// `BlueZ` uses `u32::MAX` (`Track.Duration` / `Position`) for "the peer did not
+/// describe the timeline". Formatting it as a timestamp produced a bogus
+/// `1193:...` hours readout, so the shell must classify the timeline as unknown
+/// and let the view hide (or degrade) the seek row.
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_unknown_timeline_degrades_seek_row() {
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use slint::ComponentHandle;
+    use speaker_bluetooth::BtPlaybackState;
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    let known = BtPlaybackState {
+        device_name: "Pixel Phone".into(),
+        status: "playing".into(),
+        title: "Telegraph Road".into(),
+        artist: "Dire Straits".into(),
+        album: "Love over Gold".into(),
+        position_ms: 300_000,
+        duration_ms: 860_000,
+        ..BtPlaybackState::default()
+    };
+    shell.apply_bluetooth_playback(&known);
+    assert!(shell.window().get_duration_known());
+    assert!(shell.window().get_position_known());
+    assert_eq!(shell.window().get_position_text(), "05:00");
+    assert_eq!(shell.window().get_duration_text(), "14:20");
+
+    // Position only: indeterminate track (thin + shimmer), no duration readout.
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        duration_ms: u32::MAX,
+        position_ms: 65_000,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert!(!shell.window().get_duration_known());
+    assert!(shell.window().get_position_known());
+    assert_eq!(shell.window().get_position_text(), "1:05");
+    assert_eq!(shell.window().get_duration_text(), "");
+    assert_eq!(shell.window().get_duration_ms(), 0);
+
+    // Neither known: both readouts blank and the row is hidden by the view.
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        duration_ms: u32::MAX,
+        position_ms: u32::MAX,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert!(!shell.window().get_duration_known());
+    assert!(!shell.window().get_position_known());
+    assert_eq!(shell.window().get_position_text(), "");
+    assert_eq!(shell.window().get_duration_text(), "");
+
+    // All three seek-row presentations must render without error.
+    shell.window().show().expect("Failed to show MainWindow");
+    shell.apply_bluetooth_playback(&known);
+    assert!(
+        fb.render_frame(&window)
+            .expect("render determinate seek bar")
+    );
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        duration_ms: u32::MAX,
+        position_ms: 65_000,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert!(
+        fb.render_frame(&window)
+            .expect("render indeterminate shimmer track")
+    );
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        duration_ms: u32::MAX,
+        position_ms: u32::MAX,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert!(fb.render_frame(&window).expect("render hidden seek row"));
+
+    // A determinate timeline re-enables the full seek row.
+    shell.apply_bluetooth_playback(&known);
+    assert!(shell.window().get_duration_known());
+    assert_eq!(shell.window().get_duration_text(), "14:20");
+}
+
 /// A snapshot whose track advertises art (`ImgHandle`) but whose file is not
 /// cached yet means the OBEX fetch is pending — the displayed cover must stay
 /// (a pending fetch must never blank working art, or a later playback tick

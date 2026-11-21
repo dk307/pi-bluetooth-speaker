@@ -82,17 +82,32 @@ pub fn select_active_pcm_for(
 
 /// Computes the playback progress ratio clamped to `0.0..=1.0`.
 ///
-/// A zero or unknown duration maps to `0.0`. Shared between
-/// [`BtPlaybackState::progress_ratio`] and the UI shell so the ratio logic has
-/// a single source of truth.
+/// A zero duration, an unreported position, or [`UNKNOWN_TRACK_TIME_MS`] on
+/// either field maps to `0.0`: an unknown timeline has no meaningful progress.
+/// Shared between [`BtPlaybackState::progress_ratio`] and the UI shell so the
+/// ratio logic has a single source of truth.
 #[must_use]
 pub fn playback_progress_ratio(position_ms: u32, duration_ms: u32) -> f32 {
-    if duration_ms == 0 {
+    if duration_ms == 0
+        || duration_ms == UNKNOWN_TRACK_TIME_MS
+        || position_ms == UNKNOWN_TRACK_TIME_MS
+    {
         0.0
     } else {
         (position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
     }
 }
+
+/// `BlueZ` `MediaPlayer1` sentinel for a timestamp that the transport does not
+/// report.
+///
+/// `Track.Duration` and `Position` are `uint32` milliseconds; a source that
+/// cannot describe the timeline (e.g. an AVRCP peer that never sent
+/// `EVENT_PLAYBACK_POS_CHANGED` / track info) publishes `0xFFFFFFFF` instead of
+/// a real value. Formatting it as a timestamp yields a nonsense `1193:...`
+/// hours field, so the domain boundary must classify it as *unknown* rather
+/// than as a duration.
+pub const UNKNOWN_TRACK_TIME_MS: u32 = u32::MAX;
 
 /// Computes the `MediaPlayer1.Seek` relative offset for an absolute target.
 ///
@@ -279,6 +294,22 @@ impl BtPlaybackState {
     #[must_use]
     pub fn is_playing(&self) -> bool {
         self.status.eq_ignore_ascii_case("playing")
+    }
+
+    /// Returns `true` when the transport reported a usable total track length.
+    ///
+    /// `BlueZ` publishes [`UNKNOWN_TRACK_TIME_MS`] when the peer never described
+    /// the track; a zero duration means the same thing for UI purposes (no
+    /// timeline to seek within).
+    #[must_use]
+    pub fn duration_known(&self) -> bool {
+        self.duration_ms != UNKNOWN_TRACK_TIME_MS && self.duration_ms != 0
+    }
+
+    /// Returns `true` when the transport reported a usable elapsed position.
+    #[must_use]
+    pub fn position_known(&self) -> bool {
+        self.position_ms != UNKNOWN_TRACK_TIME_MS
     }
 
     /// Returns the progress ratio between 0.0 and 1.0.
