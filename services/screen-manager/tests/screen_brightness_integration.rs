@@ -410,6 +410,7 @@ fn write_fault_retries_on_a_later_tick() {
 
     let failed = tick(&sensor, &backlight, &mut ab, &cfg, &mut loop_state, &[]);
     assert!(matches!(failed, TickAction::WriteFault { .. }));
+    assert!(loop_state.backlight_fault_logged);
     assert_eq!(
         loop_state.last_written, 0,
         "failed write must not advance last_written"
@@ -418,6 +419,7 @@ fn write_fault_retries_on_a_later_tick() {
     backlight.write_error.set(false);
     let recovered = tick(&sensor, &backlight, &mut ab, &cfg, &mut loop_state, &[]);
     assert!(matches!(recovered, TickAction::AutoWrite { raw } if raw > 0));
+    assert!(!loop_state.backlight_fault_logged);
     assert_eq!(loop_state.last_written, backlight.writes.borrow()[0]);
 }
 
@@ -758,10 +760,13 @@ fn shell_brightness_overlay_callbacks_drive_the_engine() {
     }
     assert!(shell.window().get_auto_brightness_enabled());
 
-    // A rejected/pre-command snapshot must snap the optimistic overlay back
-    // immediately rather than holding it for the whole settle window.
+    // A stale in-flight snapshot must not yank the thumb back while the settle
+    // window is fresh; after the window expires the authoritative value wins.
     shell.window().invoke_brightness_changed(63.0);
     assert_eq!(shell.window().get_brightness_value(), 63.0);
+    shell.apply_brightness(&state(false, 100.0));
+    assert_eq!(shell.window().get_brightness_value(), 63.0);
+    std::thread::sleep(std::time::Duration::from_millis(1_600));
     shell.apply_brightness(&state(false, 100.0));
     assert_eq!(shell.window().get_brightness_value(), 100.0);
     assert!(shell.window().get_ambient_lux_available());

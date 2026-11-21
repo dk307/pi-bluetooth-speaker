@@ -1123,10 +1123,10 @@ impl AppShell {
 
     /// Applies an authoritative brightness snapshot published by the worker.
     ///
-    /// AUTO mode and the ambient lux readout always update. A differing percent
-    /// is applied immediately so an unapplied/rejected slider change converges;
-    /// a matching snapshot needs no redundant property set. The settle marker
-    /// only suppresses that redundant set while the optimistic value is fresh.
+    /// AUTO mode and the ambient lux readout always update. During the settle
+    /// window the optimistic percent is preserved so an in-flight stale snapshot
+    /// cannot yank the thumb back; once the window expires the next authoritative
+    /// snapshot is always applied, forcing convergence even if a write failed.
     pub fn apply_brightness(&self, state: &BrightnessState) {
         self.window.set_auto_brightness_enabled(state.auto_enabled);
         self.window
@@ -1136,8 +1136,7 @@ impl AppShell {
         let authoritative_percent = state.brightness_percent.clamp(0.0, 100.0);
         let settle = self.last_brightness_command.get();
         let hold_optimistic = settle.is_some_and(|(at, optimistic)| {
-            at.elapsed() < BRIGHTNESS_SETTLE_WINDOW
-                && optimistic.is_some_and(|pct| (pct - authoritative_percent).abs() < 0.5)
+            at.elapsed() < BRIGHTNESS_SETTLE_WINDOW && optimistic.is_some()
         });
         if !hold_optimistic {
             self.window.set_brightness_value(authoritative_percent);

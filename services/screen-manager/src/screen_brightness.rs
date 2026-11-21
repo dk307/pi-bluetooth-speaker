@@ -229,6 +229,9 @@ pub struct LoopState {
     /// Whether the current sensor-fault episode has already been logged at
     /// `warn!` level; subsequent ticks are downgraded to `debug!`.
     pub sensor_fault_logged: bool,
+    /// Whether the current backlight read/write fault episode has already been
+    /// logged at `warn!` level; subsequent ticks are downgraded to `debug!`.
+    pub backlight_fault_logged: bool,
 }
 
 impl LoopState {
@@ -248,6 +251,7 @@ impl LoopState {
             last_lux: None,
             pending_manual: None,
             sensor_fault_logged: false,
+            backlight_fault_logged: false,
         }
     }
 }
@@ -344,6 +348,28 @@ where
     }
 }
 
+/// Logs a backlight I/O fault once at `warn!`, then at `debug!` until the next
+/// successful operation clears the episode flag, so a persistent sysfs fault
+/// cannot flood the journal at 20 Hz.
+fn report_backlight_fault(
+    state: &mut LoopState,
+    context: &'static str,
+    raw: Option<u32>,
+    error: &BrightnessError,
+) {
+    if state.backlight_fault_logged {
+        debug!(error = %error, ?raw, context, "backlight operation still failing");
+    } else {
+        warn!(
+            error = %error,
+            ?raw,
+            context,
+            "backlight operation failed; retrying next tick"
+        );
+        state.backlight_fault_logged = true;
+    }
+}
+
 /// Executes one control-loop tick over injectable hardware seams.
 ///
 /// Commands are applied first (with an immediate backlight write for a manual
@@ -393,6 +419,7 @@ where
                         ab.on_manual_change(perceptual);
                         loop_state.last_written = raw;
                         loop_state.pending_manual = None;
+                        loop_state.backlight_fault_logged = false;
                         info!(
                             percent,
                             raw,
@@ -403,12 +430,7 @@ where
                     }
                     Err(e) => {
                         loop_state.pending_manual = Some((perceptual, raw));
-                        warn!(
-                            error = %e,
-                            percent,
-                            raw,
-                            "manual backlight write failed; auto mode disabled, retrying next tick"
-                        );
+                        report_backlight_fault(loop_state, "manual write", Some(raw), &e);
                         action = TickAction::WriteFault { raw };
                     }
                 }
@@ -447,11 +469,12 @@ where
                 ab.on_manual_change(percent);
                 loop_state.last_written = raw;
                 loop_state.pending_manual = None;
+                loop_state.backlight_fault_logged = false;
                 info!(percent, raw, "retried manual brightness applied");
                 action = TickAction::ManualWrite { raw };
             }
             Err(e) => {
-                warn!(error = %e, percent, raw, "retried manual backlight write failed");
+                report_backlight_fault(loop_state, "manual write retry", Some(raw), &e);
                 action = TickAction::WriteFault { raw };
             }
         }
@@ -465,6 +488,7 @@ where
                 let perceptual = ratio.powf(1.0 / cfg.pwm_gamma).clamp(cfg.b_min, 1.0);
                 ab.on_manual_change(perceptual);
                 loop_state.last_written = hw;
+                loop_state.backlight_fault_logged = false;
                 loop_state.last_manual = Some(input.now);
                 info!(
                     raw = hw,
@@ -474,8 +498,8 @@ where
                 action = TickAction::ExternalAdopt { raw: hw };
                 suppressed = true;
             }
-            Ok(_) => {}
-            Err(e) => warn!(error = %e, "backlight read failed; skipping external-write detection"),
+            Ok(_) => loop_state.backlight_fault_logged = false,
+            Err(e) => report_backlight_fault(loop_state, "read", None, &e),
         }
     }
 
@@ -500,15 +524,12 @@ where
                     match backlight.write(raw) {
                         Ok(()) => {
                             loop_state.last_written = raw;
+                            loop_state.backlight_fault_logged = false;
                             action = TickAction::AutoWrite { raw };
                             debug!(raw, lux, dt = input.dt, "auto brightness write");
                         }
                         Err(e) => {
-                            warn!(
-                                error = %e,
-                                target_raw = raw,
-                                "backlight write failed; retrying with backoff next tick"
-                            );
+                            report_backlight_fault(loop_state, "auto write", Some(raw), &e);
                             action = TickAction::WriteFault { raw };
                         }
                     }
