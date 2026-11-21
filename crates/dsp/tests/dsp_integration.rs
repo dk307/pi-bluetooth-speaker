@@ -394,6 +394,13 @@ fn mock_ws_reply(cmd: &str) -> serde_json::Value {
         "GetConfigFilePath" => {
             serde_json::json!({"reply": "GetConfigFilePath", "result": "Ok", "value": "/etc/camilladsp/crossover.yml"})
         }
+        "GetConfigJson" => {
+            serde_json::json!({
+                "reply": "GetConfigJson",
+                "result": "Ok",
+                "value": r#"{"devices":{"samplerate":96000,"chunksize":2048,"capture":{"type":"Alsa","channels":2,"device":"hw:Loopback,1,0","format":"S32_LE"},"playback":{"type":"Alsa","channels":2,"device":"hw:sndrpihifiberry,0","format":"S32_LE"}},"mixers":null,"filters":null,"processors":null,"pipeline":null}"#
+            })
+        }
         "GetState" => serde_json::json!({"reply": "GetState", "result": "Ok", "value": "Running"}),
         "GetProcessingLoad" => {
             serde_json::json!({"reply": "GetProcessingLoad", "result": "Ok", "value": 4.25})
@@ -446,6 +453,10 @@ async fn hardware_backend_websocket_roundtrip() {
     let status = dsp.read_status_async().await.unwrap();
     assert_eq!(status.version.as_deref(), Some("5.0.0-beta.2"));
     assert_eq!(status.config_title.as_deref(), Some("Test Engine"));
+    let cfg = status.config.as_ref().expect("GetConfigJson parsed");
+    assert_eq!(cfg.samplerate, Some(96000));
+    assert_eq!(cfg.chunksize, Some(2048));
+    assert_eq!(status.buffer_capacity, 2048);
     assert_eq!(status.state, ProcessingState::Running);
     assert_eq!(status.processing_load, 4.25);
     assert_eq!(status.resampler_load, Some(0.15));
