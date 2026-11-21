@@ -555,15 +555,17 @@ export component NowPlayingView inherits Rectangle {
 
                             // Soft gradient sweep for the indeterminate track: a
                             // slow 2.5 s "still active" cue instead of a bar stuck
-                            // at 0%. The band starts half-on at the left edge and
-                            // exits past the right edge, so the track is never
-                            // completely static; ticks stop while paused, freezing
-                            // the sweep.
+                            // at 0%. The band's centre travels from the left edge
+                            // to the right edge (`parent.width`, not
+                            // `parent.width + sweep_width`), so at every tick at
+                            // least half the band is still on the track and the
+                            // bar is never completely static. Ticks stop while
+                            // paused, freezing the sweep.
                             if root.seek_indeterminate : Rectangle {
                                 property <length> sweep_width: parent.width * 0.35;
                                 width: self.sweep_width;
                                 height: parent.height;
-                                x: -self.sweep_width / 2 + root.shimmer_progress * (parent.width + self.sweep_width);
+                                x: root.shimmer_progress * parent.width - self.sweep_width / 2;
                                 background: @linear-gradient(90deg, transparent 0%, MaterialPalette.primary 50%, transparent 100%);
                                 opacity: 0.55;
                             }

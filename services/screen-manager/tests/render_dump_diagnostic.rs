@@ -43,6 +43,32 @@ impl LineBufferProvider for &mut ScratchBuffer {
     }
 }
 
+/// Applies the seek-row timeline selected by `RENDER_DUMP_TIMELINE` so the
+/// determinate / indeterminate / hidden presentations can be inspected offline.
+fn apply_dump_timeline(shell: &AppShell, timeline: Option<&str>) {
+    let playback = |position_ms, duration_ms| speaker_bluetooth::BtPlaybackState {
+        status: "playing".into(),
+        title: "Test Track Title".into(),
+        artist: "Some Artist Name".into(),
+        album: "Audiophile DSP Sink".into(),
+        position_ms,
+        duration_ms,
+        ..speaker_bluetooth::BtPlaybackState::default()
+    };
+    match timeline {
+        // Position only: thin shimmer track, position readout, no duration.
+        Some("unknown") => shell.apply_bluetooth_playback(&playback(65_000, u32::MAX)),
+        // Neither: the whole seek row is hidden.
+        Some("none") => shell.apply_bluetooth_playback(&playback(u32::MAX, u32::MAX)),
+        // Duration only: thin shimmer track that still shows the total length.
+        Some("duration_only") => shell.apply_bluetooth_playback(&playback(u32::MAX, 860_000)),
+        // Multi-hour track: `H:MM:SS` readouts are the widest strings the seek
+        // row can produce and used to be clipped by the fixed 64 px slots.
+        Some("long") => shell.set_playback_state(true, 3_723_000, 7_384_000),
+        _ => shell.set_playback_state(true, 60_000, 500_000),
+    }
+}
+
 #[test]
 fn dump_single_frame_for_layout_analysis() {
     let out_path: std::path::PathBuf = match std::env::var("RENDER_DUMP_PATH") {
@@ -93,43 +119,7 @@ fn dump_single_frame_for_layout_analysis() {
         "Audiophile DSP Sink",
     );
     shell.set_playing(true);
-    match timeline.as_deref() {
-        Some("unknown") => shell.apply_bluetooth_playback(&speaker_bluetooth::BtPlaybackState {
-            status: "playing".into(),
-            title: "Test Track Title".into(),
-            artist: "Some Artist Name".into(),
-            album: "Audiophile DSP Sink".into(),
-            position_ms: 65_000,
-            duration_ms: u32::MAX,
-            ..speaker_bluetooth::BtPlaybackState::default()
-        }),
-        Some("none") => shell.apply_bluetooth_playback(&speaker_bluetooth::BtPlaybackState {
-            status: "playing".into(),
-            title: "Test Track Title".into(),
-            artist: "Some Artist Name".into(),
-            album: "Audiophile DSP Sink".into(),
-            position_ms: u32::MAX,
-            duration_ms: u32::MAX,
-            ..speaker_bluetooth::BtPlaybackState::default()
-        }),
-        // Duration known, position unknown: indeterminate shimmer track that
-        // still shows the total length.
-        Some("duration_only") => {
-            shell.apply_bluetooth_playback(&speaker_bluetooth::BtPlaybackState {
-                status: "playing".into(),
-                title: "Test Track Title".into(),
-                artist: "Some Artist Name".into(),
-                album: "Audiophile DSP Sink".into(),
-                position_ms: u32::MAX,
-                duration_ms: 860_000,
-                ..speaker_bluetooth::BtPlaybackState::default()
-            })
-        }
-        // Multi-hour track: `H:MM:SS` readouts are the widest strings the seek
-        // row can produce and used to be clipped by the fixed 64 px slots.
-        Some("long") => shell.set_playback_state(true, 3_723_000, 7_384_000),
-        _ => shell.set_playback_state(true, 60_000, 500_000),
-    }
+    apply_dump_timeline(&shell, timeline.as_deref());
     shell.set_tab(tab);
     if open_hud {
         // Open the HUD the way the touch UI does: tap the volume icon in the

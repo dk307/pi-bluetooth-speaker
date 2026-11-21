@@ -1155,12 +1155,14 @@ impl AppShell {
             w.set_position_known(row.position_known);
         }
 
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "timeline_ms is 0 or a real duration <= i32::MAX; fits cleanly in slint int"
-        )]
-        if w.get_duration_ms() != row.timeline_ms as i32 {
-            w.set_duration_ms(row.timeline_ms as i32);
+        // Slint's `duration_ms` is an `i32`, while `duration_known_ms` only
+        // rejects `0` and the `u32::MAX` sentinel: a peer advertising a
+        // multi-week "duration" would wrap negative through an `as` cast. Clamp
+        // at the boundary instead of asserting an invariant the caller cannot
+        // enforce, so the value handed to the view is always a sane total.
+        let duration_ms_i32 = i32::try_from(row.timeline_ms).unwrap_or(i32::MAX);
+        if w.get_duration_ms() != duration_ms_i32 {
+            w.set_duration_ms(duration_ms_i32);
         }
         if w.get_is_playing() != is_playing {
             w.set_is_playing(is_playing);
