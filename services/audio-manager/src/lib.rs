@@ -11,6 +11,7 @@ pub mod config;
 pub mod dbus_api;
 pub mod dsp_watch;
 pub mod error;
+pub mod rate_watch;
 pub mod state_file;
 
 // Re-export key types for consumers (tests, etc.)

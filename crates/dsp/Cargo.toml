@@ -8,6 +8,7 @@ description = "CamillaDSP WebSocket client and dBFS level meter telemetry"
 
 [dependencies]
 speaker-common = { workspace = true }
+camilladsp-schema = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }

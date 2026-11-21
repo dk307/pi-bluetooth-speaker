@@ -67,6 +67,10 @@ fi
 # ------------------------------------------------------------------------------
 echo "==> [4/10] Configuring ALSA routing and loopback definitions..."
 cp "${SCRIPT_DIR}/etc/asound.conf" /etc/asound.conf
+if [ -f "${SCRIPT_DIR}/etc/modprobe.d/snd-aloop.conf" ]; then
+    mkdir -p /etc/modprobe.d
+    cp "${SCRIPT_DIR}/etc/modprobe.d/snd-aloop.conf" /etc/modprobe.d/
+fi
 if [ -f "${SCRIPT_DIR}/etc/alsa/20-bluealsa.conf" ]; then
     mkdir -p /etc/alsa/conf.d
     cp "${SCRIPT_DIR}/etc/alsa/20-bluealsa.conf" /etc/alsa/conf.d/

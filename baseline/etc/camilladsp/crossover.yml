@@ -3,6 +3,7 @@ devices:
   chunksize: 1024
   queuelimit: 4
   enable_rate_adjust: true
+  stop_on_rate_change: true
   # Pop-prevention lever (plan §11.3): when the capture signal stays below
   # -60 dB for this long, the engine reports Paused. dsp_watch mutes only
   # after it observes a stopped state, so this setting does not by itself
@@ -13,7 +14,7 @@ devices:
     type: Alsa
     channels: 2
     device: "hw:Loopback,1,0"
-    format: S32_LE
+    stop_on_inactive: true
   playback:
     type: Alsa
     channels: 2

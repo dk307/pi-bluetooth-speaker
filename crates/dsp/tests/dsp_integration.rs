@@ -325,7 +325,7 @@ fn hardware_info_constants() {
 #[test]
 fn config_json_parsing_passthrough_and_pipeline() {
     let passthrough = serde_json::json!(
-        r#"{"devices":{"samplerate":48000,"chunksize":1024,"capture":{"device":"hw:Loopback,1,0","format":"S32_LE"},"playback":{"device":"hw:sndrpihifiberry,0","format":"S32_LE"}},"mixers":null,"filters":null,"processors":null,"pipeline":null}"#
+        r#"{"devices":{"samplerate":48000,"chunksize":1024,"capture":{"type":"Alsa","channels":2,"device":"hw:Loopback,1,0","format":"S32_LE"},"playback":{"type":"Alsa","channels":2,"device":"hw:sndrpihifiberry,0","format":"S32_LE"}},"mixers":null,"filters":null,"processors":null,"pipeline":null}"#
     );
     let cfg = dsp_test_helpers::helper_parse_config_json(&passthrough).unwrap();
     assert_eq!(cfg.samplerate, Some(48000));
@@ -337,14 +337,14 @@ fn config_json_parsing_passthrough_and_pipeline() {
     assert!(cfg.is_passthrough());
 
     let with_pipeline = serde_json::json!(
-        r#"{"devices":{"samplerate":44100,"chunksize":512,"capture":{"device":"hw:0,0"},"playback":{"device":"hw:1,0"}},"mixers":{"m1":{}},"filters":{"f1":{},"f2":{}},"processors":{"p1":{}},"pipeline":[{"type":"Filter"}]}"#
+        r#"{"devices":{"samplerate":44100,"chunksize":512,"capture":{"type":"Alsa","channels":2,"device":"hw:0,0"},"playback":{"type":"Alsa","channels":2,"device":"hw:1,0"}},"mixers":{"m1":{"channels":{"in":2,"out":2},"mapping":[]}},"filters":{"f1":{"type":"Gain","parameters":{"gain":-3.0}},"f2":{"type":"Gain","parameters":{"gain":0.0}}},"processors":null,"pipeline":[{"type":"Filter","channels":[0],"names":["f1"]}]}"#
     );
     let cfg2 = dsp_test_helpers::helper_parse_config_json(&with_pipeline).unwrap();
     assert_eq!(cfg2.samplerate, Some(44100));
     assert_eq!(cfg2.chunksize, Some(512));
     assert_eq!(cfg2.mixers.len(), 1);
     assert_eq!(cfg2.filters.len(), 2);
-    assert_eq!(cfg2.processors.len(), 1);
+    assert_eq!(cfg2.processors.len(), 0);
     assert_eq!(cfg2.pipeline_stages, 1);
     assert!(!cfg2.is_passthrough());
 
@@ -446,7 +446,7 @@ async fn hardware_backend_websocket_roundtrip() {
     assert_eq!(status.state, ProcessingState::Running);
     assert_eq!(status.processing_load, 4.25);
     assert_eq!(status.resampler_load, Some(0.15));
-    assert_eq!(status.rate_adjust, 1.000_010);
+    assert!((status.rate_adjust - 1.000_010).abs() < 1e-6);
     assert_eq!(status.buffer_level, 512);
     assert_eq!(status.volume_db, Some(-6.0));
     assert_eq!(status.muted, Some(false));
