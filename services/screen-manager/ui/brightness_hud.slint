@@ -159,12 +159,24 @@ export component BrightnessHudOverlay inherits Rectangle {
                         }
                     }
 
-                    Text {
-                        text: "AMBIENT  " + Math.round(root.clamped-lux) + " lx";
-                        color: MaterialPalette.on_surface_variant;
-                        font-size: 16px * TouchScale.clamped_font_scale;
-                        font-weight: 700;
-                        vertical-alignment: center;
+                    // Readout only. The full-viewport backdrop TouchArea above would
+                    // otherwise receive taps on this text and dismiss the HUD, making
+                    // the label look like an action button. Swallow the tap and just
+                    // keep the HUD alive; no brightness state is changed here.
+                    Rectangle {
+                        Text {
+                            text: "AMBIENT  " + Math.round(root.clamped-lux) + " lx";
+                            color: MaterialPalette.on_surface_variant;
+                            font-size: 16px * TouchScale.clamped_font_scale;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+
+                        ambient_touch := TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => { root.interaction_activity(); }
+                        }
                     }
                 }
             }
