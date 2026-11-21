@@ -27,14 +27,8 @@ rustflags = [
     "-C", "llvm-args=-vectorize-loops",
     "-C", "llvm-args=-vectorize-slp",
 
-    # 4. Linker optimizations: strip unused sections, garbage collect dead code,
-    #    and wrap math symbols that host glibc >= 2.42 versions as @GLIBC_2.43
-    #    (`acosf`, `atan2f`, `remainder`) so both Rust LTO and C++ static archives
-    #    (`libskia.a`) resolve against `GLIBC_2.17` on Debian 13 Trixie (glibc 2.41).
+    # 4. Linker optimizations: strip unused sections & garbage collect dead code
     "-C", "link-arg=-Wl,--as-needed",
     "-C", "link-arg=-Wl,--gc-sections",
     "-C", "link-arg=-Wl,-O1",
-    "-C", "link-arg=-Wl,--wrap=acosf",
-    "-C", "link-arg=-Wl,--wrap=atan2f",
-    "-C", "link-arg=-Wl,--wrap=remainder",
 ]
