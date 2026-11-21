@@ -50,6 +50,25 @@ fn appliance_default_discovers_i2c_backlight_device() {
 }
 
 #[test]
+fn appliance_default_follows_sysfs_class_symlinks() {
+    // `/sys/class/backlight/<device>` entries are symlinks into `/sys/devices`.
+    // A directory-only filter would skip every real device.
+    let target = ScopedTempDir::new("backlight_symlink_target");
+    let device = target.path().join("10-0045");
+    fs::create_dir_all(&device).expect("create symlink target device dir");
+    fs::write(device.join("max_brightness"), "255\n").expect("write max");
+    fs::write(device.join("brightness"), "123\n").expect("write raw");
+
+    let root = ScopedTempDir::new("backlight_symlink_root");
+    std::os::unix::fs::symlink(&device, root.path().join("10-0045"))
+        .expect("create sysfs-class style symlink");
+
+    let (backlight, name) = Backlight::with_appliance_default_in(root.path()).unwrap();
+    assert_eq!(&*name, "10-0045");
+    assert_eq!(backlight.read().unwrap(), 123);
+}
+
+#[test]
 fn appliance_default_skips_malformed_devices_and_fails_when_none_usable() {
     let dir = ScopedTempDir::new("backlight_no_usable");
     let broken = dir.path().join("aaa-broken");

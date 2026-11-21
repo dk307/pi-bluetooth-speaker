@@ -164,6 +164,20 @@ impl LuxSource for LightSensor {
     }
 }
 
+/// Ambient source used when the BH1750 cannot be opened at startup.
+///
+/// Keeping the brightness worker alive with a permanently faulting source
+/// preserves manual slider control; every tick reports the sensor fault
+/// through the normal auto path instead of silently disabling the overlay.
+#[derive(Debug, Clone, Copy)]
+pub struct UnavailableLuxSource;
+
+impl LuxSource for UnavailableLuxSource {
+    fn read_lux(&self) -> Result<f32, BrightnessError> {
+        Err(BrightnessError::failed("ambient light sensor unavailable"))
+    }
+}
+
 /// Injectable backlight sysfs adapter (`Backlight` in production).
 pub trait BacklightIo {
     /// Returns the hardware maximum raw brightness value.
@@ -208,6 +222,12 @@ pub struct LoopState {
     pub auto_enabled: bool,
     /// Last successfully read lux value (telemetry readout).
     pub last_lux: f32,
+    /// Manual percent/raw pair whose write failed and must be retried before
+    /// any further automatic or external-write processing.
+    pub pending_manual: Option<(f32, u32)>,
+    /// Whether the current sensor-fault episode has already been logged at
+    /// `warn!` level; subsequent ticks are downgraded to `debug!`.
+    pub sensor_fault_logged: bool,
 }
 
 impl LoopState {
@@ -225,6 +245,8 @@ impl LoopState {
             last_manual: None,
             auto_enabled,
             last_lux: 50.0,
+            pending_manual: None,
+            sensor_fault_logged: false,
         }
     }
 }
@@ -310,33 +332,48 @@ where
     let max = backlight.max_brightness();
     let mut action = TickAction::Idle;
     let mut suppressed = false;
+    let mut manual_attempted = false;
 
     for command in input.commands {
         match *command {
             BrightnessCommand::SetPercent(percent)
                 if percent.is_finite() && (0.0..=100.0).contains(&percent) =>
             {
+                manual_attempted = true;
                 let perceptual =
                     (f64::from(percent) / 100.0).clamp(f64::from(cfg.b_min), 1.0) as f32;
-                ab.on_manual_change(perceptual);
-                let duty = ab.brightness().powf(cfg.pwm_gamma);
-                let raw = raw_from_duty(duty, max);
-                match backlight.write(raw) {
-                    Ok(()) => loop_state.last_written = raw,
-                    Err(e) => warn!(error = %e, raw, "manual backlight write failed"),
-                }
+                let raw = raw_from_duty(perceptual.powf(cfg.pwm_gamma), max);
                 // A slider drag is an explicit manual takeover: the overlay
                 // only sends SetPercent, so the engine leaves auto mode itself
-                // (SetAuto(true) re-enables it).
+                // (SetAuto(true) re-enables it). This records user intent even
+                // when the sysfs write fails; the requested level is retried
+                // next tick instead of being reported as applied.
                 loop_state.auto_enabled = false;
                 loop_state.last_manual = Some(input.now);
-                info!(
-                    percent,
-                    raw,
-                    auto_enabled = false,
-                    "manual brightness applied; auto mode disabled"
-                );
-                action = TickAction::ManualWrite { raw };
+                match backlight.write(raw) {
+                    Ok(()) => {
+                        ab.on_manual_change(perceptual);
+                        loop_state.last_written = raw;
+                        loop_state.pending_manual = None;
+                        info!(
+                            percent,
+                            raw,
+                            auto_enabled = false,
+                            "manual brightness applied; auto mode disabled"
+                        );
+                        action = TickAction::ManualWrite { raw };
+                    }
+                    Err(e) => {
+                        loop_state.pending_manual = Some((perceptual, raw));
+                        warn!(
+                            error = %e,
+                            percent,
+                            raw,
+                            "manual backlight write failed; auto mode disabled, retrying next tick"
+                        );
+                        action = TickAction::WriteFault { raw };
+                    }
+                }
                 suppressed = true;
             }
             BrightnessCommand::SetPercent(percent) => {
@@ -348,6 +385,11 @@ where
                 }
                 loop_state.auto_enabled = enabled;
                 loop_state.last_manual = Some(input.now);
+                if enabled {
+                    // Re-enabling auto cancels any manual write that failed
+                    // earlier; the ambient policy owns the backlight again.
+                    loop_state.pending_manual = None;
+                }
             }
             BrightnessCommand::ResetBias => {
                 ab.reset_manual_bias();
@@ -356,6 +398,26 @@ where
                 action = TickAction::IdleReset;
             }
         }
+    }
+
+    // A failed manual write is retried on later ticks before external-write
+    // detection or the auto path, so a transient sysfs fault cannot leave the
+    // UI showing a level that was never applied.
+    if !manual_attempted && let Some((percent, raw)) = loop_state.pending_manual {
+        match backlight.write(raw) {
+            Ok(()) => {
+                ab.on_manual_change(percent);
+                loop_state.last_written = raw;
+                loop_state.pending_manual = None;
+                info!(percent, raw, "retried manual brightness applied");
+                action = TickAction::ManualWrite { raw };
+            }
+            Err(e) => {
+                warn!(error = %e, percent, raw, "retried manual backlight write failed");
+                action = TickAction::WriteFault { raw };
+            }
+        }
+        suppressed = true;
     }
 
     if !suppressed {
@@ -395,6 +457,7 @@ where
         if loop_state.auto_enabled {
             match sensor.read_lux() {
                 Ok(lux) if lux.is_finite() => {
+                    loop_state.sensor_fault_logged = false;
                     loop_state.last_lux = lux;
                     let duty = ab.update(lux, input.dt);
                     let raw = raw_from_duty(duty, max);
@@ -417,11 +480,21 @@ where
                     }
                 }
                 Ok(lux) => {
-                    warn!(lux, "ignored non-finite lux sample; holding brightness");
+                    if loop_state.sensor_fault_logged {
+                        debug!(lux, "non-finite lux sample; holding brightness");
+                    } else {
+                        warn!(lux, "ignored non-finite lux sample; holding brightness");
+                        loop_state.sensor_fault_logged = true;
+                    }
                     action = TickAction::SensorFault;
                 }
                 Err(e) => {
-                    warn!(error = %e, "lux read failed; holding last brightness");
+                    if loop_state.sensor_fault_logged {
+                        debug!(error = %e, "lux read still failing; holding last brightness");
+                    } else {
+                        warn!(error = %e, "lux read failed; holding last brightness");
+                        loop_state.sensor_fault_logged = true;
+                    }
                     action = TickAction::SensorFault;
                 }
             }
@@ -484,8 +557,27 @@ where
         cfg: BrightnessConfig,
         auto_enabled: bool,
     ) -> Result<Self, BrightnessError> {
-        let initial_raw = backlight.read()?;
         let initial_lux = sensor.read_lux()?;
+        Self::new_seeded(sensor, backlight, cfg, auto_enabled, initial_lux)
+    }
+
+    /// Builds an engine with an explicitly supplied initial lux seed.
+    ///
+    /// Used when the ambient sensor could not be opened: manual brightness
+    /// control must still work, and each tick reports the sensor fault through
+    /// the normal auto path. The backlight read remains fail-loud so the
+    /// external-write detector starts from the authoritative hardware value.
+    ///
+    /// # Errors
+    /// Returns a typed error when the initial backlight read fails.
+    pub fn new_seeded(
+        sensor: S,
+        backlight: B,
+        cfg: BrightnessConfig,
+        auto_enabled: bool,
+        initial_lux: f32,
+    ) -> Result<Self, BrightnessError> {
+        let initial_raw = backlight.read()?;
         let ab = AutoBrightness::new(initial_lux, cfg);
         let state = LoopState::with_auto(initial_raw, auto_enabled);
         info!(
@@ -616,37 +708,6 @@ impl From<BacklightError> for BrightnessError {
     fn from(e: BacklightError) -> Self {
         Self::backlight(e)
     }
-}
-
-/// Coalesces a drained batch to the last percent and auto value, preserving
-/// explicit bias resets.
-#[must_use]
-pub fn coalesce(drained: Vec<BrightnessCommand>) -> Vec<BrightnessCommand> {
-    let mut percent: Option<usize> = None;
-    let mut auto: Option<usize> = None;
-    let mut out: Vec<BrightnessCommand> = Vec::new();
-    for command in drained {
-        match command {
-            BrightnessCommand::SetPercent(_) => {
-                if let Some(idx) = percent {
-                    out[idx] = command;
-                } else {
-                    percent = Some(out.len());
-                    out.push(command);
-                }
-            }
-            BrightnessCommand::SetAuto(_) => {
-                if let Some(idx) = auto {
-                    out[idx] = command;
-                } else {
-                    auto = Some(out.len());
-                    out.push(command);
-                }
-            }
-            BrightnessCommand::ResetBias => out.push(command),
-        }
-    }
-    out
 }
 
 /// Publishes a state snapshot into the shared update, recovering a poisoned guard.

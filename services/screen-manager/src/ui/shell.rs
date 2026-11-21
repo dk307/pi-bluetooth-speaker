@@ -1103,11 +1103,12 @@ impl AppShell {
         *self.amp_commands.borrow_mut() = Some(commands.clone());
     }
 
-    /// Applies an authoritative brightness snapshot published by the daemon.
+    /// Applies an authoritative brightness snapshot published by the worker.
     ///
-    /// During the settle window after an optimistic slider change, the local
-    /// percent is preserved so a stale snapshot cannot yank the thumb back;
-    /// auto mode and the lux readout still update immediately.
+    /// AUTO mode and the ambient lux readout always update. A differing percent
+    /// is applied immediately so an unapplied/rejected slider change converges;
+    /// a matching snapshot needs no redundant property set. The settle marker
+    /// only suppresses that redundant set while the optimistic value is fresh.
     pub fn apply_brightness(&self, state: &BrightnessState) {
         self.window.set_auto_brightness_enabled(state.auto_enabled);
         self.window.set_ambient_lux(state.ambient_lux);
@@ -1503,6 +1504,16 @@ impl AppShell {
                             &setting_brightness_settle,
                             BrightnessCommand::SetAuto(right_selected),
                         );
+                        if !right_selected {
+                            // Match the HUD toggle: dropping AUTO also drops
+                            // the learned gamma bias so re-enabling AUTO
+                            // returns to the unmodified ambient curve.
+                            Self::push_brightness_command(
+                                &setting_brightness_cmds,
+                                &setting_brightness_settle,
+                                BrightnessCommand::ResetBias,
+                            );
+                        }
                     }
                 }
             }

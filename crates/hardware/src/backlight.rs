@@ -223,10 +223,11 @@ impl Backlight {
     ///
     /// `DietPi` releases on the appliance expose the panel as an I²C backlight
     /// (for example `10-0045`) rather than `rpi_backlight`. The preferred name
-    /// is still tried first; only a `NotFound` triggers discovery, so
-    /// permission and malformed-data faults are never masked. Discovered
-    /// devices are tried in lexicographic order and malformed ones skipped.
-    /// The selected device name is returned alongside the handle for logging.
+    /// is still tried first; only a `NotFound` triggers discovery. During
+    /// discovery, malformed sibling devices are skipped, but permission and
+    /// other transport faults are propagated rather than masked as `NotFound`.
+    /// Devices are tried in lexicographic order and the selected name is
+    /// returned alongside the handle for logging.
     ///
     /// # Errors
     /// Returns [`BacklightError`] when no usable backlight device exists or the
@@ -246,15 +247,28 @@ impl Backlight {
         match Self::with_root(root.as_ref(), DEFAULT_BACKLIGHT_DEVICE) {
             Ok(backlight) => Ok((backlight, DEFAULT_BACKLIGHT_DEVICE.into())),
             Err(e) if e.is_not_found() => {
-                let mut names: Vec<Box<str>> = fs::read_dir(root.as_ref())?
-                    .filter_map(Result::ok)
-                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-                    .filter_map(|entry| entry.file_name().into_string().ok().map(Into::into))
-                    .collect();
+                // `/sys/class/backlight/<device>` entries are symlinks into
+                // `/sys/devices`; `DirEntry::file_type()` does not follow them,
+                // so use `Path::is_dir()` (which does) to avoid filtering out
+                // every real device.
+                let mut names: Vec<Box<str>> = Vec::new();
+                for entry in fs::read_dir(root.as_ref())? {
+                    let entry = entry?;
+                    if entry.path().is_dir()
+                        && let Ok(name) = entry.file_name().into_string()
+                    {
+                        names.push(name.into());
+                    }
+                }
                 names.sort();
                 for name in names {
-                    if let Ok(backlight) = Self::with_root(root.as_ref(), name.as_ref()) {
-                        return Ok((backlight, name));
+                    match Self::with_root(root.as_ref(), name.as_ref()) {
+                        Ok(backlight) => return Ok((backlight, name)),
+                        // A malformed or vanished sibling is not a usable
+                        // backlight; keep scanning. Permission, transport, and
+                        // other real faults must not be disguised as NotFound.
+                        Err(e) if e.is_invalid_data() || e.is_not_found() => {}
+                        Err(e) => return Err(e),
                     }
                 }
                 Err(BacklightError::not_found(format!(

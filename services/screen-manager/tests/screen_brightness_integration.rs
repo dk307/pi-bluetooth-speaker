@@ -11,7 +11,7 @@ use screen_manager::daemon::BtSharedUpdate;
 use screen_manager::screen_brightness::{
     AutoBrightness, BacklightIo, BrightnessCommand, BrightnessCommandQueue, BrightnessConfig,
     BrightnessEngine, BrightnessError, BrightnessState, LoopState, LuxSource, TickAction,
-    TickInput, coalesce, default_policy, run_tick, run_worker,
+    TickInput, UnavailableLuxSource, default_policy, run_tick, run_worker,
 };
 
 const MAX: u32 = 255;
@@ -119,25 +119,6 @@ fn state_sanitizes_non_finite_values() {
     assert_eq!(clamped.brightness_percent, 100.0);
     assert_eq!(clamped.ambient_lux, 0.0);
     assert_eq!(clamped.manual_gamma, 0.0);
-}
-
-#[test]
-fn coalesce_keeps_last_value_per_kind() {
-    let out = coalesce(vec![
-        BrightnessCommand::SetPercent(10.0),
-        BrightnessCommand::SetAuto(true),
-        BrightnessCommand::SetPercent(70.0),
-        BrightnessCommand::SetAuto(false),
-        BrightnessCommand::ResetBias,
-    ]);
-    assert_eq!(
-        out,
-        vec![
-            BrightnessCommand::SetPercent(70.0),
-            BrightnessCommand::SetAuto(false),
-            BrightnessCommand::ResetBias,
-        ]
-    );
 }
 
 #[test]
@@ -380,9 +361,10 @@ fn manual_write_fault_does_not_advance_last_written() {
     let backlight = FakeBacklight::new(0);
     backlight.write_error.set(true);
     let mut ab = AutoBrightness::new(100.0, cfg);
+    let initial_brightness = ab.brightness();
     let mut loop_state = LoopState::new(0);
 
-    let action = tick(
+    let failed = tick(
         &sensor,
         &backlight,
         &mut ab,
@@ -391,10 +373,23 @@ fn manual_write_fault_does_not_advance_last_written() {
         &[BrightnessCommand::SetPercent(50.0)],
     );
 
-    assert!(matches!(action, TickAction::ManualWrite { .. }));
+    assert!(matches!(failed, TickAction::WriteFault { .. }));
     assert!(backlight.writes.borrow().is_empty());
     assert_eq!(loop_state.last_written, 0);
+    assert_eq!(
+        loop_state.pending_manual.map(|(percent, _)| percent),
+        Some(0.5)
+    );
     assert!(!loop_state.auto_enabled);
+    // The failed level must never be reported as authoritative telemetry.
+    assert!((ab.brightness() - initial_brightness).abs() < f32::EPSILON);
+
+    backlight.write_error.set(false);
+    let recovered = tick(&sensor, &backlight, &mut ab, &cfg, &mut loop_state, &[]);
+    assert!(matches!(recovered, TickAction::ManualWrite { raw } if raw > 0));
+    assert_eq!(loop_state.pending_manual, None);
+    assert_eq!(loop_state.last_written, backlight.writes.borrow()[0]);
+    assert!((ab.brightness() - 0.5).abs() < 0.001);
 }
 
 #[test]
@@ -495,6 +490,28 @@ fn engine_bootstrap_fails_loudly_on_hardware_faults() {
     let engine = BrightnessEngine::try_new(sensor, backlight, cfg, false)
         .expect("mocked bootstrap succeeds");
     assert!(!engine.state().auto_enabled);
+}
+
+#[test]
+fn unavailable_sensor_keeps_manual_brightness_usable() {
+    let cfg = default_policy();
+    let backlight = FakeBacklight::new(10);
+    let mut engine = BrightnessEngine::new_seeded(UnavailableLuxSource, backlight, cfg, true, 50.0)
+        .expect("backlight-only bootstrap succeeds");
+
+    let auto = engine.tick(Instant::now(), 0.05, &[], IDLE_RESET);
+    assert!(matches!(auto.action, TickAction::SensorFault));
+    assert!(engine.state().auto_enabled);
+
+    let manual = engine.tick(
+        Instant::now(),
+        0.0,
+        &[BrightnessCommand::SetPercent(60.0)],
+        IDLE_RESET,
+    );
+    assert!(matches!(manual.action, TickAction::ManualWrite { .. }));
+    assert!(!engine.state().auto_enabled);
+    assert!((engine.state().brightness_percent - 60.0).abs() < 0.5);
 }
 
 #[test]
@@ -653,6 +670,19 @@ fn shell_brightness_overlay_callbacks_drive_the_engine() {
     shell.apply_brightness(&state(false, 100.0));
     assert_eq!(shell.window().get_brightness_value(), 100.0);
     let _ = queue.drain();
+
+    // The Settings row must match the HUD toggle: disabling AUTO also drops
+    // the learned gamma bias.
+    shell
+        .window()
+        .invoke_setting_toggle("auto_brightness".into(), false);
+    assert_eq!(
+        queue.drain(),
+        vec![
+            BrightnessCommand::SetAuto(false),
+            BrightnessCommand::ResetBias
+        ]
+    );
 }
 
 #[test]

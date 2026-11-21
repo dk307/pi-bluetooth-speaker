@@ -1993,11 +1993,35 @@ pub fn join_brightness_worker(brightness_worker: std::io::Result<std::thread::Jo
     }
 }
 
+/// Ambient source used by the brightness worker so a missing BH1750 does not
+/// also take down manual brightness control.
+#[cfg(feature = "ui")]
+enum WorkerLuxSource {
+    /// Live or mocked BH1750 sensor.
+    Hardware(speaker_hardware::LightSensor),
+    /// Sensor could not be opened; auto mode stays faulted while manual writes
+    /// keep working.
+    Unavailable,
+}
+
+#[cfg(feature = "ui")]
+impl crate::screen_brightness::LuxSource for WorkerLuxSource {
+    fn read_lux(&self) -> Result<f32, crate::screen_brightness::BrightnessError> {
+        match self {
+            Self::Hardware(sensor) => crate::screen_brightness::LuxSource::read_lux(sensor),
+            Self::Unavailable => crate::screen_brightness::LuxSource::read_lux(
+                &crate::screen_brightness::UnavailableLuxSource,
+            ),
+        }
+    }
+}
+
 /// Spawns the embedded brightness control-loop worker thread.
 ///
 /// The worker owns the BH1750 sensor and the backlight sysfs handle, so no
-/// separate daemon or D-Bus service is involved. Mocked sessions use in-memory
-/// hardware so host tests never touch I²C or sysfs.
+/// separate daemon or D-Bus service is involved. A missing ambient sensor only
+/// disables the auto path; manual slider control still drives the backlight.
+/// Mocked sessions use in-memory hardware so host tests never touch I²C or sysfs.
 ///
 /// # Errors
 /// Returns the underlying thread-spawn I/O error.
@@ -2020,18 +2044,13 @@ pub fn spawn_brightness_worker(
             if !running.load(Ordering::Relaxed) {
                 return;
             }
-            let (sensor, backlight) = if mocked {
+            let (sensor, backlight, sensor_available) = if mocked {
                 let (sensor, _sensor_ctrl) = speaker_hardware::LightSensor::new_mocked();
                 let (backlight, _backlight_ctrl) = speaker_hardware::Backlight::new_mocked();
-                (sensor, backlight)
+                (WorkerLuxSource::Hardware(sensor), backlight, true)
             } else {
-                let sensor = match speaker_hardware::LightSensor::new() {
-                    Ok(sensor) => sensor,
-                    Err(e) => {
-                        tracing::error!(error = %e, "Failed to open BH1750 sensor; brightness disabled");
-                        return;
-                    }
-                };
+                // The backlight is mandatory: without it neither manual nor
+                // automatic brightness can be applied.
                 let (backlight, device) =
                     match speaker_hardware::Backlight::with_appliance_default() {
                         Ok(handle) => handle,
@@ -2041,14 +2060,28 @@ pub fn spawn_brightness_worker(
                         }
                     };
                 tracing::info!(device = %device, "Backlight sysfs device selected");
-                (sensor, backlight)
+                // The ambient sensor is optional: keep the worker alive with a
+                // faulting source so the manual slider remains functional.
+                let (sensor, sensor_available) = match speaker_hardware::LightSensor::new() {
+                    Ok(sensor) => (WorkerLuxSource::Hardware(sensor), true),
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to open BH1750 sensor; auto brightness disabled, manual brightness remains available");
+                        (WorkerLuxSource::Unavailable, false)
+                    }
+                };
+                (sensor, backlight, sensor_available)
             };
-            let mut engine = match crate::screen_brightness::BrightnessEngine::try_new(
-                sensor,
-                backlight,
-                policy,
-                auto_enabled,
-            ) {
+            let mut engine = match if sensor_available {
+                crate::screen_brightness::BrightnessEngine::try_new(sensor, backlight, policy, auto_enabled)
+            } else {
+                crate::screen_brightness::BrightnessEngine::new_seeded(
+                    sensor,
+                    backlight,
+                    policy,
+                    auto_enabled,
+                    50.0,
+                )
+            } {
                 Ok(engine) => engine,
                 Err(e) => {
                     tracing::error!(error = %e, "Brightness hardware bootstrap failed; brightness disabled");
