@@ -10,6 +10,10 @@ export component Ripple {
     in property <length> pressed_y;
     in property <color> color;
     in property <bool> clip_ripple: true;
+    // Drives the ripple from the owning button's pressed state. The ripple stays
+    // mounted and only its geometry/opacity change, so a quick tap never destroys
+    // the item tree before the effect can render (M-NO-PER-FRAME-ITEM-TREE-CHURN).
+    in property <bool> active;
 
     Rectangle {
         width: 100%;
@@ -22,14 +26,12 @@ export component Ripple {
             y: root.pressed_y - self.height / 2;
             height: self.width;
             border_radius: self.width / 2;
-            opacity: MaterialPalette.state_layer_opacity_press;
+            width: root.active ? root.width * 2 * 1.4142 : 0px;
+            opacity: root.active ? MaterialPalette.state_layer_opacity_press : 0;
             background: root.color;
 
-            init => {
-                self.width = root.width * 2 * 1.4142;
-            }
-
             animate width { duration: MaterialAnimations.ripple_duration; easing: MaterialAnimations.ripple_easing; }
+            animate opacity { duration: MaterialAnimations.opacity_duration; easing: MaterialAnimations.opacity_easing; }
         }
     }
 }
@@ -136,7 +138,13 @@ export component StateLayerArea inherits FocusTouchArea {
     property <bool> popup_open;
     property <bool> has_h: root.mouse-x > 0 && root.mouse-x < root.width && root.mouse-y > 0 && root.mouse-y < root.height;
 
-    if !root.enabled || (root.enabled && (root.has_focus || root.pressed || root.enter_pressed)) : StateLayer {
+    // State layer and ripple stay mounted for the button's whole lifetime. They
+    // used to be `if pressed : ...` items, so a short touchscreen tap created and
+    // immediately destroyed them before the 250 ms opacity animation could show
+    // any feedback — the button looked completely unresponsive. Driving only
+    // their properties lets the state layer fade in on press and out on release,
+    // and avoids a full-window redraw per tap from item-tree churn.
+    StateLayer {
         width: 100%;
         height: 100%;
         background: root.transparent_background ? transparent : root.color;
@@ -148,8 +156,8 @@ export component StateLayerArea inherits FocusTouchArea {
         display_background: root.display_background;
     }
 
-    // ripple
-    if root.enabled && (root.pressed || root.enter_pressed) : Ripple {
+    Ripple {
+        active: root.enabled && (root.pressed || root.enter_pressed);
         pressed_x: root.pressed_x;
         pressed_y: root.pressed_y;
         width: 100%;

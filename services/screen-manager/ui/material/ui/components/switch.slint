@@ -48,8 +48,10 @@ export component Switch {
                 pressed: touch_area.pressed;
                 enabled: root.enabled;
 
-                // ripple
-                if root.enabled && (touch_area.pressed || touch_area.enter_pressed) : Ripple {
+                // Ripple stays mounted and is driven by `active` so a short
+                // tap renders feedback before release destroys it.
+                Ripple {
+                    active: root.enabled && (touch_area.pressed || touch_area.enter_pressed);
                     pressed_x: touch_area.pressed_x;
                     pressed_y: touch_area.pressed_y;
                     width: 100%;

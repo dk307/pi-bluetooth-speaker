@@ -14,6 +14,9 @@ export component FilledIconButton {
     in_out property <bool> checked;
     in property <string> tooltip <=> base.tooltip;
     in property <bool> enabled <=> base.enabled;
+    // Optional touch-target/icon sizing; defaults match the stock M3 button.
+    in property <length> button_size: MaterialStyleMetrics.size_40;
+    in property <length> icon_size: MaterialStyleMetrics.icon_size_24;
 
     callback clicked();
 
@@ -43,9 +46,9 @@ export component FilledIconButton {
         color: !root.enabled ? MaterialPalette.on_surface_variant : root.checkable ? MaterialPalette.primary : MaterialPalette.on_primary;
         button_horizontal_padding: 0;
         button_vertical_padding: 0;
-        min_layout_width: MaterialStyleMetrics.size_40;
-        min_layout_height: self.min_layout_width;
-        icon_size: MaterialStyleMetrics.icon_size_24;
+        min_layout_width: root.button_size;
+        min_layout_height: root.button_size;
+        icon_size: root.icon_size;
 
         clicked => {
             root.toggle();

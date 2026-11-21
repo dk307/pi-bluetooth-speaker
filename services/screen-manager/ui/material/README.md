@@ -36,3 +36,8 @@ import {
    - Removed `app_bar.slint` and `bottom_app_bar.slint` (replaced by custom [`ui/screen_app_bar.slint`](../screen_app_bar.slint) and [`ui/status_bar.slint`](../status_bar.slint)).
    - Removed `navigation_drawer.slint` and `drawer.slint`.
    - Removed `date_picker.slint` and `time_picker.slint` (vertical layouts exceed the `480px` panel height).
+
+5. **Press Feedback Survives Short Touchscreen Taps:**
+   - [`ui/components/state_layer.slint`](ui/components/state_layer.slint): `StateLayerArea` keeps its `StateLayer` and `Ripple` mounted for the component's lifetime and drives them with `pressed`/`active` properties. Upstream mounts them as `if pressed : ...` items; on a ~50–100 ms touchscreen tap the release destroys them before the 250 ms opacity animation can render, so buttons appear unresponsive. `Ripple` also takes a new `active` property (bound `width`/`opacity` instead of a one-shot `init` assignment) so it fades out instead of vanishing.
+   - [`ui/components/navigation_bar.slint`](ui/components/navigation_bar.slint) and [`ui/components/switch.slint`](ui/components/switch.slint): remaining `if pressed : Ripple` call sites converted to always-mounted `Ripple { active: ... }` for the same reason.
+   - [`ui/components/icon_button.slint`](ui/components/icon_button.slint), [`filled_icon_button.slint`](ui/components/filled_icon_button.slint), [`tonal_icon_button.slint`](ui/components/tonal_icon_button.slint), [`outline_icon_button.slint`](ui/components/outline_icon_button.slint): optional `button_size` / `icon_size` overrides (plus `icon_color` / `background_color` / `border_color` on the outline variant) let appliance-sized touch targets reuse the stock M3 components. All defaults match upstream, so existing callers are unchanged.
