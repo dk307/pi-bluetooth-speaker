@@ -1231,7 +1231,7 @@ fn publish_link_state_stages_pcm_once_and_resets() {
 
     let mut first = BtSharedUpdate::default();
     let __snap = bt.link_snapshot().expect("mock link snapshot");
-    let _ = state.publish_link_state(&mut first, bt.active_device(), Ok(&__snap));
+    let _ = state.publish_link_state(&mut first, bt.active_device(), Ok(__snap));
     assert!(first.pcm.is_some());
     let details = state.last_details().expect("first tick caches details");
     assert!(details.device.is_some());
@@ -1240,7 +1240,7 @@ fn publish_link_state_stages_pcm_once_and_resets() {
     // Unchanged snapshot is deduplicated.
     let mut second = BtSharedUpdate::default();
     let __snap = bt.link_snapshot().expect("mock link snapshot");
-    let _ = state.publish_link_state(&mut second, bt.active_device(), Ok(&__snap));
+    let _ = state.publish_link_state(&mut second, bt.active_device(), Ok(__snap));
     assert!(second.pcm.is_none());
     assert!(state.last_details().is_some());
 
@@ -1249,7 +1249,7 @@ fn publish_link_state_stages_pcm_once_and_resets() {
     assert!(state.last_details().is_none());
     let mut third = BtSharedUpdate::default();
     let __snap = bt.link_snapshot().expect("mock link snapshot");
-    let _ = state.publish_link_state(&mut third, bt.active_device(), Ok(&__snap));
+    let _ = state.publish_link_state(&mut third, bt.active_device(), Ok(__snap));
     assert!(third.pcm.is_some());
     assert!(state.last_details().is_some());
 }
@@ -1266,7 +1266,7 @@ fn publish_link_state_keeps_state_on_query_fault() {
     let __err = bt.link_snapshot().unwrap_err();
     assert!(
         state
-            .publish_link_state(&mut update, bt.active_device(), Err(&__err))
+            .publish_link_state(&mut update, bt.active_device(), Err(__err))
             .is_none()
     );
     assert!(state.last_details().is_none());
@@ -1283,7 +1283,7 @@ fn publish_link_state_clears_details_on_disconnect() {
     let _ = state.publish_link_state(
         &mut BtSharedUpdate::default(),
         bt.active_device(),
-        Ok(&__snap),
+        Ok(__snap),
     );
 
     mock.clear_devices();
@@ -1292,7 +1292,7 @@ fn publish_link_state_clears_details_on_disconnect() {
     let _ = state.publish_link_state(
         &mut BtSharedUpdate::default(),
         bt.active_device(),
-        Ok(&__snap),
+        Ok(__snap),
     );
     let details = state
         .last_details()

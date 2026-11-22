@@ -591,6 +591,28 @@ pub struct LinkSnapshot {
     pub pcms: Box<[BlueAlsaPcm]>,
 }
 
+/// Combined link + playback snapshot from a single `org.bluez` `GetManagedObjects`.
+///
+/// The screen monitor needs both the playback state and the link details every
+/// tick; fetching them separately issued two `GetManagedObjects` round-trips.
+/// This carries both from one snapshot, plus the resolved active-device address
+/// so the caller never needs a second `ActiveDevice` property read.
+///
+/// `playback` and `link` are deliberately independent: a `BlueALSA` failure
+/// degrades only `link` (the last published PCM rows are kept) while `playback`
+/// continues to update. Only a `BlueZ` failure fails both, since the object map
+/// is their shared source — that case is surfaced as the outer `Err`.
+#[derive(Debug)]
+pub struct LinkAndPlaybackSnapshot {
+    /// Arbitrated active device (`ActiveDevice` or the caller's fallback).
+    pub active_addr: Option<BtAddress>,
+    /// Playback state from the same object map, or `None` when no player exists.
+    pub playback: Option<BtPlaybackState>,
+    /// Link snapshot; `Err` only when `BlueALSA` failed after a successful
+    /// `BlueZ` query (the last published PCM state is kept by the caller).
+    pub link: Result<LinkSnapshot, BtError>,
+}
+
 #[derive(Debug)]
 pub(crate) enum BtErrorKind {
     Dbus { details: Box<str> },
@@ -2700,9 +2722,7 @@ impl BluetoothDeviceMock {
     /// reads the shared mock state once, deriving both the link snapshot and the
     /// playback state (with cached cover-art path) under a single lock, mirroring
     /// the single-`GetManagedObjects` production path.
-    fn link_and_playback_snapshot(
-        &self,
-    ) -> Result<(LinkSnapshot, Option<BtPlaybackState>), BtError> {
+    fn link_and_playback_snapshot(&self) -> Result<LinkAndPlaybackSnapshot, BtError> {
         let state = self
             .state
             .read()
@@ -2722,7 +2742,11 @@ impl BluetoothDeviceMock {
         {
             p.cover_art_path = cover_art_cached_path_in(&state.cache_dir, addr, handle);
         }
-        Ok((snapshot, pb))
+        Ok(LinkAndPlaybackSnapshot {
+            active_addr: state.active_device,
+            playback: pb,
+            link: Ok(snapshot),
+        })
     }
 
     fn get_adapter_mut<'a>(
@@ -3242,12 +3266,17 @@ impl BluetoothDevice {
     /// playback from the same snapshot), queries `BlueALSA`, and resolves cover art
     /// exactly like [`Self::playback_state`].
     ///
+    /// The resolved active-device address is returned alongside the data so the
+    /// caller never needs a second `ActiveDevice` property read.
+    ///
     /// # Errors
-    /// Returns [`BtError`] if D-Bus communication fails or a mock fault is injected.
+    /// Returns [`BtError`] only when the `BlueZ` object query itself fails; a
+    /// `BlueALSA` failure degrades only the [`LinkAndPlaybackSnapshot::link`]
+    /// field, leaving [`LinkAndPlaybackSnapshot::playback`] usable.
     pub fn link_and_playback_snapshot(
         &self,
         fallback: Option<BtAddress>,
-    ) -> Result<(LinkSnapshot, Option<BtPlaybackState>), BtError> {
+    ) -> Result<LinkAndPlaybackSnapshot, BtError> {
         match &*self.backend {
             Backend::Mock(mock) => mock.link_and_playback_snapshot(),
             Backend::Dbus(dbus) => {
@@ -3258,15 +3287,18 @@ impl BluetoothDevice {
                 let (adapter, devices, mut playback) =
                     dbus.query_bluez_with_preferred(None, preferred)?;
                 dbus.resolve_cover_art(&mut playback);
-                let pcms = dbus.query_bluealsa(&devices)?;
-                Ok((
-                    LinkSnapshot {
-                        adapter,
-                        devices,
-                        pcms,
-                    },
+                // BlueALSA is a separate service: its failure must not suppress
+                // playback updates. Degrade only the link snapshot.
+                let link = dbus.query_bluealsa(&devices).map(|pcms| LinkSnapshot {
+                    adapter,
+                    devices,
+                    pcms,
+                });
+                Ok(LinkAndPlaybackSnapshot {
+                    active_addr: preferred,
                     playback,
-                ))
+                    link,
+                })
             }
         }
     }

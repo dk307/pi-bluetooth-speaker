@@ -1450,13 +1450,14 @@ fn link_and_playback_snapshot_returns_both_from_mock() {
     let (device, mock) = BluetoothDevice::new_mocked();
     mock.set_player_status("playing");
 
-    let (snapshot, playback) = device.link_and_playback_snapshot(None).unwrap();
+    let combined = device.link_and_playback_snapshot(None).unwrap();
     // Mock initializes with one connected device and a running PCM.
+    let snapshot = combined.link.expect("mock link snapshot is Ok");
     assert_eq!(snapshot.devices.len(), 1);
     assert!(snapshot.devices.iter().any(|d| d.connected));
     assert!(snapshot.pcms.iter().any(|p| p.running));
     assert_eq!(
-        playback.as_ref().map(|p| p.status.as_ref()),
+        combined.playback.as_ref().map(|p| p.status.as_ref()),
         Some("playing")
     );
 

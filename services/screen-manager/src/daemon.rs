@@ -1124,15 +1124,17 @@ impl BtMonitorState {
     /// `snapshot` and `active_addr` are resolved once by the caller (via
     /// [`speaker_bluetooth::BluetoothDevice::link_and_playback_snapshot`], which
     /// shares one `org.bluez` `GetManagedObjects` with the playback state), so
-    /// this function issues no D-Bus calls of its own.
+    /// this function issues no D-Bus calls of its own. The snapshot is taken by
+    /// value: the caller moves its owned `LinkSnapshot` out of the combined
+    /// result, avoiding a per-tick deep copy of the device/PCM slices.
     pub fn publish_link_state(
         &mut self,
         update: &mut BtSharedUpdate,
         active_addr: Option<speaker_bluetooth::BtAddress>,
-        snapshot: Result<&speaker_bluetooth::LinkSnapshot, &speaker_bluetooth::BtError>,
+        snapshot: Result<speaker_bluetooth::LinkSnapshot, speaker_bluetooth::BtError>,
     ) -> Option<speaker_bluetooth::LinkSnapshot> {
         let snapshot = match snapshot {
-            Ok(s) => s.clone(),
+            Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to query Bluetooth link snapshot");
                 return None;
@@ -1853,23 +1855,28 @@ impl BtMonitorState {
         let mut update = BtSharedUpdate::default();
         // One `org.bluez` `GetManagedObjects` feeds both the playback state and
         // the link snapshot (and the arbitrated active device), so the whole
-        // tick issues a single bluez round-trip instead of two. Both publish
-        // helpers keep the last published state on error (logging at `warn`
-        // internally), so we pass the shared result by reference.
+        // tick issues a single bluez round-trip instead of two. The combined
+        // result carries separate `playback` and `link` fields so a BlueALSA
+        // failure degrades only the link/PCM rows while playback keeps updating.
         let fallback_addr = self.last_pb.as_ref().and_then(|p| p.device_address);
         let combined = bt.link_and_playback_snapshot(fallback_addr);
         // Publish the authoritative state; a missing playback result publishes
         // the connection placeholder so stale optimistic UI state is cleared.
         publish_playback_state(
-            combined.as_ref().map(|(_, pb)| pb),
+            combined.as_ref().map(|s| &s.playback),
             &mut update,
             &mut self.last_pb,
             &mut self.cover,
             &mut self.settle,
         );
-        let active_addr = bt.active_device();
-        let snapshot =
-            self.publish_link_state(&mut update, active_addr, combined.as_ref().map(|(s, _)| s));
+        // Move the owned link result out (no clone) and reuse the active-device
+        // address the combined snapshot already resolved — no second
+        // `ActiveDevice` read per tick.
+        let (active_addr, link_result) = match combined {
+            Ok(s) => (s.active_addr, s.link),
+            Err(e) => (self.last_active_device, Err(e)),
+        };
+        let snapshot = self.publish_link_state(&mut update, active_addr, link_result);
         let built = snapshot
             .as_ref()
             .map(|snapshot| self.build_device_rows(snapshot));
