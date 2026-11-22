@@ -15,8 +15,8 @@ pub const RADIAL_BUF_SIZE: u32 = 228;
 
 const RADIAL_BUF_USIZE: usize = RADIAL_BUF_SIZE as usize;
 const RADIAL_CENTER: f32 = 114.0;
-const R_INNER: f32 = 44.0;
-const MAX_BAR_LEN: f32 = 68.0;
+const R_INNER: f32 = 58.0;
+const MAX_BAR_LEN: f32 = 54.0;
 const R_OUTER: f32 = R_INNER + MAX_BAR_LEN;
 const MIN_BAR_LEN: f32 = 1.5;
 const PEAK_CAP_THICKNESS: f32 = 1.5;

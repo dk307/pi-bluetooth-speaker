@@ -34,8 +34,8 @@ export component VisualizerOverlay inherits Rectangle {
     if root.visualizer_mode == 0 : Rectangle {
         property <length> cx: 400px;
         property <length> cy: 240px;
-        property <length> r_inner: 88px;
-        property <length> max_bar_len: 136px;
+        property <length> r_inner: 116px;
+        property <length> max_bar_len: 108px;
         property <length> r_outer: r_inner + max_bar_len;
 
         width: 100%;
@@ -50,11 +50,11 @@ export component VisualizerOverlay inherits Rectangle {
             cache-rendering-hint: true;
 
             Rectangle {
-                x: cx - 156px;
-                y: cy - 156px;
-                width: 312px;
-                height: 312px;
-                border-radius: 156px;
+                x: cx - 170px;
+                y: cy - 170px;
+                width: 340px;
+                height: 340px;
+                border-radius: 170px;
                 border-width: 1px;
                 border-color: #161D2B;
                 background: transparent;
