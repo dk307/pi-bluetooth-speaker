@@ -386,6 +386,7 @@ export component MainWindow inherits Window {
         bg_column := VerticalLayout {
             width: 100%;
             height: 100%;
+            visible: !root.visualizer_active;
 
             // Top bar slot: 60px on Now Playing (`TopStatusBar`), scaled
             // `MaterialStyleMetrics.size_64` on screen tabs (`ScreenAppBar`).

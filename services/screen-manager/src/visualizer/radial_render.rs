@@ -9,17 +9,18 @@ use slint::{Rgba8Pixel, SharedPixelBuffer};
 
 use super::dsp_math::ERB_BAND_COUNT;
 
-/// Width and height in pixels of the square Radial FFT render buffer (`2 * 228`).
-pub const RADIAL_BUF_SIZE: u32 = 456;
+/// Width and height in pixels of the half-resolution Radial FFT render buffer (`2 * 114`),
+/// upscaled 2× by the GPU texture sampler to `456×456` to cut CPU & `glTexImage2D` bandwidth 4×.
+pub const RADIAL_BUF_SIZE: u32 = 228;
 
 const RADIAL_BUF_USIZE: usize = RADIAL_BUF_SIZE as usize;
-const RADIAL_CENTER: f32 = 228.0;
-const R_INNER: f32 = 88.0;
-const MAX_BAR_LEN: f32 = 136.0;
+const RADIAL_CENTER: f32 = 114.0;
+const R_INNER: f32 = 44.0;
+const MAX_BAR_LEN: f32 = 68.0;
 const R_OUTER: f32 = R_INNER + MAX_BAR_LEN;
-const MIN_BAR_LEN: f32 = 3.0;
-const PEAK_CAP_THICKNESS: f32 = 3.0;
-const SPOKE_HALF_WIDTH: f32 = 3.0;
+const MIN_BAR_LEN: f32 = 1.5;
+const PEAK_CAP_THICKNESS: f32 = 1.5;
+const SPOKE_HALF_WIDTH: f32 = 1.5;
 
 #[derive(Debug, Clone, Copy)]
 struct SpokePixel {
@@ -74,7 +75,6 @@ impl RadialFftRenderer {
         peak_rgb: [u8; 3],
     ) -> slint::Image {
         let bytes = self.pixels.make_mut_bytes();
-        bytes.fill(0);
 
         for (band_idx, spoke_pixels) in self.band_pixels.iter().enumerate() {
             let bar_len = (MAX_BAR_LEN * bars[band_idx].clamp(0.0, 1.0)).max(MIN_BAR_LEN);
@@ -90,6 +90,8 @@ impl RadialFftRenderer {
                     dst.copy_from_slice(&premul_rgba(peak_rgb, sp.alpha_u8));
                 } else if sp.radial_px <= bar_end {
                     dst.copy_from_slice(&sp.bar_premul);
+                } else {
+                    dst.fill(0);
                 }
             }
         }

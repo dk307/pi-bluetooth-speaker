@@ -342,11 +342,11 @@ fn visualizer_bridge_updates_24_band_vec_model() {
     bridge.apply_output(&jitter);
     assert!((bands.row_data(0).unwrap().value - 0.6).abs() < 1e-5);
 
-    // Radial FFT mode renders a 456x456 SharedPixelBuffer image with non-zero pixels.
+    // Radial FFT mode renders a 228x228 SharedPixelBuffer image with non-zero pixels.
     bridge.apply_for_mode(&window, VisualizerMode::RadialFft, &out);
     let radial_img = window.get_viz_radial_image();
-    assert_eq!(radial_img.size().width, 456);
-    assert_eq!(radial_img.size().height, 456);
+    assert_eq!(radial_img.size().width, 228);
+    assert_eq!(radial_img.size().height, 228);
     let rgba = radial_img.to_rgba8_premultiplied().expect("rgba8 buffer");
     assert!(rgba.as_bytes().iter().any(|&b| b != 0));
 }
