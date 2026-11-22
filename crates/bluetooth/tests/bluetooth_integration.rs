@@ -1461,13 +1461,38 @@ fn link_and_playback_snapshot_returns_both_from_mock() {
         Some("playing")
     );
 
-    // Fault injection propagates as a typed error.
+    // Fault injection propagates as a typed error (BlueZ failure fails both).
     mock.set_fault(Some("combined fault".into()));
     assert!(
         device
             .link_and_playback_snapshot(None)
             .unwrap_err()
             .is_mock_fault()
+    );
+
+    // Reset the BlueZ fault, then inject a BlueALSA-only fault: playback keeps
+    // updating while link degrades to Err (the failure-domain split).
+    mock.set_fault(None);
+    mock.set_bluealsa_fault(Some("bluealsa down".into()));
+    let combined = device.link_and_playback_snapshot(None).unwrap();
+    assert!(
+        combined.link.is_err(),
+        "BlueALSA fault must degrade only the link snapshot"
+    );
+    assert!(
+        combined.playback.is_some(),
+        "playback must keep updating when BlueALSA fails"
+    );
+
+    // `active_addr` is the arbitrated device only: the fallback (last-known
+    // playback device) must never promote a standby device to "Active".
+    mock.set_bluealsa_fault(None);
+    let fallback = speaker_bluetooth::BtAddress::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+    let combined = device.link_and_playback_snapshot(Some(fallback)).unwrap();
+    assert_ne!(
+        combined.active_addr,
+        Some(fallback),
+        "fallback must not leak into the arbitrated active_addr"
     );
 }
 

@@ -2200,6 +2200,10 @@ struct MockState {
     playback: Option<BtPlaybackState>,
     active_device: Option<BtAddress>,
     fault: Option<Box<str>>,
+    /// Simulates a BlueALSA-only failure: `link_and_playback_snapshot` degrades
+    /// only the `link` field while `playback` keeps updating, mirroring the
+    /// production failure-domain split. A `BlueZ` fault (`fault`) fails both.
+    bluealsa_fault: Option<Box<str>>,
     cache_dir: std::path::PathBuf,
     last_admin_action: Option<AdminAction>,
 }
@@ -2280,6 +2284,7 @@ impl BluetoothDeviceMock {
             }),
             active_device: None,
             fault: None,
+            bluealsa_fault: None,
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             last_admin_action: None,
         };
@@ -2371,6 +2376,22 @@ impl BluetoothDeviceMock {
     pub fn set_fault(&self, fault: Option<Box<str>>) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.fault = fault;
+
+        self.change_flag.notify();
+    }
+
+    /// Sets a simulated `BlueALSA`-only failure.
+    ///
+    /// Unlike [`Self::set_fault`] (which mirrors a `BlueZ` object-query failure
+    /// and fails the whole `link_and_playback_snapshot`), this degrades only the
+    /// `link` field while `playback` keeps updating — the failure-domain split
+    /// the production path guarantees.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_bluealsa_fault(&self, fault: Option<Box<str>>) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        state.bluealsa_fault = fault;
 
         self.change_flag.notify();
     }
@@ -2704,10 +2725,10 @@ impl BluetoothDeviceMock {
     }
 
     fn link_snapshot(&self) -> Result<LinkSnapshot, BtError> {
-        let state = self
-            .state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self.state.read().unwrap_or_else(|p| {
+            tracing::warn!(error = %p, "mock state lock poisoned; recovering");
+            p.into_inner()
+        });
         if let Some(ref fault) = state.fault {
             return Err(BtError::mock_fault(fault.clone()));
         }
@@ -2722,11 +2743,23 @@ impl BluetoothDeviceMock {
     /// reads the shared mock state once, deriving both the link snapshot and the
     /// playback state (with cached cover-art path) under a single lock, mirroring
     /// the single-`GetManagedObjects` production path.
-    fn link_and_playback_snapshot(&self) -> Result<LinkAndPlaybackSnapshot, BtError> {
-        let state = self
-            .state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ///
+    /// `fallback` mirrors production's `read_active_device().or(fallback)` active
+    /// -device arbitration for playback selection, but the returned `active_addr`
+    /// is the arbitrated device only (never the fallback): the Devices-screen
+    /// badge must not promote a standby device merely because it was the last
+    /// playing one. A `bluealsa_fault` degrades only `link` (leaving `playback`
+    /// usable), matching the production failure-domain split; a `fault` fails
+    /// the whole call like a `BlueZ` object-query failure.
+    fn link_and_playback_snapshot(
+        &self,
+        fallback: Option<BtAddress>,
+    ) -> Result<LinkAndPlaybackSnapshot, BtError> {
+        let _ = fallback; // playback selection only; active_addr excludes it
+        let state = self.state.read().unwrap_or_else(|p| {
+            tracing::warn!(error = %p, "mock state lock poisoned; recovering");
+            p.into_inner()
+        });
         if let Some(ref fault) = state.fault {
             return Err(BtError::mock_fault(fault.clone()));
         }
@@ -2742,10 +2775,14 @@ impl BluetoothDeviceMock {
         {
             p.cover_art_path = cover_art_cached_path_in(&state.cache_dir, addr, handle);
         }
+        let link = match state.bluealsa_fault {
+            Some(ref fault) => Err(BtError::mock_fault(fault.clone())),
+            None => Ok(snapshot),
+        };
         Ok(LinkAndPlaybackSnapshot {
             active_addr: state.active_device,
             playback: pb,
-            link: Ok(snapshot),
+            link,
         })
     }
 
@@ -3278,12 +3315,18 @@ impl BluetoothDevice {
         fallback: Option<BtAddress>,
     ) -> Result<LinkAndPlaybackSnapshot, BtError> {
         match &*self.backend {
-            Backend::Mock(mock) => mock.link_and_playback_snapshot(),
+            Backend::Mock(mock) => mock.link_and_playback_snapshot(fallback),
             Backend::Dbus(dbus) => {
                 // `query_bluez_with_preferred` resolves the arbitrated active
                 // device first, falling back to the caller's last-known device,
                 // matching `playback_state_for` semantics with one GMO round-trip.
-                let preferred = dbus.read_active_device().or(fallback);
+                // `active` (the arbitrated device, without fallback) is returned
+                // for the Devices-screen badge; `preferred` (with fallback) is
+                // only for playback selection — the badge must never promote a
+                // standby device to "Active" merely because it was the last
+                // playing one.
+                let active = dbus.read_active_device();
+                let preferred = active.or(fallback);
                 let (adapter, devices, mut playback) =
                     dbus.query_bluez_with_preferred(None, preferred)?;
                 dbus.resolve_cover_art(&mut playback);
@@ -3295,7 +3338,7 @@ impl BluetoothDevice {
                     pcms,
                 });
                 Ok(LinkAndPlaybackSnapshot {
-                    active_addr: preferred,
+                    active_addr: active,
                     playback,
                     link,
                 })
