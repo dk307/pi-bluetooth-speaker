@@ -1446,6 +1446,71 @@ fn bluetooth_mock_playback_state_mutation_and_faults() {
 }
 
 #[test]
+fn link_and_playback_snapshot_returns_both_from_mock() {
+    let (device, mock) = BluetoothDevice::new_mocked();
+    mock.set_player_status("playing");
+
+    let combined = device.link_and_playback_snapshot(None).unwrap();
+    // Mock initializes with one connected device and a running PCM.
+    let snapshot = combined.link.expect("mock link snapshot is Ok");
+    assert_eq!(snapshot.devices.len(), 1);
+    assert!(snapshot.devices.iter().any(|d| d.connected));
+    assert!(snapshot.pcms.iter().any(|p| p.running));
+    assert_eq!(
+        combined.playback.as_ref().map(|p| p.status.as_ref()),
+        Some("playing")
+    );
+
+    // Fault injection propagates as a typed error (BlueZ failure fails both).
+    mock.set_fault(Some("combined fault".into()));
+    assert!(
+        device
+            .link_and_playback_snapshot(None)
+            .unwrap_err()
+            .is_mock_fault()
+    );
+
+    // Reset the BlueZ fault, then inject a BlueALSA-only fault: playback keeps
+    // updating while link degrades to Err (the failure-domain split).
+    mock.set_fault(None);
+    mock.set_bluealsa_fault(Some("bluealsa down".into()));
+    let combined = device.link_and_playback_snapshot(None).unwrap();
+    assert!(
+        combined.link.is_err(),
+        "BlueALSA fault must degrade only the link snapshot"
+    );
+    assert!(
+        combined.playback.is_some(),
+        "playback must keep updating when BlueALSA fails"
+    );
+    // `link_snapshot()` must also propagate the BlueALSA fault as Err, matching
+    // the production D-Bus arm which calls `query_bluealsa(&devices)?`.
+    assert!(
+        device.link_snapshot().is_err(),
+        "link_snapshot() must propagate BlueALSA fault as Err"
+    );
+
+    // `active_addr` is the arbitrated device only: the fallback (last-known
+    // playback device) must never promote a standby device to "Active". Set an
+    // arbitrated active device on the mock and verify the fallback is ignored.
+    mock.set_bluealsa_fault(None);
+    let arbitrated = speaker_bluetooth::BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    let fallback = speaker_bluetooth::BtAddress::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+    mock.set_active_device(Some(arbitrated));
+    let combined = device.link_and_playback_snapshot(Some(fallback)).unwrap();
+    assert_eq!(
+        combined.active_addr,
+        Some(arbitrated),
+        "active_addr must be the arbitrated device, not the fallback"
+    );
+    assert_ne!(
+        combined.active_addr,
+        Some(fallback),
+        "fallback must not leak into the arbitrated active_addr"
+    );
+}
+
+#[test]
 fn parse_bluez_all_with_media_player() {
     let mut objects: ManagedObjects = HashMap::new();
 
