@@ -366,7 +366,10 @@ async fn run_mock_spectrum_loop(
         tokio::select! {
             () = wait_for_stop(&mut stop_rx) => break,
             _ = ticker.tick() => {
-                let (capture_rms, _) = mock.levels_snapshot();
+                let Some((capture_rms, _)) = mock.levels_snapshot() else {
+                    slot.publish(SpectrumSnapshot::silent());
+                    continue;
+                };
                 let avg_db = if capture_rms.is_empty() {
                     SILENCE_DBFS
                 } else {

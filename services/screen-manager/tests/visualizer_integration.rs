@@ -239,6 +239,21 @@ fn visualizer_default_mode_and_autostart_config_roundtrip() {
     shell.shutdown_visualizer();
 }
 
+fn poll_until_positive(ctrl: &mut VisualizerController, timeout: Duration) -> VisualizerOutput {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let out = ctrl.tick(Instant::now());
+        if out.spectrum_bars.iter().any(|&v| v > 0.0) {
+            return out;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for positive spectrum frame"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn visualizer_controller_lifecycle_and_mock_streaming() {
     let (dsp, _) = DspDevice::new_mocked();
@@ -246,8 +261,7 @@ fn visualizer_controller_lifecycle_and_mock_streaming() {
     assert_eq!(ctrl.active_mode(), None);
 
     ctrl.set_active_mode(Some(VisualizerMode::RadialFft), false);
-    std::thread::sleep(Duration::from_millis(60));
-    let radial_out = ctrl.tick(Instant::now());
+    let radial_out = poll_until_positive(&mut ctrl, Duration::from_secs(2));
     assert!(radial_out.spectrum_bars.iter().any(|&v| v > 0.0));
 
     // Switching to LinearSpectrum keeps the stream active seamlessly.
@@ -257,8 +271,7 @@ fn visualizer_controller_lifecycle_and_mock_streaming() {
 
     // Enabling 60 FPS restarts stream at 60 Hz cleanly.
     ctrl.set_active_mode(Some(VisualizerMode::RadialFft), true);
-    std::thread::sleep(Duration::from_millis(40));
-    let fast_out = ctrl.tick(Instant::now() + Duration::from_millis(16));
+    let fast_out = poll_until_positive(&mut ctrl, Duration::from_secs(2));
     assert!(fast_out.spectrum_bars.iter().any(|&v| v > 0.0));
 
     ctrl.set_active_mode(None, false);

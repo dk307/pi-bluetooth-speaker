@@ -931,7 +931,10 @@ async fn hardware_spectrum_stream_state_aware_resubscribe() {
     assert_eq!(snap.magnitudes, vec![-22.0, -18.0, -25.0]);
 
     sub.stop().await;
-    server_task.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), server_task)
+        .await
+        .expect("server_task timed out")
+        .unwrap();
 }
 
 async fn send_ws_json(
@@ -1040,5 +1043,8 @@ async fn hardware_spectrum_stream_processing_stopped_and_resubscribe() {
 
     assert_eq!(snap.frequencies.as_ref(), &[100.0, 2000.0]);
     sub.stop().await;
-    server_task.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), server_task)
+        .await
+        .expect("server_task timed out")
+        .unwrap();
 }

@@ -228,7 +228,6 @@ impl SpectrumBallistics {
     ) -> ([f32; ERB_BAND_COUNT], [f32; ERB_BAND_COUNT]) {
         let attack_alpha = smoothing_coeff(dt, SPECTRUM_ATTACK_TAU_SECS);
         let decay_alpha = smoothing_coeff(dt, SPECTRUM_DECAY_TAU_SECS);
-        let peak_drop = PEAK_DECAY_PER_SEC * dt.as_secs_f32().max(0.0);
 
         for (i, &raw_target) in targets.iter().enumerate().take(ERB_BAND_COUNT) {
             let target = if raw_target.is_finite() {
@@ -253,7 +252,9 @@ impl SpectrumBallistics {
             {
                 self.peak_hold_remaining[i] = rem;
             } else {
+                let excess_dt = dt.saturating_sub(self.peak_hold_remaining[i]);
                 self.peak_hold_remaining[i] = Duration::ZERO;
+                let peak_drop = PEAK_DECAY_PER_SEC * excess_dt.as_secs_f32().max(0.0);
                 self.peaks[i] = (self.peaks[i] - peak_drop).max(next_bar);
             }
         }
