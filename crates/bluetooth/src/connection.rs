@@ -3308,9 +3308,9 @@ impl BluetoothDevice {
     /// The screen monitor needs both link details and playback state every tick;
     /// fetching them separately issued two `GetManagedObjects` calls (each
     /// ~28 KiB on a busy adapter). This fetches the object map once via
-    /// [`Self::query_bluez`] (which already parses adapter, devices, and
-    /// playback from the same snapshot), queries `BlueALSA`, and resolves cover art
-    /// exactly like [`Self::playback_state`].
+    /// [`Self::query_bluez_with_preferred`] (which already parses adapter,
+    /// devices, and playback from the same snapshot), queries `BlueALSA`, and
+    /// resolves cover art exactly like [`Self::playback_state`].
     ///
     /// The resolved active-device address is returned alongside the data so the
     /// caller never needs a second `ActiveDevice` property read.

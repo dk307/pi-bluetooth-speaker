@@ -1483,6 +1483,12 @@ fn link_and_playback_snapshot_returns_both_from_mock() {
         combined.playback.is_some(),
         "playback must keep updating when BlueALSA fails"
     );
+    // `link_snapshot()` must also propagate the BlueALSA fault as Err, matching
+    // the production D-Bus arm which calls `query_bluealsa(&devices)?`.
+    assert!(
+        device.link_snapshot().is_err(),
+        "link_snapshot() must propagate BlueALSA fault as Err"
+    );
 
     // `active_addr` is the arbitrated device only: the fallback (last-known
     // playback device) must never promote a standby device to "Active". Set an
