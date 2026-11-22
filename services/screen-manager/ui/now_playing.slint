@@ -291,6 +291,7 @@ export component NowPlayingView inherits Rectangle {
     callback next_track();
     callback previous_track();
     callback settings_clicked();
+    callback visualizer_clicked();
 
     // Pre-warm the glyph atlas on the first frame for tabular playback timer
     // digits so 1 Hz mm:ss updates never trigger cold glyph rasterization.
@@ -718,6 +719,21 @@ export component NowPlayingView inherits Rectangle {
                     }
                 }
         }
+    }
+
+    // Dedicated Visualizer launch button anchored just left of Settings.
+    visualizer_btn := OutlineIconButton {
+        x: settings_btn.x - self.width - 12px;
+        y: settings_btn.y;
+        icon: @image-url("../../../assets/icons/equalizer.svg");
+        tooltip: "Visualizer";
+        button_size: 56px * TouchScale.widget_scale;
+        icon_size: 28px * TouchScale.widget_scale;
+        icon_color: MaterialPalette.primary;
+        background_color: MaterialPalette.surface;
+        border_color: MaterialPalette.outline_variant;
+        cache-rendering-hint: true;
+        clicked => { root.visualizer_clicked(); }
     }
 
     // Dedicated Settings button anchored to the right-bottom corner. Uses the

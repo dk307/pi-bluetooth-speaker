@@ -32,7 +32,7 @@ use crate::config::{
     MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
     MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE, MIN_VOLUME_HUD_TIMEOUT_MS,
     MIN_VOLUME_STEP_PERCENT, ManualBrightnessPercent, MarqueeFps, TitleDisplayMode,
-    VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+    VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent, VuSkinName, VuZeroDbfs,
 };
 use crate::screen_brightness::{
     BRIGHTNESS_SETTLE_WINDOW, BrightnessCommand, BrightnessCommandQueue, BrightnessState,
@@ -40,12 +40,14 @@ use crate::screen_brightness::{
 use crate::settings_catalog::{
     SETTINGS_CATALOG, SettingControl, SettingId, SettingTier, apply_step, apply_toggle, row_state,
 };
+use crate::visualizer::{VisualizerController, VisualizerMode};
 
 use super::backdrop::OVERLAY_TOP_INSET;
 use super::generated::{
     AppTheme, MainWindow, MarqueeCompose, SettingControlKind, SettingRowItem, TouchScale,
 };
 use super::theme::ThemePreset;
+use super::visualizer_bridge::VisualizerUiState;
 
 /// Tracks cumulative [`speaker_hardware::EncoderStatus`] counters and translates
 /// quadrature detents and push-switch presses into UI volume and mute actions.
@@ -278,6 +280,11 @@ pub struct AppShell {
     device_commands: Rc<RefCell<Option<speaker_bluetooth::DeviceCommandQueue>>>,
     bt_devices: Rc<RefCell<crate::ui::BtDevicesController>>,
     last_toggle: Rc<Cell<std::time::Instant>>,
+    visualizer: Rc<VisualizerUiState>,
+    visualizer_ctrl: Rc<RefCell<Option<VisualizerController>>>,
+    visualizer_timer: Rc<slint::Timer>,
+    was_playing: Cell<bool>,
+    was_bt_connected: Cell<bool>,
 }
 
 impl Debug for AppShell {
@@ -324,6 +331,9 @@ impl AppShell {
         window.set_basic_settings(ModelRc::from(Rc::clone(&settings_models.basic)));
         window.set_advanced_settings(ModelRc::from(Rc::clone(&settings_models.advanced)));
 
+        let visualizer = Rc::new(VisualizerUiState::new());
+        visualizer.bind_to_window(&window);
+
         let shell = Self {
             window,
             settings_models,
@@ -341,6 +351,11 @@ impl AppShell {
                     .checked_sub(std::time::Duration::from_secs(1))
                     .unwrap_or_else(std::time::Instant::now),
             )),
+            visualizer,
+            visualizer_ctrl: Rc::new(RefCell::new(None)),
+            visualizer_timer: Rc::new(slint::Timer::default()),
+            was_playing: Cell::new(false),
+            was_bt_connected: Cell::new(false),
         };
 
         // One-shot seed, not runtime config: the blur pipeline crops at
@@ -388,6 +403,9 @@ impl AppShell {
         ));
         window.set_auto_brightness_enabled(config.auto_brightness_enabled);
         window.set_brightness_value(f32::from(config.brightness_manual_percent.value()));
+        window.set_viz_vu_skin(config.vu_skin.as_str().into());
+        window.set_viz_zero_dbfs(config.vu_zero_dbfs.value());
+        window.set_viz_spectrum_led_mask(config.spectrum_led_mask);
     }
 
     fn build_setting_rows(config: &CoreConfig, tier: SettingTier) -> Vec<SettingRowItem> {
@@ -756,6 +774,9 @@ impl AppShell {
                 .unwrap_or_default(),
             auto_brightness_enabled: window.get_auto_brightness_enabled(),
             brightness_manual_percent: Self::brightness_percent_from_window(window),
+            vu_skin: VuSkinName::try_from(window.get_viz_vu_skin().as_str()).unwrap_or_default(),
+            vu_zero_dbfs: VuZeroDbfs::new(window.get_viz_zero_dbfs()),
+            spectrum_led_mask: window.get_viz_spectrum_led_mask(),
         }
     }
 
@@ -1254,17 +1275,103 @@ impl AppShell {
         }
     }
 
-    /// Updates the mini peak meter visualization ratios (0.0 to 1.0).
-    pub fn set_peak_levels(&self, left: f32, right: f32) {
-        let clamp_ratio = |val: f32| {
-            if val.is_nan() {
-                0.0
-            } else {
-                val.clamp(0.0, 1.0)
-            }
-        };
-        self.window.set_left_peak_ratio(clamp_ratio(left));
-        self.window.set_right_peak_ratio(clamp_ratio(right));
+    /// Wires the `CamillaDSP` visualizer worker controller and starts/stops its 33 Hz
+    /// render timer in lockstep with `visualizer_active`.
+    pub fn wire_visualizer(&self, dsp: speaker_dsp::DspDevice) {
+        let ctrl = VisualizerController::new(dsp, self.window.get_viz_zero_dbfs() as f32);
+        *self.visualizer_ctrl.borrow_mut() = Some(ctrl);
+        if self.window.get_visualizer_active() {
+            self.open_visualizer();
+        }
+    }
+
+    /// Shuts down the visualizer telemetry worker thread cleanly.
+    pub fn shutdown_visualizer(&self) {
+        self.visualizer_timer.stop();
+        if let Some(mut ctrl) = self.visualizer_ctrl.borrow_mut().take() {
+            ctrl.shutdown();
+        }
+    }
+
+    /// Returns `true` while the full-screen visualizer overlay is open.
+    #[must_use]
+    pub fn is_visualizer_active(&self) -> bool {
+        self.window.get_visualizer_active()
+    }
+
+    /// Opens the full-screen visualizer overlay and starts streaming telemetry.
+    pub fn open_visualizer(&self) {
+        Self::activate_visualizer_on(
+            &self.window,
+            &self.visualizer,
+            &self.visualizer_ctrl,
+            &self.visualizer_timer,
+        );
+    }
+
+    /// Closes the full-screen visualizer overlay and unsubscribes from `CamillaDSP`.
+    pub fn close_visualizer(&self) {
+        Self::deactivate_visualizer_on(&self.window, &self.visualizer_ctrl, &self.visualizer_timer);
+    }
+
+    fn activate_visualizer_on(
+        window: &MainWindow,
+        visualizer: &Rc<VisualizerUiState>,
+        visualizer_ctrl: &Rc<RefCell<Option<VisualizerController>>>,
+        visualizer_timer: &Rc<slint::Timer>,
+    ) {
+        window.set_visualizer_active(true);
+        let skin_name = window.get_viz_vu_skin();
+        visualizer.ensure_skin_loaded(window, skin_name.as_str());
+
+        let mode = VisualizerMode::from_index(window.get_visualizer_mode());
+        if let Some(ctrl) = visualizer_ctrl.borrow_mut().as_mut() {
+            ctrl.set_zero_vu_dbfs(window.get_viz_zero_dbfs() as f32);
+            ctrl.set_active_mode(Some(mode));
+        }
+
+        let win_weak = window.as_weak();
+        let viz_state = Rc::clone(visualizer);
+        let viz_ctrl = Rc::clone(visualizer_ctrl);
+        let timer_ref = Rc::clone(visualizer_timer);
+        visualizer_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(30),
+            move || {
+                let Some(w) = win_weak.upgrade() else {
+                    timer_ref.stop();
+                    return;
+                };
+                if !w.get_visualizer_active() {
+                    timer_ref.stop();
+                    return;
+                }
+                let m = VisualizerMode::from_index(w.get_visualizer_mode());
+                let out = if let Some(ctrl) = viz_ctrl.borrow_mut().as_mut() {
+                    ctrl.set_zero_vu_dbfs(w.get_viz_zero_dbfs() as f32);
+                    if ctrl.active_mode() != Some(m) {
+                        ctrl.set_active_mode(Some(m));
+                    }
+                    ctrl.tick(Instant::now())
+                } else {
+                    return;
+                };
+                viz_state.apply_output(&w, m, &out);
+            },
+        );
+    }
+
+    fn deactivate_visualizer_on(
+        window: &MainWindow,
+        visualizer_ctrl: &Rc<RefCell<Option<VisualizerController>>>,
+        visualizer_timer: &Rc<slint::Timer>,
+    ) {
+        window.set_active_tab(0);
+        window.set_visualizer_active(false);
+        visualizer_timer.stop();
+        if let Some(ctrl) = visualizer_ctrl.borrow_mut().as_mut() {
+            ctrl.set_active_mode(None);
+        }
     }
 
     /// Sets whether cover art is present.
@@ -1284,6 +1391,10 @@ impl AppShell {
     /// Applies state from a [`speaker_bluetooth::BtPlaybackState`] point-in-time snapshot.
     pub fn apply_bluetooth_playback(&self, playback: &speaker_bluetooth::BtPlaybackState) {
         Self::apply_playback_to_window(&self.window, playback);
+        let is_playing = playback.is_playing();
+        if self.was_playing.replace(is_playing) && !is_playing && self.is_visualizer_active() {
+            self.close_visualizer();
+        }
     }
 
     fn refresh_marquee_strip(w: &MainWindow) {
@@ -1416,6 +1527,9 @@ impl AppShell {
         if w.get_bt_connected() != connected {
             w.set_bt_connected(connected);
         }
+        if self.was_bt_connected.replace(connected) && !connected && self.is_visualizer_active() {
+            self.close_visualizer();
+        }
 
         if update.action_settled || update.toast.is_some() {
             w.set_bt_pending_address(String::new().into());
@@ -1527,10 +1641,56 @@ impl AppShell {
 
     fn setup_callbacks(&self) {
         self.setup_navigation_callbacks();
+        self.setup_visualizer_callbacks();
         self.setup_bt_devices_callbacks();
         self.setup_bt_device_dialog_callbacks();
         self.setup_transport_callbacks();
         self.setup_overlay_backdrop_callback();
+    }
+
+    fn setup_visualizer_callbacks(&self) {
+        let win = self.window.as_weak();
+        let viz_state = Rc::clone(&self.visualizer);
+        let viz_ctrl = Rc::clone(&self.visualizer_ctrl);
+        let viz_timer = Rc::clone(&self.visualizer_timer);
+        self.window.on_open_visualizer(move || {
+            if let Some(w) = win.upgrade() {
+                Self::activate_visualizer_on(&w, &viz_state, &viz_ctrl, &viz_timer);
+            }
+        });
+
+        let viz_ctrl = Rc::clone(&self.visualizer_ctrl);
+        let viz_timer = Rc::clone(&self.visualizer_timer);
+        let win = self.window.as_weak();
+        self.window.on_close_visualizer(move || {
+            if let Some(w) = win.upgrade() {
+                Self::deactivate_visualizer_on(&w, &viz_ctrl, &viz_timer);
+            }
+        });
+
+        let win = self.window.as_weak();
+        let viz_ctrl = Rc::clone(&self.visualizer_ctrl);
+        self.window.on_next_visualizer(move || {
+            if let Some(w) = win.upgrade() {
+                let next = VisualizerMode::from_index(w.get_visualizer_mode()).next();
+                w.set_visualizer_mode(next as i32);
+                if let Some(ctrl) = viz_ctrl.borrow_mut().as_mut() {
+                    ctrl.set_active_mode(Some(next));
+                }
+            }
+        });
+
+        let win = self.window.as_weak();
+        let viz_ctrl = Rc::clone(&self.visualizer_ctrl);
+        self.window.on_prev_visualizer(move || {
+            if let Some(w) = win.upgrade() {
+                let prev = VisualizerMode::from_index(w.get_visualizer_mode()).prev();
+                w.set_visualizer_mode(prev as i32);
+                if let Some(ctrl) = viz_ctrl.borrow_mut().as_mut() {
+                    ctrl.set_active_mode(Some(prev));
+                }
+            }
+        });
     }
 
     fn setup_overlay_backdrop_callback(&self) {

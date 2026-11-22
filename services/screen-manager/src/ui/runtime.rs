@@ -254,6 +254,7 @@ struct Session {
     amp_worker: std::io::Result<std::thread::JoinHandle<()>>,
     brightness_worker: std::io::Result<std::thread::JoinHandle<()>>,
     bt_worker: Option<std::io::Result<std::thread::JoinHandle<()>>>,
+    shell: Rc<crate::ui::AppShell>,
     _sync_timer: Timer,
 }
 
@@ -279,6 +280,12 @@ impl Session {
             device_commands,
         } = init;
         let shell = Rc::new(shell);
+        let dsp = if mocked {
+            speaker_dsp::DspDevice::new_mocked().0
+        } else {
+            speaker_dsp::DspDevice::new()
+        };
+        shell.wire_visualizer(dsp);
         let bg_running = Arc::new(AtomicBool::new(true));
         let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
 
@@ -376,6 +383,7 @@ impl Session {
             amp_worker,
             brightness_worker,
             bt_worker,
+            shell,
             _sync_timer: sync_timer,
         }
     }
@@ -384,6 +392,7 @@ impl Session {
     /// any worker panic (M-PANIC-ON-BUG) instead of swallowing it.
     fn shutdown(self) {
         self.bg_running.store(false, Ordering::Relaxed);
+        self.shell.shutdown_visualizer();
         daemon::join_amp_volume_worker(self.amp_worker);
         daemon::join_brightness_worker(self.brightness_worker);
         match self.bt_worker {

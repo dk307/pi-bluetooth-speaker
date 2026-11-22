@@ -421,6 +421,7 @@ pub fn init_shell_with_config(
         // bootstrap lazily, so availability is unknowable at init: the
         // screen opens unconditionally and renders its empty/no-adapter
         // state until the worker publishes rows.
+        Some(1) => shell.open_visualizer(),
         Some(2) => shell.window().invoke_open_bt_devices(),
         Some(tb) => shell.set_tab(tb),
         None => {}

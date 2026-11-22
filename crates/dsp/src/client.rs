@@ -974,6 +974,13 @@ impl DspDeviceMock {
         })
     }
 
+    pub(crate) fn levels_snapshot(&self) -> (Vec<f32>, Vec<f32>) {
+        self.inner
+            .lock()
+            .map(|g| (g.capture_rms.clone(), g.capture_peaks.clone()))
+            .unwrap_or_default()
+    }
+
     /// Returns the most recent YAML configuration uploaded via `set_config` on this mock.
     #[must_use]
     pub fn last_set_config(&self) -> Option<String> {
@@ -1408,7 +1415,21 @@ impl DspDevice {
         .await
     }
 
-    async fn connect_ws(
+    pub(crate) fn is_mock(&self) -> Option<&DspDeviceMock> {
+        match &*self.backend {
+            Backend::Mock { mock, .. } => Some(mock),
+            Backend::Hardware { .. } => None,
+        }
+    }
+
+    pub(crate) fn hardware_endpoint(&self) -> Option<(&DspHost, DspPort)> {
+        match &*self.backend {
+            Backend::Hardware { host, port } => Some((host, *port)),
+            Backend::Mock { .. } => None,
+        }
+    }
+
+    pub(crate) async fn connect_ws(
         host: &DspHost,
         port: DspPort,
     ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, DspError> {
@@ -1430,7 +1451,7 @@ impl DspDevice {
         Ok(ws)
     }
 
-    async fn send_ws_command<S>(ws: &mut S, cmd: &WsCommand) -> Result<WsReply, DspError>
+    pub(crate) async fn send_ws_command<S>(ws: &mut S, cmd: &WsCommand) -> Result<WsReply, DspError>
     where
         S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error>
             + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
@@ -1781,11 +1802,11 @@ fn extract_state_event(reply: WsReply) -> Option<ProcessingState> {
     }
 }
 
-fn unexpected_reply(cmd: &str, reply: &WsReply) -> DspError {
+pub(crate) fn unexpected_reply(cmd: &str, reply: &WsReply) -> DspError {
     DspError::protocol_error(format!("unexpected reply '{}' for '{cmd}'", reply.name()))
 }
 
-fn check_ws_result(cmd: &str, result: WsResult) -> Result<(), DspError> {
+pub(crate) fn check_ws_result(cmd: &str, result: WsResult) -> Result<(), DspError> {
     match result {
         WsResult::Ok => Ok(()),
         WsResult::ConfigValidationError { message }

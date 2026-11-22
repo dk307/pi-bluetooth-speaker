@@ -44,12 +44,11 @@ export component MainViewport inherits Rectangle {
     in-out property <bool> has_cover_art: false;
     in-out property <image> cover_image;
     in property <string> artist_marquee_text;
-    in-out property <float> left_peak_ratio: 0.0;
-    in-out property <float> right_peak_ratio: 0.0;
     in-out property <string> track_or_device: "Waiting for Connection...";
     in property <string> stream_codec: "aptX-HD";
 
     callback settings_clicked();
+    callback visualizer_clicked();
     callback select_tab(int);
     callback open_bluetooth_devices();
     callback toggle_play_pause();
@@ -109,34 +108,12 @@ export component MainViewport inherits Rectangle {
                 next_track => { root.next_track(); }
                 previous_track => { root.previous_track(); }
                 settings_clicked => { root.settings_clicked(); }
+                visualizer_clicked => { root.visualizer_clicked(); }
             }
         }
     }
 
-    // Tab 1: VU Meter (Authentic PeppyMeter Skin Picture)
-    if root.active_tab == 1 : VerticalLayout {
-        padding: 8px;
-
-        Rectangle {
-            background: MaterialPalette.surface;
-            border-radius: 16px;
-            border-width: 1px;
-            border-color: MaterialPalette.outline_variant;
-            clip: true;
-
-            // Full-screen background image
-            Image {
-                width: 100%;
-                height: 100%;
-                source: AppTheme.active_preset == 0 ? @image-url("../../../assets/skins/800x480/blue-bgr.png") :
-                        AppTheme.active_preset == 1 ? @image-url("../../../assets/skins/800x480/gold-bgr.png") :
-                        AppTheme.active_preset == 2 ? @image-url("../../../assets/skins/800x480/rainbow-bgr.png") :
-                        AppTheme.active_preset == 3 ? @image-url("../../../assets/skins/800x480/black-white-bgr.png") :
-                        @image-url("../../../assets/skins/800x480/vintage-bgr.png");
-                image-fit: contain;
-            }
-        }
-    }
+    // Tab 1 is reserved for full-screen VisualizerOverlay in MainWindow.
 
     // Tab 3: CD Player
     if root.active_tab == 3 : VerticalLayout {
@@ -203,7 +180,7 @@ export component MainViewport inherits Rectangle {
             basic_settings: root.basic_settings;
             advanced_settings: root.advanced_settings;
             bluetooth_clicked => { root.open_bluetooth_devices(); }
-            vu_meter_clicked => { root.select_tab(1); }
+            vu_meter_clicked => { root.visualizer_clicked(); }
             dsp_clicked => { root.select_tab(4); }
             cd_clicked => { root.select_tab(3); }
             select_theme(idx) => { root.select_theme(idx); }
