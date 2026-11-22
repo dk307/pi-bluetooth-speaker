@@ -1485,10 +1485,18 @@ fn link_and_playback_snapshot_returns_both_from_mock() {
     );
 
     // `active_addr` is the arbitrated device only: the fallback (last-known
-    // playback device) must never promote a standby device to "Active".
+    // playback device) must never promote a standby device to "Active". Set an
+    // arbitrated active device on the mock and verify the fallback is ignored.
     mock.set_bluealsa_fault(None);
+    let arbitrated = speaker_bluetooth::BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
     let fallback = speaker_bluetooth::BtAddress::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+    mock.set_active_device(Some(arbitrated));
     let combined = device.link_and_playback_snapshot(Some(fallback)).unwrap();
+    assert_eq!(
+        combined.active_addr,
+        Some(arbitrated),
+        "active_addr must be the arbitrated device, not the fallback"
+    );
     assert_ne!(
         combined.active_addr,
         Some(fallback),

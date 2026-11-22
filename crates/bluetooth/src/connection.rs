@@ -2736,6 +2736,12 @@ impl BluetoothDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(BtError::mock_fault(fault.clone()));
         }
+        // Mirror production's `link_snapshot()` D-Bus arm, which propagates
+        // BlueALSA query failures as `Err`. Without this check a test injecting
+        // `set_bluealsa_fault` would pass on the mock but fail on real hardware.
+        if let Some(ref fault) = state.bluealsa_fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
         Ok(LinkSnapshot {
             adapter: state.adapter.clone(),
             devices: state.devices.clone().into_boxed_slice(),
