@@ -39,15 +39,21 @@ impl<T> LatestFrameSlot<T> {
 
     /// Publishes a new frame, overwriting any unread previous frame.
     pub fn publish(&self, value: T) {
-        if let Ok(mut guard) = self.inner.lock() {
-            *guard = Some(value);
-        }
+        let mut guard = self.inner.lock().unwrap_or_else(|p| {
+            tracing::warn!("LatestFrameSlot mutex poisoned during publish; recovering");
+            p.into_inner()
+        });
+        *guard = Some(value);
     }
 
     /// Takes the latest frame if one has been published since the last call.
     #[must_use]
     pub fn take(&self) -> Option<T> {
-        self.inner.lock().ok().and_then(|mut g| g.take())
+        let mut guard = self.inner.lock().unwrap_or_else(|p| {
+            tracing::warn!("LatestFrameSlot mutex poisoned during take; recovering");
+            p.into_inner()
+        });
+        guard.take()
     }
 }
 
@@ -105,8 +111,11 @@ impl VisualizerSubscription {
     /// Explicitly stops the subscription and awaits clean WebSocket teardown.
     pub async fn stop(mut self) {
         let _ = self.stop_tx.send(true);
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
+        if let Some(task) = self.task.take()
+            && let Err(err) = task.await
+            && err.is_panic()
+        {
+            std::panic::resume_unwind(err.into_panic());
         }
     }
 }
@@ -188,11 +197,15 @@ async fn run_resilient_spectrum_loop(
         if *stop_rx.borrow() {
             break;
         }
-        let Ok(mut state_rx) = dev.subscribe_state().await else {
-            slot.publish(SpectrumSnapshot::silent());
-            tokio::select! {
-                () = wait_for_stop(&mut stop_rx) => break,
-                () = tokio::time::sleep(Duration::from_millis(300)) => continue,
+        let mut state_rx = match dev.subscribe_state().await {
+            Ok(rx) => rx,
+            Err(err) => {
+                tracing::warn!(error = %err, "Failed to subscribe to DSP state for spectrum; retrying");
+                slot.publish(SpectrumSnapshot::silent());
+                tokio::select! {
+                    () = wait_for_stop(&mut stop_rx) => break,
+                    () = tokio::time::sleep(Duration::from_millis(300)) => continue,
+                }
             }
         };
 
@@ -205,7 +218,7 @@ async fn run_resilient_spectrum_loop(
                     is_running = wait_for_running(&mut state_rx, &slot, &mut stop_rx).await;
                 }
                 Err(err) => {
-                    tracing::debug!(error = %err, "Spectrum stream disconnected; resetting state watch");
+                    tracing::warn!(error = %err, "Spectrum stream disconnected; resetting state watch");
                     slot.publish(SpectrumSnapshot::silent());
                     tokio::select! {
                         () = wait_for_stop(&mut stop_rx) => return,

@@ -169,6 +169,11 @@ fn settings_catalog_spectrum_style_and_fps_toggles() {
     let _ = VisualizerAutoStartSecs::try_from(0).unwrap_err();
     let _ = VisualizerAutoStartSecs::try_from(61).unwrap_err();
     assert_eq!(VisualizerAutoStartSecs::try_from(15).unwrap().value(), 15);
+    assert_eq!(DefaultVisualizerMode::RadialFft.slug(), "radial_fft");
+    assert_eq!(
+        DefaultVisualizerMode::LinearSpectrum.slug(),
+        "linear_spectrum"
+    );
 }
 
 #[test]
@@ -209,6 +214,27 @@ fn visualizer_default_mode_and_autostart_config_roundtrip() {
         ..BtPlaybackState::default()
     });
     assert!(!shell.is_visualizer_active());
+
+    // Enabling auto-start with a 1s delay opens the visualizer when playback transitions to playing.
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        status: "paused".into(),
+        ..BtPlaybackState::default()
+    });
+    shell.apply_config(&CoreConfig {
+        visualizer_auto_start: true,
+        visualizer_auto_start_secs: VisualizerAutoStartSecs::new(1),
+        default_visualizer: DefaultVisualizerMode::LinearSpectrum,
+        ..CoreConfig::default()
+    });
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert!(!shell.is_visualizer_active());
+    std::thread::sleep(Duration::from_millis(1050));
+    slint::platform::update_timers_and_animations();
+    assert!(shell.is_visualizer_active());
+    assert_eq!(shell.window().get_visualizer_mode(), 1);
 
     shell.shutdown_visualizer();
 }
@@ -277,12 +303,13 @@ fn visualizer_ui_framebuffer_rendering_and_navigation() {
     });
     assert!(!shell.is_visualizer_active());
 
-    // Opening from Settings (tab 5) closes cleanly when BT devices opens
+    // Opening from Settings (tab 5) preserves active_tab=5 when closed or when BT devices opens
     shell.set_tab(5);
     shell.open_visualizer();
     assert!(shell.is_visualizer_active());
     shell.window().invoke_open_bt_devices();
     assert!(!shell.is_visualizer_active());
+    assert_eq!(shell.current_tab(), 5);
 
     shell.shutdown_visualizer();
 }
@@ -306,4 +333,20 @@ fn visualizer_bridge_updates_24_band_vec_model() {
     let first = bands.row_data(0).unwrap();
     assert!((first.value - 0.6).abs() < 1e-5);
     assert!((first.peak - 0.8).abs() < 1e-5);
+
+    // Sub-pixel change (< 0.003) is skipped to avoid unnecessary VecModel dirtying.
+    let jitter = VisualizerOutput {
+        spectrum_bars: [0.601; ERB_BAND_COUNT],
+        spectrum_peaks: [0.801; ERB_BAND_COUNT],
+    };
+    bridge.apply_output(&jitter);
+    assert!((bands.row_data(0).unwrap().value - 0.6).abs() < 1e-5);
+
+    // Radial FFT mode renders a 456x456 SharedPixelBuffer image with non-zero pixels.
+    bridge.apply_for_mode(&window, VisualizerMode::RadialFft, &out);
+    let radial_img = window.get_viz_radial_image();
+    assert_eq!(radial_img.size().width, 456);
+    assert_eq!(radial_img.size().height, 456);
+    let rgba = radial_img.to_rgba8_premultiplied().expect("rgba8 buffer");
+    assert!(rgba.as_bytes().iter().any(|&b| b != 0));
 }

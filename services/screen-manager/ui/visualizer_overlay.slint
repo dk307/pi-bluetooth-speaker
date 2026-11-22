@@ -21,6 +21,7 @@ export component VisualizerOverlay inherits Rectangle {
     // 0 = Radial FFT, 1 = 24-Band ERB Linear Spectrum
     in property <int> visualizer_mode: 0;
     in property <[SpectrumBandItem]> spectrum_bands;
+    in property <image> radial_image;
     in property <bool> spectrum_led_mask: true;
     in property <bool> has_cover_art: false;
     in property <image> cover_image;
@@ -29,7 +30,7 @@ export component VisualizerOverlay inherits Rectangle {
     callback next_visualizer();
     callback prev_visualizer();
 
-    // Mode 0: Bilateral 48-Bar Radial FFT Visualizer
+    // Mode 0: Bilateral 48-Bar Radial FFT Visualizer (pre-rendered SharedPixelBuffer)
     if root.visualizer_mode == 0 : Rectangle {
         property <length> cx: 400px;
         property <length> cy: 240px;
@@ -40,7 +41,6 @@ export component VisualizerOverlay inherits Rectangle {
         width: 100%;
         height: 100%;
         background: #090B10;
-        clip: true;
 
         // Subtle static concentric reference rings (cached once into GPU FBO)
         Rectangle {
@@ -72,54 +72,17 @@ export component VisualizerOverlay inherits Rectangle {
             }
         }
 
-        // 48 radial bars (24 ERB bands mirrored bilaterally left & right)
-        for side in [-1, 1] : Rectangle {
-            width: 100%;
-            height: 100%;
-            background: transparent;
-
-            for band[idx] in root.spectrum_bands : Rectangle {
-                property <length> bar_len: Math.max(3px, max_bar_len * Math.clamp(band.value, 0.0, 1.0));
-                property <length> peak_dist: Math.max(3px, max_bar_len * Math.clamp(band.peak, 0.0, 1.0));
-                property <angle> spoke_angle: side * (idx + 0.5) * 7.5deg;
-
-                x: cx - 4px;
-                y: cy - r_outer;
-                width: 8px;
-                height: r_outer;
-                background: transparent;
-                transform-rotation: spoke_angle;
-                transform-origin: { x: 4px, y: r_outer };
-
-                // Radial bar extending outward from central ring
-                Rectangle {
-                    x: 1px;
-                    y: r_outer - r_inner - bar_len;
-                    width: 6px;
-                    height: bar_len;
-                    border-radius: 0px;
-                    background: @linear-gradient(
-                        180deg,
-                        #FF5252 0%,
-                        #FFB300 28%,
-                        #26E6A4 68%,
-                        #00B8D4 100%
-                    );
-                }
-
-                // 3 px radial peak-hold cap
-                Rectangle {
-                    x: 1px;
-                    y: Math.max(0px, r_outer - r_inner - peak_dist - 3px);
-                    width: 6px;
-                    height: 3px;
-                    border-radius: 0px;
-                    background: MaterialPalette.primary;
-                }
-            }
+        // Single pre-rendered 48-spoke Radial FFT buffer (456×456 centered on 400×240)
+        Image {
+            x: cx - 228px;
+            y: cy - 228px;
+            width: 456px;
+            height: 456px;
+            source: root.radial_image;
+            image-fit: fill;
         }
 
-        // Central circular ring: album cover art or minimal dark hub
+        // Central circular ring: album cover art or minimal dark hub (cached in GPU FBO)
         Rectangle {
             x: cx - (r_inner - 4px);
             y: cy - (r_inner - 4px);
@@ -130,6 +93,7 @@ export component VisualizerOverlay inherits Rectangle {
             border-color: MaterialPalette.outline_variant;
             background: #121622;
             clip: true;
+            cache-rendering-hint: true;
 
             if root.has_cover_art : Image {
                 width: 100%;
@@ -154,7 +118,6 @@ export component VisualizerOverlay inherits Rectangle {
         width: 100%;
         height: 100%;
         background: #090B10;
-        clip: true;
 
         // Subtle horizontal reference grid lines (static, cached)
         Rectangle {

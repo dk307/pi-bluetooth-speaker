@@ -95,13 +95,18 @@ impl VisualizerController {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
         let spectrum_slot_bg = Arc::clone(&spectrum_slot);
-        let worker_thread = std::thread::Builder::new()
+        let worker_thread = match std::thread::Builder::new()
             .name("visualizer-dsp".to_string())
             .spawn(move || {
                 lower_current_thread_priority();
                 run_worker_runtime(dsp, spectrum_slot_bg, cmd_rx);
-            })
-            .ok();
+            }) {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                tracing::error!(error = %err, "Failed to spawn visualizer-dsp worker thread");
+                None
+            }
+        };
 
         Self {
             cmd_tx,
@@ -188,8 +193,11 @@ impl VisualizerController {
 impl Drop for VisualizerController {
     fn drop(&mut self) {
         let _ = self.cmd_tx.send(WorkerCommand::Shutdown);
-        if let Some(handle) = self.worker_thread.take() {
-            let _ = handle.join();
+        if let Some(handle) = self.worker_thread.take()
+            && let Err(panic_payload) = handle.join()
+            && !std::thread::panicking()
+        {
+            std::panic::resume_unwind(panic_payload);
         }
     }
 }

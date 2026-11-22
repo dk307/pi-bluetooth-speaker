@@ -139,6 +139,7 @@ component MarqueeText inherits Rectangle {
 
 component AmbientWaveIndicator inherits Rectangle {
     in property <bool> is_playing: true;
+    in property <bool> animations_paused: false;
     width: 64px;
     height: 24px;
     background: transparent;
@@ -148,7 +149,7 @@ component AmbientWaveIndicator inherits Rectangle {
 
     Timer {
         interval: 180ms;
-        running: root.is_playing;
+        running: root.is_playing && !root.animations_paused;
         triggered() => {
             root.tick = Math.mod(root.tick + 1, 6);
         }
@@ -237,6 +238,7 @@ export component NowPlayingView inherits Rectangle {
     property <bool> seek_indeterminate: !root.seek_determinate && !root.seek_hidden;
     in property <float> progress_ratio: 0.0;
     in property <bool> is_playing: false;
+    in property <bool> animations_paused: false;
     in property <bool> has_cover_art: false;
     in property <image> cover_image;
     in property <bool> transport_available: root.duration_ms > 0 || root.is_playing || (root.track_title != "" && root.track_title != "Waiting for Bluetooth Connection...");
@@ -247,7 +249,7 @@ export component NowPlayingView inherits Rectangle {
     in property <int> marquee_fps: MarqueeCompose.marquee_fps;
     in-out property <int> marquee_clock <=> MarqueeCompose.clock;
     property <int> step_frames: Math.max(1, Math.round(60 / root.marquee_fps));
-    out property <bool> is_animating: (!root.title_split_mode && title_marquee.is_overflow) || root.is_playing;
+    out property <bool> is_animating: !root.animations_paused && ((!root.title_split_mode && title_marquee.is_overflow) || root.is_playing);
 
     // Indeterminate-seek shimmer clock. One full sweep takes
     // `shimmer_sweep_ms` (2.5 s) sampled every `shimmer_step_ms` (50 ms), i.e.
@@ -267,7 +269,7 @@ export component NowPlayingView inherits Rectangle {
 
     Timer {
         interval: root.shimmer_step_ms * 1ms;
-        running: root.seek_indeterminate && root.is_playing;
+        running: root.seek_indeterminate && root.is_playing && !root.animations_paused;
         triggered() => {
             root.shimmer_tick = Math.mod(root.shimmer_tick + 1, root.shimmer_steps);
         }
@@ -275,7 +277,7 @@ export component NowPlayingView inherits Rectangle {
 
     Timer {
         interval: root.step_frames * 16.65ms;
-        running: !root.title_split_mode && title_marquee.is_overflow;
+        running: !root.title_split_mode && title_marquee.is_overflow && !root.animations_paused;
         triggered() => {
             root.marquee_clock += 1;
         }
@@ -543,6 +545,7 @@ export component NowPlayingView inherits Rectangle {
 
                     AmbientWaveIndicator {
                         is_playing: root.is_playing;
+                        animations_paused: root.animations_paused;
                         visible: root.is_playing;
                     }
                 }

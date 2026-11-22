@@ -41,6 +41,7 @@ export component MainViewport inherits Rectangle {
     in-out property <float> progress_ratio: 0.0;
     in-out property <float> volume_value: 75.0;
     in-out property <bool> is_playing: false;
+    in property <bool> animations_paused: false;
     in-out property <bool> is_muted: false;
     in property <float> volume_hud_opacity: 0.0;
     in-out property <bool> has_cover_art: false;
@@ -102,6 +103,7 @@ export component MainViewport inherits Rectangle {
                 position_known: root.position_known;
                 progress_ratio: root.progress_ratio;
                 is_playing: root.is_playing;
+                animations_paused: root.animations_paused;
                 has_cover_art: root.has_cover_art;
                 cover_image: root.cover_image;
                 artist_marquee_text: root.artist_marquee_text;

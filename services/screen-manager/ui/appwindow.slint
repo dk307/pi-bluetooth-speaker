@@ -118,10 +118,11 @@ export component MainWindow inherits Window {
     in-out property <bool> viz_auto_start: true;
     in-out property <int> viz_auto_start_secs: 5;
     in property <[SpectrumBandItem]> viz_spectrum_bands;
+    in property <image> viz_radial_image;
     in-out property <bool> viz_spectrum_led_mask: true;
     in-out property <bool> viz_force_60fps: false;
     in-out property <bool> cd_enabled: false;
-    out property <bool> is_animating: root.active_tab == 0 || root.visualizer_active || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01 || root.brightness_hud_visible || root.brightness_hud_opacity > 0.01
+    out property <bool> is_animating: (root.active_tab == 0 && !root.visualizer_active && !root.bt_devices_open && !root.boot_splash_visible) || root.visualizer_active || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01 || root.brightness_hud_visible || root.brightness_hud_opacity > 0.01
         // The devices screen keeps frames coming only while a live animation
         // source runs: the pairing ring (mode 2 + spinning), the Add-Device
         // scanning spinner (mode 1 + scanning), a pending row action, or a
@@ -453,6 +454,7 @@ export component MainWindow inherits Window {
                 progress_ratio: root.progress_ratio;
                 volume_value <=> root.volume_value;
                 is_playing: root.is_playing;
+                animations_paused: root.visualizer_active || root.bt_devices_open || root.boot_splash_visible;
                 is_muted <=> root.is_muted;
                 volume_hud_opacity: root.volume_hud_opacity;
                 has_cover_art: root.has_cover_art;
@@ -503,11 +505,11 @@ export component MainWindow inherits Window {
             height: 100%;
             visualizer_mode: root.visualizer_mode;
             spectrum_bands: root.viz_spectrum_bands;
+            radial_image: root.viz_radial_image;
             spectrum_led_mask: root.viz_spectrum_led_mask;
             has_cover_art: root.has_cover_art;
             cover_image: root.cover_image;
             close_requested => {
-                root.active_tab = 0;
                 root.visualizer_active = false;
                 root.close_visualizer();
             }

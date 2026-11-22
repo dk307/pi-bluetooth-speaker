@@ -167,6 +167,37 @@ const _: () = {
     );
 };
 
+macro_rules! impl_bounded_int_traits {
+    ($ty:ty, $prim:ty, $field:expr, $min:expr, $max:expr) => {
+        impl Default for $ty {
+            fn default() -> Self {
+                Self::DEFAULT
+            }
+        }
+
+        impl TryFrom<$prim> for $ty {
+            type Error = ConfigError;
+
+            fn try_from(val: $prim) -> Result<Self, Self::Error> {
+                if ($min..=$max).contains(&val) {
+                    Ok(Self::new(val))
+                } else {
+                    Err(ConfigError::invalid(format!(
+                        "invalid {} '{val}': expected {}..={}",
+                        $field, $min, $max
+                    )))
+                }
+            }
+        }
+
+        impl From<$ty> for $prim {
+            fn from(val: $ty) -> Self {
+                val.0
+            }
+        }
+    };
+}
+
 /// Strongly typed rotary encoder volume step percentage (`1..=25`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u8", into = "u8")]
@@ -196,31 +227,13 @@ impl VolumeStepPercent {
     }
 }
 
-impl Default for VolumeStepPercent {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
-impl TryFrom<u8> for VolumeStepPercent {
-    type Error = ConfigError;
-
-    fn try_from(step: u8) -> Result<Self, Self::Error> {
-        if (MIN_VOLUME_STEP_PERCENT..=MAX_VOLUME_STEP_PERCENT).contains(&step) {
-            Ok(Self::new(step))
-        } else {
-            Err(ConfigError::invalid(format!(
-                "invalid volume_step_percent '{step}': expected {MIN_VOLUME_STEP_PERCENT}..={MAX_VOLUME_STEP_PERCENT}"
-            )))
-        }
-    }
-}
-
-impl From<VolumeStepPercent> for u8 {
-    fn from(step: VolumeStepPercent) -> Self {
-        step.0
-    }
-}
+impl_bounded_int_traits!(
+    VolumeStepPercent,
+    u8,
+    "volume_step_percent",
+    MIN_VOLUME_STEP_PERCENT,
+    MAX_VOLUME_STEP_PERCENT
+);
 
 /// Strongly typed manual brightness percentage (`0..=100`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,31 +319,13 @@ impl VolumeHudTimeoutMs {
     }
 }
 
-impl Default for VolumeHudTimeoutMs {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
-impl TryFrom<u32> for VolumeHudTimeoutMs {
-    type Error = ConfigError;
-
-    fn try_from(ms: u32) -> Result<Self, Self::Error> {
-        if (MIN_VOLUME_HUD_TIMEOUT_MS..=MAX_VOLUME_HUD_TIMEOUT_MS).contains(&ms) {
-            Ok(Self::new(ms))
-        } else {
-            Err(ConfigError::invalid(format!(
-                "invalid volume_hud_timeout_ms '{ms}': expected {MIN_VOLUME_HUD_TIMEOUT_MS}..={MAX_VOLUME_HUD_TIMEOUT_MS}"
-            )))
-        }
-    }
-}
-
-impl From<VolumeHudTimeoutMs> for u32 {
-    fn from(ms: VolumeHudTimeoutMs) -> Self {
-        ms.0
-    }
-}
+impl_bounded_int_traits!(
+    VolumeHudTimeoutMs,
+    u32,
+    "volume_hud_timeout_ms",
+    MIN_VOLUME_HUD_TIMEOUT_MS,
+    MAX_VOLUME_HUD_TIMEOUT_MS
+);
 
 /// Strongly typed Volume HUD fade-out duration in milliseconds (`0..=2_000`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,31 +411,13 @@ impl CodecHudTimeoutMs {
     }
 }
 
-impl Default for CodecHudTimeoutMs {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
-impl TryFrom<u32> for CodecHudTimeoutMs {
-    type Error = ConfigError;
-
-    fn try_from(ms: u32) -> Result<Self, Self::Error> {
-        if (MIN_CODEC_HUD_TIMEOUT_MS..=MAX_CODEC_HUD_TIMEOUT_MS).contains(&ms) {
-            Ok(Self::new(ms))
-        } else {
-            Err(ConfigError::invalid(format!(
-                "invalid codec_hud_timeout_ms '{ms}': expected {MIN_CODEC_HUD_TIMEOUT_MS}..={MAX_CODEC_HUD_TIMEOUT_MS}"
-            )))
-        }
-    }
-}
-
-impl From<CodecHudTimeoutMs> for u32 {
-    fn from(ms: CodecHudTimeoutMs) -> Self {
-        ms.0
-    }
-}
+impl_bounded_int_traits!(
+    CodecHudTimeoutMs,
+    u32,
+    "codec_hud_timeout_ms",
+    MIN_CODEC_HUD_TIMEOUT_MS,
+    MAX_CODEC_HUD_TIMEOUT_MS
+);
 
 /// Strongly typed touch font scale factor (`1.00..=1.35`, default `1.15`).
 ///
@@ -577,31 +554,13 @@ impl VisualizerAutoStartSecs {
     }
 }
 
-impl Default for VisualizerAutoStartSecs {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
-impl TryFrom<u32> for VisualizerAutoStartSecs {
-    type Error = ConfigError;
-
-    fn try_from(secs: u32) -> Result<Self, Self::Error> {
-        if (MIN_VISUALIZER_AUTO_START_SECS..=MAX_VISUALIZER_AUTO_START_SECS).contains(&secs) {
-            Ok(Self::new(secs))
-        } else {
-            Err(ConfigError::invalid(format!(
-                "invalid visualizer_auto_start_secs '{secs}': expected {MIN_VISUALIZER_AUTO_START_SECS}..={MAX_VISUALIZER_AUTO_START_SECS}"
-            )))
-        }
-    }
-}
-
-impl From<VisualizerAutoStartSecs> for u32 {
-    fn from(secs: VisualizerAutoStartSecs) -> Self {
-        secs.0
-    }
-}
+impl_bounded_int_traits!(
+    VisualizerAutoStartSecs,
+    u32,
+    "visualizer_auto_start_secs",
+    MIN_VISUALIZER_AUTO_START_SECS,
+    MAX_VISUALIZER_AUTO_START_SECS
+);
 
 /// Default audio visualizer mode opened by user tap or auto-start.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -658,16 +617,6 @@ impl DefaultVisualizerMode {
     #[must_use]
     pub const fn is_linear(self) -> bool {
         matches!(self, Self::LinearSpectrum)
-    }
-
-    /// Constructs the mode from a boolean flag (`false` = `RadialFft`, `true` = `LinearSpectrum`).
-    #[must_use]
-    pub const fn from_linear(linear: bool) -> Self {
-        if linear {
-            Self::LinearSpectrum
-        } else {
-            Self::RadialFft
-        }
     }
 
     /// Returns the Slint `visualizer_mode` integer index (`0` or `1`).

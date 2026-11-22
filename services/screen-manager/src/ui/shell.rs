@@ -1412,7 +1412,7 @@ impl AppShell {
                 } else {
                     return;
                 };
-                viz_state.apply_output(&out);
+                viz_state.apply_for_mode(&w, m, &out);
             },
         );
     }
@@ -1422,7 +1422,6 @@ impl AppShell {
         visualizer_ctrl: &Rc<RefCell<Option<VisualizerController>>>,
         visualizer_timer: &Rc<slint::Timer>,
     ) {
-        window.set_active_tab(0);
         window.set_visualizer_active(false);
         visualizer_timer.stop();
         if let Some(ctrl) = visualizer_ctrl.borrow_mut().as_mut() {
