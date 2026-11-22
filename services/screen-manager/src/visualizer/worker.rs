@@ -4,104 +4,15 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use speaker_dsp::{
     DspDevice, LatestFrameSlot, SpectrumSnapshot, VisualizerSubscription,
     spectrum_subscription_for_rate,
 };
 use tokio::sync::mpsc;
 
+pub use crate::config::VisualizerMode;
+
 use super::dsp_math::{ERB_BAND_COUNT, ErbBandMapper, SpectrumBallistics};
-
-/// Active visualizer screen mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "&'static str")]
-#[repr(i32)]
-pub enum VisualizerMode {
-    /// Bilateral 48-bar radial FFT ring around central album art.
-    #[default]
-    RadialFft = 0,
-    /// 24-band Glasberg–Moore ERB linear bar spectrum analyzer.
-    LinearSpectrum = 1,
-}
-
-impl VisualizerMode {
-    /// Total number of registered visualizer screens.
-    pub const COUNT: i32 = 2;
-
-    /// Returns the canonical config slug (`"radial_fft"` or `"linear_spectrum"`).
-    #[must_use]
-    pub const fn slug(self) -> &'static str {
-        match self {
-            Self::RadialFft => "radial_fft",
-            Self::LinearSpectrum => "linear_spectrum",
-        }
-    }
-
-    /// Parses a canonical config slug back into [`VisualizerMode`].
-    ///
-    /// # Errors
-    /// Returns a human-readable error if `slug` is not a recognized mode slug.
-    pub fn parse_slug(slug: &str) -> Result<Self, String> {
-        match slug {
-            "radial_fft" => Ok(Self::RadialFft),
-            "linear_spectrum" => Ok(Self::LinearSpectrum),
-            other => Err(format!(
-                "invalid default_visualizer '{other}': expected 'radial_fft' or 'linear_spectrum'"
-            )),
-        }
-    }
-
-    /// Returns the human-readable visualizer name shown in Screen Settings.
-    #[must_use]
-    pub const fn display_name(self) -> &'static str {
-        match self {
-            Self::RadialFft => "Radial FFT",
-            Self::LinearSpectrum => "ERB Spectrum",
-        }
-    }
-
-    /// Returns the Slint `visualizer_mode` integer index (`0` or `1`).
-    #[must_use]
-    pub const fn as_index(self) -> i32 {
-        self as i32
-    }
-
-    /// Converts an integer index (wrapping modulo `COUNT`) into a [`VisualizerMode`].
-    #[must_use]
-    pub const fn from_index(idx: i32) -> Self {
-        match idx.rem_euclid(Self::COUNT) {
-            1 => Self::LinearSpectrum,
-            _ => Self::RadialFft,
-        }
-    }
-
-    /// Returns the next visualizer mode, wrapping around.
-    #[must_use]
-    pub const fn next(self) -> Self {
-        Self::from_index(self as i32 + 1)
-    }
-
-    /// Returns the previous visualizer mode, wrapping around.
-    #[must_use]
-    pub const fn prev(self) -> Self {
-        Self::from_index(self as i32 - 1)
-    }
-}
-
-impl TryFrom<String> for VisualizerMode {
-    type Error = String;
-
-    fn try_from(slug: String) -> Result<Self, Self::Error> {
-        Self::parse_slug(&slug)
-    }
-}
-
-impl From<VisualizerMode> for &'static str {
-    fn from(mode: VisualizerMode) -> Self {
-        mode.slug()
-    }
-}
 
 /// Output snapshot produced on each UI timer tick (`~33 Hz`).
 #[derive(Debug, Clone, PartialEq)]
