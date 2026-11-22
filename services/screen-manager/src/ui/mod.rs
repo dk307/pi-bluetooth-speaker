@@ -26,6 +26,7 @@ pub mod marquee;
 pub mod runtime;
 pub(crate) mod shell;
 pub(crate) mod theme;
+pub(crate) mod visualizer_bridge;
 
 #[doc(inline)]
 pub use backdrop::{
@@ -45,13 +46,15 @@ pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError, FramebufferM
 #[doc(inline)]
 pub use generated::{
     AmbientWaveSprites, AppTheme, BootCheckLine, BtDeviceRow, MainWindow, MarqueeCompose,
-    MaterialPalette, MaterialStyleMetrics, SettingControlKind, SettingRowItem, SplashScreen,
-    TouchScale, VirtualKeyboard,
+    MaterialPalette, MaterialStyleMetrics, SettingControlKind, SettingRowItem, SpectrumBandItem,
+    SplashScreen, TouchScale, VirtualKeyboard,
 };
 #[doc(inline)]
 pub use shell::{AppShell, BtLinkDetails, EncoderVolumeTracker};
 #[doc(inline)]
 pub use theme::ThemePreset;
+#[doc(inline)]
+pub use visualizer_bridge::VisualizerUiState;
 
 #[cfg(feature = "test-util")]
 #[doc(hidden)]

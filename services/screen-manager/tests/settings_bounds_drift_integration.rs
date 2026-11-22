@@ -53,7 +53,7 @@ fn catalog_bounds_match_rust_config_domains() {
                 assert_eq!(max, expected_max, "max mismatch for {id:?}");
                 assert_eq!(step, expected_step, "step mismatch for {id:?}");
             }
-            SettingControl::TwoOption { .. } => {
+            SettingControl::TwoOption { .. } | SettingControl::Selector => {
                 panic!("expected Stepper control for {id:?}");
             }
         }

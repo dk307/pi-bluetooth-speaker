@@ -29,10 +29,12 @@ type BrightnessSettle = Rc<Cell<Option<BrightnessSettleSnapshot>>>;
 
 use crate::config::{
     CodecHudTimeoutMs, CoreConfig, DEFAULT_FONT_SCALE, DEFAULT_VOLUME_STEP_PERCENT, FontScale,
-    MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
-    MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE, MIN_VOLUME_HUD_TIMEOUT_MS,
-    MIN_VOLUME_STEP_PERCENT, ManualBrightnessPercent, MarqueeFps, TitleDisplayMode,
-    VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+    MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE, MAX_VISUALIZER_AUTO_START_SECS,
+    MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_STEP_PERCENT,
+    MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE, MIN_VISUALIZER_AUTO_START_SECS,
+    MIN_VOLUME_HUD_TIMEOUT_MS, MIN_VOLUME_STEP_PERCENT, ManualBrightnessPercent, MarqueeFps,
+    TitleDisplayMode, VisualizerAutoStartSecs, VolumeHudFadeMs, VolumeHudTimeoutMs,
+    VolumeStepPercent,
 };
 use crate::screen_brightness::{
     BRIGHTNESS_SETTLE_WINDOW, BrightnessCommand, BrightnessCommandQueue, BrightnessState,
@@ -40,12 +42,14 @@ use crate::screen_brightness::{
 use crate::settings_catalog::{
     SETTINGS_CATALOG, SettingControl, SettingId, SettingTier, apply_step, apply_toggle, row_state,
 };
+use crate::visualizer::{VisualizerController, VisualizerMode};
 
 use super::backdrop::OVERLAY_TOP_INSET;
 use super::generated::{
     AppTheme, MainWindow, MarqueeCompose, SettingControlKind, SettingRowItem, TouchScale,
 };
 use super::theme::ThemePreset;
+use super::visualizer_bridge::VisualizerUiState;
 
 /// Tracks cumulative [`speaker_hardware::EncoderStatus`] counters and translates
 /// quadrature detents and push-switch presses into UI volume and mute actions.
@@ -203,6 +207,7 @@ fn pcm_bit_depth(format: &str) -> &'static str {
 #[derive(Clone)]
 struct SettingsModels {
     basic: Rc<VecModel<SettingRowItem>>,
+    visualizer: Rc<VecModel<SettingRowItem>>,
     advanced: Rc<VecModel<SettingRowItem>>,
 }
 
@@ -278,6 +283,12 @@ pub struct AppShell {
     device_commands: Rc<RefCell<Option<speaker_bluetooth::DeviceCommandQueue>>>,
     bt_devices: Rc<RefCell<crate::ui::BtDevicesController>>,
     last_toggle: Rc<Cell<std::time::Instant>>,
+    visualizer: Rc<VisualizerUiState>,
+    visualizer_ctrl: Rc<RefCell<Option<VisualizerController>>>,
+    visualizer_timer: Rc<slint::Timer>,
+    visualizer_autostart_timer: Rc<slint::Timer>,
+    was_playing: Cell<bool>,
+    was_bt_connected: Cell<bool>,
 }
 
 impl Debug for AppShell {
@@ -316,13 +327,21 @@ impl AppShell {
                 &default_cfg,
                 SettingTier::Basic,
             ))),
+            visualizer: Rc::new(VecModel::from(Self::build_setting_rows(
+                &default_cfg,
+                SettingTier::Visualizer,
+            ))),
             advanced: Rc::new(VecModel::from(Self::build_setting_rows(
                 &default_cfg,
                 SettingTier::Advanced,
             ))),
         };
         window.set_basic_settings(ModelRc::from(Rc::clone(&settings_models.basic)));
+        window.set_visualizer_settings(ModelRc::from(Rc::clone(&settings_models.visualizer)));
         window.set_advanced_settings(ModelRc::from(Rc::clone(&settings_models.advanced)));
+
+        let visualizer = Rc::new(VisualizerUiState::new());
+        visualizer.bind_to_window(&window);
 
         let shell = Self {
             window,
@@ -341,6 +360,12 @@ impl AppShell {
                     .checked_sub(std::time::Duration::from_secs(1))
                     .unwrap_or_else(std::time::Instant::now),
             )),
+            visualizer,
+            visualizer_ctrl: Rc::new(RefCell::new(None)),
+            visualizer_timer: Rc::new(slint::Timer::default()),
+            visualizer_autostart_timer: Rc::new(slint::Timer::default()),
+            was_playing: Cell::new(false),
+            was_bt_connected: Cell::new(false),
         };
 
         // One-shot seed, not runtime config: the blur pipeline crops at
@@ -388,6 +413,18 @@ impl AppShell {
         ));
         window.set_auto_brightness_enabled(config.auto_brightness_enabled);
         window.set_brightness_value(f32::from(config.brightness_manual_percent.value()));
+        window.set_viz_spectrum_led_mask(config.spectrum_led_mask);
+        window.set_viz_force_60fps(config.visualizer_force_60fps);
+        window.set_viz_auto_start(config.visualizer_auto_start);
+        window.set_viz_auto_start_secs(Self::slint_i32(
+            config.visualizer_auto_start_secs.value(),
+            "visualizer_auto_start_secs",
+        ));
+        let default_mode_idx = config.default_visualizer.as_index();
+        window.set_default_visualizer_mode(default_mode_idx);
+        if !window.get_visualizer_active() {
+            window.set_visualizer_mode(default_mode_idx);
+        }
     }
 
     fn build_setting_rows(config: &CoreConfig, tier: SettingTier) -> Vec<SettingRowItem> {
@@ -409,6 +446,11 @@ impl AppShell {
                         SettingControlKind::TwoOption,
                         left_label.into(),
                         right_label.into(),
+                    ),
+                    SettingControl::Selector => (
+                        SettingControlKind::Selector,
+                        slint::SharedString::new(),
+                        slint::SharedString::new(),
                     ),
                 };
                 SettingRowItem {
@@ -435,6 +477,7 @@ impl AppShell {
         let config = Self::config_from_window(window);
         for (tier, model) in [
             (SettingTier::Basic, &models.basic),
+            (SettingTier::Visualizer, &models.visualizer),
             (SettingTier::Advanced, &models.advanced),
         ] {
             for (idx, row) in Self::build_setting_rows(&config, tier)
@@ -756,7 +799,23 @@ impl AppShell {
                 .unwrap_or_default(),
             auto_brightness_enabled: window.get_auto_brightness_enabled(),
             brightness_manual_percent: Self::brightness_percent_from_window(window),
+            spectrum_led_mask: window.get_viz_spectrum_led_mask(),
+            visualizer_force_60fps: window.get_viz_force_60fps(),
+            visualizer_auto_start: window.get_viz_auto_start(),
+            visualizer_auto_start_secs: Self::visualizer_auto_start_secs_from_window(window),
+            default_visualizer: VisualizerMode::from_index(window.get_default_visualizer_mode()),
         }
+    }
+
+    fn visualizer_auto_start_secs_from_window(window: &MainWindow) -> VisualizerAutoStartSecs {
+        let clamped = window
+            .get_viz_auto_start_secs()
+            .clamp(
+                MIN_VISUALIZER_AUTO_START_SECS.cast_signed(),
+                MAX_VISUALIZER_AUTO_START_SECS.cast_signed(),
+            )
+            .cast_unsigned();
+        VisualizerAutoStartSecs::new(clamped)
     }
 
     /// Reads the overlay brightness percent, sanitizing NaN and clamping to `0..=100`.
@@ -794,6 +853,9 @@ impl AppShell {
                 codec_hud_timeout_ms = config.codec_hud_timeout_ms.value(),
                 auto_brightness = config.auto_brightness_enabled,
                 brightness_percent = config.brightness_manual_percent.value(),
+                visualizer_auto_start = config.visualizer_auto_start,
+                visualizer_auto_start_secs = config.visualizer_auto_start_secs.value(),
+                default_visualizer = config.default_visualizer.slug(),
                 "Screen settings saved"
             ),
             Err(e) => tracing::error!(
@@ -1254,17 +1316,115 @@ impl AppShell {
         }
     }
 
-    /// Updates the mini peak meter visualization ratios (0.0 to 1.0).
-    pub fn set_peak_levels(&self, left: f32, right: f32) {
-        let clamp_ratio = |val: f32| {
-            if val.is_nan() {
-                0.0
-            } else {
-                val.clamp(0.0, 1.0)
-            }
-        };
-        self.window.set_left_peak_ratio(clamp_ratio(left));
-        self.window.set_right_peak_ratio(clamp_ratio(right));
+    /// Wires the `CamillaDSP` visualizer worker controller and starts/stops its 33 Hz
+    /// render timer in lockstep with `visualizer_active`.
+    pub fn wire_visualizer(&self, dsp: speaker_dsp::DspDevice) {
+        let ctrl = VisualizerController::new(dsp);
+        *self.visualizer_ctrl.borrow_mut() = Some(ctrl);
+        if self.window.get_visualizer_active() {
+            self.open_visualizer();
+        }
+    }
+
+    /// Shuts down the visualizer telemetry worker thread cleanly.
+    pub fn shutdown_visualizer(&self) {
+        self.visualizer_autostart_timer.stop();
+        self.visualizer_timer.stop();
+        if let Some(mut ctrl) = self.visualizer_ctrl.borrow_mut().take() {
+            ctrl.shutdown();
+        }
+    }
+
+    /// Returns `true` while the full-screen visualizer overlay is open.
+    #[must_use]
+    pub fn is_visualizer_active(&self) -> bool {
+        self.window.get_visualizer_active()
+    }
+
+    /// Opens the full-screen visualizer overlay and starts streaming telemetry.
+    pub fn open_visualizer(&self) {
+        Self::activate_visualizer_on(
+            &self.window,
+            &self.visualizer,
+            &self.visualizer_ctrl,
+            &self.visualizer_timer,
+            &self.visualizer_autostart_timer,
+        );
+    }
+
+    /// Closes the full-screen visualizer overlay and unsubscribes from `CamillaDSP`.
+    pub fn close_visualizer(&self) {
+        self.visualizer_autostart_timer.stop();
+        Self::deactivate_visualizer_on(&self.window, &self.visualizer_ctrl, &self.visualizer_timer);
+    }
+
+    fn can_autostart_visualizer(window: &MainWindow) -> bool {
+        window.get_viz_auto_start()
+            && window.get_active_tab() == 0
+            && !window.get_bt_devices_open()
+            && !window.get_boot_splash_visible()
+            && !window.get_visualizer_active()
+    }
+
+    fn activate_visualizer_on(
+        window: &MainWindow,
+        visualizer: &Rc<VisualizerUiState>,
+        visualizer_ctrl: &Rc<RefCell<Option<VisualizerController>>>,
+        visualizer_timer: &Rc<slint::Timer>,
+        autostart_timer: &slint::Timer,
+    ) {
+        autostart_timer.stop();
+        window.set_visualizer_mode(window.get_default_visualizer_mode());
+        window.set_visualizer_active(true);
+
+        let mode = VisualizerMode::from_index(window.get_visualizer_mode());
+        let force_60 = window.get_viz_force_60fps();
+        if let Some(ctrl) = visualizer_ctrl.borrow_mut().as_mut() {
+            ctrl.set_active_mode(Some(mode), force_60);
+        }
+
+        let interval_ms = if force_60 { 16 } else { 30 };
+        let win_weak = window.as_weak();
+        let viz_state = Rc::clone(visualizer);
+        let viz_ctrl = Rc::clone(visualizer_ctrl);
+        let timer_ref = Rc::clone(visualizer_timer);
+        visualizer_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(interval_ms),
+            move || {
+                let Some(w) = win_weak.upgrade() else {
+                    timer_ref.stop();
+                    return;
+                };
+                if !w.get_visualizer_active() {
+                    timer_ref.stop();
+                    return;
+                }
+                let m = VisualizerMode::from_index(w.get_visualizer_mode());
+                let f60 = w.get_viz_force_60fps();
+                let out = if let Some(ctrl) = viz_ctrl.borrow_mut().as_mut() {
+                    if ctrl.active_mode() != Some(m) {
+                        ctrl.set_active_mode(Some(m), f60);
+                    }
+                    ctrl.tick(Instant::now())
+                } else {
+                    return;
+                };
+                viz_state.apply_for_mode(&w, m, &out);
+            },
+        );
+    }
+
+    fn deactivate_visualizer_on(
+        window: &MainWindow,
+        visualizer_ctrl: &Rc<RefCell<Option<VisualizerController>>>,
+        visualizer_timer: &Rc<slint::Timer>,
+    ) {
+        window.set_visualizer_active(false);
+        visualizer_timer.stop();
+        if let Some(ctrl) = visualizer_ctrl.borrow_mut().as_mut() {
+            ctrl.set_active_mode(None, false);
+        }
     }
 
     /// Sets whether cover art is present.
@@ -1284,6 +1444,43 @@ impl AppShell {
     /// Applies state from a [`speaker_bluetooth::BtPlaybackState`] point-in-time snapshot.
     pub fn apply_bluetooth_playback(&self, playback: &speaker_bluetooth::BtPlaybackState) {
         Self::apply_playback_to_window(&self.window, playback);
+        let is_playing = playback.is_playing();
+        let was_playing = self.was_playing.replace(is_playing);
+        if was_playing && !is_playing {
+            self.visualizer_autostart_timer.stop();
+            if self.is_visualizer_active() {
+                self.close_visualizer();
+            }
+        } else if !was_playing && is_playing {
+            self.visualizer_autostart_timer.stop();
+            if Self::can_autostart_visualizer(&self.window) {
+                let delay_secs =
+                    u64::from(Self::visualizer_auto_start_secs_from_window(&self.window).value());
+                let win_weak = self.window.as_weak();
+                let viz_state = Rc::clone(&self.visualizer);
+                let viz_ctrl = Rc::clone(&self.visualizer_ctrl);
+                let viz_timer = Rc::clone(&self.visualizer_timer);
+                let autostart_ref = Rc::clone(&self.visualizer_autostart_timer);
+                self.visualizer_autostart_timer.start(
+                    slint::TimerMode::SingleShot,
+                    Duration::from_secs(delay_secs),
+                    move || {
+                        let Some(w) = win_weak.upgrade() else {
+                            return;
+                        };
+                        if w.get_is_playing() && Self::can_autostart_visualizer(&w) {
+                            Self::activate_visualizer_on(
+                                &w,
+                                &viz_state,
+                                &viz_ctrl,
+                                &viz_timer,
+                                &autostart_ref,
+                            );
+                        }
+                    },
+                );
+            }
+        }
     }
 
     fn refresh_marquee_strip(w: &MainWindow) {
@@ -1416,6 +1613,12 @@ impl AppShell {
         if w.get_bt_connected() != connected {
             w.set_bt_connected(connected);
         }
+        if self.was_bt_connected.replace(connected) && !connected {
+            self.visualizer_autostart_timer.stop();
+            if self.is_visualizer_active() {
+                self.close_visualizer();
+            }
+        }
 
         if update.action_settled || update.toast.is_some() {
             w.set_bt_pending_address(String::new().into());
@@ -1527,10 +1730,57 @@ impl AppShell {
 
     fn setup_callbacks(&self) {
         self.setup_navigation_callbacks();
+        self.setup_visualizer_callbacks();
         self.setup_bt_devices_callbacks();
         self.setup_bt_device_dialog_callbacks();
         self.setup_transport_callbacks();
         self.setup_overlay_backdrop_callback();
+    }
+
+    fn setup_visualizer_callbacks(&self) {
+        let win = self.window.as_weak();
+        let viz_state = Rc::clone(&self.visualizer);
+        let viz_ctrl = Rc::clone(&self.visualizer_ctrl);
+        let viz_timer = Rc::clone(&self.visualizer_timer);
+        let viz_autostart = Rc::clone(&self.visualizer_autostart_timer);
+        self.window.on_open_visualizer(move || {
+            if let Some(w) = win.upgrade() {
+                Self::activate_visualizer_on(&w, &viz_state, &viz_ctrl, &viz_timer, &viz_autostart);
+            }
+        });
+
+        let viz_ctrl = Rc::clone(&self.visualizer_ctrl);
+        let viz_timer = Rc::clone(&self.visualizer_timer);
+        let win = self.window.as_weak();
+        self.window.on_close_visualizer(move || {
+            if let Some(w) = win.upgrade() {
+                Self::deactivate_visualizer_on(&w, &viz_ctrl, &viz_timer);
+            }
+        });
+
+        let win = self.window.as_weak();
+        let viz_ctrl = Rc::clone(&self.visualizer_ctrl);
+        self.window.on_next_visualizer(move || {
+            if let Some(w) = win.upgrade() {
+                let next = VisualizerMode::from_index(w.get_visualizer_mode()).next();
+                w.set_visualizer_mode(next as i32);
+                if let Some(ctrl) = viz_ctrl.borrow_mut().as_mut() {
+                    ctrl.set_active_mode(Some(next), w.get_viz_force_60fps());
+                }
+            }
+        });
+
+        let win = self.window.as_weak();
+        let viz_ctrl = Rc::clone(&self.visualizer_ctrl);
+        self.window.on_prev_visualizer(move || {
+            if let Some(w) = win.upgrade() {
+                let prev = VisualizerMode::from_index(w.get_visualizer_mode()).prev();
+                w.set_visualizer_mode(prev as i32);
+                if let Some(ctrl) = viz_ctrl.borrow_mut().as_mut() {
+                    ctrl.set_active_mode(Some(prev), w.get_viz_force_60fps());
+                }
+            }
+        });
     }
 
     fn setup_overlay_backdrop_callback(&self) {

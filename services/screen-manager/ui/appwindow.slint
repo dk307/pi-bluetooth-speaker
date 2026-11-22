@@ -16,6 +16,10 @@ import { BrightnessHudOverlay } from "brightness_hud.slint";
 import { BluetoothDevicesScreen, BtDeviceRow } from "bluetooth_devices.slint";
 import { VirtualKeyboardSheet } from "touch_scale_widgets.slint";
 import { SettingControlKind, SettingRowItem } from "settings_view.slint";
+import {
+    SpectrumBandItem,
+    VisualizerOverlay,
+} from "visualizer_overlay.slint";
 
 // Re-exported so slint-build generates the Rust global accessors.
 export { AmbientWaveSprites, MarqueeCompose, TouchScale, VirtualKeyboard }
@@ -26,7 +30,7 @@ import "../../../assets/fonts/Inter-SemiBold.ttf";
 import "../../../assets/fonts/Inter-Bold.ttf";
 import "../../../assets/fonts/Inter-ExtraBold.ttf";
 
-export { BootCheckLine, SplashScreen, MaterialPalette, MaterialStyleMetrics, AppTheme, BtDeviceRow, SettingControlKind, SettingRowItem }
+export { BootCheckLine, SplashScreen, MaterialPalette, MaterialStyleMetrics, AppTheme, BtDeviceRow, SettingControlKind, SettingRowItem, SpectrumBandItem }
 
 export component MainWindow inherits Window {
     title: "DietPi Audiophile Console";
@@ -108,10 +112,17 @@ export component MainWindow inherits Window {
     // Seeded from Rust's `OVERLAY_TOP_INSET` (backdrop.rs) by `AppShell::new`;
     // this literal is only the design-preview fallback.
     in-out property <length> overlay_top_inset: 60px;
-    in-out property <float> left_peak_ratio: 0.0;
-    in-out property <float> right_peak_ratio: 0.0;
+    in-out property <bool> visualizer_active: false;
+    in-out property <int> visualizer_mode: 0;
+    in-out property <int> default_visualizer_mode: 0;
+    in-out property <bool> viz_auto_start: true;
+    in-out property <int> viz_auto_start_secs: 5;
+    in property <[SpectrumBandItem]> viz_spectrum_bands;
+    in property <image> viz_radial_image;
+    in-out property <bool> viz_spectrum_led_mask: true;
+    in-out property <bool> viz_force_60fps: false;
     in-out property <bool> cd_enabled: false;
-    out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01 || root.brightness_hud_visible || root.brightness_hud_opacity > 0.01
+    out property <bool> is_animating: (root.active_tab == 0 && !root.visualizer_active && !root.bt_devices_open && !root.boot_splash_visible) || root.visualizer_active || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01 || root.brightness_hud_visible || root.brightness_hud_opacity > 0.01
         // The devices screen keeps frames coming only while a live animation
         // source runs: the pairing ring (mode 2 + spinning), the Add-Device
         // scanning spinner (mode 1 + scanning), a pending row action, or a
@@ -123,9 +134,11 @@ export component MainWindow inherits Window {
 
     // Lifted to MainWindow for title switching in ScreenAppBar
     in-out property <bool> show_themes: false;
+    in-out property <bool> show_visualizer: false;
     in-out property <bool> show_advanced: false;
     in-out property <bool> show_widget_preview: false;
     in property <[SettingRowItem]> basic_settings;
+    in property <[SettingRowItem]> visualizer_settings;
     in property <[SettingRowItem]> advanced_settings;
     in-out property <string> speaker_alias: "DietPi Speaker";
 
@@ -134,6 +147,7 @@ export component MainWindow inherits Window {
     // Active top bar height: fixed `overlay_top_inset` (60px) on Now Playing (`TopStatusBar`),
     // scaled `MaterialStyleMetrics.size_64` (`56px * TouchScale.widget_scale`) on screen tabs.
     out property <length> top_bar_height: root.show_status_bar ? root.overlay_top_inset : MaterialStyleMetrics.size_64;
+    out property <length> hud_top_inset: root.visualizer_active ? 0px : root.top_bar_height;
 
     // Boot splash overlay state (Appliance boot phase): the KMS backend allows
     // only one window per process, so boot checks render as an in-window
@@ -297,6 +311,10 @@ export component MainWindow inherits Window {
     callback night_mode_clicked();
     // Raised after the settings tab transition so Rust can log the navigation.
     callback settings_clicked();
+    callback open_visualizer();
+    callback close_visualizer();
+    callback next_visualizer();
+    callback prev_visualizer();
     callback tab_selected(int);
     callback select_theme(int);
     callback cycle_theme();
@@ -317,6 +335,10 @@ export component MainWindow inherits Window {
     // Opens the Bluetooth devices screen from any entry point (status bar taps,
     // Settings tile, CLI); remembers the tab to return to.
     public function open_bt_devices() {
+        if (root.visualizer_active) {
+            root.visualizer_active = false;
+            root.close_visualizer();
+        }
         if (!root.bt_devices_open) {
             root.previous_tab = root.active_tab;
         }
@@ -346,6 +368,8 @@ export component MainWindow inherits Window {
             root.show_widget_preview = false;
         } else if (root.active_tab == 5 && root.show_advanced) {
             root.show_advanced = false;
+        } else if (root.active_tab == 5 && root.show_visualizer) {
+            root.show_visualizer = false;
         } else if (root.active_tab == 5 && root.show_themes) {
             root.show_themes = false;
         } else if (root.active_tab != 0) {
@@ -362,6 +386,7 @@ export component MainWindow inherits Window {
         bg_column := VerticalLayout {
             width: 100%;
             height: 100%;
+            visible: !root.visualizer_active;
 
             // Top bar slot: 60px on Now Playing (`TopStatusBar`), scaled
             // `MaterialStyleMetrics.size_64` on screen tabs (`ScreenAppBar`).
@@ -405,7 +430,7 @@ export component MainWindow inherits Window {
                     title: root.active_tab == 1 ? "VU Meter" :
                            root.active_tab == 3 ? "CD Player" :
                            root.active_tab == 4 ? "DSP & Tone" :
-                           root.active_tab == 5 ? (root.show_widget_preview ? "Touch Scale Test" : (root.show_themes ? (root.show_advanced ? "Advanced Settings" : "Screen Settings") : "Settings")) : "";
+                           root.active_tab == 5 ? (root.show_widget_preview ? "Touch Scale Test" : (root.show_themes ? (root.show_advanced ? "Advanced Settings" : (root.show_visualizer ? "Visualizer Settings" : "Screen Settings")) : "Settings")) : "";
                     trailing_icon: @image-url("../../../assets/icons/back.svg");
                     trailing_clicked => { root.app_bar_back(); }
                 }
@@ -430,19 +455,20 @@ export component MainWindow inherits Window {
                 progress_ratio: root.progress_ratio;
                 volume_value <=> root.volume_value;
                 is_playing: root.is_playing;
+                animations_paused: root.visualizer_active || root.bt_devices_open || root.boot_splash_visible;
                 is_muted <=> root.is_muted;
                 volume_hud_opacity: root.volume_hud_opacity;
                 has_cover_art: root.has_cover_art;
                 cover_image: root.cover_image;
-                left_peak_ratio: root.left_peak_ratio;
-                right_peak_ratio: root.right_peak_ratio;
                 track_or_device: root.track_or_device;
                 stream_codec: root.stream_codec;
                 artist_marquee_text: root.artist_marquee_text;
                 show_themes <=> root.show_themes;
+                show_visualizer <=> root.show_visualizer;
                 show_advanced <=> root.show_advanced;
                 show_widget_preview <=> root.show_widget_preview;
                 basic_settings: root.basic_settings;
+                visualizer_settings: root.visualizer_settings;
                 advanced_settings: root.advanced_settings;
                 speaker_alias <=> root.speaker_alias;
 
@@ -456,6 +482,10 @@ export component MainWindow inherits Window {
                     root.active_tab = 5;
                     root.settings_clicked();
                 }
+                visualizer_clicked => {
+                    root.visualizer_active = true;
+                    root.open_visualizer();
+                }
                 select_tab(idx) => {
                     root.previous_tab = root.active_tab;
                     root.active_tab = idx;
@@ -467,6 +497,28 @@ export component MainWindow inherits Window {
                 font_scale_changed(val) => { root.font_scale_changed(val); }
                 setting_step(id, dir) => { root.setting_step(id, dir); }
                 setting_toggle(id, right) => { root.setting_toggle(id, right); }
+            }
+        }
+
+        // Full-screen 800x480 music visualizer overlay (above top bar & viewport, below HUDs).
+        if root.visualizer_active: visualizer_overlay := VisualizerOverlay {
+            width: 100%;
+            height: 100%;
+            visualizer_mode: root.visualizer_mode;
+            spectrum_bands: root.viz_spectrum_bands;
+            radial_image: root.viz_radial_image;
+            spectrum_led_mask: root.viz_spectrum_led_mask;
+            has_cover_art: root.has_cover_art;
+            cover_image: root.cover_image;
+            close_requested => {
+                root.visualizer_active = false;
+                root.close_visualizer();
+            }
+            next_visualizer => {
+                root.next_visualizer();
+            }
+            prev_visualizer => {
+                root.prev_visualizer();
             }
         }
 
@@ -544,9 +596,9 @@ export component MainWindow inherits Window {
 
             // Volume HUD overlay (top layer) — same below-the-top-bar geometry.
             volume_hud := VolumeHudOverlay {
-                y: root.top_bar_height;
+                y: root.hud_top_inset;
                 width: 100%;
-                height: parent.height - root.top_bar_height;
+                height: parent.height - root.hud_top_inset;
                 overlay_backdrop_available: root.overlay_backdrop_available;
                 visible: root.volume_hud_opacity > 0.01;
                 opacity: root.volume_hud_opacity;
@@ -560,9 +612,9 @@ export component MainWindow inherits Window {
 
             // Codec information overlay (top layer) — same below-the-top-bar geometry.
             codec_hud := CodecHudOverlay {
-                y: root.top_bar_height;
+                y: root.hud_top_inset;
                 width: 100%;
-                height: parent.height - root.top_bar_height;
+                height: parent.height - root.hud_top_inset;
                 overlay_backdrop_available: root.overlay_backdrop_available;
                 visible: root.codec_hud_opacity > 0.01;
                 opacity: root.codec_hud_opacity;
@@ -577,9 +629,9 @@ export component MainWindow inherits Window {
 
             // Brightness overlay (top layer) — same below-the-top-bar geometry.
             brightness_hud := BrightnessHudOverlay {
-                y: root.top_bar_height;
+                y: root.hud_top_inset;
                 width: 100%;
-                height: parent.height - root.top_bar_height;
+                height: parent.height - root.hud_top_inset;
                 overlay_backdrop_available: root.overlay_backdrop_available;
                 visible: root.brightness_hud_opacity > 0.01;
                 opacity: root.brightness_hud_opacity;

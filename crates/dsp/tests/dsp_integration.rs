@@ -818,3 +818,233 @@ async fn concurrent_device_clones_read_and_reset() {
     h2.await.unwrap();
     let _ = dsp.read_status().unwrap();
 }
+
+#[test]
+fn latest_frame_slot_overwrites_safely() {
+    use speaker_dsp::LatestFrameSlot;
+
+    let slot = LatestFrameSlot::new();
+    assert!(slot.take().is_none());
+    slot.publish(1_u32);
+    slot.publish(2_u32);
+    assert_eq!(slot.take(), Some(2));
+    assert!(slot.take().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hardware_spectrum_stream_state_aware_resubscribe() {
+    use speaker_dsp::{LatestFrameSlot, default_spectrum_subscription};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_port = listener.local_addr().unwrap().port();
+
+    let server_task = tokio::spawn(async move {
+        // 1. SubscribeState
+        let (s_state, _) = listener.accept().await.unwrap();
+        let mut ws_state = tokio_tungstenite::accept_async(s_state).await.unwrap();
+        let _ = ws_state.next().await.unwrap().unwrap();
+        ws_state
+            .send(Message::Text(
+                serde_json::json!({"reply": "SubscribeState", "result": "Ok"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+
+        // 2. GetState seed -> Running
+        let (s_get, _) = listener.accept().await.unwrap();
+        let mut ws_get = tokio_tungstenite::accept_async(s_get).await.unwrap();
+        let _ = ws_get.next().await.unwrap().unwrap();
+        ws_get
+            .send(Message::Text(
+                serde_json::json!({"reply": "GetState", "result": "Ok", "value": "Running"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+
+        // 3. SubscribeSpectrum
+        let (s_spec, _) = listener.accept().await.unwrap();
+        let mut ws_spec = tokio_tungstenite::accept_async(s_spec).await.unwrap();
+        let req = ws_spec.next().await.unwrap().unwrap();
+        let req_json: serde_json::Value = serde_json::from_str(req.to_text().unwrap()).unwrap();
+        assert_eq!(req_json["command"], "SubscribeSpectrum");
+        assert_eq!(req_json["value"]["side"], "capture");
+
+        ws_spec
+            .send(Message::Text(
+                serde_json::json!({"reply": "SubscribeSpectrum", "result": "Ok"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+
+        ws_spec
+            .send(Message::Text(
+                serde_json::json!({
+                    "reply": "SpectrumEvent",
+                    "result": "Ok",
+                    "value": {
+                        "frequencies": [50.0, 1000.0, 10000.0],
+                        "magnitudes": [-22.0, -18.0, -25.0]
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+
+        let stop_msg = ws_spec.next().await.unwrap().unwrap();
+        let stop_req: serde_json::Value =
+            serde_json::from_str(stop_msg.to_text().unwrap()).unwrap();
+        assert_eq!(stop_req["command"], "StopSubscription");
+    });
+
+    let dsp = DspDevice::with_host_and_port(
+        DspHost::new("127.0.0.1").unwrap(),
+        DspPort::new(local_port).unwrap(),
+    );
+    let slot = std::sync::Arc::new(LatestFrameSlot::new());
+    let sub = dsp.start_spectrum_stream(
+        default_spectrum_subscription(),
+        std::sync::Arc::clone(&slot),
+    );
+
+    let snap = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Some(s) = slot.take()
+                && !s.frequencies.is_empty()
+            {
+                break s;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for SpectrumEvent");
+
+    assert_eq!(snap.frequencies.as_ref(), &[50.0, 1000.0, 10000.0]);
+    assert_eq!(snap.magnitudes, vec![-22.0, -18.0, -25.0]);
+
+    sub.stop().await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), server_task)
+        .await
+        .expect("server_task timed out")
+        .unwrap();
+}
+
+async fn send_ws_json(
+    ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    val: serde_json::Value,
+) {
+    ws.send(Message::Text(val.to_string().into()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hardware_spectrum_stream_processing_stopped_and_resubscribe() {
+    use speaker_dsp::{LatestFrameSlot, default_spectrum_subscription};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_port = listener.local_addr().unwrap().port();
+
+    let server_task = tokio::spawn(async move {
+        let (s_state, _) = listener.accept().await.unwrap();
+        let mut ws_state = tokio_tungstenite::accept_async(s_state).await.unwrap();
+        let _ = ws_state.next().await.unwrap().unwrap();
+        send_ws_json(
+            &mut ws_state,
+            serde_json::json!({"reply": "SubscribeState", "result": "Ok"}),
+        )
+        .await;
+
+        let (s_get, _) = listener.accept().await.unwrap();
+        let mut ws_get = tokio_tungstenite::accept_async(s_get).await.unwrap();
+        let _ = ws_get.next().await.unwrap().unwrap();
+        send_ws_json(
+            &mut ws_get,
+            serde_json::json!({"reply": "GetState", "result": "Ok", "value": "Running"}),
+        )
+        .await;
+
+        let (s_spec1, _) = listener.accept().await.unwrap();
+        let mut ws_spec1 = tokio_tungstenite::accept_async(s_spec1).await.unwrap();
+        let _ = ws_spec1.next().await.unwrap().unwrap();
+        send_ws_json(
+            &mut ws_spec1,
+            serde_json::json!({"reply": "SubscribeSpectrum", "result": "ProcessingNotRunningError"}),
+        )
+        .await;
+
+        send_ws_json(
+            &mut ws_state,
+            serde_json::json!({
+                "reply": "StateEvent",
+                "result": "Ok",
+                "value": {"state": "Running", "stop_reason": null}
+            }),
+        )
+        .await;
+
+        let (s_spec2, _) = listener.accept().await.unwrap();
+        let mut ws_spec2 = tokio_tungstenite::accept_async(s_spec2).await.unwrap();
+        let _ = ws_spec2.next().await.unwrap().unwrap();
+        send_ws_json(
+            &mut ws_spec2,
+            serde_json::json!({"reply": "SubscribeSpectrum", "result": "Ok"}),
+        )
+        .await;
+        send_ws_json(
+            &mut ws_spec2,
+            serde_json::json!({
+                "reply": "SpectrumEvent",
+                "result": "Ok",
+                "value": {
+                    "frequencies": [100.0, 2000.0],
+                    "magnitudes": [-15.0, -20.0]
+                }
+            }),
+        )
+        .await;
+
+        let stop_msg = ws_spec2.next().await.unwrap().unwrap();
+        let stop_req: serde_json::Value =
+            serde_json::from_str(stop_msg.to_text().unwrap()).unwrap();
+        assert_eq!(stop_req["command"], "StopSubscription");
+    });
+
+    let dsp = DspDevice::with_host_and_port(
+        DspHost::new("127.0.0.1").unwrap(),
+        DspPort::new(local_port).unwrap(),
+    );
+    let slot = std::sync::Arc::new(LatestFrameSlot::new());
+    let sub = dsp.start_spectrum_stream(
+        default_spectrum_subscription(),
+        std::sync::Arc::clone(&slot),
+    );
+
+    let snap = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(s) = slot.take()
+                && !s.frequencies.is_empty()
+            {
+                break s;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for resubscribed SpectrumEvent");
+
+    assert_eq!(snap.frequencies.as_ref(), &[100.0, 2000.0]);
+    sub.stop().await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), server_task)
+        .await
+        .expect("server_task timed out")
+        .unwrap();
+}

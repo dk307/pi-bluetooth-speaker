@@ -1,0 +1,238 @@
+//! Dedicated low-priority `CamillaDSP` spectrum telemetry worker and 33 Hz UI frame stepper.
+
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use speaker_dsp::{
+    DspDevice, LatestFrameSlot, SpectrumSnapshot, VisualizerSubscription,
+    spectrum_subscription_for_rate,
+};
+use tokio::sync::mpsc;
+
+pub use crate::config::VisualizerMode;
+
+use super::dsp_math::{ERB_BAND_COUNT, ErbBandMapper, SpectrumBallistics};
+
+/// Output snapshot produced on each UI timer tick (`~33 Hz`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VisualizerOutput {
+    /// Smoothed 24-band ERB bar heights (`0.0..=1.0`).
+    pub spectrum_bars: [f32; ERB_BAND_COUNT],
+    /// 24-band peak-hold cap positions (`0.0..=1.0`).
+    pub spectrum_peaks: [f32; ERB_BAND_COUNT],
+}
+
+impl Default for VisualizerOutput {
+    fn default() -> Self {
+        Self {
+            spectrum_bars: [0.0; ERB_BAND_COUNT],
+            spectrum_peaks: [0.0; ERB_BAND_COUNT],
+        }
+    }
+}
+
+enum WorkerCommand {
+    SetActive { active: bool, max_rate_hz: f32 },
+    Shutdown,
+}
+
+/// Coordinates the `Nice=15` `CamillaDSP` spectrum worker and UI-thread ballistics.
+#[derive(Debug)]
+pub struct VisualizerController {
+    cmd_tx: mpsc::UnboundedSender<WorkerCommand>,
+    worker_thread: Option<JoinHandle<()>>,
+    spectrum_slot: Arc<LatestFrameSlot<SpectrumSnapshot>>,
+    active: bool,
+    force_60fps: bool,
+    mode: VisualizerMode,
+    erb_mapper: ErbBandMapper,
+    ballistics: SpectrumBallistics,
+    last_spectrum_targets: [f32; ERB_BAND_COUNT],
+    last_tick: Option<Instant>,
+}
+
+impl VisualizerController {
+    /// Spawns the low-priority spectrum worker thread for `dsp` (idle until `set_active_mode`).
+    #[must_use]
+    pub fn new(dsp: DspDevice) -> Self {
+        let spectrum_slot = Arc::new(LatestFrameSlot::new());
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+
+        let spectrum_slot_bg = Arc::clone(&spectrum_slot);
+        let worker_thread = match std::thread::Builder::new()
+            .name("visualizer-dsp".to_string())
+            .spawn(move || {
+                lower_current_thread_priority();
+                run_worker_runtime(dsp, spectrum_slot_bg, cmd_rx);
+            }) {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                tracing::error!(error = %err, "Failed to spawn visualizer-dsp worker thread");
+                None
+            }
+        };
+
+        Self {
+            cmd_tx,
+            worker_thread,
+            spectrum_slot,
+            active: false,
+            force_60fps: false,
+            mode: VisualizerMode::default(),
+            erb_mapper: ErbBandMapper::new(),
+            ballistics: SpectrumBallistics::new(),
+            last_spectrum_targets: [0.0; ERB_BAND_COUNT],
+            last_tick: None,
+        }
+    }
+
+    /// Activates or deactivates spectrum streaming for `mode` at `40 Hz` or `60 Hz`.
+    ///
+    /// Passing `None` immediately unsubscribes (`StopSubscription`) so idle
+    /// `CamillaDSP` overhead drops to zero. Switching between `RadialFft` and
+    /// `LinearSpectrum` keeps the active stream open without reconnecting.
+    pub fn set_active_mode(&mut self, mode: Option<VisualizerMode>, force_60fps: bool) {
+        let next_active = mode.is_some();
+        if let Some(m) = mode {
+            self.mode = m;
+        }
+        if self.active == next_active && (!next_active || self.force_60fps == force_60fps) {
+            return;
+        }
+        self.active = next_active;
+        self.force_60fps = force_60fps;
+        self.last_tick = None;
+        self.last_spectrum_targets = [0.0; ERB_BAND_COUNT];
+        self.ballistics.reset();
+        let _ = self.spectrum_slot.take();
+        let max_rate_hz = if force_60fps { 60.0 } else { 40.0 };
+        let _ = self.cmd_tx.send(WorkerCommand::SetActive {
+            active: next_active,
+            max_rate_hz,
+        });
+    }
+
+    /// Returns the currently active visualizer mode, if visible.
+    #[must_use]
+    pub const fn active_mode(&self) -> Option<VisualizerMode> {
+        if self.active { Some(self.mode) } else { None }
+    }
+
+    /// Advances UI ballistics for the current frame and returns the latest display values.
+    pub fn tick(&mut self, now: Instant) -> VisualizerOutput {
+        if !self.active {
+            return VisualizerOutput::default();
+        }
+        let dt = self
+            .last_tick
+            .map_or(Duration::from_millis(30), |prev| {
+                now.saturating_duration_since(prev)
+            })
+            .min(Duration::from_millis(100));
+        self.last_tick = Some(now);
+
+        if let Some(spec) = self.spectrum_slot.take() {
+            self.last_spectrum_targets = self
+                .erb_mapper
+                .map_to_bands(&spec.frequencies, &spec.magnitudes);
+        }
+        let (bars, peaks) = self.ballistics.step(&self.last_spectrum_targets, dt);
+        VisualizerOutput {
+            spectrum_bars: bars,
+            spectrum_peaks: peaks,
+        }
+    }
+
+    /// Stops any active stream and joins the background worker thread cleanly.
+    pub fn shutdown(&mut self) {
+        let _ = self.cmd_tx.send(WorkerCommand::Shutdown);
+        if let Some(handle) = self.worker_thread.take()
+            && let Err(panic_payload) = handle.join()
+        {
+            std::panic::resume_unwind(panic_payload);
+        }
+    }
+}
+
+impl Drop for VisualizerController {
+    fn drop(&mut self) {
+        let _ = self.cmd_tx.send(WorkerCommand::Shutdown);
+        if let Some(handle) = self.worker_thread.take()
+            && let Err(panic_payload) = handle.join()
+            && !std::thread::panicking()
+        {
+            std::panic::resume_unwind(panic_payload);
+        }
+    }
+}
+
+fn lower_current_thread_priority() {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `SYS_gettid` returns the calling kernel thread ID (`id_t`), and
+        // `setpriority(PRIO_PROCESS, tid, 15)` lowers only this worker thread's nice
+        // value to 15 so it yields CPU to the Slint render thread.
+        let rc = unsafe {
+            let tid = libc::syscall(libc::SYS_gettid);
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "Linux kernel TID from SYS_gettid is non-negative and fits in id_t (u32)"
+            )]
+            let tid_id = tid as libc::id_t;
+            libc::setpriority(libc::PRIO_PROCESS, tid_id, 15)
+        };
+        if rc != 0 {
+            tracing::debug!("Unable to lower visualizer worker priority to Nice=15");
+        }
+    }
+}
+
+fn run_worker_runtime(
+    dsp: DspDevice,
+    spectrum_slot: Arc<LatestFrameSlot<SpectrumSnapshot>>,
+    mut cmd_rx: mpsc::UnboundedReceiver<WorkerCommand>,
+) {
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        tracing::error!("Failed to build Tokio runtime for visualizer worker");
+        return;
+    };
+
+    rt.block_on(async move {
+        let mut active_sub: Option<VisualizerSubscription> = None;
+        let mut active_rate_hz: f32 = 0.0;
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                WorkerCommand::Shutdown => break,
+                WorkerCommand::SetActive {
+                    active,
+                    max_rate_hz,
+                } => {
+                    if !active {
+                        if let Some(prev) = active_sub.take() {
+                            prev.stop().await;
+                        }
+                        active_rate_hz = 0.0;
+                    } else if active_sub.is_none() || (active_rate_hz - max_rate_hz).abs() > 0.1 {
+                        if let Some(prev) = active_sub.take() {
+                            prev.stop().await;
+                        }
+                        spectrum_slot.publish(SpectrumSnapshot::silent());
+                        active_sub = Some(dsp.start_spectrum_stream(
+                            spectrum_subscription_for_rate(max_rate_hz),
+                            Arc::clone(&spectrum_slot),
+                        ));
+                        active_rate_hz = max_rate_hz;
+                    }
+                }
+            }
+        }
+        if let Some(prev) = active_sub.take() {
+            prev.stop().await;
+        }
+    });
+}

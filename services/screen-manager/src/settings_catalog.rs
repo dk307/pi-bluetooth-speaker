@@ -10,10 +10,11 @@
 
 use crate::config::{
     CODEC_HUD_TIMEOUT_STEP_MS, CodecHudTimeoutMs, CoreConfig, MAX_CODEC_HUD_TIMEOUT_MS,
-    MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_STEP_PERCENT,
-    MIN_CODEC_HUD_TIMEOUT_MS, MIN_VOLUME_HUD_FADE_MS, MIN_VOLUME_HUD_TIMEOUT_MS,
-    MIN_VOLUME_STEP_PERCENT, MarqueeFps, TitleDisplayMode, VOLUME_HUD_FADE_STEP_MS,
-    VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+    MAX_VISUALIZER_AUTO_START_SECS, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
+    MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_VISUALIZER_AUTO_START_SECS,
+    MIN_VOLUME_HUD_FADE_MS, MIN_VOLUME_HUD_TIMEOUT_MS, MIN_VOLUME_STEP_PERCENT, MarqueeFps,
+    TitleDisplayMode, VISUALIZER_AUTO_START_STEP_SECS, VOLUME_HUD_FADE_STEP_MS,
+    VisualizerAutoStartSecs, VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
 };
 
 /// Visibility tier for a setting on the Screen Settings UI.
@@ -21,6 +22,8 @@ use crate::config::{
 pub enum SettingTier {
     /// Shown directly on the Screen Settings screen.
     Basic,
+    /// Shown in the dedicated Visualizer Settings sub-screen.
+    Visualizer,
     /// Hidden by default; revealed only after entering the Advanced sub-screen.
     Advanced,
 }
@@ -50,11 +53,21 @@ pub enum SettingId {
     CodecHudTimeoutMs,
     /// Automatic ambient-light brightness control (`Manual` vs `Auto`).
     AutoBrightness,
+    /// Retro segmented LED slit mask over the 24-band spectrum (`Smooth` vs `LED`).
+    SpectrumLedMask,
+    /// Automatically open the visualizer after playback starts (`Off` vs `On`).
+    VisualizerAutoStart,
+    /// Delay in seconds before auto-starting the visualizer (`1..=60` s).
+    VisualizerAutoStartSecs,
+    /// Default visualization mode (`Radial` vs `Spectrum`).
+    DefaultVisualizer,
+    /// Force 60 FPS on music visualizations (`30` = ~33 Hz vs `60` = 60 Hz).
+    VisualizerFps,
 }
 
 impl SettingId {
     /// All variants of [`SettingId`], used to prove catalog completeness at compile time.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 12] = [
         Self::TitleDisplayMode,
         Self::MarqueeFps,
         Self::VolumeStepPercent,
@@ -62,6 +75,11 @@ impl SettingId {
         Self::VolumeHudFadeMs,
         Self::CodecHudTimeoutMs,
         Self::AutoBrightness,
+        Self::SpectrumLedMask,
+        Self::VisualizerAutoStart,
+        Self::VisualizerAutoStartSecs,
+        Self::DefaultVisualizer,
+        Self::VisualizerFps,
     ];
 
     /// Stable slug key used to identify this setting across the Rust/Slint boundary.
@@ -75,6 +93,11 @@ impl SettingId {
             Self::VolumeHudFadeMs => "volume_hud_fade_ms",
             Self::CodecHudTimeoutMs => "codec_hud_timeout_ms",
             Self::AutoBrightness => "auto_brightness",
+            Self::SpectrumLedMask => "spectrum_led_mask",
+            Self::VisualizerAutoStart => "visualizer_auto_start",
+            Self::VisualizerAutoStartSecs => "visualizer_auto_start_secs",
+            Self::DefaultVisualizer => "default_visualizer",
+            Self::VisualizerFps => "visualizer_fps",
         }
     }
 
@@ -109,6 +132,8 @@ pub enum SettingControl {
         /// Label for the right (`true`) option.
         right_label: &'static str,
     },
+    /// Cyclic `<` / `>` selector over named options (scalable to 2+ choices).
+    Selector,
 }
 
 /// Metadata descriptor for a single setting row.
@@ -211,6 +236,50 @@ pub const SETTINGS_CATALOG: &[SettingDescriptor] = &[
             right_label: "Auto",
         },
     },
+    SettingDescriptor {
+        id: SettingId::VisualizerAutoStart,
+        label: "Auto-Start Visualizer",
+        tier: SettingTier::Visualizer,
+        control: SettingControl::TwoOption {
+            left_label: "Off",
+            right_label: "On",
+        },
+    },
+    SettingDescriptor {
+        id: SettingId::VisualizerAutoStartSecs,
+        label: "Auto-Start Delay",
+        tier: SettingTier::Visualizer,
+        control: SettingControl::Stepper {
+            min: MIN_VISUALIZER_AUTO_START_SECS.cast_signed(),
+            max: MAX_VISUALIZER_AUTO_START_SECS.cast_signed(),
+            step: VISUALIZER_AUTO_START_STEP_SECS.cast_signed(),
+            unit: "s",
+        },
+    },
+    SettingDescriptor {
+        id: SettingId::DefaultVisualizer,
+        label: "Default Visualizer",
+        tier: SettingTier::Visualizer,
+        control: SettingControl::Selector,
+    },
+    SettingDescriptor {
+        id: SettingId::SpectrumLedMask,
+        label: "24-Band LED Mask",
+        tier: SettingTier::Visualizer,
+        control: SettingControl::TwoOption {
+            left_label: "Off",
+            right_label: "On",
+        },
+    },
+    SettingDescriptor {
+        id: SettingId::VisualizerFps,
+        label: "Visualizer FPS",
+        tier: SettingTier::Advanced,
+        control: SettingControl::TwoOption {
+            left_label: "30",
+            right_label: "60",
+        },
+    },
 ];
 
 const _: () = {
@@ -298,27 +367,36 @@ pub fn row_state(config: &CoreConfig, desc: &SettingDescriptor) -> SettingRowSta
             can_increase: false,
             right_selected: two_option_is_right(config, desc.id),
         },
+        SettingControl::Selector => SettingRowState {
+            value_text: selector_value_text(config, desc.id),
+            can_decrease: true,
+            can_increase: true,
+            right_selected: false,
+        },
     }
 }
 
 /// Applies a relative step (`direction` = `-1` or `+1`, clamped via `signum()`)
-/// to a stepper setting in `config`, clamping to the descriptor's `min..=max` bounds.
+/// to a stepper or cyclic selector setting in `config`.
 ///
-/// Returns `true` if `id` is a stepper setting and `config` was updated.
+/// Returns `true` if `id` is a stepper/selector setting and `config` was updated.
 pub fn apply_step(config: &mut CoreConfig, id: SettingId, direction: i32) -> bool {
-    let desc = find_setting(id);
-    let SettingControl::Stepper { min, max, step, .. } = desc.control else {
-        return false;
-    };
     let dir = direction.signum();
     if dir == 0 {
         return false;
     }
-    let current = stepper_value(config, id);
-    let next = current
-        .saturating_add(dir.saturating_mul(step))
-        .clamp(min, max);
-    set_stepper_value(config, id, next)
+    let desc = find_setting(id);
+    match desc.control {
+        SettingControl::Stepper { min, max, step, .. } => {
+            let current = stepper_value(config, id);
+            let next = current
+                .saturating_add(dir.saturating_mul(step))
+                .clamp(min, max);
+            set_stepper_value(config, id, next)
+        }
+        SettingControl::Selector => apply_selector_step(config, id, dir),
+        SettingControl::TwoOption { .. } => false,
+    }
 }
 
 /// Applies a two-option selection (`right_selected`) to `config`.
@@ -342,10 +420,45 @@ pub fn apply_toggle(config: &mut CoreConfig, id: SettingId, right_selected: bool
             config.auto_brightness_enabled = right_selected;
             true
         }
+        SettingId::SpectrumLedMask => {
+            config.spectrum_led_mask = right_selected;
+            true
+        }
+        SettingId::VisualizerAutoStart => {
+            config.visualizer_auto_start = right_selected;
+            true
+        }
+        SettingId::VisualizerFps => {
+            config.visualizer_force_60fps = right_selected;
+            true
+        }
         SettingId::VolumeStepPercent
         | SettingId::VolumeHudTimeoutMs
         | SettingId::VolumeHudFadeMs
-        | SettingId::CodecHudTimeoutMs => false,
+        | SettingId::CodecHudTimeoutMs
+        | SettingId::VisualizerAutoStartSecs
+        | SettingId::DefaultVisualizer => false,
+    }
+}
+
+fn selector_value_text(config: &CoreConfig, id: SettingId) -> String {
+    match id {
+        SettingId::DefaultVisualizer => config.default_visualizer.display_name().to_string(),
+        _ => String::new(),
+    }
+}
+
+fn apply_selector_step(config: &mut CoreConfig, id: SettingId, dir: i32) -> bool {
+    match id {
+        SettingId::DefaultVisualizer => {
+            config.default_visualizer = if dir < 0 {
+                config.default_visualizer.prev()
+            } else {
+                config.default_visualizer.next()
+            };
+            true
+        }
+        _ => false,
     }
 }
 
@@ -358,7 +471,17 @@ fn stepper_value(config: &CoreConfig, id: SettingId) -> i32 {
             .expect("validated volume_hud_fade_ms fits in i32"),
         SettingId::CodecHudTimeoutMs => i32::try_from(config.codec_hud_timeout_ms.value())
             .expect("validated codec_hud_timeout_ms fits in i32"),
-        SettingId::TitleDisplayMode | SettingId::MarqueeFps | SettingId::AutoBrightness => 0,
+        SettingId::VisualizerAutoStartSecs => {
+            i32::try_from(config.visualizer_auto_start_secs.value())
+                .expect("validated visualizer_auto_start_secs fits in i32")
+        }
+        SettingId::TitleDisplayMode
+        | SettingId::MarqueeFps
+        | SettingId::AutoBrightness
+        | SettingId::SpectrumLedMask
+        | SettingId::VisualizerAutoStart
+        | SettingId::DefaultVisualizer
+        | SettingId::VisualizerFps => 0,
     }
 }
 
@@ -397,7 +520,21 @@ fn set_stepper_value(config: &mut CoreConfig, id: SettingId, value: i32) -> bool
             config.codec_hud_timeout_ms = CodecHudTimeoutMs::new(clamped);
             true
         }
-        SettingId::TitleDisplayMode | SettingId::MarqueeFps | SettingId::AutoBrightness => false,
+        SettingId::VisualizerAutoStartSecs => {
+            let clamped = value.max(0).cast_unsigned().clamp(
+                MIN_VISUALIZER_AUTO_START_SECS,
+                MAX_VISUALIZER_AUTO_START_SECS,
+            );
+            config.visualizer_auto_start_secs = VisualizerAutoStartSecs::new(clamped);
+            true
+        }
+        SettingId::TitleDisplayMode
+        | SettingId::MarqueeFps
+        | SettingId::AutoBrightness
+        | SettingId::SpectrumLedMask
+        | SettingId::VisualizerAutoStart
+        | SettingId::DefaultVisualizer
+        | SettingId::VisualizerFps => false,
     }
 }
 
@@ -406,9 +543,14 @@ fn two_option_is_right(config: &CoreConfig, id: SettingId) -> bool {
         SettingId::TitleDisplayMode => config.title_display_mode.is_split(),
         SettingId::MarqueeFps => config.marquee_fps == MarqueeFps::FPS_60,
         SettingId::AutoBrightness => config.auto_brightness_enabled,
+        SettingId::SpectrumLedMask => config.spectrum_led_mask,
+        SettingId::VisualizerAutoStart => config.visualizer_auto_start,
+        SettingId::VisualizerFps => config.visualizer_force_60fps,
         SettingId::VolumeStepPercent
         | SettingId::VolumeHudTimeoutMs
         | SettingId::VolumeHudFadeMs
-        | SettingId::CodecHudTimeoutMs => false,
+        | SettingId::CodecHudTimeoutMs
+        | SettingId::VisualizerAutoStartSecs
+        | SettingId::DefaultVisualizer => false,
     }
 }

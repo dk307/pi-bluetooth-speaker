@@ -666,7 +666,7 @@ fn test_core_daemon_run_ui_display_unheadless_and_init_shell_direct() {
         shell.current_theme(),
         screen_manager::ui::ThemePreset::Peppy
     );
-    assert_eq!(shell.current_tab(), 1);
+    assert!(shell.is_visualizer_active());
 
     // 3. init_shell with mocked_device = true exercises mocked Bluetooth path and playback sync
     let main_window_mock = MainWindow::new().unwrap();

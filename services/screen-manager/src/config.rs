@@ -79,6 +79,18 @@ const MAX_FONT_SCALE_PCT: u16 = 135;
 /// anchored at 250 + n*1000, not at the domain minimum.
 pub const CODEC_HUD_TIMEOUT_STEP_MS: u32 = 1_000;
 
+/// Production default visualizer auto-start delay in seconds (`5` s).
+pub const DEFAULT_VISUALIZER_AUTO_START_SECS: u32 = 5;
+
+/// Minimum allowed visualizer auto-start delay in seconds (`1` s).
+pub const MIN_VISUALIZER_AUTO_START_SECS: u32 = 1;
+
+/// Maximum allowed visualizer auto-start delay in seconds (`60` s).
+pub const MAX_VISUALIZER_AUTO_START_SECS: u32 = 60;
+
+/// Stepper increment for the visualizer auto-start delay in seconds (`1` s).
+pub const VISUALIZER_AUTO_START_STEP_SECS: u32 = 1;
+
 /// Allowed marquee scroll rates: 60 is the production default and 30 halves the
 /// render load by scrolling 2 px per 33.3 ms tick at identical on-screen speed.
 const MARQUEE_FPS_ALLOWED: [u32; 2] = [30, 60];
@@ -149,7 +161,42 @@ const _: () = {
             && (DEFAULT_VOLUME_HUD_TIMEOUT_MS <= MAX_VOLUME_HUD_TIMEOUT_MS)
     );
     assert!(DEFAULT_VOLUME_HUD_FADE_MS <= MAX_VOLUME_HUD_FADE_MS);
+    assert!(
+        (MIN_VISUALIZER_AUTO_START_SECS <= DEFAULT_VISUALIZER_AUTO_START_SECS)
+            && (DEFAULT_VISUALIZER_AUTO_START_SECS <= MAX_VISUALIZER_AUTO_START_SECS)
+    );
 };
+
+macro_rules! impl_bounded_int_traits {
+    ($ty:ty, $prim:ty, $field:expr, $min:expr, $max:expr) => {
+        impl Default for $ty {
+            fn default() -> Self {
+                Self::DEFAULT
+            }
+        }
+
+        impl TryFrom<$prim> for $ty {
+            type Error = ConfigError;
+
+            fn try_from(val: $prim) -> Result<Self, Self::Error> {
+                if ($min..=$max).contains(&val) {
+                    Ok(Self::new(val))
+                } else {
+                    Err(ConfigError::invalid(format!(
+                        "invalid {} '{val}': expected {}..={}",
+                        $field, $min, $max
+                    )))
+                }
+            }
+        }
+
+        impl From<$ty> for $prim {
+            fn from(val: $ty) -> Self {
+                val.0
+            }
+        }
+    };
+}
 
 /// Strongly typed rotary encoder volume step percentage (`1..=25`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,31 +227,13 @@ impl VolumeStepPercent {
     }
 }
 
-impl Default for VolumeStepPercent {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
-impl TryFrom<u8> for VolumeStepPercent {
-    type Error = ConfigError;
-
-    fn try_from(step: u8) -> Result<Self, Self::Error> {
-        if (MIN_VOLUME_STEP_PERCENT..=MAX_VOLUME_STEP_PERCENT).contains(&step) {
-            Ok(Self::new(step))
-        } else {
-            Err(ConfigError::invalid(format!(
-                "invalid volume_step_percent '{step}': expected {MIN_VOLUME_STEP_PERCENT}..={MAX_VOLUME_STEP_PERCENT}"
-            )))
-        }
-    }
-}
-
-impl From<VolumeStepPercent> for u8 {
-    fn from(step: VolumeStepPercent) -> Self {
-        step.0
-    }
-}
+impl_bounded_int_traits!(
+    VolumeStepPercent,
+    u8,
+    "volume_step_percent",
+    MIN_VOLUME_STEP_PERCENT,
+    MAX_VOLUME_STEP_PERCENT
+);
 
 /// Strongly typed manual brightness percentage (`0..=100`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,31 +319,13 @@ impl VolumeHudTimeoutMs {
     }
 }
 
-impl Default for VolumeHudTimeoutMs {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
-impl TryFrom<u32> for VolumeHudTimeoutMs {
-    type Error = ConfigError;
-
-    fn try_from(ms: u32) -> Result<Self, Self::Error> {
-        if (MIN_VOLUME_HUD_TIMEOUT_MS..=MAX_VOLUME_HUD_TIMEOUT_MS).contains(&ms) {
-            Ok(Self::new(ms))
-        } else {
-            Err(ConfigError::invalid(format!(
-                "invalid volume_hud_timeout_ms '{ms}': expected {MIN_VOLUME_HUD_TIMEOUT_MS}..={MAX_VOLUME_HUD_TIMEOUT_MS}"
-            )))
-        }
-    }
-}
-
-impl From<VolumeHudTimeoutMs> for u32 {
-    fn from(ms: VolumeHudTimeoutMs) -> Self {
-        ms.0
-    }
-}
+impl_bounded_int_traits!(
+    VolumeHudTimeoutMs,
+    u32,
+    "volume_hud_timeout_ms",
+    MIN_VOLUME_HUD_TIMEOUT_MS,
+    MAX_VOLUME_HUD_TIMEOUT_MS
+);
 
 /// Strongly typed Volume HUD fade-out duration in milliseconds (`0..=2_000`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -400,31 +411,13 @@ impl CodecHudTimeoutMs {
     }
 }
 
-impl Default for CodecHudTimeoutMs {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
-impl TryFrom<u32> for CodecHudTimeoutMs {
-    type Error = ConfigError;
-
-    fn try_from(ms: u32) -> Result<Self, Self::Error> {
-        if (MIN_CODEC_HUD_TIMEOUT_MS..=MAX_CODEC_HUD_TIMEOUT_MS).contains(&ms) {
-            Ok(Self::new(ms))
-        } else {
-            Err(ConfigError::invalid(format!(
-                "invalid codec_hud_timeout_ms '{ms}': expected {MIN_CODEC_HUD_TIMEOUT_MS}..={MAX_CODEC_HUD_TIMEOUT_MS}"
-            )))
-        }
-    }
-}
-
-impl From<CodecHudTimeoutMs> for u32 {
-    fn from(ms: CodecHudTimeoutMs) -> Self {
-        ms.0
-    }
-}
+impl_bounded_int_traits!(
+    CodecHudTimeoutMs,
+    u32,
+    "codec_hud_timeout_ms",
+    MIN_CODEC_HUD_TIMEOUT_MS,
+    MAX_CODEC_HUD_TIMEOUT_MS
+);
 
 /// Strongly typed touch font scale factor (`1.00..=1.35`, default `1.15`).
 ///
@@ -532,6 +525,145 @@ impl TitleDisplayMode {
     }
 }
 
+/// Strongly typed visualizer auto-start delay in seconds (`1..=60`, default `5`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct VisualizerAutoStartSecs(u32);
+
+impl VisualizerAutoStartSecs {
+    /// Production default delay (`5` s).
+    pub const DEFAULT: Self = Self::new(DEFAULT_VISUALIZER_AUTO_START_SECS);
+
+    /// Const constructor validated against `1..=60`.
+    ///
+    /// # Panics
+    /// Panics if `secs` is not in the range `1..=60`.
+    #[must_use]
+    pub const fn new(secs: u32) -> Self {
+        assert!(
+            secs >= MIN_VISUALIZER_AUTO_START_SECS && secs <= MAX_VISUALIZER_AUTO_START_SECS,
+            "visualizer_auto_start_secs out of range 1..=60"
+        );
+        Self(secs)
+    }
+
+    /// Returns the raw delay in seconds.
+    #[must_use]
+    pub const fn value(self) -> u32 {
+        self.0
+    }
+}
+
+impl_bounded_int_traits!(
+    VisualizerAutoStartSecs,
+    u32,
+    "visualizer_auto_start_secs",
+    MIN_VISUALIZER_AUTO_START_SECS,
+    MAX_VISUALIZER_AUTO_START_SECS
+);
+
+/// Active visualizer screen mode (persisted as `default_visualizer` in [`CoreConfig`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "&'static str")]
+#[repr(i32)]
+pub enum VisualizerMode {
+    /// Bilateral 48-bar radial FFT ring around central album art.
+    #[default]
+    RadialFft = 0,
+    /// 24-band Glasberg–Moore ERB linear bar spectrum analyzer.
+    LinearSpectrum = 1,
+}
+
+impl VisualizerMode {
+    /// Total number of registered visualizer screens.
+    pub const COUNT: i32 = 2;
+
+    const SLUGS: [(Self, &str); 2] = [
+        (Self::RadialFft, "radial_fft"),
+        (Self::LinearSpectrum, "linear_spectrum"),
+    ];
+
+    /// Returns the canonical config slug (`"radial_fft"` or `"linear_spectrum"`).
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        let mut i = 0;
+        while i < Self::SLUGS.len() {
+            let (mode, slug) = Self::SLUGS[i];
+            if mode as i32 == self as i32 {
+                return slug;
+            }
+            i += 1;
+        }
+        "radial_fft"
+    }
+
+    /// Parses a canonical config slug back into [`VisualizerMode`].
+    ///
+    /// # Errors
+    /// Returns a human-readable error if `slug` is not a recognized mode slug.
+    pub fn parse_slug(slug: &str) -> Result<Self, String> {
+        Self::SLUGS
+            .iter()
+            .find(|&&(_, s)| s == slug)
+            .map(|&(m, _)| m)
+            .ok_or_else(|| {
+                format!(
+                    "invalid default_visualizer '{slug}': expected 'radial_fft' or 'linear_spectrum'"
+                )
+            })
+    }
+
+    /// Returns the human-readable visualizer name shown in Screen Settings.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::RadialFft => "Radial FFT",
+            Self::LinearSpectrum => "ERB Spectrum",
+        }
+    }
+
+    /// Returns the Slint `visualizer_mode` integer index (`0` or `1`).
+    #[must_use]
+    pub const fn as_index(self) -> i32 {
+        self as i32
+    }
+
+    /// Converts an integer index (wrapping modulo `COUNT`) into a [`VisualizerMode`].
+    #[must_use]
+    pub const fn from_index(idx: i32) -> Self {
+        match idx.rem_euclid(Self::COUNT) {
+            1 => Self::LinearSpectrum,
+            _ => Self::RadialFft,
+        }
+    }
+
+    /// Returns the next visualizer mode, wrapping around.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self::from_index(self as i32 + 1)
+    }
+
+    /// Returns the previous visualizer mode, wrapping around.
+    #[must_use]
+    pub const fn prev(self) -> Self {
+        Self::from_index(self as i32 - 1)
+    }
+}
+
+impl TryFrom<String> for VisualizerMode {
+    type Error = String;
+
+    fn try_from(slug: String) -> Result<Self, Self::Error> {
+        Self::parse_slug(&slug)
+    }
+}
+
+impl From<VisualizerMode> for &'static str {
+    fn from(mode: VisualizerMode) -> Self {
+        mode.slug()
+    }
+}
+
 /// Strongly typed appliance configuration persisted as JSON on disk.
 ///
 /// Missing fields deserialize to their defaults, so minimal config files
@@ -540,6 +672,10 @@ impl TitleDisplayMode {
 /// inhabit this struct.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent persisted boolean settings on CoreConfig"
+)]
 pub struct CoreConfig {
     /// Theme preset override applied on startup; `None` keeps the built-in default.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -562,6 +698,16 @@ pub struct CoreConfig {
     pub auto_brightness_enabled: bool,
     /// Last user-selected brightness percent while in manual mode (`0..=100`).
     pub brightness_manual_percent: ManualBrightnessPercent,
+    /// Whether the retro segmented LED slit mask overlays the 24-band spectrum.
+    pub spectrum_led_mask: bool,
+    /// Force 60 FPS on music visualizations (`false` = 33 Hz / 30 ms, `true` = 60 Hz / 16 ms).
+    pub visualizer_force_60fps: bool,
+    /// Whether to automatically open the visualizer after playback starts.
+    pub visualizer_auto_start: bool,
+    /// Delay in seconds after playback starts before auto-opening the visualizer (`1..=60`).
+    pub visualizer_auto_start_secs: VisualizerAutoStartSecs,
+    /// Default visualization mode (`"radial_fft"` or `"linear_spectrum"`).
+    pub default_visualizer: VisualizerMode,
 }
 
 impl Default for CoreConfig {
@@ -577,6 +723,11 @@ impl Default for CoreConfig {
             font_scale: FontScale::default(),
             auto_brightness_enabled: true,
             brightness_manual_percent: ManualBrightnessPercent::DEFAULT,
+            spectrum_led_mask: true,
+            visualizer_force_60fps: false,
+            visualizer_auto_start: true,
+            visualizer_auto_start_secs: VisualizerAutoStartSecs::default(),
+            default_visualizer: VisualizerMode::default(),
         }
     }
 }

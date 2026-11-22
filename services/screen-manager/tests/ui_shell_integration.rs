@@ -335,18 +335,14 @@ fn ui_shell_now_playing_properties_and_playback_state() {
         "AAC-LC | 44.1kHz/16-bit ➔ DSP 48k"
     );
 
-    // Peak levels & NaN / boundary clamping
-    shell.set_peak_levels(0.85, 0.42);
-    assert_eq!(shell.window().get_left_peak_ratio(), 0.85);
-    assert_eq!(shell.window().get_right_peak_ratio(), 0.42);
-
-    shell.set_peak_levels(1.5, -0.5);
-    assert_eq!(shell.window().get_left_peak_ratio(), 1.0);
-    assert_eq!(shell.window().get_right_peak_ratio(), 0.0);
-
-    shell.set_peak_levels(f32::NAN, f32::INFINITY);
-    assert_eq!(shell.window().get_left_peak_ratio(), 0.0);
-    assert_eq!(shell.window().get_right_peak_ratio(), 1.0);
+    // Visualizer open / close & mode cycling
+    assert!(!shell.is_visualizer_active());
+    shell.open_visualizer();
+    assert!(shell.is_visualizer_active());
+    shell.window().invoke_next_visualizer();
+    assert_eq!(shell.window().get_visualizer_mode(), 1);
+    shell.close_visualizer();
+    assert!(!shell.is_visualizer_active());
 
     // Cover art toggle
     assert!(!shell.window().get_has_cover_art());
@@ -1308,7 +1304,7 @@ fn ui_shell_generic_settings_callbacks_clamp_and_sync_models() {
         screen_manager::config::TitleDisplayMode::Split
     );
 
-    // Verify basic_settings and advanced_settings models reflect the updated state.
+    // Verify basic_settings, visualizer_settings, and advanced_settings models reflect the updated state.
     let basic_rows = shell.window().get_basic_settings();
     assert_eq!(basic_rows.row_count(), 2);
     let title_row = basic_rows.row_data(0).expect("title_display_mode row");
@@ -1320,8 +1316,19 @@ fn ui_shell_generic_settings_callbacks_clamp_and_sync_models() {
     assert!(!auto_row.is_advanced);
     assert!(auto_row.right_selected);
 
+    let viz_rows = shell.window().get_visualizer_settings();
+    assert_eq!(viz_rows.row_count(), 4);
+    assert_eq!(
+        viz_rows.row_data(0).expect("autostart row").id.as_str(),
+        "visualizer_auto_start"
+    );
+    assert_eq!(
+        viz_rows.row_data(3).expect("led mask row").id.as_str(),
+        "spectrum_led_mask"
+    );
+
     let adv_rows = shell.window().get_advanced_settings();
-    assert_eq!(adv_rows.row_count(), 5);
+    assert_eq!(adv_rows.row_count(), 6);
     let vol_row = adv_rows.row_data(1).expect("volume_step_percent row");
     assert_eq!(vol_row.id.as_str(), "volume_step_percent");
     assert!(vol_row.is_advanced);
@@ -1395,6 +1402,7 @@ fn ui_shell_screen_settings_save_round_trip_and_clamping() {
         font_scale: FontScale::from_percent(125),
         auto_brightness_enabled: false,
         brightness_manual_percent: ManualBrightnessPercent::new(60),
+        ..CoreConfig::default()
     };
     shell.apply_config(&cfg);
 
