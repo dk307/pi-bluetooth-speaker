@@ -167,7 +167,7 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 | **`bluetooth.service`** | `active (running)` | System | `/usr/libexec/bluetooth/bluetoothd` | Official BlueZ 5.88 daemon managing HCI controller and A2DP profile. |
 | **`bt-manager.service`** | `active (running)` | Appliance | `/usr/local/bin/bt-manager` | Pure-Rust service providing native BlueZ `org.bluez.Agent1` headless auto-pairing & auto-trust agent, BlueZ/BlueALSA status monitoring, and BIP cover-art publisher (replaces legacy `bt-agent.service`). |
 | **`bluealsa.service`** | `active (running)` | Appliance | `/usr/local/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+` | BlueALSA v5.0.0 (private A53-tuned build) daemon acting as an A2DP sink supporting all high-resolution codecs except Opus, with native AVRCP volume. |
-| **`bluealsa-aplay.service`**| `active (running)` | Appliance | `/usr/local/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"` | Pipes incoming decoded audio stream from BlueALSA to ALSA `default` (`dsp_dmix` -> `Loopback,0,0` -> CamillaDSP) with hardware-only volume auto-sync to the Merus MA12070P chip (`hw:sndrpimerusamp`). |
+| **`bluealsa-aplay.service`**| `active (running)` | Appliance | `/usr/local/bin/bluealsa-aplay -S -D default --volume=none --single-audio` | Pure audio forwarding only: pipes incoming decoded stream from BlueALSA to ALSA `default` (`dsp_dmix` -> `Loopback,0,0` -> CamillaDSP). No mixer control — the Merus MA12070P `A.Mstr Vol` is owned solely by `audio-manager` (fed by `bt-manager` volume sync); `--single-audio` gates playback to one active PCM. |
 | **`camilladsp.service`** | `active (running)` | Custom | `/usr/local/bin/camilladsp -p 1234 -o /var/log/camilladsp/camilladsp.log /etc/camilladsp/crossover.yml` | CamillaDSP v4.1.3 crossover and filter engine with WebSocket control API on port 1234. |
 
 ### Infrastructure & System Services
@@ -276,12 +276,13 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 ### 7.2. BlueALSA Playback Forwarder (`bluealsa-aplay.service`)
 - **File:** `/etc/systemd/system/bluealsa-aplay.service`
 - **Target Device:** `-D default` (routes through ALSA `pcm.!default` -> `dsp_dmix` -> `Loopback,0,0`)
-- **Hardware-Only Volume Sync:** `-M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"` explicitly binds `bluealsa-aplay` to the Merus MA12070P hardware amplifier mixer (`Card 1: sndrpimerusamp`) rather than relying on `ctl.!default`. This sets `SoftVolume: false` on the BlueALSA PCM transport so BlueALSA performs **zero software attenuation**, feeding a bit-perfect 100% full-scale digital signal into CamillaDSP while mapping AVRCP volume (`0..127`) exclusively to the MA12070P hardware `'A.Mstr Vol'` register (`0..144`, `-144 dB..0.00 dB`).
+- **Pure audio forwarding — no mixer binding:** `--volume=none --single-audio`. `bluealsa-aplay` does **not** touch the Merus mixer (no `-M` / `--mixer-control`). The `A.Mstr Vol` hardware register (`Card 1: sndrpimerusamp`) is owned **solely by `audio-manager`** (D-Bus `org.speaker.AudioManager`), which bt-manager's `volume_sync` task feeds from the BlueALSA PCM volume. The BlueALSA PCM reports `SoftVolume: false`, so BlueALSA performs **zero software attenuation**, feeding a bit-perfect 100% full-scale digital signal into CamillaDSP. **Do NOT re-add `-M hw:sndrpimerusamp --mixer-control`:** with `[AVRCP] VolumeCategory = false` the BlueZ `MediaTransport1.Volume` stays 0, so bluealsa-aplay's mixer writer would repeatedly slam the amp to raw 0 on every PCM restart — the documented two-writer fight. See `docs/volume_sync_plan.md` (Final Architecture).
 - **Command Line:**
   ```bash
-  /usr/local/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"
+  /usr/local/bin/bluealsa-aplay -S -D default --volume=none --single-audio
   ```
-- **Boot Race Mitigation (Critical):** `bluealsa-aplay` MUST NOT attempt to enumerate the PCM list before `bluealsad` has fully registered `org.bluealsa` on the system D-Bus bus. A boot race here (previously observed when starting the service without proper ordering) manifests as `Couldn't get BlueALSA PCM list: The name org.bluealsa was not provided by any .service files`, after which the AVRCP → Merus hardware volume sync is permanently dead for the session (the mixer handle is never opened, so volume changes on the phone are silently ignored while playback continues at whatever hardware volume was last set).
+- **Why `--single-audio` (mandatory):** gates ALSA playback to one active BlueALSA PCM at a time (first-play-wins), so two phones cannot mix into the same sink. bluealsa-aplay's built-in AVRCP Pause targets `.../dev_XX/player0`, which fails on BlueZ 5.88 (players live at `.../avrcp/player0`); `bt-manager` therefore sends the real AVRCP Pause and publishes `ActiveDevice` on D-Bus. See `docs/single_active_bt_source.md`.
+- **Boot Race Mitigation (Critical):** `bluealsa-aplay` MUST NOT attempt to enumerate the PCM list before `bluealsad` has fully registered `org.bluealsa` on the system D-Bus bus. A boot race here (previously observed when starting the service without proper ordering) manifests as `Couldn't get BlueALSA PCM list: The name org.bluealsa was not provided by any .service files`, after which no PCM is opened, so audio does not flow for the session until the service restarts. Volume control itself is unaffected: it follows the independent chain BlueZ → bluealsad → bt-manager `volume_sync` → `audio-manager` (§7.6.1), none of which depends on `bluealsa-aplay`'s PCM enumeration.
 - **Dependency & Resilience Configuration:** To prevent the boot race, the `[Unit]` section MUST pin `bluealsa-aplay.service` to `bluealsa.service` with both ordering and lifecycle dependencies, and the `[Service]` section MUST enable aggressive automatic restarts:
   ```ini
   [Unit]
@@ -295,7 +296,7 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
   ```
   - `Requires=bluealsa.service` + `After=bluealsa.service` ensures the daemon is fully stopped before the forwarder (re)starts.
 
-- **Why `After=` alone is insufficient — `Type=dbus` is mandatory:** With `bluealsa.service` configured as `Type=simple`, systemd considers it "started" the moment the process forks — long before `bluealsad` registers `org.bluealsa` on the system bus. The boot race therefore recurs on every cold start or combined stack restart (observed in the journal as `bluealsad: Couldn't get HCI version: Network is down` alongside the aplay PCM-list error). Critically, `bluealsa-aplay` does **not** exit on the failed PCM list: it logs the error and continues running in a degraded state with no PCM watching, so `Restart=always` never fires and volume sync stays dead until a manual restart.
+- **Why `After=` alone is insufficient — `Type=dbus` is mandatory:** With `bluealsa.service` configured as `Type=simple`, systemd considers it "started" the moment the process forks — long before `bluealsad` registers `org.bluealsa` on the system bus. The boot race therefore recurs on every cold start or combined stack restart (observed in the journal as `bluealsad: Couldn't get HCI version: Network is down` alongside the aplay PCM-list error). Critically, `bluealsa-aplay` does **not** exit on the failed PCM list: it logs the error and continues running in a degraded state with no PCM watching, so `Restart=always` never fires and audio path stays down until a manual restart. (Volume control is unaffected — it follows the independent BlueZ → bluealsad → bt-manager → audio-manager chain, §7.6.1.)
   - **Fix:** `bluealsa.service` MUST use:
     ```ini
     [Service]
@@ -367,16 +368,15 @@ Because the custom Merus overlay strips `pinctrl` and the Freenove display uses 
 
 ### 7.6. AVRCP Absolute Volume Synchronization & Calibration
 
-#### 7.6.1. Volume Sync Architecture (BlueZ ↔ bluealsa-aplay ↔ Merus)
-Volume control is a **three-stage chain**, and a failure at any stage freezes the physical amplifier:
+#### 7.6.1. Volume Sync Architecture (BlueZ → bt-manager → audio-manager → Merus)
+Volume control is a **four-stage chain** (implemented Nov 2026), and a failure at any stage freezes the physical amplifier:
 
-1. **BlueZ (bluetoothd) — AVRCP TG controller:** Exclusively owns the AVCTP/AVRCP connection (PSM 0x0017) and the SDP records. It receives `SetAbsoluteVolume` (PDU 0x50) commands from the phone (CT, Category 2) and exposes the current volume as `org.bluez.MediaTransport1.Volume` (0..127) on each active transport (`/org/bluez/hci0/dev_<mac>/fdN`). bluez-alsa is only a D-Bus client here — it never touches AVCTP itself.
-2. **bluealsad / bluez-alsa 5.0.0:** Maps the D-Bus `Volume` property into its internal PCM volume model and signals changes to `bluealsa-aplay`.
-3. **bluealsa-aplay mixer binding:** With `-M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"` (`SoftVolume: false`), every transport volume event is translated directly into the Merus MA12070P hardware register `A.Mstr Vol` (0..144 raw steps, -144 dB..0 dB), leaving the digital path to CamillaDSP bit-perfect.
+1. **BlueZ (bluetoothd) — AVRCP TG controller:** Exclusively owns the AVCTP/AVRCP connection (PSM 0x0017) and the SDP records. It receives `SetAbsoluteVolume` (PDU 0x50) commands from the phone (CT, Category 2) and exposes the current volume as `org.bluez.MediaTransport1.Volume` (0..127) on each active transport (`/org/bluez/hci0/dev_<mac>/fdN`). With `[AVRCP] VolumeCategory = false`, bluez-alsa receives absolute volume natively via BlueALSA's own PCM volume path; the BlueZ `MediaTransport1.Volume` path is not used and stays 0.
+2. **bluealsad / bluez-alsa 5.0.0:** Reads AVRCP absolute volume natively into its internal PCM volume model and exposes it as `org.bluealsa.PCM1.Volume` (per-channel bytes). `SoftVolume: false` means zero software attenuation — the digital path to CamillaDSP stays bit-perfect.
+3. **bt-manager `volume_sync`:** Event-driven task reads `org.bluealsa.PCM1.Volume` and forwards the percent to `audio-manager` via D-Bus `SetLevel`/`SetMute` (deduped on change); it also mirrors genuine `audio-manager` `Level`/`Muted` changes back to BlueALSA. See `services/bt-manager/src/volume_sync.rs`.
+4. **audio-manager — sole amp owner:** Owns `org.speaker.AudioManager` (`/org/speaker/amp`), the **only writer** of the Merus MA12070P `A.Mstr Vol` register (0..144 raw steps via `PERCENT_TO_RAW`), persisting/restoring state. Mute = raw 0 because the Merus card has **no ALSA mute switch** and the BlueALSA PCM mute bit is an audible no-op (verified live 2026-11-09). `bluealsa-aplay` is deliberately **not** in this chain — it runs `--volume=none --single-audio` with no mixer binding, avoiding a two-writer fight. See `docs/audio_manager_plan.md` and `docs/volume_sync_plan.md` (Final Architecture).
 
-> **Planned change:** this BT-coupled mixer ownership is slated for replacement by the new **`audio-manager`** service (single event-driven hardware owner of the amp; mute = raw 0, since the Merus card has **no ALSA mute switch** and the BlueALSA PCM mute bit is currently an audible no-op — verified live 2026-11-09). See `docs/audio_manager_plan.md`; §7.6.1 will become a four-stage chain (BlueZ → bt-manager → audio-manager → Merus) when phase 2 lands.
-
-**Critical BlueZ gate (Rank 0 root cause — BlueZ 5.88 `[AVRCP] VolumeCategory`, fixed 2026-11-09):** BlueZ 5.88 (deployed 2026-11-07) introduced commit `8baabd2f5` ("audio/avrcp: Only allow absolute volume call/event on category-2 peers") with a **new `main.conf` default `[AVRCP] VolumeCategory = true`**. With the default, `bluetoothd`'s AVRCP target init refuses to register the `EVENT_VOLUME_CHANGED` notification (AVRCP event 0x0D) unless the phone's own AVRCP Target SDP record advertises the **category-2** feature bit. The Pixel's TG record (AVRCP **1.4**, no category-2) fails the check, so the phone never learns the sink supports absolute volume, never sends `SetAbsoluteVolume` (PDU 0x50), and `MediaTransport1.Volume` stays frozen while BlueALSA/Merus downstream sit idle. Symptom fingerprint (observed live 2026-11-09): BlueZ transport Volume, BlueALSA PCM `Volume`, and the Merus `A.Mstr Vol` mixer all frozen at stale values during volume-key presses; **no** `SetAbsoluteVolume not supported` error in the journal (the phone silently never sends after the notification registration is skipped), and `btmon` shows only encrypted ACL traffic. Fix: set `[AVRCP] VolumeCategory = false` in `/etc/bluetooth/main.conf` and restart Bluetooth. Verified live after the fix: the phone's PDU 0x50 is accepted (`bluetoothd -d` shows `handle_vendordep_pdu() AVRCP PDU 0x50`), the transport `Volume` follows every key press, and `bluealsa-aplay` maps it onto the Merus mixer through the amp's dB curve. Note the gate requires the *remote's* TG SDP record version ≥ 1.4 **in addition to** category-2 when `VolumeCategory = true` (`avrcp_volume_supported()` in `profiles/audio/avrcp.c`).
+**Critical BlueZ gate (Rank 0 root cause — BlueZ 5.88 `[AVRCP] VolumeCategory`, fixed 2026-11-09):** BlueZ 5.88 (deployed 2026-11-07) introduced commit `8baabd2f5` ("audio/avrcp: Only allow absolute volume call/event on category-2 peers") with a **new `main.conf` default `[AVRCP] VolumeCategory = true`**. With the default, `bluetoothd`'s AVRCP target init refuses to register the `EVENT_VOLUME_CHANGED` notification (AVRCP event 0x0D) unless the phone's own AVRCP Target SDP record advertises the **category-2** feature bit. The Pixel's TG record (AVRCP **1.4**, no category-2) fails the check, so the phone never learns the sink supports absolute volume, never sends `SetAbsoluteVolume` (PDU 0x50), and `MediaTransport1.Volume` stays frozen while BlueALSA/Merus downstream sit idle. Symptom fingerprint (observed live 2026-11-09): BlueZ transport Volume, BlueALSA PCM `Volume`, and the Merus `A.Mstr Vol` mixer all frozen at stale values during volume-key presses; **no** `SetAbsoluteVolume not supported` error in the journal (the phone silently never sends after the notification registration is skipped), and `btmon` shows only encrypted ACL traffic. Fix: set `[AVRCP] VolumeCategory = false` in `/etc/bluetooth/main.conf` and restart Bluetooth. Verified live after the fix: the phone's PDU 0x50 is accepted (`bluetoothd -d` shows `handle_vendordep_pdu() AVRCP PDU 0x50`), the volume follows every key press through BlueZ → bluealsad PCM → bt-manager `volume_sync` → `audio-manager`, which maps it onto the Merus mixer through the amp's dB curve (`PERCENT_TO_RAW`). Note the gate requires the *remote's* TG SDP record version ≥ 1.4 **in addition to** category-2 when `VolumeCategory = true` (`avrcp_volume_supported()` in `profiles/audio/avrcp.c`).
 
 **Critical BlueZ gate (Rank 1 root cause of "volume stuck at 0"):** `bluetoothd`'s AVRCP target init only registers the Volume-Changed notification (AVRCP event 0x0D) with the phone if `btd_device_get_volume()` returns a valid value. If the device info file `/var/lib/bluetooth/<adapter_mac>/<device_mac>/info` has **no `Volume=` entry** under `[General]`, this returns -1 and the phone is never told the sink supports absolute volume — the phone then never sends volume updates, and the transport volume stays frozen (observed: stuck at 10/127 ≈ 8% while the Merus mixer stayed at a stale 107/144). Seeding `Volume=64` once in the info file bootstrap-resolves this; afterwards BlueZ persists the phone's last volume automatically on every change.
 
@@ -448,10 +448,10 @@ bluetoothctl remove 30:E0:44:67:38:A2   # on the Pi (then "Forget" the device on
 - **Class code breakdown (`0x240414`):** Major Device Class = Audio/Video, Minor Device Class = Loudspeaker, Service Classes = Rendering. Phones use this to present the sink as a speaker and to select appropriate volume UX. The previous value `0x240418` mapped to Minor = Headphones.
 - **ControllerMode implications:** The default is `dual` (Classic + BLE). On dual mode, BLE Media Control Profile (MCP) server registration can collide with Classic AVRCP target init on Android 15+ phones, causing `MediaTransport1.SetVolume` to be missing and the transport `Volume` property to be read-only (transport stuck; volume sync dead). `bredr` removes the collision by disabling all BLE GATT server profiles on this controller.
 
-#### 7.6.4. Verified Volume Mapping (Transport → Merus Hardware Mixer)
-Measured calibration after the fixes (transport `MediaTransport1.Volume` set via `busctl set-property ... org.bluez.MediaTransport1 Volume q <v>`; mixer read via `amixer -c sndrpimerusamp sget 'A.Mstr Vol'`):
+#### 7.6.4. Verified Volume Mapping (AVRCP volume → Merus Hardware Mixer)
+Measured calibration from the earlier bluealsa-aplay-mixer-binding architecture (transport `MediaTransport1.Volume` set via `busctl set-property ... org.bluez.MediaTransport1 Volume q <v>`; mixer read via `amixer -c sndrpimerusamp sget 'A.Mstr Vol'`). The curve is preserved by the current `audio-manager` `PERCENT_TO_RAW` mapping, but the path is now BlueZ → bluealsad → bt-manager → audio-manager → Merus (§7.6.1), not a direct aplay mixer write:
 
-| Transport (AVRCP) | Mixer raw (`A.Mstr Vol`) | Attenuation | Note |
+| AVRCP volume | Mixer raw (`A.Mstr Vol`) | Attenuation | Note |
 |---|---|---|---|
 | 0 | 0 | −144 dB | hard mute |
 | 32 (25%) | 124 | −20 dB | bottom of working range |
@@ -459,7 +459,7 @@ Measured calibration after the fixes (transport `MediaTransport1.Volume` set via
 | 96 (75%) | 140 | −4 dB | ≈ −5 dB per 32 steps |
 | 127 (100%) | 144 | 0 dB | full output |
 
-The mapping is **perceptually curved, not linear**: bluez-alsa dB-maps AVRCP volume into the mixer's declared range so phone volume steps sound evenly loud. Endpoints are exact (0 → mute, 127 → 0 dB); the −144 dB range is only reachable at V=0, and above that the curve compresses into roughly the top −20 dB. Do **not** assume the linear `V × 144/127` scaling when predicting mixer positions from transport volume.
+The mapping is **perceptually curved, not linear**: the amp's declared dB range is mapped so phone volume steps sound evenly loud. Endpoints are exact (0 → mute, 127 → 0 dB); the −144 dB range is only reachable at V=0, and above that the curve compresses into roughly the top −20 dB. Do **not** assume the linear `V × 144/127` scaling when predicting mixer positions from AVRCP volume. For the live percent→raw function, see `speaker_hardware::amp::PERCENT_TO_RAW` (the authoritative source in `audio-manager`).
 
 #### 7.6.5. Volume Sync Verification Commands
 ```bash
@@ -469,14 +469,17 @@ ssh root@192.168.2.120 "busctl get-property org.bluez /org/bluez/hci0/dev_30_E0_
 # SetVolume method must exist on the transport (proves AVRCP TG init succeeded)
 ssh root@192.168.2.120 "busctl introspect org.bluez /org/bluez/hci0/dev_30_E0_44_67_38_A2/fd0 org.bluez.MediaTransport1 | grep -E 'SetVolume|Volume'"
 
-# BlueALSA-side volume (must equal transport volume; SoftVolume must be false)
+# BlueALSA PCM volume (read natively by bluealsad from AVRCP; SoftVolume must be false)
 ssh root@192.168.2.120 "bluealsa-cli info /org/bluealsa/hci0/dev_30_E0_44_67_38_A2/a2dpsnk/source | grep -E 'Volume|Soft'"
 
-# Merus hardware mixer position (follows transport volume per the table in 7.6.3)
+# audio-manager is sole amp owner: Level (0..100 percent) drives A.Mstr Vol (0..144 raw)
+ssh root@192.168.2.120 "busctl get-property org.speaker.AudioManager /org/speaker/amp org.speaker.AudioManager1 Level"
+
+# Merus hardware mixer position (set by audio-manager via PERCENT_TO_RAW per 7.6.4)
 ssh root@192.168.2.120 "amixer -c sndrpimerusamp sget 'A.Mstr Vol' | grep Mono"
 ```
 
-Healthy-state checklist after (re)connection: transport `State = active` and `Volume` writable; `SetVolume` present on `MediaTransport1`; `bluealsa-cli` `Volume` equals transport `Volume`; `SoftVolume: false`; mixer follows transport per 7.6.3. If the mixer is stuck after boot, check for the stale `asound.state` restore (`A.Mstr Vol Volume value 0`) and verify the boot-race fix in 7.2 is still deployed. If the transport `Volume` is frozen during phone key presses, verify `[AVRCP] VolumeCategory = false` survived in `/etc/bluetooth/main.conf` (Rank 0 gate, 7.6.1) — note that `bluealsa-aplay` only drives the Merus mixer while the PCM is open (music streaming); volume updates received while idle are applied at PCM open.
+Healthy-state checklist after (re)connection: transport `State = active`; BlueALSA PCM `Volume` follows phone volume keys (bluealsad reads AVRCP natively) with `SoftVolume: false`; `audio-manager` `Level` and the Merus `A.Mstr Vol` mixer track that volume per §7.6.4. `bluealsa-aplay` runs `--volume=none --single-audio` and does **not** write the mixer. If the mixer is stuck after boot, check the `audio-manager` service is active and that its persisted level was restored (not a stale `asound.state` `A.Mstr Vol Volume value 0`). If phone volume keys do nothing, verify `[AVRCP] VolumeCategory = false` survived in `/etc/bluetooth/main.conf` (Rank 0 gate, §7.6.1) and that `bt-manager` volume sync is running.
 
 ---
 
@@ -848,7 +851,9 @@ Wants=camilladsp.service
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol"
+# Pure audio forwarding. A.Mstr Vol is owned solely by audio-manager;
+# do NOT re-add -M/--mixer-control (two-writer fight, see §7.2/§7.6.1).
+ExecStart=/usr/local/bin/bluealsa-aplay -S -D default --volume=none --single-audio
 Restart=always
 RestartSec=2
 

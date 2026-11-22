@@ -61,6 +61,14 @@ Phone volume buttons (AVRCP absolute volume, 0-127)
 
 ## Historical Analysis (pre-audio-manager)
 
+> **⚠️ Historical only — not the deployed config.** Everything from here to
+> the "Proposed Solutions" section records the *superseded* design in which
+> `bluealsa-aplay -M … --mixer-control` wrote the Merus mixer directly. That
+> path was replaced by the **Final Architecture** at the top of this document
+> (audio-manager is the sole amp owner; `bluealsa-aplay` runs
+> `--volume=none --single-audio`). Do not copy the commands below into a live
+> unit.
+
 ### Hardware
 - **DAC/Amp**: Merus MA12070P (Mono, 0-144 raw, fake dB scale 0-70=mute)
 - **Bluetooth**: Raspberry Pi 3 Model B (BCM2837), BlueZ 5.55+, bluealsa v5.0.0
@@ -70,7 +78,8 @@ Phone volume buttons (AVRCP absolute volume, 0-127)
 # /etc/systemd/system/bluealsa.service
 ExecStart=/usr/local/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+
 
-# /etc/systemd/system/bluealsa-aplay.service
+# /etc/systemd/system/bluealsa-aplay.service  [SUPERSEDED — historical only]
+# Deployed: ExecStart=/usr/local/bin/bluealsa-aplay -S -D default --volume=none --single-audio
 ExecStart=/usr/local/bin/bluealsa-aplay -S -D default -M hw:sndrpimerusamp --mixer-control="A.Mstr Vol" --pcm-buffer-time=500000 --pcm-period-time=100000
 ```
 
