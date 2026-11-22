@@ -1615,8 +1615,11 @@ impl AppShell {
         if w.get_bt_connected() != connected {
             w.set_bt_connected(connected);
         }
-        if self.was_bt_connected.replace(connected) && !connected && self.is_visualizer_active() {
-            self.close_visualizer();
+        if self.was_bt_connected.replace(connected) && !connected {
+            self.visualizer_autostart_timer.stop();
+            if self.is_visualizer_active() {
+                self.close_visualizer();
+            }
         }
 
         if update.action_settled || update.toast.is_some() {

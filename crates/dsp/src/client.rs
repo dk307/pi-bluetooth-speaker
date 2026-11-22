@@ -975,10 +975,11 @@ impl DspDeviceMock {
     }
 
     pub(crate) fn levels_snapshot(&self) -> (Vec<f32>, Vec<f32>) {
-        self.inner
-            .lock()
-            .map(|g| (g.capture_rms.clone(), g.capture_peaks.clone()))
-            .unwrap_or_default()
+        let guard = self.inner.lock().unwrap_or_else(|p| {
+            tracing::warn!("DspDeviceMock mutex poisoned during levels_snapshot; recovering");
+            p.into_inner()
+        });
+        (guard.capture_rms.clone(), guard.capture_peaks.clone())
     }
 
     /// Returns the most recent YAML configuration uploaded via `set_config` on this mock.

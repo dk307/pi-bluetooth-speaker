@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use speaker_dsp::{
     DspDevice, LatestFrameSlot, SpectrumSnapshot, VisualizerSubscription,
     spectrum_subscription_for_rate,
@@ -13,7 +14,8 @@ use tokio::sync::mpsc;
 use super::dsp_math::{ERB_BAND_COUNT, ErbBandMapper, SpectrumBallistics};
 
 /// Active visualizer screen mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[repr(i32)]
 pub enum VisualizerMode {
     /// Bilateral 48-bar radial FFT ring around central album art.
@@ -26,6 +28,30 @@ pub enum VisualizerMode {
 impl VisualizerMode {
     /// Total number of registered visualizer screens.
     pub const COUNT: i32 = 2;
+
+    /// Returns the canonical config slug (`"radial_fft"` or `"linear_spectrum"`).
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::RadialFft => "radial_fft",
+            Self::LinearSpectrum => "linear_spectrum",
+        }
+    }
+
+    /// Returns the human-readable visualizer name shown in Screen Settings.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::RadialFft => "Radial FFT",
+            Self::LinearSpectrum => "ERB Spectrum",
+        }
+    }
+
+    /// Returns the Slint `visualizer_mode` integer index (`0` or `1`).
+    #[must_use]
+    pub const fn as_index(self) -> i32 {
+        self as i32
+    }
 
     /// Converts an integer index (wrapping modulo `COUNT`) into a [`VisualizerMode`].
     #[must_use]
@@ -205,9 +231,19 @@ impl Drop for VisualizerController {
 fn lower_current_thread_priority() {
     #[cfg(target_os = "linux")]
     {
-        // SAFETY: `PRIO_PROCESS` with `who = 0` adjusts only the calling thread's
-        // Linux scheduling nice value to 15 (below the UI thread at Nice=10).
-        let rc = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 15) };
+        // SAFETY: `SYS_gettid` returns the calling kernel thread ID (`id_t`), and
+        // `setpriority(PRIO_PROCESS, tid, 15)` lowers only this worker thread's nice
+        // value to 15 so it yields CPU to the Slint render thread.
+        let rc = unsafe {
+            let tid = libc::syscall(libc::SYS_gettid);
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "Linux kernel TID from SYS_gettid is non-negative and fits in id_t (u32)"
+            )]
+            let tid_id = tid as libc::id_t;
+            libc::setpriority(libc::PRIO_PROCESS, tid_id, 15)
+        };
         if rc != 0 {
             tracing::debug!("Unable to lower visualizer worker priority to Nice=15");
         }

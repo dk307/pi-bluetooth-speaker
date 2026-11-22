@@ -270,21 +270,27 @@ async fn subscribe_once_spectrum(
     slot: &LatestFrameSlot<SpectrumSnapshot>,
     stop_rx: &mut watch::Receiver<bool>,
 ) -> Result<SpectrumExit, DspError> {
-    let mut ws = DspDevice::connect_ws(host, port).await?;
-    let reply = DspDevice::send_ws_command(
-        &mut ws,
-        &WsCommand::SubscribeSpectrum {
-            value: SpectrumSubscription {
-                side: sub.side,
-                channel: sub.channel,
-                min_freq: sub.min_freq,
-                max_freq: sub.max_freq,
-                n_bins: sub.n_bins,
-                max_rate: sub.max_rate,
-            },
+    let mut ws = tokio::select! {
+        () = wait_for_stop(stop_rx) => return Ok(SpectrumExit::CallerStopped),
+        res = DspDevice::connect_ws(host, port) => res?,
+    };
+    let cmd = WsCommand::SubscribeSpectrum {
+        value: SpectrumSubscription {
+            side: sub.side,
+            channel: sub.channel,
+            min_freq: sub.min_freq,
+            max_freq: sub.max_freq,
+            n_bins: sub.n_bins,
+            max_rate: sub.max_rate,
         },
-    )
-    .await?;
+    };
+    let reply = tokio::select! {
+        () = wait_for_stop(stop_rx) => {
+            let _ = ws.close(None).await;
+            return Ok(SpectrumExit::CallerStopped);
+        }
+        res = DspDevice::send_ws_command(&mut ws, &cmd) => res?,
+    };
 
     match reply {
         WsReply::SubscribeSpectrum {

@@ -31,10 +31,15 @@ struct SpokePixel {
 }
 
 /// Precomputed LUT renderer for the 48-spoke bilateral Radial FFT ring.
+///
+/// Uses a two-slot ping-pong `SharedPixelBuffer` pair so `make_mut_bytes()` mutates
+/// the inactive buffer in place without per-frame heap reallocation while Slint holds
+/// the previous frame's `Image`.
 #[derive(Debug)]
 pub struct RadialFftRenderer {
     band_pixels: [Vec<SpokePixel>; ERB_BAND_COUNT],
-    pixels: SharedPixelBuffer<Rgba8Pixel>,
+    buffers: [SharedPixelBuffer<Rgba8Pixel>; 2],
+    next_buf: usize,
 }
 
 impl Default for RadialFftRenderer {
@@ -44,7 +49,7 @@ impl Default for RadialFftRenderer {
 }
 
 impl RadialFftRenderer {
-    /// Builds the 48-spoke pixel LUT and allocates the `456×456` RGBA pixel buffer.
+    /// Builds the 48-spoke pixel LUT and allocates the ping-pong `228×228` RGBA buffers.
     #[must_use]
     pub fn new() -> Self {
         let mut band_pixels: [Vec<SpokePixel>; ERB_BAND_COUNT] =
@@ -63,18 +68,24 @@ impl RadialFftRenderer {
 
         Self {
             band_pixels,
-            pixels: SharedPixelBuffer::new(RADIAL_BUF_SIZE, RADIAL_BUF_SIZE),
+            buffers: [
+                SharedPixelBuffer::new(RADIAL_BUF_SIZE, RADIAL_BUF_SIZE),
+                SharedPixelBuffer::new(RADIAL_BUF_SIZE, RADIAL_BUF_SIZE),
+            ],
+            next_buf: 0,
         }
     }
 
-    /// Renders `bars` and `peaks` into the internal buffer and returns a Slint [`slint::Image`].
+    /// Renders `bars` and `peaks` into the inactive ping-pong buffer and returns a Slint [`slint::Image`].
     pub fn render(
         &mut self,
         bars: &[f32; ERB_BAND_COUNT],
         peaks: &[f32; ERB_BAND_COUNT],
         peak_rgb: [u8; 3],
     ) -> slint::Image {
-        let bytes = self.pixels.make_mut_bytes();
+        let idx = self.next_buf;
+        self.next_buf = 1 - idx;
+        let bytes = self.buffers[idx].make_mut_bytes();
 
         for (band_idx, spoke_pixels) in self.band_pixels.iter().enumerate() {
             let bar_len = (MAX_BAR_LEN * bars[band_idx].clamp(0.0, 1.0)).max(MIN_BAR_LEN);
@@ -96,7 +107,7 @@ impl RadialFftRenderer {
             }
         }
 
-        slint::Image::from_rgba8_premultiplied(self.pixels.clone())
+        slint::Image::from_rgba8_premultiplied(self.buffers[idx].clone())
     }
 }
 
