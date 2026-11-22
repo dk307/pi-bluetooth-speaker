@@ -532,159 +532,6 @@ impl TitleDisplayMode {
     }
 }
 
-/// Minimum allowed `0 VU` calibration reference in dBFS.
-pub const MIN_VU_ZERO_DBFS: i32 = -30;
-/// Maximum allowed `0 VU` calibration reference in dBFS.
-pub const MAX_VU_ZERO_DBFS: i32 = -3;
-/// Default `0 VU` calibration reference in dBFS.
-pub const DEFAULT_VU_ZERO_DBFS: i32 = -12;
-
-/// All 25 `PeppyMeter` `800×480` skin names in `meters.txt` order.
-pub const VU_SKIN_NAMES: [&str; 25] = [
-    "bar",
-    "blue",
-    "vintage",
-    "dash",
-    "gas",
-    "rainbow",
-    "grunge",
-    "royal",
-    "compass",
-    "gold",
-    "black-white",
-    "white-red",
-    "orange",
-    "blue-2",
-    "emerald",
-    "red",
-    "tube",
-    "vertical-linear",
-    "vertical-circular",
-    "big-bang",
-    "ring",
-    "relax",
-    "steam-punk",
-    "fantasy",
-    "chillout",
-];
-
-/// Default `PeppyMeter` skin name.
-pub const DEFAULT_VU_SKIN_NAME: &str = "vintage";
-
-/// Validated `0 VU` calibration reference in dBFS (`-30..=-6`, default `-18`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(transparent)]
-pub struct VuZeroDbfs(i32);
-
-impl VuZeroDbfs {
-    /// Default `-18 dBFS` reference.
-    pub const DEFAULT: Self = Self(DEFAULT_VU_ZERO_DBFS);
-
-    /// Constructs a [`VuZeroDbfs`], clamping to `MIN_VU_ZERO_DBFS..=MAX_VU_ZERO_DBFS`.
-    #[must_use]
-    pub const fn new(value: i32) -> Self {
-        let clamped = if value < MIN_VU_ZERO_DBFS {
-            MIN_VU_ZERO_DBFS
-        } else if value > MAX_VU_ZERO_DBFS {
-            MAX_VU_ZERO_DBFS
-        } else {
-            value
-        };
-        Self(clamped)
-    }
-
-    /// Returns the integer dBFS reference.
-    #[must_use]
-    pub const fn value(self) -> i32 {
-        self.0
-    }
-}
-
-impl Default for VuZeroDbfs {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
-impl TryFrom<i32> for VuZeroDbfs {
-    type Error = ConfigError;
-
-    fn try_from(value: i32) -> Result<Self, Self::Error> {
-        if !(MIN_VU_ZERO_DBFS..=MAX_VU_ZERO_DBFS).contains(&value) {
-            return Err(ConfigError::invalid(format!(
-                "invalid vu_zero_dbfs '{value}': expected {MIN_VU_ZERO_DBFS}..={MAX_VU_ZERO_DBFS}"
-            )));
-        }
-        Ok(Self(value))
-    }
-}
-
-impl<'de> Deserialize<'de> for VuZeroDbfs {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = i32::deserialize(deserializer)?;
-        Self::try_from(raw).map_err(serde::de::Error::custom)
-    }
-}
-
-/// Validated `PeppyMeter` skin name from [`VU_SKIN_NAMES`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct VuSkinName(String);
-
-impl VuSkinName {
-    /// Returns the skin name slug.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Returns the index in [`VU_SKIN_NAMES`].
-    #[must_use]
-    pub fn index(&self) -> usize {
-        VU_SKIN_NAMES
-            .iter()
-            .position(|&name| name == self.0)
-            .unwrap_or(2)
-    }
-
-    /// Constructs a [`VuSkinName`] from an index in `0..VU_SKIN_NAMES.len()`.
-    #[must_use]
-    pub fn from_index(idx: usize) -> Self {
-        let clamped = idx.min(VU_SKIN_NAMES.len() - 1);
-        Self(VU_SKIN_NAMES[clamped].to_string())
-    }
-}
-
-impl Default for VuSkinName {
-    fn default() -> Self {
-        Self(DEFAULT_VU_SKIN_NAME.to_string())
-    }
-}
-
-impl TryFrom<&str> for VuSkinName {
-    type Error = ConfigError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let trimmed = value.trim();
-        if let Some(&canonical) = VU_SKIN_NAMES
-            .iter()
-            .find(|&&name| name.eq_ignore_ascii_case(trimmed))
-        {
-            return Ok(Self(canonical.to_string()));
-        }
-        Err(ConfigError::invalid(format!(
-            "invalid vu_skin '{value}': unknown PeppyMeter skin"
-        )))
-    }
-}
-
-impl<'de> Deserialize<'de> for VuSkinName {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        Self::try_from(raw.as_str()).map_err(serde::de::Error::custom)
-    }
-}
-
 /// Strongly typed appliance configuration persisted as JSON on disk.
 ///
 /// Missing fields deserialize to their defaults, so minimal config files
@@ -715,12 +562,10 @@ pub struct CoreConfig {
     pub auto_brightness_enabled: bool,
     /// Last user-selected brightness percent while in manual mode (`0..=100`).
     pub brightness_manual_percent: ManualBrightnessPercent,
-    /// Selected `PeppyMeter` skin name (`"vintage"`, `"blue"`, `"bar"`, etc.).
-    pub vu_skin: VuSkinName,
-    /// `0 VU` calibration reference in dBFS (`-30..=-6`, default `-18`).
-    pub vu_zero_dbfs: VuZeroDbfs,
     /// Whether the retro segmented LED slit mask overlays the 24-band spectrum.
     pub spectrum_led_mask: bool,
+    /// Force 60 FPS on music visualizations (`false` = 33 Hz / 30 ms, `true` = 60 Hz / 16 ms).
+    pub visualizer_force_60fps: bool,
 }
 
 impl Default for CoreConfig {
@@ -736,9 +581,8 @@ impl Default for CoreConfig {
             font_scale: FontScale::default(),
             auto_brightness_enabled: true,
             brightness_manual_percent: ManualBrightnessPercent::DEFAULT,
-            vu_skin: VuSkinName::default(),
-            vu_zero_dbfs: VuZeroDbfs::default(),
             spectrum_led_mask: true,
+            visualizer_force_60fps: false,
         }
     }
 }

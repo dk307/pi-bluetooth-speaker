@@ -9,8 +9,8 @@ export struct SpectrumBandItem {
 /// Full-screen `800×480` music visualizer overlay.
 ///
 /// Supports:
-/// - Mode 0: PeppyMeter VU (all 25 circular & linear skins)
-/// - Mode 1: 24-Band Glasberg–Moore ERB Spectrum with 3 px peak-hold caps
+/// - Mode 0: Bilateral 48-bar Radial FFT around central circular album art
+/// - Mode 1: 24-Band Glasberg–Moore ERB Linear Spectrum with 3 px peak-hold caps
 /// - Tap anywhere to return to Now Playing; swipe left/right to switch modes.
 export component VisualizerOverlay inherits Rectangle {
     width: 800px;
@@ -18,141 +18,138 @@ export component VisualizerOverlay inherits Rectangle {
     clip: true;
     background: #090B10;
 
-    // 0 = VU Meter, 1 = 24-Band ERB Spectrum
+    // 0 = Radial FFT, 1 = 24-Band ERB Linear Spectrum
     in property <int> visualizer_mode: 0;
-
-    // VU skin textures & geometry
-    in property <bool> is_circular: true;
-    in property <bool> is_stereo: true;
-    in property <bool> has_fgr: false;
-    in property <image> vu_bgr;
-    in property <image> vu_fgr;
-    in property <image> vu_indicator;
-    in property <image> vu_indicator_flipped;
-
-    // Circular needle placement & angles (precomputed in Rust)
-    in property <length> left_needle_x: 0px;
-    in property <length> left_needle_y: 0px;
-    in property <length> left_pivot_x: 0px;
-    in property <length> left_pivot_y: 0px;
-    in property <float> left_angle_deg: -45.0;
-
-    in property <length> right_needle_x: 0px;
-    in property <length> right_needle_y: 0px;
-    in property <length> right_pivot_x: 0px;
-    in property <length> right_pivot_y: 0px;
-    in property <float> right_angle_deg: -45.0;
-
-    // Linear bar/cursor geometry (precomputed per-frame in Rust for all 8 linear skins)
-    in property <length> linear_ind_w: 0px;
-    in property <length> linear_ind_h: 0px;
-    in property <length> linear_left_x: 0px;
-    in property <length> linear_left_y: 0px;
-    in property <length> linear_left_w: 0px;
-    in property <length> linear_left_h: 0px;
-    in property <length> linear_left_img_x: 0px;
-    in property <length> linear_left_img_y: 0px;
-    in property <bool> linear_left_flipped: false;
-
-    in property <length> linear_right_x: 0px;
-    in property <length> linear_right_y: 0px;
-    in property <length> linear_right_w: 0px;
-    in property <length> linear_right_h: 0px;
-    in property <length> linear_right_img_x: 0px;
-    in property <length> linear_right_img_y: 0px;
-    in property <bool> linear_right_flipped: false;
-
-    // 24-band ERB spectrum state
     in property <[SpectrumBandItem]> spectrum_bands;
     in property <bool> spectrum_led_mask: true;
+    in property <bool> has_cover_art: false;
+    in property <image> cover_image;
 
     callback close_requested();
     callback next_visualizer();
     callback prev_visualizer();
 
-    // Mode 0: PeppyMeter VU (Circular or Linear)
+    // Mode 0: Bilateral 48-Bar Radial FFT Visualizer
     if root.visualizer_mode == 0 : Rectangle {
+        property <length> cx: 400px;
+        property <length> cy: 240px;
+        property <length> r_inner: 88px;
+        property <length> max_bar_len: 136px;
+        property <length> r_outer: r_inner + max_bar_len;
+
         width: 100%;
         height: 100%;
+        background: #090B10;
         clip: true;
 
-        Image {
-            width: 800px;
-            height: 480px;
-            source: root.vu_bgr;
-            image-fit: fill;
+        // Subtle static concentric reference rings (cached once into GPU FBO)
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: transparent;
             cache-rendering-hint: true;
+
+            Rectangle {
+                x: cx - 156px;
+                y: cy - 156px;
+                width: 312px;
+                height: 312px;
+                border-radius: 156px;
+                border-width: 1px;
+                border-color: #161D2B;
+                background: transparent;
+            }
+
+            Rectangle {
+                x: cx - r_outer;
+                y: cy - r_outer;
+                width: r_outer * 2;
+                height: r_outer * 2;
+                border-radius: r_outer;
+                border-width: 1px;
+                border-color: #1A2336;
+                background: transparent;
+            }
         }
 
-        // Circular rotating needles
-        if root.is_circular : Image {
-            source: root.vu_indicator;
-            x: root.left_needle_x;
-            y: root.left_needle_y;
-            transform-rotation: root.left_angle_deg * 1deg;
-            transform-origin: { x: root.left_pivot_x, y: root.left_pivot_y };
-        }
-
-        if root.is_circular && root.is_stereo : Image {
-            source: root.vu_indicator;
-            x: root.right_needle_x;
-            y: root.right_needle_y;
-            transform-rotation: root.right_angle_deg * 1deg;
-            transform-origin: { x: root.right_pivot_x, y: root.right_pivot_y };
-        }
-
-        // Linear clipped bars & sliding cursor (all 8 linear skins)
-        if !root.is_circular : Rectangle {
+        // 48 radial bars (24 ERB bands mirrored bilaterally left & right)
+        for side in [-1, 1] : Rectangle {
             width: 100%;
             height: 100%;
             background: transparent;
 
-            Rectangle {
-                x: root.linear_left_x;
-                y: root.linear_left_y;
-                width: root.linear_left_w;
-                height: root.linear_left_h;
-                clip: true;
+            for band[idx] in root.spectrum_bands : Rectangle {
+                property <length> bar_len: Math.max(3px, max_bar_len * Math.clamp(band.value, 0.0, 1.0));
+                property <length> peak_dist: Math.max(3px, max_bar_len * Math.clamp(band.peak, 0.0, 1.0));
+                property <angle> spoke_angle: side * (idx + 0.5) * 7.5deg;
 
-                Image {
-                    x: root.linear_left_img_x;
-                    y: root.linear_left_img_y;
-                    width: root.linear_ind_w;
-                    height: root.linear_ind_h;
-                    source: root.linear_left_flipped ? root.vu_indicator_flipped : root.vu_indicator;
-                    image-fit: fill;
+                x: cx - 4px;
+                y: cy - r_outer;
+                width: 8px;
+                height: r_outer;
+                background: transparent;
+                transform-rotation: spoke_angle;
+                transform-origin: { x: 4px, y: r_outer };
+
+                // Radial bar extending outward from central ring
+                Rectangle {
+                    x: 1px;
+                    y: r_outer - r_inner - bar_len;
+                    width: 6px;
+                    height: bar_len;
+                    border-radius: 0px;
+                    background: @linear-gradient(
+                        180deg,
+                        #FF5252 0%,
+                        #FFB300 28%,
+                        #26E6A4 68%,
+                        #00B8D4 100%
+                    );
                 }
-            }
 
-            if root.is_stereo : Rectangle {
-                x: root.linear_right_x;
-                y: root.linear_right_y;
-                width: root.linear_right_w;
-                height: root.linear_right_h;
-                clip: true;
-
-                Image {
-                    x: root.linear_right_img_x;
-                    y: root.linear_right_img_y;
-                    width: root.linear_ind_w;
-                    height: root.linear_ind_h;
-                    source: root.linear_right_flipped ? root.vu_indicator_flipped : root.vu_indicator;
-                    image-fit: fill;
+                // 3 px radial peak-hold cap
+                Rectangle {
+                    x: 1px;
+                    y: Math.max(0px, r_outer - r_inner - peak_dist - 3px);
+                    width: 6px;
+                    height: 3px;
+                    border-radius: 0px;
+                    background: MaterialPalette.primary;
                 }
             }
         }
 
-        // Optional foreground glass/bezel overlay
-        if root.has_fgr : Image {
-            width: 800px;
-            height: 480px;
-            source: root.vu_fgr;
-            image-fit: fill;
-            cache-rendering-hint: true;
+        // Central circular ring: album cover art or minimal dark hub
+        Rectangle {
+            x: cx - (r_inner - 4px);
+            y: cy - (r_inner - 4px);
+            width: (r_inner - 4px) * 2;
+            height: (r_inner - 4px) * 2;
+            border-radius: r_inner - 4px;
+            border-width: 2px;
+            border-color: MaterialPalette.outline_variant;
+            background: #121622;
+            clip: true;
+
+            if root.has_cover_art : Image {
+                width: 100%;
+                height: 100%;
+                source: root.cover_image;
+                image-fit: cover;
+            }
+
+            if !root.has_cover_art : Image {
+                width: 44px;
+                height: 44px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                source: @image-url("../../../assets/icons/equalizer.svg");
+                colorize: MaterialPalette.primary;
+            }
         }
     }
 
-    // Mode 1: 24-Band ERB Frequency Spectrum
+    // Mode 1: 24-Band ERB Linear Frequency Spectrum
     if root.visualizer_mode == 1 : Rectangle {
         width: 100%;
         height: 100%;

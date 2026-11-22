@@ -18,9 +18,6 @@ pub const DISPLAY_MIN_DBFS: f32 = -60.0;
 /// Maximum dBFS ceiling mapped to `1.0` normalized height.
 pub const DISPLAY_MAX_DBFS: f32 = 0.0;
 
-/// Default 0 VU calibration reference in dBFS (consumer digital playback headroom).
-pub const DEFAULT_ZERO_VU_DBFS: f32 = -12.0;
-
 /// Fast spectrum attack time constant (`15 ms` per spec §3.1).
 const SPECTRUM_ATTACK_TAU_SECS: f32 = 0.015;
 
@@ -54,28 +51,6 @@ pub fn normalize_dbfs(dbfs: f32) -> f32 {
         return 0.0;
     }
     ((dbfs - DISPLAY_MIN_DBFS) / (DISPLAY_MAX_DBFS - DISPLAY_MIN_DBFS)).clamp(0.0, 1.0)
-}
-
-/// Maps a dBFS reading onto `0.0..=1.0` using IEC 60268-17 voltage-linear deflection.
-///
-/// Calibrated at `zero_vu_dbfs` (`-20 VU` to `+3 VU`, i.e. `[zero_vu - 20, zero_vu + 3]`)
-/// so `-3 VU` sits near mid-scale and `0 VU` sits near ~69% of the dial.
-#[must_use]
-pub fn dbfs_to_vu_ratio(dbfs: f32, zero_vu_dbfs: f32) -> f32 {
-    if !dbfs.is_finite() || !zero_vu_dbfs.is_finite() {
-        return 0.0;
-    }
-    let min_db = zero_vu_dbfs - 20.0;
-    let max_db = zero_vu_dbfs + 3.0;
-    if dbfs <= min_db {
-        return 0.0;
-    }
-    if dbfs >= max_db {
-        return 1.0;
-    }
-    let amp = 10.0_f32.powf((dbfs - max_db) / 20.0);
-    let amp_min = 10.0_f32.powf(-23.0 / 20.0);
-    ((amp - amp_min) / (1.0 - amp_min)).clamp(0.0, 1.0)
 }
 
 /// Computes frame-rate-independent exponential smoothing coefficient `1 - e^(-dt / tau)`.

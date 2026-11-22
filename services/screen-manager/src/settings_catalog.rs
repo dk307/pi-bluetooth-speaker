@@ -10,11 +10,10 @@
 
 use crate::config::{
     CODEC_HUD_TIMEOUT_STEP_MS, CodecHudTimeoutMs, CoreConfig, MAX_CODEC_HUD_TIMEOUT_MS,
-    MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_STEP_PERCENT, MAX_VU_ZERO_DBFS,
+    MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_STEP_PERCENT,
     MIN_CODEC_HUD_TIMEOUT_MS, MIN_VOLUME_HUD_FADE_MS, MIN_VOLUME_HUD_TIMEOUT_MS,
-    MIN_VOLUME_STEP_PERCENT, MIN_VU_ZERO_DBFS, MarqueeFps, TitleDisplayMode,
-    VOLUME_HUD_FADE_STEP_MS, VU_SKIN_NAMES, VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
-    VuSkinName, VuZeroDbfs,
+    MIN_VOLUME_STEP_PERCENT, MarqueeFps, TitleDisplayMode, VOLUME_HUD_FADE_STEP_MS,
+    VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
 };
 
 /// Visibility tier for a setting on the Screen Settings UI.
@@ -51,17 +50,15 @@ pub enum SettingId {
     CodecHudTimeoutMs,
     /// Automatic ambient-light brightness control (`Manual` vs `Auto`).
     AutoBrightness,
-    /// Selected `PeppyMeter` VU skin (cycles through all 25 skins).
-    VuSkin,
     /// Retro segmented LED slit mask over the 24-band spectrum (`Smooth` vs `LED`).
     SpectrumLedMask,
-    /// `0 VU` needle calibration reference in dBFS (`-30..=-6`).
-    VuZeroDbfs,
+    /// Force 60 FPS on music visualizations (`30` = ~33 Hz vs `60` = 60 Hz).
+    VisualizerFps,
 }
 
 impl SettingId {
     /// All variants of [`SettingId`], used to prove catalog completeness at compile time.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 9] = [
         Self::TitleDisplayMode,
         Self::MarqueeFps,
         Self::VolumeStepPercent,
@@ -69,9 +66,8 @@ impl SettingId {
         Self::VolumeHudFadeMs,
         Self::CodecHudTimeoutMs,
         Self::AutoBrightness,
-        Self::VuSkin,
         Self::SpectrumLedMask,
-        Self::VuZeroDbfs,
+        Self::VisualizerFps,
     ];
 
     /// Stable slug key used to identify this setting across the Rust/Slint boundary.
@@ -85,9 +81,8 @@ impl SettingId {
             Self::VolumeHudFadeMs => "volume_hud_fade_ms",
             Self::CodecHudTimeoutMs => "codec_hud_timeout_ms",
             Self::AutoBrightness => "auto_brightness",
-            Self::VuSkin => "vu_skin",
             Self::SpectrumLedMask => "spectrum_led_mask",
-            Self::VuZeroDbfs => "vu_zero_dbfs",
+            Self::VisualizerFps => "visualizer_fps",
         }
     }
 
@@ -225,17 +220,6 @@ pub const SETTINGS_CATALOG: &[SettingDescriptor] = &[
         },
     },
     SettingDescriptor {
-        id: SettingId::VuSkin,
-        label: "VU Meter Skin",
-        tier: SettingTier::Basic,
-        control: SettingControl::Stepper {
-            min: 0,
-            max: 24,
-            step: 1,
-            unit: "",
-        },
-    },
-    SettingDescriptor {
         id: SettingId::SpectrumLedMask,
         label: "Spectrum Style",
         tier: SettingTier::Basic,
@@ -245,14 +229,12 @@ pub const SETTINGS_CATALOG: &[SettingDescriptor] = &[
         },
     },
     SettingDescriptor {
-        id: SettingId::VuZeroDbfs,
-        label: "VU 0 dB Ref",
+        id: SettingId::VisualizerFps,
+        label: "Visualizer FPS",
         tier: SettingTier::Advanced,
-        control: SettingControl::Stepper {
-            min: MIN_VU_ZERO_DBFS,
-            max: MAX_VU_ZERO_DBFS,
-            step: 1,
-            unit: "dBFS",
+        control: SettingControl::TwoOption {
+            left_label: "30",
+            right_label: "60",
         },
     },
 ];
@@ -329,13 +311,8 @@ pub fn row_state(config: &CoreConfig, desc: &SettingDescriptor) -> SettingRowSta
     match desc.control {
         SettingControl::Stepper { min, max, unit, .. } => {
             let raw = stepper_value(config, desc.id);
-            let value_text = if desc.id == SettingId::VuSkin {
-                config.vu_skin.as_str().to_string()
-            } else {
-                format!("{raw} {unit}")
-            };
             SettingRowState {
-                value_text,
+                value_text: format!("{raw} {unit}"),
                 can_decrease: raw > min,
                 can_increase: raw < max,
                 right_selected: false,
@@ -395,12 +372,14 @@ pub fn apply_toggle(config: &mut CoreConfig, id: SettingId, right_selected: bool
             config.spectrum_led_mask = right_selected;
             true
         }
+        SettingId::VisualizerFps => {
+            config.visualizer_force_60fps = right_selected;
+            true
+        }
         SettingId::VolumeStepPercent
         | SettingId::VolumeHudTimeoutMs
         | SettingId::VolumeHudFadeMs
-        | SettingId::CodecHudTimeoutMs
-        | SettingId::VuSkin
-        | SettingId::VuZeroDbfs => false,
+        | SettingId::CodecHudTimeoutMs => false,
     }
 }
 
@@ -413,12 +392,11 @@ fn stepper_value(config: &CoreConfig, id: SettingId) -> i32 {
             .expect("validated volume_hud_fade_ms fits in i32"),
         SettingId::CodecHudTimeoutMs => i32::try_from(config.codec_hud_timeout_ms.value())
             .expect("validated codec_hud_timeout_ms fits in i32"),
-        SettingId::VuSkin => i32::try_from(config.vu_skin.index()).unwrap_or(0),
-        SettingId::VuZeroDbfs => config.vu_zero_dbfs.value(),
         SettingId::TitleDisplayMode
         | SettingId::MarqueeFps
         | SettingId::AutoBrightness
-        | SettingId::SpectrumLedMask => 0,
+        | SettingId::SpectrumLedMask
+        | SettingId::VisualizerFps => 0,
     }
 }
 
@@ -457,20 +435,11 @@ fn set_stepper_value(config: &mut CoreConfig, id: SettingId, value: i32) -> bool
             config.codec_hud_timeout_ms = CodecHudTimeoutMs::new(clamped);
             true
         }
-        SettingId::VuSkin => {
-            let max_idx = i32::try_from(VU_SKIN_NAMES.len() - 1).unwrap_or(24);
-            let idx = usize::try_from(value.clamp(0, max_idx)).unwrap_or(0);
-            config.vu_skin = VuSkinName::from_index(idx);
-            true
-        }
-        SettingId::VuZeroDbfs => {
-            config.vu_zero_dbfs = VuZeroDbfs::new(value);
-            true
-        }
         SettingId::TitleDisplayMode
         | SettingId::MarqueeFps
         | SettingId::AutoBrightness
-        | SettingId::SpectrumLedMask => false,
+        | SettingId::SpectrumLedMask
+        | SettingId::VisualizerFps => false,
     }
 }
 
@@ -480,11 +449,10 @@ fn two_option_is_right(config: &CoreConfig, id: SettingId) -> bool {
         SettingId::MarqueeFps => config.marquee_fps == MarqueeFps::FPS_60,
         SettingId::AutoBrightness => config.auto_brightness_enabled,
         SettingId::SpectrumLedMask => config.spectrum_led_mask,
+        SettingId::VisualizerFps => config.visualizer_force_60fps,
         SettingId::VolumeStepPercent
         | SettingId::VolumeHudTimeoutMs
         | SettingId::VolumeHudFadeMs
-        | SettingId::CodecHudTimeoutMs
-        | SettingId::VuSkin
-        | SettingId::VuZeroDbfs => false,
+        | SettingId::CodecHudTimeoutMs => false,
     }
 }

@@ -1,15 +1,15 @@
-//! Real-time visualizer telemetry streaming for `CamillaDSP` 5.0 (`SubscribeVuLevels` & `SubscribeSpectrum`).
+//! Real-time visualizer telemetry streaming for `CamillaDSP` 5.0 (`SubscribeSpectrum`).
 //!
-//! Each visualizer mode opens a dedicated WebSocket connection so asynchronous
-//! telemetry events never interleave with control commands or another subscription.
-//! Incoming frames are drained into a single [`LatestFrameSlot`] so a slow UI
-//! frame drops older samples harmlessly instead of building TCP backpressure.
+//! Opens a dedicated WebSocket connection so asynchronous spectrum events never
+//! interleave with control commands. Incoming frames are drained into a single
+//! [`LatestFrameSlot`] so a slow UI frame drops older samples harmlessly instead
+//! of building TCP backpressure.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use camilladsp_schema::protocol::{
-    SpectrumSide, SpectrumSubscription, VuSubscription, WsCommand, WsReply, WsResult,
+    SpectrumSide, SpectrumSubscription, WsCommand, WsReply, WsResult,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::watch;
@@ -51,40 +51,6 @@ impl<T> LatestFrameSlot<T> {
     }
 }
 
-/// Capture-side VU levels snapshot delivered by `SubscribeVuLevels`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct VuLevelsSnapshot {
-    /// Smoothed capture RMS levels per channel in dBFS.
-    pub capture_rms: Vec<f32>,
-    /// Smoothed capture peak levels per channel in dBFS.
-    pub capture_peak: Vec<f32>,
-}
-
-impl VuLevelsSnapshot {
-    /// Returns `(left, right)` capture RMS levels in dBFS.
-    ///
-    /// Duplicates channel 0 for mono streams and falls back to [`SILENCE_DBFS`]
-    /// when no channels are present.
-    #[must_use]
-    pub fn capture_lr_rms(&self) -> (f32, f32) {
-        extract_lr(&self.capture_rms)
-    }
-
-    /// Returns `(left, right)` capture peak levels in dBFS.
-    #[must_use]
-    pub fn capture_lr_peak(&self) -> (f32, f32) {
-        extract_lr(&self.capture_peak)
-    }
-}
-
-fn extract_lr(channels: &[f32]) -> (f32, f32) {
-    match channels {
-        [] => (SILENCE_DBFS, SILENCE_DBFS),
-        [mono] => (*mono, *mono),
-        [left, right, ..] => (*left, *right),
-    }
-}
-
 /// Capture-side log-spaced spectrum snapshot delivered by `SubscribeSpectrum`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpectrumSnapshot {
@@ -105,27 +71,24 @@ impl SpectrumSnapshot {
     }
 }
 
-/// Default `SubscribeVuLevels` configuration tuned for IEC 60268-17 needle feel at 40 Hz.
+/// Builds a `SubscribeSpectrum` configuration querying pre-crossover capture audio
+/// capped at `max_rate_hz`.
 #[must_use]
-pub const fn default_vu_subscription() -> VuSubscription {
-    VuSubscription {
-        max_rate: 40.0,
-        attack: 65.0,
-        release: 300.0,
-    }
-}
-
-/// Default `SubscribeSpectrum` configuration querying pre-crossover capture audio.
-#[must_use]
-pub const fn default_spectrum_subscription() -> SpectrumSubscription {
+pub const fn spectrum_subscription_for_rate(max_rate_hz: f32) -> SpectrumSubscription {
     SpectrumSubscription {
         side: SpectrumSide::Capture,
         channel: None,
         min_freq: 30.0,
         max_freq: 18000.0,
         n_bins: 128,
-        max_rate: Some(40.0),
+        max_rate: Some(max_rate_hz),
     }
+}
+
+/// Default `SubscribeSpectrum` configuration querying pre-crossover capture audio at 40 Hz.
+#[must_use]
+pub const fn default_spectrum_subscription() -> SpectrumSubscription {
+    spectrum_subscription_for_rate(40.0)
 }
 
 /// RAII handle for an active visualizer telemetry stream.
@@ -181,44 +144,11 @@ fn rate_hz_to_period_ms(max_rate_hz: f32) -> u64 {
 }
 
 impl DspDevice {
-    /// Opens a dedicated `SubscribeVuLevels` stream writing into `slot`.
-    ///
-    /// Automatically reconnects on transient disconnect until the returned
-    /// [`VisualizerSubscription`] is dropped.
-    #[must_use]
-    pub fn start_vu_stream(
-        &self,
-        sub: VuSubscription,
-        slot: Arc<LatestFrameSlot<VuLevelsSnapshot>>,
-    ) -> VisualizerSubscription {
-        let (stop_tx, mut stop_rx) = watch::channel(false);
-        let task = if let Some(mock) = self.is_mock().cloned() {
-            let interval_ms = rate_hz_to_period_ms(sub.max_rate);
-            tokio::spawn(async move {
-                run_mock_vu_loop(mock, slot, Duration::from_millis(interval_ms), stop_rx).await;
-            })
-        } else if let Some((host, port)) = self.hardware_endpoint() {
-            let host = host.clone();
-            tokio::spawn(async move {
-                run_hardware_vu_loop(host, port, sub, slot, stop_rx).await;
-            })
-        } else {
-            tokio::spawn(async move {
-                wait_for_stop(&mut stop_rx).await;
-            })
-        };
-
-        VisualizerSubscription {
-            stop_tx,
-            task: Some(task),
-        }
-    }
-
     /// Opens a dedicated, state-aware `SubscribeSpectrum` stream writing into `slot`.
     ///
     /// Uses [`Self::subscribe_state`] to wait for [`ProcessingState::Running`]
-    /// whenever `CamillaDSP` stops (silence timeout, pause, or sample-rate change)
-    /// and emits [`SpectrumSnapshot::silent`] while inactive.
+    /// or [`ProcessingState::Paused`] whenever `CamillaDSP` stops (rate change
+    /// or shutdown) and emits [`SpectrumSnapshot::silent`] while inactive.
     #[must_use]
     pub fn start_spectrum_stream(
         &self,
@@ -234,113 +164,6 @@ impl DspDevice {
         VisualizerSubscription {
             stop_tx,
             task: Some(task),
-        }
-    }
-}
-
-async fn run_mock_vu_loop(
-    mock: crate::client::DspDeviceMock,
-    slot: Arc<LatestFrameSlot<VuLevelsSnapshot>>,
-    period: Duration,
-    mut stop_rx: watch::Receiver<bool>,
-) {
-    let mut ticker = tokio::time::interval(period);
-    loop {
-        tokio::select! {
-            () = wait_for_stop(&mut stop_rx) => break,
-            _ = ticker.tick() => {
-                let (capture_rms, capture_peak) = mock.levels_snapshot();
-                slot.publish(VuLevelsSnapshot {
-                    capture_rms,
-                    capture_peak,
-                });
-            }
-        }
-    }
-}
-
-async fn run_hardware_vu_loop(
-    host: DspHost,
-    port: DspPort,
-    sub: VuSubscription,
-    slot: Arc<LatestFrameSlot<VuLevelsSnapshot>>,
-    mut stop_rx: watch::Receiver<bool>,
-) {
-    loop {
-        if *stop_rx.borrow() {
-            break;
-        }
-        match subscribe_once_vu(&host, port, sub, &slot, &mut stop_rx).await {
-            Ok(StoppedByCaller::Yes) => break,
-            Ok(StoppedByCaller::No) => {}
-            Err(err) => {
-                tracing::debug!(error = %err, "VU stream connection ended; retrying");
-            }
-        }
-        tokio::select! {
-            () = wait_for_stop(&mut stop_rx) => break,
-            () = tokio::time::sleep(Duration::from_millis(250)) => {}
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StoppedByCaller {
-    Yes,
-    No,
-}
-
-async fn subscribe_once_vu(
-    host: &DspHost,
-    port: DspPort,
-    sub: VuSubscription,
-    slot: &LatestFrameSlot<VuLevelsSnapshot>,
-    stop_rx: &mut watch::Receiver<bool>,
-) -> Result<StoppedByCaller, DspError> {
-    let mut ws = DspDevice::connect_ws(host, port).await?;
-    match DspDevice::send_ws_command(&mut ws, &WsCommand::SubscribeVuLevels { value: sub }).await? {
-        WsReply::SubscribeVuLevels { result } => check_ws_result("SubscribeVuLevels", result)?,
-        other => return Err(unexpected_reply("SubscribeVuLevels", &other)),
-    }
-    tracing::info!(%host, port = port.as_u16(), "Subscribed to CamillaDSP VuLevels stream");
-
-    let mut logged_first = false;
-    loop {
-        tokio::select! {
-            () = wait_for_stop(stop_rx) => {
-                send_stop_and_close(&mut ws).await;
-                return Ok(StoppedByCaller::Yes);
-            }
-            msg = ws.next() => {
-                let Some(frame) = msg else {
-                    return Ok(StoppedByCaller::No);
-                };
-                match frame {
-                    Ok(Message::Text(text)) => {
-                        match serde_json::from_str::<WsReply>(&text) {
-                            Ok(WsReply::VuLevelsEvent { value, .. }) => {
-                                if !logged_first {
-                                    logged_first = true;
-                                    tracing::info!(
-                                        capture_rms = ?value.capture_rms,
-                                        "Received first CamillaDSP VuLevelsEvent"
-                                    );
-                                }
-                                slot.publish(VuLevelsSnapshot {
-                                    capture_rms: value.capture_rms,
-                                    capture_peak: value.capture_peak,
-                                });
-                            }
-                            Ok(_) => {}
-                            Err(err) => {
-                                tracing::warn!(error = %err, "Failed to parse VuLevelsEvent frame");
-                            }
-                        }
-                    }
-                    Ok(Message::Close(_)) | Err(_) => return Ok(StoppedByCaller::No),
-                    Ok(_) => {}
-                }
-            }
         }
     }
 }
@@ -373,7 +196,6 @@ async fn run_resilient_spectrum_loop(
             }
         };
 
-        // Wait until CamillaDSP reports Running before sending SubscribeSpectrum.
         let mut is_running = wait_for_running(&mut state_rx, &slot, &mut stop_rx).await;
         while is_running {
             match subscribe_once_spectrum(&host, port, &sub, &slot, &mut stop_rx).await {

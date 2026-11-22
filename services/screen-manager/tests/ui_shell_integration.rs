@@ -1306,7 +1306,7 @@ fn ui_shell_generic_settings_callbacks_clamp_and_sync_models() {
 
     // Verify basic_settings and advanced_settings models reflect the updated state.
     let basic_rows = shell.window().get_basic_settings();
-    assert_eq!(basic_rows.row_count(), 4);
+    assert_eq!(basic_rows.row_count(), 3);
     let title_row = basic_rows.row_data(0).expect("title_display_mode row");
     assert_eq!(title_row.id.as_str(), "title_display_mode");
     assert!(!title_row.is_advanced);

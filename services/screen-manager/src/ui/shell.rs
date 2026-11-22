@@ -32,7 +32,7 @@ use crate::config::{
     MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
     MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE, MIN_VOLUME_HUD_TIMEOUT_MS,
     MIN_VOLUME_STEP_PERCENT, ManualBrightnessPercent, MarqueeFps, TitleDisplayMode,
-    VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent, VuSkinName, VuZeroDbfs,
+    VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
 };
 use crate::screen_brightness::{
     BRIGHTNESS_SETTLE_WINDOW, BrightnessCommand, BrightnessCommandQueue, BrightnessState,
@@ -403,9 +403,8 @@ impl AppShell {
         ));
         window.set_auto_brightness_enabled(config.auto_brightness_enabled);
         window.set_brightness_value(f32::from(config.brightness_manual_percent.value()));
-        window.set_viz_vu_skin(config.vu_skin.as_str().into());
-        window.set_viz_zero_dbfs(config.vu_zero_dbfs.value());
         window.set_viz_spectrum_led_mask(config.spectrum_led_mask);
+        window.set_viz_force_60fps(config.visualizer_force_60fps);
     }
 
     fn build_setting_rows(config: &CoreConfig, tier: SettingTier) -> Vec<SettingRowItem> {
@@ -774,9 +773,8 @@ impl AppShell {
                 .unwrap_or_default(),
             auto_brightness_enabled: window.get_auto_brightness_enabled(),
             brightness_manual_percent: Self::brightness_percent_from_window(window),
-            vu_skin: VuSkinName::try_from(window.get_viz_vu_skin().as_str()).unwrap_or_default(),
-            vu_zero_dbfs: VuZeroDbfs::new(window.get_viz_zero_dbfs()),
             spectrum_led_mask: window.get_viz_spectrum_led_mask(),
+            visualizer_force_60fps: window.get_viz_force_60fps(),
         }
     }
 
@@ -1278,7 +1276,7 @@ impl AppShell {
     /// Wires the `CamillaDSP` visualizer worker controller and starts/stops its 33 Hz
     /// render timer in lockstep with `visualizer_active`.
     pub fn wire_visualizer(&self, dsp: speaker_dsp::DspDevice) {
-        let ctrl = VisualizerController::new(dsp, self.window.get_viz_zero_dbfs() as f32);
+        let ctrl = VisualizerController::new(dsp);
         *self.visualizer_ctrl.borrow_mut() = Some(ctrl);
         if self.window.get_visualizer_active() {
             self.open_visualizer();
@@ -1321,22 +1319,21 @@ impl AppShell {
         visualizer_timer: &Rc<slint::Timer>,
     ) {
         window.set_visualizer_active(true);
-        let skin_name = window.get_viz_vu_skin();
-        visualizer.ensure_skin_loaded(window, skin_name.as_str());
 
         let mode = VisualizerMode::from_index(window.get_visualizer_mode());
+        let force_60 = window.get_viz_force_60fps();
         if let Some(ctrl) = visualizer_ctrl.borrow_mut().as_mut() {
-            ctrl.set_zero_vu_dbfs(window.get_viz_zero_dbfs() as f32);
-            ctrl.set_active_mode(Some(mode));
+            ctrl.set_active_mode(Some(mode), force_60);
         }
 
+        let interval_ms = if force_60 { 16 } else { 30 };
         let win_weak = window.as_weak();
         let viz_state = Rc::clone(visualizer);
         let viz_ctrl = Rc::clone(visualizer_ctrl);
         let timer_ref = Rc::clone(visualizer_timer);
         visualizer_timer.start(
             slint::TimerMode::Repeated,
-            Duration::from_millis(30),
+            Duration::from_millis(interval_ms),
             move || {
                 let Some(w) = win_weak.upgrade() else {
                     timer_ref.stop();
@@ -1347,16 +1344,16 @@ impl AppShell {
                     return;
                 }
                 let m = VisualizerMode::from_index(w.get_visualizer_mode());
+                let f60 = w.get_viz_force_60fps();
                 let out = if let Some(ctrl) = viz_ctrl.borrow_mut().as_mut() {
-                    ctrl.set_zero_vu_dbfs(w.get_viz_zero_dbfs() as f32);
                     if ctrl.active_mode() != Some(m) {
-                        ctrl.set_active_mode(Some(m));
+                        ctrl.set_active_mode(Some(m), f60);
                     }
                     ctrl.tick(Instant::now())
                 } else {
                     return;
                 };
-                viz_state.apply_output(&w, m, &out);
+                viz_state.apply_output(&out);
             },
         );
     }
@@ -1370,7 +1367,7 @@ impl AppShell {
         window.set_visualizer_active(false);
         visualizer_timer.stop();
         if let Some(ctrl) = visualizer_ctrl.borrow_mut().as_mut() {
-            ctrl.set_active_mode(None);
+            ctrl.set_active_mode(None, false);
         }
     }
 
@@ -1675,7 +1672,7 @@ impl AppShell {
                 let next = VisualizerMode::from_index(w.get_visualizer_mode()).next();
                 w.set_visualizer_mode(next as i32);
                 if let Some(ctrl) = viz_ctrl.borrow_mut().as_mut() {
-                    ctrl.set_active_mode(Some(next));
+                    ctrl.set_active_mode(Some(next), w.get_viz_force_60fps());
                 }
             }
         });
@@ -1687,7 +1684,7 @@ impl AppShell {
                 let prev = VisualizerMode::from_index(w.get_visualizer_mode()).prev();
                 w.set_visualizer_mode(prev as i32);
                 if let Some(ctrl) = viz_ctrl.borrow_mut().as_mut() {
-                    ctrl.set_active_mode(Some(prev));
+                    ctrl.set_active_mode(Some(prev), w.get_viz_force_60fps());
                 }
             }
         });

@@ -9,8 +9,8 @@ pub use client::{
     DspStatus, ProcessingState, StopReason, format_dbfs_meter, format_load_meter,
 };
 pub use visualizer::{
-    LatestFrameSlot, SILENCE_DBFS, SpectrumSnapshot, VisualizerSubscription, VuLevelsSnapshot,
-    default_spectrum_subscription, default_vu_subscription,
+    LatestFrameSlot, SILENCE_DBFS, SpectrumSnapshot, VisualizerSubscription,
+    default_spectrum_subscription, spectrum_subscription_for_rate,
 };
 
 #[cfg(feature = "test-util")]

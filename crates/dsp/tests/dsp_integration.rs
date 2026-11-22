@@ -820,8 +820,8 @@ async fn concurrent_device_clones_read_and_reset() {
 }
 
 #[test]
-fn latest_frame_slot_overwrites_and_vu_lr_extraction() {
-    use speaker_dsp::{LatestFrameSlot, SILENCE_DBFS, VuLevelsSnapshot};
+fn latest_frame_slot_overwrites_safely() {
+    use speaker_dsp::LatestFrameSlot;
 
     let slot = LatestFrameSlot::new();
     assert!(slot.take().is_none());
@@ -829,89 +829,6 @@ fn latest_frame_slot_overwrites_and_vu_lr_extraction() {
     slot.publish(2_u32);
     assert_eq!(slot.take(), Some(2));
     assert!(slot.take().is_none());
-
-    let empty = VuLevelsSnapshot {
-        capture_rms: vec![],
-        capture_peak: vec![],
-    };
-    assert_eq!(empty.capture_lr_rms(), (SILENCE_DBFS, SILENCE_DBFS));
-    assert_eq!(empty.capture_lr_peak(), (SILENCE_DBFS, SILENCE_DBFS));
-
-    let mono = VuLevelsSnapshot {
-        capture_rms: vec![-12.5],
-        capture_peak: vec![-6.0],
-    };
-    assert_eq!(mono.capture_lr_rms(), (-12.5, -12.5));
-    assert_eq!(mono.capture_lr_peak(), (-6.0, -6.0));
-
-    let stereo = VuLevelsSnapshot {
-        capture_rms: vec![-14.0, -16.0],
-        capture_peak: vec![-3.0, -4.0],
-    };
-    assert_eq!(stereo.capture_lr_rms(), (-14.0, -16.0));
-    assert_eq!(stereo.capture_lr_peak(), (-3.0, -4.0));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hardware_vu_stream_roundtrip_and_stop() {
-    use speaker_dsp::{LatestFrameSlot, default_vu_subscription};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let local_port = listener.local_addr().unwrap().port();
-
-    let server_task = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-        let msg = ws.next().await.unwrap().unwrap();
-        let req: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
-        assert_eq!(req["command"], "SubscribeVuLevels");
-
-        let ack = serde_json::json!({"reply": "SubscribeVuLevels", "result": "Ok"});
-        ws.send(Message::Text(ack.to_string().into()))
-            .await
-            .unwrap();
-
-        let ev = serde_json::json!({
-            "reply": "VuLevelsEvent",
-            "result": "Ok",
-            "value": {
-                "playback_rms": [-20.0, -21.0],
-                "playback_peak": [-10.0, -11.0],
-                "capture_rms": [-18.0, -17.0],
-                "capture_peak": [-8.0, -7.5]
-            }
-        });
-        ws.send(Message::Text(ev.to_string().into())).await.unwrap();
-
-        let stop_msg = ws.next().await.unwrap().unwrap();
-        let stop_req: serde_json::Value =
-            serde_json::from_str(stop_msg.to_text().unwrap()).unwrap();
-        assert_eq!(stop_req["command"], "StopSubscription");
-    });
-
-    let dsp = DspDevice::with_host_and_port(
-        DspHost::new("127.0.0.1").unwrap(),
-        DspPort::new(local_port).unwrap(),
-    );
-    let slot = std::sync::Arc::new(LatestFrameSlot::new());
-    let sub = dsp.start_vu_stream(default_vu_subscription(), std::sync::Arc::clone(&slot));
-
-    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if let Some(f) = slot.take() {
-                break f;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("timed out waiting for VuLevelsEvent");
-
-    assert_eq!(frame.capture_lr_rms(), (-18.0, -17.0));
-    assert_eq!(frame.capture_lr_peak(), (-8.0, -7.5));
-
-    sub.stop().await;
-    server_task.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
