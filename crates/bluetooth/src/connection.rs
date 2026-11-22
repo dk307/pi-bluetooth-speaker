@@ -591,6 +591,32 @@ pub struct LinkSnapshot {
     pub pcms: Box<[BlueAlsaPcm]>,
 }
 
+/// Combined link + playback snapshot from a single `org.bluez` `GetManagedObjects`.
+///
+/// The screen monitor needs both the playback state and the link details every
+/// tick; fetching them separately issued two `GetManagedObjects` round-trips.
+/// This carries both from one snapshot, plus the resolved active-device address
+/// so the caller never needs a second `ActiveDevice` property read.
+///
+/// `playback` and `link` are deliberately independent: a `BlueALSA` failure
+/// degrades only `link` (the last published PCM rows are kept) while `playback`
+/// continues to update. Only a `BlueZ` failure fails both, since the object map
+/// is their shared source — that case is surfaced as the outer `Err`.
+#[derive(Debug)]
+pub struct LinkAndPlaybackSnapshot {
+    /// Arbitrated active device (`ActiveDevice` only).
+    ///
+    /// The caller's `fallback` is used solely for playback selection and is
+    /// **never** returned here: the Devices-screen badge must not promote a
+    /// standby device to "Active" merely because it was the last playing one.
+    pub active_addr: Option<BtAddress>,
+    /// Playback state from the same object map, or `None` when no player exists.
+    pub playback: Option<BtPlaybackState>,
+    /// Link snapshot; `Err` only when `BlueALSA` failed after a successful
+    /// `BlueZ` query (the last published PCM state is kept by the caller).
+    pub link: Result<LinkSnapshot, BtError>,
+}
+
 #[derive(Debug)]
 pub(crate) enum BtErrorKind {
     Dbus { details: Box<str> },
@@ -1436,6 +1462,18 @@ impl DbusClient {
         &self,
         target_adapter: Option<&str>,
     ) -> Result<BluezSnapshot, BtError> {
+        let preferred = self.read_active_device();
+        self.query_bluez_with_preferred(target_adapter, preferred)
+    }
+
+    /// Queries `org.bluez` `GetManagedObjects` with an explicit `preferred`
+    /// active device, so callers that already resolved the fallback address can
+    /// reuse it without a second `read_active_device` round-trip.
+    pub(crate) fn query_bluez_with_preferred(
+        &self,
+        target_adapter: Option<&str>,
+        preferred: Option<BtAddress>,
+    ) -> Result<BluezSnapshot, BtError> {
         let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
             .destination("org.bluez")
             .and_then(|b| b.path("/"))
@@ -1443,7 +1481,6 @@ impl DbusClient {
 
         let objects = proxy.get_managed_objects()?;
 
-        let preferred = self.read_active_device();
         let (adapter, devices, playback) =
             Self::parse_bluez_all_for(&objects, target_adapter, preferred)?;
         Ok((adapter, devices, playback))
@@ -2167,6 +2204,10 @@ struct MockState {
     playback: Option<BtPlaybackState>,
     active_device: Option<BtAddress>,
     fault: Option<Box<str>>,
+    /// Simulates a BlueALSA-only failure: `link_and_playback_snapshot` degrades
+    /// only the `link` field while `playback` keeps updating, mirroring the
+    /// production failure-domain split. A `BlueZ` fault (`fault`) fails both.
+    bluealsa_fault: Option<Box<str>>,
     cache_dir: std::path::PathBuf,
     last_admin_action: Option<AdminAction>,
 }
@@ -2247,6 +2288,7 @@ impl BluetoothDeviceMock {
             }),
             active_device: None,
             fault: None,
+            bluealsa_fault: None,
             cache_dir: std::path::PathBuf::from(COVER_ART_CACHE_DIR),
             last_admin_action: None,
         };
@@ -2338,6 +2380,22 @@ impl BluetoothDeviceMock {
     pub fn set_fault(&self, fault: Option<Box<str>>) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.fault = fault;
+
+        self.change_flag.notify();
+    }
+
+    /// Sets a simulated `BlueALSA`-only failure.
+    ///
+    /// Unlike [`Self::set_fault`] (which mirrors a `BlueZ` object-query failure
+    /// and fails the whole `link_and_playback_snapshot`), this degrades only the
+    /// `link` field while `playback` keeps updating — the failure-domain split
+    /// the production path guarantees.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_bluealsa_fault(&self, fault: Option<Box<str>>) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        state.bluealsa_fault = fault;
 
         self.change_flag.notify();
     }
@@ -2671,17 +2729,69 @@ impl BluetoothDeviceMock {
     }
 
     fn link_snapshot(&self) -> Result<LinkSnapshot, BtError> {
-        let state = self
-            .state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self.state.read().unwrap_or_else(|p| {
+            tracing::warn!(error = %p, "mock state lock poisoned; recovering");
+            p.into_inner()
+        });
         if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        // Mirror production's `link_snapshot()` D-Bus arm, which propagates
+        // BlueALSA query failures as `Err`. Without this check a test injecting
+        // `set_bluealsa_fault` would pass on the mock but fail on real hardware.
+        if let Some(ref fault) = state.bluealsa_fault {
             return Err(BtError::mock_fault(fault.clone()));
         }
         Ok(LinkSnapshot {
             adapter: state.adapter.clone(),
             devices: state.devices.clone().into_boxed_slice(),
             pcms: state.pcms.clone().into_boxed_slice(),
+        })
+    }
+
+    /// Mock counterpart of [`BluetoothDevice::link_and_playback_snapshot`]:
+    /// reads the shared mock state once, deriving both the link snapshot and the
+    /// playback state (with cached cover-art path) under a single lock, mirroring
+    /// the single-`GetManagedObjects` production path.
+    ///
+    /// The mock does not model multi-player fallback arbitration: `fallback` is
+    /// accepted for signature parity with the production path but not applied,
+    /// because the mock's `playback` field is already the arbitrated result. The
+    /// returned `active_addr` is `state.active_device` only (never the fallback),
+    /// matching production's badge semantics. A `bluealsa_fault` degrades only
+    /// `link` (leaving `playback` usable); a `fault` fails the whole call.
+    fn link_and_playback_snapshot(
+        &self,
+        fallback: Option<BtAddress>,
+    ) -> Result<LinkAndPlaybackSnapshot, BtError> {
+        let _ = fallback; // signature parity; mock playback is pre-arbitrated
+        let state = self.state.read().unwrap_or_else(|p| {
+            tracing::warn!(error = %p, "mock state lock poisoned; recovering");
+            p.into_inner()
+        });
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        let snapshot = LinkSnapshot {
+            adapter: state.adapter.clone(),
+            devices: state.devices.clone().into_boxed_slice(),
+            pcms: state.pcms.clone().into_boxed_slice(),
+        };
+        let mut pb = state.playback.clone();
+        if let Some(ref mut p) = pb
+            && p.cover_art_path.is_none()
+            && let (Some(addr), Some(handle)) = (p.device_address, &p.image_handle)
+        {
+            p.cover_art_path = cover_art_cached_path_in(&state.cache_dir, addr, handle);
+        }
+        let link = match state.bluealsa_fault {
+            Some(ref fault) => Err(BtError::mock_fault(fault.clone())),
+            None => Ok(snapshot),
+        };
+        Ok(LinkAndPlaybackSnapshot {
+            active_addr: state.active_device,
+            playback: pb,
+            link,
         })
     }
 
@@ -3190,6 +3300,59 @@ impl BluetoothDevice {
             dev.link_snapshot()
         })
         .await
+    }
+
+    /// Returns the link snapshot and playback state from a single `org.bluez`
+    /// `GetManagedObjects` round-trip.
+    ///
+    /// The screen monitor needs both link details and playback state every tick;
+    /// fetching them separately issued two `GetManagedObjects` calls (each
+    /// ~28 KiB on a busy adapter). This fetches the object map once via
+    /// [`Self::query_bluez_with_preferred`] (which already parses adapter,
+    /// devices, and playback from the same snapshot), queries `BlueALSA`, and
+    /// resolves cover art exactly like [`Self::playback_state`].
+    ///
+    /// The resolved active-device address is returned alongside the data so the
+    /// caller never needs a second `ActiveDevice` property read.
+    ///
+    /// # Errors
+    /// Returns [`BtError`] only when the `BlueZ` object query itself fails; a
+    /// `BlueALSA` failure degrades only the [`LinkAndPlaybackSnapshot::link`]
+    /// field, leaving [`LinkAndPlaybackSnapshot::playback`] usable.
+    pub fn link_and_playback_snapshot(
+        &self,
+        fallback: Option<BtAddress>,
+    ) -> Result<LinkAndPlaybackSnapshot, BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.link_and_playback_snapshot(fallback),
+            Backend::Dbus(dbus) => {
+                // `query_bluez_with_preferred` resolves the arbitrated active
+                // device first, falling back to the caller's last-known device,
+                // matching `playback_state_for` semantics with one GMO round-trip.
+                // `active` (the arbitrated device, without fallback) is returned
+                // for the Devices-screen badge; `preferred` (with fallback) is
+                // only for playback selection — the badge must never promote a
+                // standby device to "Active" merely because it was the last
+                // playing one.
+                let active = dbus.read_active_device();
+                let preferred = active.or(fallback);
+                let (adapter, devices, mut playback) =
+                    dbus.query_bluez_with_preferred(None, preferred)?;
+                dbus.resolve_cover_art(&mut playback);
+                // BlueALSA is a separate service: its failure must not suppress
+                // playback updates. Degrade only the link snapshot.
+                let link = dbus.query_bluealsa(&devices).map(|pcms| LinkSnapshot {
+                    adapter,
+                    devices,
+                    pcms,
+                });
+                Ok(LinkAndPlaybackSnapshot {
+                    active_addr: active,
+                    playback,
+                    link,
+                })
+            }
+        }
     }
 
     /// Returns the active media player playback state, if available.

@@ -965,7 +965,14 @@ fn publish_suppresses_matching_settle_snapshot() {
         kind: SettleKind::Toggle { pre_playing: true },
         started: Instant::now(),
     });
-    publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
+    let __pb = bt.playback_state_for(last_pb.as_ref().and_then(|p| p.device_address));
+    publish_playback_state(
+        __pb.as_ref(),
+        &mut update,
+        &mut last_pb,
+        &mut cover,
+        &mut settle,
+    );
     assert!(update.playback.is_none(), "settling must suppress publish");
     assert!(settle.is_some(), "settle window stays armed during window");
 }
@@ -985,7 +992,14 @@ fn publish_after_settle_expiry_publishes() {
     let mut last_pb: Option<speaker_bluetooth::BtPlaybackState> = None;
     let mut update = BtSharedUpdate::default();
     let mut cover = CoverState::default();
-    publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
+    let __pb = bt.playback_state_for(last_pb.as_ref().and_then(|p| p.device_address));
+    publish_playback_state(
+        __pb.as_ref(),
+        &mut update,
+        &mut last_pb,
+        &mut cover,
+        &mut settle,
+    );
     assert!(update.playback.is_some(), "expiry must force a publish");
     assert!(settle.is_none(), "window must be disarmed after expiry");
 }
@@ -1004,7 +1018,14 @@ fn publish_failed_cover_retry_after_backoff() {
     let mut cover = CoverState::default();
     let mut settle = None;
     let mut update = BtSharedUpdate::default();
-    publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
+    let __pb = bt.playback_state_for(last_pb.as_ref().and_then(|p| p.device_address));
+    publish_playback_state(
+        __pb.as_ref(),
+        &mut update,
+        &mut last_pb,
+        &mut cover,
+        &mut settle,
+    );
     assert_eq!(cover.path.as_deref(), Some(missing));
     assert!(cover.failed_since.is_some());
     assert!(update.cover.is_none(), "failed decode keeps prior art");
@@ -1016,7 +1037,14 @@ fn publish_failed_cover_retry_after_backoff() {
             .expect("monotonic instant before start"),
     );
     update = BtSharedUpdate::default();
-    publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
+    let __pb = bt.playback_state_for(last_pb.as_ref().and_then(|p| p.device_address));
+    publish_playback_state(
+        __pb.as_ref(),
+        &mut update,
+        &mut last_pb,
+        &mut cover,
+        &mut settle,
+    );
     assert!(
         cover.failed_since.is_some(),
         "retry must be re-attempted after the backoff"
@@ -1038,7 +1066,14 @@ fn publish_device_gone_clears_cover() {
     };
     let mut update = BtSharedUpdate::default();
     let mut settle = None;
-    publish_playback_state(&bt, &mut update, &mut last_pb, &mut cover, &mut settle);
+    let __pb = bt.playback_state_for(last_pb.as_ref().and_then(|p| p.device_address));
+    publish_playback_state(
+        __pb.as_ref(),
+        &mut update,
+        &mut last_pb,
+        &mut cover,
+        &mut settle,
+    );
     assert!(
         update.playback.is_some(),
         "placeholder must publish on Ok(None)"
@@ -1195,7 +1230,8 @@ fn publish_link_state_stages_pcm_once_and_resets() {
     let mut state = BtMonitorState::default();
 
     let mut first = BtSharedUpdate::default();
-    let _ = state.publish_link_state(&bt, &mut first);
+    let __snap = bt.link_snapshot().expect("mock link snapshot");
+    let _ = state.publish_link_state(&mut first, bt.active_device(), Ok(__snap));
     assert!(first.pcm.is_some());
     let details = state.last_details().expect("first tick caches details");
     assert!(details.device.is_some());
@@ -1203,7 +1239,8 @@ fn publish_link_state_stages_pcm_once_and_resets() {
 
     // Unchanged snapshot is deduplicated.
     let mut second = BtSharedUpdate::default();
-    let _ = state.publish_link_state(&bt, &mut second);
+    let __snap = bt.link_snapshot().expect("mock link snapshot");
+    let _ = state.publish_link_state(&mut second, bt.active_device(), Ok(__snap));
     assert!(second.pcm.is_none());
     assert!(state.last_details().is_some());
 
@@ -1211,7 +1248,8 @@ fn publish_link_state_stages_pcm_once_and_resets() {
     state.reset_dedup();
     assert!(state.last_details().is_none());
     let mut third = BtSharedUpdate::default();
-    let _ = state.publish_link_state(&bt, &mut third);
+    let __snap = bt.link_snapshot().expect("mock link snapshot");
+    let _ = state.publish_link_state(&mut third, bt.active_device(), Ok(__snap));
     assert!(third.pcm.is_some());
     assert!(state.last_details().is_some());
 }
@@ -1225,7 +1263,12 @@ fn publish_link_state_keeps_state_on_query_fault() {
     mock.set_fault(Some("link fault".into()));
     let mut state = BtMonitorState::default();
     let mut update = BtSharedUpdate::default();
-    assert!(state.publish_link_state(&bt, &mut update).is_none());
+    let __err = bt.link_snapshot().unwrap_err();
+    assert!(
+        state
+            .publish_link_state(&mut update, bt.active_device(), Err(__err))
+            .is_none()
+    );
     assert!(state.last_details().is_none());
 }
 
@@ -1236,11 +1279,21 @@ fn publish_link_state_clears_details_on_disconnect() {
 
     let (bt, mock) = BluetoothDevice::new_mocked();
     let mut state = BtMonitorState::default();
-    let _ = state.publish_link_state(&bt, &mut BtSharedUpdate::default());
+    let __snap = bt.link_snapshot().expect("mock link snapshot");
+    let _ = state.publish_link_state(
+        &mut BtSharedUpdate::default(),
+        bt.active_device(),
+        Ok(__snap),
+    );
 
     mock.clear_devices();
     mock.clear_pcms();
-    let _ = state.publish_link_state(&bt, &mut BtSharedUpdate::default());
+    let __snap = bt.link_snapshot().expect("mock link snapshot");
+    let _ = state.publish_link_state(
+        &mut BtSharedUpdate::default(),
+        bt.active_device(),
+        Ok(__snap),
+    );
     let details = state
         .last_details()
         .expect("disconnect republishes details");
