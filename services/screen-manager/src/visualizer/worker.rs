@@ -15,7 +15,7 @@ use super::dsp_math::{ERB_BAND_COUNT, ErbBandMapper, SpectrumBallistics};
 
 /// Active visualizer screen mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(try_from = "String", into = "&'static str")]
 #[repr(i32)]
 pub enum VisualizerMode {
     /// Bilateral 48-bar radial FFT ring around central album art.
@@ -35,6 +35,20 @@ impl VisualizerMode {
         match self {
             Self::RadialFft => "radial_fft",
             Self::LinearSpectrum => "linear_spectrum",
+        }
+    }
+
+    /// Parses a canonical config slug back into [`VisualizerMode`].
+    ///
+    /// # Errors
+    /// Returns a human-readable error if `slug` is not a recognized mode slug.
+    pub fn parse_slug(slug: &str) -> Result<Self, String> {
+        match slug {
+            "radial_fft" => Ok(Self::RadialFft),
+            "linear_spectrum" => Ok(Self::LinearSpectrum),
+            other => Err(format!(
+                "invalid default_visualizer '{other}': expected 'radial_fft' or 'linear_spectrum'"
+            )),
         }
     }
 
@@ -72,6 +86,20 @@ impl VisualizerMode {
     #[must_use]
     pub const fn prev(self) -> Self {
         Self::from_index(self as i32 - 1)
+    }
+}
+
+impl TryFrom<String> for VisualizerMode {
+    type Error = String;
+
+    fn try_from(slug: String) -> Result<Self, Self::Error> {
+        Self::parse_slug(&slug)
+    }
+}
+
+impl From<VisualizerMode> for &'static str {
+    fn from(mode: VisualizerMode) -> Self {
+        mode.slug()
     }
 }
 

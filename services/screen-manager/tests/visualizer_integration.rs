@@ -99,7 +99,7 @@ fn spectrum_ballistics_frame_rate_independent_and_peak_hold() {
 
 #[test]
 fn settings_catalog_spectrum_style_and_fps_toggles() {
-    use screen_manager::config::{CoreConfig, DefaultVisualizerMode, VisualizerAutoStartSecs};
+    use screen_manager::config::{CoreConfig, VisualizerAutoStartSecs};
     use screen_manager::settings_catalog::{SettingTier, apply_step, find_setting, row_state};
 
     let mut cfg = CoreConfig::default();
@@ -107,7 +107,7 @@ fn settings_catalog_spectrum_style_and_fps_toggles() {
     assert!(!cfg.visualizer_force_60fps);
     assert!(cfg.visualizer_auto_start);
     assert_eq!(cfg.visualizer_auto_start_secs.value(), 5);
-    assert_eq!(cfg.default_visualizer, DefaultVisualizerMode::RadialFft);
+    assert_eq!(cfg.default_visualizer, VisualizerMode::RadialFft);
 
     assert!(apply_toggle(&mut cfg, SettingId::SpectrumLedMask, false));
     assert!(!cfg.spectrum_led_mask);
@@ -142,16 +142,13 @@ fn settings_catalog_spectrum_style_and_fps_toggles() {
         "Radial FFT"
     );
     assert!(apply_step(&mut cfg, SettingId::DefaultVisualizer, 1));
-    assert_eq!(
-        cfg.default_visualizer,
-        DefaultVisualizerMode::LinearSpectrum
-    );
+    assert_eq!(cfg.default_visualizer, VisualizerMode::LinearSpectrum);
     assert_eq!(
         row_state(&cfg, find_setting(SettingId::DefaultVisualizer)).value_text,
         "ERB Spectrum"
     );
     assert!(apply_step(&mut cfg, SettingId::DefaultVisualizer, -1));
-    assert_eq!(cfg.default_visualizer, DefaultVisualizerMode::RadialFft);
+    assert_eq!(cfg.default_visualizer, VisualizerMode::RadialFft);
 
     assert!(apply_step(&mut cfg, SettingId::VisualizerAutoStartSecs, 1));
     assert_eq!(cfg.visualizer_auto_start_secs.value(), 6);
@@ -169,16 +166,22 @@ fn settings_catalog_spectrum_style_and_fps_toggles() {
     let _ = VisualizerAutoStartSecs::try_from(0).unwrap_err();
     let _ = VisualizerAutoStartSecs::try_from(61).unwrap_err();
     assert_eq!(VisualizerAutoStartSecs::try_from(15).unwrap().value(), 15);
-    assert_eq!(DefaultVisualizerMode::RadialFft.slug(), "radial_fft");
+    assert_eq!(VisualizerMode::RadialFft.slug(), "radial_fft");
+    assert_eq!(VisualizerMode::LinearSpectrum.slug(), "linear_spectrum");
     assert_eq!(
-        DefaultVisualizerMode::LinearSpectrum.slug(),
-        "linear_spectrum"
+        VisualizerMode::parse_slug("radial_fft"),
+        Ok(VisualizerMode::RadialFft)
     );
+    assert_eq!(
+        VisualizerMode::parse_slug("linear_spectrum"),
+        Ok(VisualizerMode::LinearSpectrum)
+    );
+    let _ = VisualizerMode::parse_slug("invalid").unwrap_err();
 }
 
 #[test]
 fn visualizer_default_mode_and_autostart_config_roundtrip() {
-    use screen_manager::config::{CoreConfig, DefaultVisualizerMode, VisualizerAutoStartSecs};
+    use screen_manager::config::{CoreConfig, VisualizerAutoStartSecs};
 
     let fb = Framebuffer::new_mocked().0;
     let _fb_window = fb.init_platform().expect("init_platform");
@@ -189,7 +192,7 @@ fn visualizer_default_mode_and_autostart_config_roundtrip() {
     let cfg = CoreConfig {
         visualizer_auto_start: false,
         visualizer_auto_start_secs: VisualizerAutoStartSecs::new(12),
-        default_visualizer: DefaultVisualizerMode::LinearSpectrum,
+        default_visualizer: VisualizerMode::LinearSpectrum,
         ..CoreConfig::default()
     };
     shell.apply_config(&cfg);
@@ -197,10 +200,7 @@ fn visualizer_default_mode_and_autostart_config_roundtrip() {
     let roundtrip = shell.current_config();
     assert!(!roundtrip.visualizer_auto_start);
     assert_eq!(roundtrip.visualizer_auto_start_secs.value(), 12);
-    assert_eq!(
-        roundtrip.default_visualizer,
-        DefaultVisualizerMode::LinearSpectrum
-    );
+    assert_eq!(roundtrip.default_visualizer, VisualizerMode::LinearSpectrum);
 
     // Opening the visualizer uses the configured default mode (LinearSpectrum = 1).
     shell.open_visualizer();
@@ -223,7 +223,7 @@ fn visualizer_default_mode_and_autostart_config_roundtrip() {
     shell.apply_config(&CoreConfig {
         visualizer_auto_start: true,
         visualizer_auto_start_secs: VisualizerAutoStartSecs::new(1),
-        default_visualizer: DefaultVisualizerMode::LinearSpectrum,
+        default_visualizer: VisualizerMode::LinearSpectrum,
         ..CoreConfig::default()
     });
     shell.apply_bluetooth_playback(&BtPlaybackState {

@@ -15,6 +15,7 @@ use config::Config as LayeredConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::ui::ThemePreset;
+use crate::visualizer::VisualizerMode;
 use speaker_common::diag::{DEFAULT_CONFIG_PATH, FALLBACK_CONFIG_PATH};
 use speaker_common::impl_canonical_error_display;
 
@@ -562,9 +563,6 @@ impl_bounded_int_traits!(
     MAX_VISUALIZER_AUTO_START_SECS
 );
 
-/// Default audio visualizer mode opened by user tap or auto-start.
-pub type DefaultVisualizerMode = crate::visualizer::VisualizerMode;
-
 /// Strongly typed appliance configuration persisted as JSON on disk.
 ///
 /// Missing fields deserialize to their defaults, so minimal config files
@@ -608,7 +606,7 @@ pub struct CoreConfig {
     /// Delay in seconds after playback starts before auto-opening the visualizer (`1..=60`).
     pub visualizer_auto_start_secs: VisualizerAutoStartSecs,
     /// Default visualization mode (`"radial_fft"` or `"linear_spectrum"`).
-    pub default_visualizer: DefaultVisualizerMode,
+    pub default_visualizer: VisualizerMode,
 }
 
 impl Default for CoreConfig {
@@ -628,7 +626,7 @@ impl Default for CoreConfig {
             visualizer_force_60fps: false,
             visualizer_auto_start: true,
             visualizer_auto_start_secs: VisualizerAutoStartSecs::default(),
-            default_visualizer: DefaultVisualizerMode::default(),
+            default_visualizer: VisualizerMode::default(),
         }
     }
 }

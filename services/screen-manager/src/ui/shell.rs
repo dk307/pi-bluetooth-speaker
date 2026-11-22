@@ -28,13 +28,13 @@ struct BrightnessSettleSnapshot {
 type BrightnessSettle = Rc<Cell<Option<BrightnessSettleSnapshot>>>;
 
 use crate::config::{
-    CodecHudTimeoutMs, CoreConfig, DEFAULT_FONT_SCALE, DEFAULT_VOLUME_STEP_PERCENT,
-    DefaultVisualizerMode, FontScale, MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE,
-    MAX_VISUALIZER_AUTO_START_SECS, MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS,
-    MAX_VOLUME_STEP_PERCENT, MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE,
-    MIN_VISUALIZER_AUTO_START_SECS, MIN_VOLUME_HUD_TIMEOUT_MS, MIN_VOLUME_STEP_PERCENT,
-    ManualBrightnessPercent, MarqueeFps, TitleDisplayMode, VisualizerAutoStartSecs,
-    VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+    CodecHudTimeoutMs, CoreConfig, DEFAULT_FONT_SCALE, DEFAULT_VOLUME_STEP_PERCENT, FontScale,
+    MAX_CODEC_HUD_TIMEOUT_MS, MAX_FONT_SCALE, MAX_VISUALIZER_AUTO_START_SECS,
+    MAX_VOLUME_HUD_FADE_MS, MAX_VOLUME_HUD_TIMEOUT_MS, MAX_VOLUME_STEP_PERCENT,
+    MIN_CODEC_HUD_TIMEOUT_MS, MIN_FONT_SCALE, MIN_VISUALIZER_AUTO_START_SECS,
+    MIN_VOLUME_HUD_TIMEOUT_MS, MIN_VOLUME_STEP_PERCENT, ManualBrightnessPercent, MarqueeFps,
+    TitleDisplayMode, VisualizerAutoStartSecs, VolumeHudFadeMs, VolumeHudTimeoutMs,
+    VolumeStepPercent,
 };
 use crate::screen_brightness::{
     BRIGHTNESS_SETTLE_WINDOW, BrightnessCommand, BrightnessCommandQueue, BrightnessState,
@@ -803,9 +803,7 @@ impl AppShell {
             visualizer_force_60fps: window.get_viz_force_60fps(),
             visualizer_auto_start: window.get_viz_auto_start(),
             visualizer_auto_start_secs: Self::visualizer_auto_start_secs_from_window(window),
-            default_visualizer: DefaultVisualizerMode::from_index(
-                window.get_default_visualizer_mode(),
-            ),
+            default_visualizer: VisualizerMode::from_index(window.get_default_visualizer_mode()),
         }
     }
 
