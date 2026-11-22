@@ -12,6 +12,7 @@ import { FontSizeControl, TouchScaleShowcase } from "touch_scale_widgets.slint";
 export enum SettingControlKind {
     stepper,
     two_option,
+    selector,
 }
 
 export struct SettingRowItem {
@@ -119,6 +120,88 @@ component SettingsStepperRow inherits Rectangle {
             plus: true;
             enabled: root.can_increase;
             clicked => { root.increase(); }
+        }
+    }
+}
+
+// Cyclic `<` / `>` selector row for multi-option settings.
+component SettingsSelectorRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    callback prev();
+    callback next();
+
+    min-height: max(MaterialStyleMetrics.size_40, row_layout.min-height);
+
+    row_layout := HorizontalLayout {
+        spacing: MaterialStyleMetrics.spacing_8;
+
+        MaterialText {
+            text: root.label;
+            style: MaterialTypography.body_large;
+            color: MaterialPalette.on_surface;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+            overflow: elide;
+            wrap: no-wrap;
+            horizontal-stretch: 1;
+        }
+
+        Rectangle {
+            width: MaterialStyleMetrics.size_40;
+            height: MaterialStyleMetrics.size_40;
+            border-radius: self.width / 2;
+            background: MaterialPalette.secondary_container;
+            opacity: prev_touch.pressed ? 0.8 : 1.0;
+            animate opacity { duration: 80ms; easing: ease-out; }
+
+            Image {
+                source: @image-url("material/ui/icons/chevron_backward.svg");
+                colorize: MaterialPalette.on_secondary_container;
+                width: MaterialStyleMetrics.icon_size_18;
+                height: self.width;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+            }
+
+            prev_touch := TouchArea {
+                clicked => { root.prev(); }
+            }
+        }
+
+        MaterialText {
+            text: root.value;
+            style: MaterialTypography.title_medium;
+            color: MaterialPalette.primary;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            width: 140px * TouchScale.widget_scale;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+
+        Rectangle {
+            width: MaterialStyleMetrics.size_40;
+            height: MaterialStyleMetrics.size_40;
+            border-radius: self.width / 2;
+            background: MaterialPalette.secondary_container;
+            opacity: next_touch.pressed ? 0.8 : 1.0;
+            animate opacity { duration: 80ms; easing: ease-out; }
+
+            Image {
+                source: @image-url("material/ui/icons/chevron_forward.svg");
+                colorize: MaterialPalette.on_secondary_container;
+                width: MaterialStyleMetrics.icon_size_18;
+                height: self.width;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+            }
+
+            next_touch := TouchArea {
+                clicked => { root.next(); }
+            }
         }
     }
 }
@@ -353,15 +436,24 @@ component GenericSettingRow inherits VerticalLayout {
         right_selected: root.item.right_selected;
         select_right(is_right) => { root.setting_toggle(root.item.id, is_right); }
     }
+
+    if root.item.kind == SettingControlKind.selector : SettingsSelectorRow {
+        label: root.item.label;
+        value: root.item.value_text;
+        prev => { root.setting_step(root.item.id, -1); }
+        next => { root.setting_step(root.item.id, 1); }
+    }
 }
 
 export component SettingsView inherits VerticalLayout {
     in property <bool> cd_enabled: false;
     in-out property <bool> show_themes: false;
+    in-out property <bool> show_visualizer: false;
     in-out property <bool> show_advanced: false;
     in-out property <bool> show_widget_preview: false;
     in-out property <string> speaker_alias: "DietPi Speaker";
     in property <[SettingRowItem]> basic_settings;
+    in property <[SettingRowItem]> visualizer_settings;
     in property <[SettingRowItem]> advanced_settings;
 
     callback bluetooth_clicked();
@@ -419,115 +511,169 @@ export component SettingsView inherits VerticalLayout {
     }
 
     // View 2: Screen Settings — Appearance (Theme presets + Text Size) + Basic
-    // catalog rows + an explicit "Advanced" button to enter the Advanced sub-screen.
-    if root.show_themes && !root.show_advanced && !root.show_widget_preview : VerticalLayout {
+    // catalog rows + entry points for Visualizer and Advanced sub-screens.
+    if root.show_themes && !root.show_advanced && !root.show_visualizer && !root.show_widget_preview : VerticalLayout {
         vertical-stretch: 1;
         spacing: MaterialStyleMetrics.spacing_8;
 
         // Section 1: Theme presets + Text Size (non-advanced appearance settings)
-        HorizontalLayout {
-            spacing: MaterialStyleMetrics.spacing_8;
+            HorizontalLayout {
+                spacing: MaterialStyleMetrics.spacing_8;
 
-            ThemePresetCard {
-                name: "McIntosh";
-                accent_name: "Electric Cyan";
-                primary_color: #00C8FF;
-                secondary_color: #70E1FF;
-                selected: AppTheme.active_preset == 0;
-                clicked => { root.select_theme(0); }
+                ThemePresetCard {
+                    name: "McIntosh";
+                    accent_name: "Electric Cyan";
+                    primary_color: #00C8FF;
+                    secondary_color: #70E1FF;
+                    selected: AppTheme.active_preset == 0;
+                    clicked => { root.select_theme(0); }
+                }
+
+                ThemePresetCard {
+                    name: "Marantz";
+                    accent_name: "Warm Amber";
+                    primary_color: #E5A93C;
+                    secondary_color: #FFD166;
+                    selected: AppTheme.active_preset == 1;
+                    clicked => { root.select_theme(1); }
+                }
+
+                ThemePresetCard {
+                    name: "Cyberpunk";
+                    accent_name: "Synthwave Pink";
+                    primary_color: #00F0FF;
+                    secondary_color: #FF007F;
+                    selected: AppTheme.active_preset == 2;
+                    clicked => { root.select_theme(2); }
+                }
+
+                ThemePresetCard {
+                    name: "Studio Dark";
+                    accent_name: "Precision Mono";
+                    primary_color: #F0F0F0;
+                    secondary_color: #A0A0A0;
+                    selected: AppTheme.active_preset == 3;
+                    clicked => { root.select_theme(3); }
+                }
+
+                ThemePresetCard {
+                    name: "PeppyMeter";
+                    accent_name: "Vintage Gold";
+                    primary_color: #F5B83D;
+                    secondary_color: #FFDF85;
+                    selected: AppTheme.active_preset == 4;
+                    clicked => { root.select_theme(4); }
+                }
             }
 
-            ThemePresetCard {
-                name: "Marantz";
-                accent_name: "Warm Amber";
-                primary_color: #E5A93C;
-                secondary_color: #FFD166;
-                selected: AppTheme.active_preset == 1;
-                clicked => { root.select_theme(1); }
+            // Text Size ("A — Slider — A") setting, live-persisted to config.json.
+            FontSizeControl {
+                font_scale_changed(val) => { root.font_scale_changed(val); }
             }
 
-            ThemePresetCard {
-                name: "Cyberpunk";
-                accent_name: "Synthwave Pink";
-                primary_color: #00F0FF;
-                secondary_color: #FF007F;
-                selected: AppTheme.active_preset == 2;
-                clicked => { root.select_theme(2); }
+            // Basic catalog-driven rows (tier == Basic).
+            for item in root.basic_settings : GenericSettingRow {
+                item: item;
+                setting_step(id, dir) => { root.setting_step(id, dir); }
+                setting_toggle(id, right) => { root.setting_toggle(id, right); }
             }
 
-            ThemePresetCard {
-                name: "Studio Dark";
-                accent_name: "Precision Mono";
-                primary_color: #F0F0F0;
-                secondary_color: #A0A0A0;
-                selected: AppTheme.active_preset == 3;
-                clicked => { root.select_theme(3); }
+            // Section divider (M3: one divider between groups, none between rows).
+            Rectangle {
+                height: 1px;
+                background: MaterialPalette.outline_variant;
             }
 
-            ThemePresetCard {
-                name: "PeppyMeter";
-                accent_name: "Vintage Gold";
-                primary_color: #F5B83D;
-                secondary_color: #FFDF85;
-                selected: AppTheme.active_preset == 4;
-                clicked => { root.select_theme(4); }
+            // Explicit entry point to the Visualizer Settings sub-screen.
+            Rectangle {
+                min-height: max(MaterialStyleMetrics.size_48, viz_row_layout.min-height);
+                border-radius: MaterialStyleMetrics.border_radius_10;
+                background: MaterialPalette.surface_container_high;
+                opacity: viz_touch.pressed ? 0.8 : 1.0;
+                animate opacity { duration: 80ms; easing: ease-out; }
+
+                viz_row_layout := HorizontalLayout {
+                    padding-left: MaterialStyleMetrics.padding_12;
+                    padding-right: MaterialStyleMetrics.padding_12;
+                    padding-top: MaterialStyleMetrics.padding_8;
+                    padding-bottom: MaterialStyleMetrics.padding_8;
+                    spacing: MaterialStyleMetrics.spacing_8;
+
+                    MaterialText {
+                        text: "Visualizer";
+                        style: MaterialTypography.title_medium;
+                        color: MaterialPalette.on_surface;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    Image {
+                        source: @image-url("material/ui/icons/chevron_forward.svg");
+                        colorize: MaterialPalette.on_surface_variant;
+                        width: MaterialStyleMetrics.icon_size_24;
+                        height: self.width;
+                        image-fit: contain;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+
+                viz_touch := TouchArea {
+                    clicked => { root.show_visualizer = true; }
+                }
             }
-        }
 
-        // Text Size ("A — Slider — A") setting, live-persisted to config.json.
-        FontSizeControl {
-            font_scale_changed(val) => { root.font_scale_changed(val); }
-        }
+            // Explicit entry point to the Advanced Settings sub-screen.
+            Rectangle {
+                min-height: max(MaterialStyleMetrics.size_48, adv_row_layout.min-height);
+                border-radius: MaterialStyleMetrics.border_radius_10;
+                background: MaterialPalette.surface_container_high;
+                opacity: adv_touch.pressed ? 0.8 : 1.0;
+                animate opacity { duration: 80ms; easing: ease-out; }
 
-        // Basic catalog-driven rows (tier == Basic).
-        for item in root.basic_settings : GenericSettingRow {
+                adv_row_layout := HorizontalLayout {
+                    padding-left: MaterialStyleMetrics.padding_12;
+                    padding-right: MaterialStyleMetrics.padding_12;
+                    padding-top: MaterialStyleMetrics.padding_8;
+                    padding-bottom: MaterialStyleMetrics.padding_8;
+                    spacing: MaterialStyleMetrics.spacing_8;
+
+                    MaterialText {
+                        text: "Advanced";
+                        style: MaterialTypography.title_medium;
+                        color: MaterialPalette.on_surface;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    Image {
+                        source: @image-url("material/ui/icons/chevron_forward.svg");
+                        colorize: MaterialPalette.on_surface_variant;
+                        width: MaterialStyleMetrics.icon_size_24;
+                        height: self.width;
+                        image-fit: contain;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+
+                adv_touch := TouchArea {
+                    clicked => { root.show_advanced = true; }
+                }
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+            }
+    }
+
+    // View 2c: Dedicated Visualizer Settings sub-screen (catalog rows where tier == Visualizer).
+    if root.show_themes && root.show_visualizer && !root.show_advanced && !root.show_widget_preview : VerticalLayout {
+        vertical-stretch: 1;
+        spacing: MaterialStyleMetrics.spacing_8;
+
+        for item in root.visualizer_settings : GenericSettingRow {
             item: item;
             setting_step(id, dir) => { root.setting_step(id, dir); }
             setting_toggle(id, right) => { root.setting_toggle(id, right); }
-        }
-
-        // Section divider (M3: one divider between groups, none between rows).
-        Rectangle {
-            height: 1px;
-            background: MaterialPalette.outline_variant;
-        }
-
-        // Explicit entry point to the Advanced Settings sub-screen.
-        Rectangle {
-            min-height: max(MaterialStyleMetrics.size_48, adv_row_layout.min-height);
-            border-radius: MaterialStyleMetrics.border_radius_10;
-            background: MaterialPalette.surface_container_high;
-            opacity: adv_touch.pressed ? 0.8 : 1.0;
-            animate opacity { duration: 80ms; easing: ease-out; }
-
-            adv_row_layout := HorizontalLayout {
-                padding-left: MaterialStyleMetrics.padding_12;
-                padding-right: MaterialStyleMetrics.padding_12;
-                padding-top: MaterialStyleMetrics.padding_8;
-                padding-bottom: MaterialStyleMetrics.padding_8;
-                spacing: MaterialStyleMetrics.spacing_8;
-
-                MaterialText {
-                    text: "Advanced";
-                    style: MaterialTypography.title_medium;
-                    color: MaterialPalette.on_surface;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
-
-                Image {
-                    source: @image-url("material/ui/icons/chevron_forward.svg");
-                    colorize: MaterialPalette.on_surface_variant;
-                    width: MaterialStyleMetrics.icon_size_24;
-                    height: self.width;
-                    image-fit: contain;
-                    y: (parent.height - self.height) / 2;
-                }
-            }
-
-            adv_touch := TouchArea {
-                clicked => { root.show_advanced = true; }
-            }
         }
 
         Rectangle {

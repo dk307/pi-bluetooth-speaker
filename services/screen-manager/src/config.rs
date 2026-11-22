@@ -79,6 +79,18 @@ const MAX_FONT_SCALE_PCT: u16 = 135;
 /// anchored at 250 + n*1000, not at the domain minimum.
 pub const CODEC_HUD_TIMEOUT_STEP_MS: u32 = 1_000;
 
+/// Production default visualizer auto-start delay in seconds (`5` s).
+pub const DEFAULT_VISUALIZER_AUTO_START_SECS: u32 = 5;
+
+/// Minimum allowed visualizer auto-start delay in seconds (`1` s).
+pub const MIN_VISUALIZER_AUTO_START_SECS: u32 = 1;
+
+/// Maximum allowed visualizer auto-start delay in seconds (`60` s).
+pub const MAX_VISUALIZER_AUTO_START_SECS: u32 = 60;
+
+/// Stepper increment for the visualizer auto-start delay in seconds (`1` s).
+pub const VISUALIZER_AUTO_START_STEP_SECS: u32 = 1;
+
 /// Allowed marquee scroll rates: 60 is the production default and 30 halves the
 /// render load by scrolling 2 px per 33.3 ms tick at identical on-screen speed.
 const MARQUEE_FPS_ALLOWED: [u32; 2] = [30, 60];
@@ -149,6 +161,10 @@ const _: () = {
             && (DEFAULT_VOLUME_HUD_TIMEOUT_MS <= MAX_VOLUME_HUD_TIMEOUT_MS)
     );
     assert!(DEFAULT_VOLUME_HUD_FADE_MS <= MAX_VOLUME_HUD_FADE_MS);
+    assert!(
+        (MIN_VISUALIZER_AUTO_START_SECS <= DEFAULT_VISUALIZER_AUTO_START_SECS)
+            && (DEFAULT_VISUALIZER_AUTO_START_SECS <= MAX_VISUALIZER_AUTO_START_SECS)
+    );
 };
 
 /// Strongly typed rotary encoder volume step percentage (`1..=25`).
@@ -532,6 +548,148 @@ impl TitleDisplayMode {
     }
 }
 
+/// Strongly typed visualizer auto-start delay in seconds (`1..=60`, default `5`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct VisualizerAutoStartSecs(u32);
+
+impl VisualizerAutoStartSecs {
+    /// Production default delay (`5` s).
+    pub const DEFAULT: Self = Self::new(DEFAULT_VISUALIZER_AUTO_START_SECS);
+
+    /// Const constructor validated against `1..=60`.
+    ///
+    /// # Panics
+    /// Panics if `secs` is not in the range `1..=60`.
+    #[must_use]
+    pub const fn new(secs: u32) -> Self {
+        assert!(
+            secs >= MIN_VISUALIZER_AUTO_START_SECS && secs <= MAX_VISUALIZER_AUTO_START_SECS,
+            "visualizer_auto_start_secs out of range 1..=60"
+        );
+        Self(secs)
+    }
+
+    /// Returns the raw delay in seconds.
+    #[must_use]
+    pub const fn value(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for VisualizerAutoStartSecs {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl TryFrom<u32> for VisualizerAutoStartSecs {
+    type Error = ConfigError;
+
+    fn try_from(secs: u32) -> Result<Self, Self::Error> {
+        if (MIN_VISUALIZER_AUTO_START_SECS..=MAX_VISUALIZER_AUTO_START_SECS).contains(&secs) {
+            Ok(Self::new(secs))
+        } else {
+            Err(ConfigError::invalid(format!(
+                "invalid visualizer_auto_start_secs '{secs}': expected {MIN_VISUALIZER_AUTO_START_SECS}..={MAX_VISUALIZER_AUTO_START_SECS}"
+            )))
+        }
+    }
+}
+
+impl From<VisualizerAutoStartSecs> for u32 {
+    fn from(secs: VisualizerAutoStartSecs) -> Self {
+        secs.0
+    }
+}
+
+/// Default audio visualizer mode opened by user tap or auto-start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultVisualizerMode {
+    /// 48-bar bilateral radial FFT around circular cover art (mode index `0`).
+    #[default]
+    RadialFft,
+    /// 24-band linear ERB spectrum analyzer (mode index `1`).
+    LinearSpectrum,
+}
+
+impl DefaultVisualizerMode {
+    /// Ordered list of all visualizer modes for cyclic selection.
+    pub const ALL: [Self; 2] = [Self::RadialFft, Self::LinearSpectrum];
+
+    /// Returns the canonical config slug (`"radial_fft"` or `"linear_spectrum"`).
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::RadialFft => "radial_fft",
+            Self::LinearSpectrum => "linear_spectrum",
+        }
+    }
+
+    /// Returns the human-readable visualizer name shown in Screen Settings.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::RadialFft => "Radial FFT",
+            Self::LinearSpectrum => "ERB Spectrum",
+        }
+    }
+
+    /// Cycles to the next visualization mode (wrapping at the end).
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::RadialFft => Self::LinearSpectrum,
+            Self::LinearSpectrum => Self::RadialFft,
+        }
+    }
+
+    /// Cycles to the previous visualization mode (wrapping at the start).
+    #[must_use]
+    pub const fn prev(self) -> Self {
+        match self {
+            Self::RadialFft => Self::LinearSpectrum,
+            Self::LinearSpectrum => Self::RadialFft,
+        }
+    }
+
+    /// Returns `true` when [`Self::LinearSpectrum`] is selected.
+    #[must_use]
+    pub const fn is_linear(self) -> bool {
+        matches!(self, Self::LinearSpectrum)
+    }
+
+    /// Constructs the mode from a boolean flag (`false` = `RadialFft`, `true` = `LinearSpectrum`).
+    #[must_use]
+    pub const fn from_linear(linear: bool) -> Self {
+        if linear {
+            Self::LinearSpectrum
+        } else {
+            Self::RadialFft
+        }
+    }
+
+    /// Returns the Slint `visualizer_mode` integer index (`0` or `1`).
+    #[must_use]
+    pub const fn as_index(self) -> i32 {
+        match self {
+            Self::RadialFft => 0,
+            Self::LinearSpectrum => 1,
+        }
+    }
+
+    /// Converts an integer index into [`DefaultVisualizerMode`], defaulting to [`Self::RadialFft`].
+    #[must_use]
+    pub const fn from_index(index: i32) -> Self {
+        if index == 1 {
+            Self::LinearSpectrum
+        } else {
+            Self::RadialFft
+        }
+    }
+}
+
 /// Strongly typed appliance configuration persisted as JSON on disk.
 ///
 /// Missing fields deserialize to their defaults, so minimal config files
@@ -540,6 +698,10 @@ impl TitleDisplayMode {
 /// inhabit this struct.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent persisted boolean settings on CoreConfig"
+)]
 pub struct CoreConfig {
     /// Theme preset override applied on startup; `None` keeps the built-in default.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -566,6 +728,12 @@ pub struct CoreConfig {
     pub spectrum_led_mask: bool,
     /// Force 60 FPS on music visualizations (`false` = 33 Hz / 30 ms, `true` = 60 Hz / 16 ms).
     pub visualizer_force_60fps: bool,
+    /// Whether to automatically open the visualizer after playback starts.
+    pub visualizer_auto_start: bool,
+    /// Delay in seconds after playback starts before auto-opening the visualizer (`1..=60`).
+    pub visualizer_auto_start_secs: VisualizerAutoStartSecs,
+    /// Default visualization mode (`"radial_fft"` or `"linear_spectrum"`).
+    pub default_visualizer: DefaultVisualizerMode,
 }
 
 impl Default for CoreConfig {
@@ -583,6 +751,9 @@ impl Default for CoreConfig {
             brightness_manual_percent: ManualBrightnessPercent::DEFAULT,
             spectrum_led_mask: true,
             visualizer_force_60fps: false,
+            visualizer_auto_start: true,
+            visualizer_auto_start_secs: VisualizerAutoStartSecs::default(),
+            default_visualizer: DefaultVisualizerMode::default(),
         }
     }
 }

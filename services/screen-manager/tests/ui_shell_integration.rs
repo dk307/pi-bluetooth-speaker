@@ -1304,9 +1304,9 @@ fn ui_shell_generic_settings_callbacks_clamp_and_sync_models() {
         screen_manager::config::TitleDisplayMode::Split
     );
 
-    // Verify basic_settings and advanced_settings models reflect the updated state.
+    // Verify basic_settings, visualizer_settings, and advanced_settings models reflect the updated state.
     let basic_rows = shell.window().get_basic_settings();
-    assert_eq!(basic_rows.row_count(), 3);
+    assert_eq!(basic_rows.row_count(), 2);
     let title_row = basic_rows.row_data(0).expect("title_display_mode row");
     assert_eq!(title_row.id.as_str(), "title_display_mode");
     assert!(!title_row.is_advanced);
@@ -1315,6 +1315,17 @@ fn ui_shell_generic_settings_callbacks_clamp_and_sync_models() {
     assert_eq!(auto_row.id.as_str(), "auto_brightness");
     assert!(!auto_row.is_advanced);
     assert!(auto_row.right_selected);
+
+    let viz_rows = shell.window().get_visualizer_settings();
+    assert_eq!(viz_rows.row_count(), 4);
+    assert_eq!(
+        viz_rows.row_data(0).expect("autostart row").id.as_str(),
+        "visualizer_auto_start"
+    );
+    assert_eq!(
+        viz_rows.row_data(3).expect("led mask row").id.as_str(),
+        "spectrum_led_mask"
+    );
 
     let adv_rows = shell.window().get_advanced_settings();
     assert_eq!(adv_rows.row_count(), 6);

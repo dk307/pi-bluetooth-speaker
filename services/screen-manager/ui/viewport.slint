@@ -18,9 +18,11 @@ export component MainViewport inherits Rectangle {
     in-out property <int> active_tab: 0;
     in property <bool> cd_enabled: false;
     in-out property <bool> show_themes: false;
+    in-out property <bool> show_visualizer: false;
     in-out property <bool> show_advanced: false;
     in-out property <bool> show_widget_preview: false;
     in property <[SettingRowItem]> basic_settings;
+    in property <[SettingRowItem]> visualizer_settings;
     in property <[SettingRowItem]> advanced_settings;
     in-out property <string> speaker_alias: "DietPi Speaker";
     in-out property <string> track_title: "Waiting for Bluetooth Connection...";
@@ -174,10 +176,12 @@ export component MainViewport inherits Rectangle {
         SettingsView {
             cd_enabled: root.cd_enabled;
             show_themes <=> root.show_themes;
+            show_visualizer <=> root.show_visualizer;
             show_advanced <=> root.show_advanced;
             show_widget_preview <=> root.show_widget_preview;
             speaker_alias <=> root.speaker_alias;
             basic_settings: root.basic_settings;
+            visualizer_settings: root.visualizer_settings;
             advanced_settings: root.advanced_settings;
             bluetooth_clicked => { root.open_bluetooth_devices(); }
             vu_meter_clicked => { root.visualizer_clicked(); }

@@ -114,6 +114,9 @@ export component MainWindow inherits Window {
     in-out property <length> overlay_top_inset: 60px;
     in-out property <bool> visualizer_active: false;
     in-out property <int> visualizer_mode: 0;
+    in-out property <int> default_visualizer_mode: 0;
+    in-out property <bool> viz_auto_start: true;
+    in-out property <int> viz_auto_start_secs: 5;
     in property <[SpectrumBandItem]> viz_spectrum_bands;
     in-out property <bool> viz_spectrum_led_mask: true;
     in-out property <bool> viz_force_60fps: false;
@@ -130,9 +133,11 @@ export component MainWindow inherits Window {
 
     // Lifted to MainWindow for title switching in ScreenAppBar
     in-out property <bool> show_themes: false;
+    in-out property <bool> show_visualizer: false;
     in-out property <bool> show_advanced: false;
     in-out property <bool> show_widget_preview: false;
     in property <[SettingRowItem]> basic_settings;
+    in property <[SettingRowItem]> visualizer_settings;
     in property <[SettingRowItem]> advanced_settings;
     in-out property <string> speaker_alias: "DietPi Speaker";
 
@@ -362,6 +367,8 @@ export component MainWindow inherits Window {
             root.show_widget_preview = false;
         } else if (root.active_tab == 5 && root.show_advanced) {
             root.show_advanced = false;
+        } else if (root.active_tab == 5 && root.show_visualizer) {
+            root.show_visualizer = false;
         } else if (root.active_tab == 5 && root.show_themes) {
             root.show_themes = false;
         } else if (root.active_tab != 0) {
@@ -421,7 +428,7 @@ export component MainWindow inherits Window {
                     title: root.active_tab == 1 ? "VU Meter" :
                            root.active_tab == 3 ? "CD Player" :
                            root.active_tab == 4 ? "DSP & Tone" :
-                           root.active_tab == 5 ? (root.show_widget_preview ? "Touch Scale Test" : (root.show_themes ? (root.show_advanced ? "Advanced Settings" : "Screen Settings") : "Settings")) : "";
+                           root.active_tab == 5 ? (root.show_widget_preview ? "Touch Scale Test" : (root.show_themes ? (root.show_advanced ? "Advanced Settings" : (root.show_visualizer ? "Visualizer Settings" : "Screen Settings")) : "Settings")) : "";
                     trailing_icon: @image-url("../../../assets/icons/back.svg");
                     trailing_clicked => { root.app_bar_back(); }
                 }
@@ -454,9 +461,11 @@ export component MainWindow inherits Window {
                 stream_codec: root.stream_codec;
                 artist_marquee_text: root.artist_marquee_text;
                 show_themes <=> root.show_themes;
+                show_visualizer <=> root.show_visualizer;
                 show_advanced <=> root.show_advanced;
                 show_widget_preview <=> root.show_widget_preview;
                 basic_settings: root.basic_settings;
+                visualizer_settings: root.visualizer_settings;
                 advanced_settings: root.advanced_settings;
                 speaker_alias <=> root.speaker_alias;
 
