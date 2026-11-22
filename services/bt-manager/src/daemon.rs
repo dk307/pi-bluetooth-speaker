@@ -423,20 +423,19 @@ pub async fn run_app(bt: BluetoothDevice, opts: BtManagerOptions) -> ExitCode {
         .await;
         // A keep-alive timeout (`false`) or signaled change (`true`) are both
         // fine; only a cancelled/poisoned blocking task is worth a debug note.
-        let signaled = match wait_result {
-            Ok(signaled) => signaled,
-            Err(e) => {
-                tracing::debug!(error = %e, "Property-change wait task failed");
-                false
-            }
-        };
+        if let Err(e) = wait_result {
+            tracing::debug!(error = %e, "Property-change wait task failed");
+        }
         // Burst guard: a signal can arrive microseconds after the previous tick
         // (AVRCP emits PropertiesChanged at up to ~10 Hz during playback). Without
         // a floor the cheap link-snapshot tick would re-run at signal rate and
-        // re-flood the bus. Hold signal-driven ticks to `MIN_SIGNAL_TICK_SPACING`;
-        // keep-alive timeouts already respect the longer `effective_interval`.
-        if signaled && let Some(wait) = MIN_SIGNAL_TICK_SPACING.checked_sub(tick_started.elapsed())
-        {
+        // re-flood the bus. The floor is applied unconditionally — including the
+        // `Err` path — so a persistently failing property-wait task (e.g. a
+        // poisoned change-flag lock) cannot turn the loop into a tight spin
+        // issuing a full `GetManagedObjects` per iteration. Keep-alive timeouts
+        // already respect the longer `effective_interval`, so the floor is a
+        // no-op there (`checked_sub` returns `None`).
+        if let Some(wait) = MIN_SIGNAL_TICK_SPACING.checked_sub(tick_started.elapsed()) {
             tokio::time::sleep(wait).await;
         }
     }

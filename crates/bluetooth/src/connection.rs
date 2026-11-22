@@ -604,7 +604,11 @@ pub struct LinkSnapshot {
 /// is their shared source — that case is surfaced as the outer `Err`.
 #[derive(Debug)]
 pub struct LinkAndPlaybackSnapshot {
-    /// Arbitrated active device (`ActiveDevice` or the caller's fallback).
+    /// Arbitrated active device (`ActiveDevice` only).
+    ///
+    /// The caller's `fallback` is used solely for playback selection and is
+    /// **never** returned here: the Devices-screen badge must not promote a
+    /// standby device to "Active" merely because it was the last playing one.
     pub active_addr: Option<BtAddress>,
     /// Playback state from the same object map, or `None` when no player exists.
     pub playback: Option<BtPlaybackState>,
@@ -2744,18 +2748,17 @@ impl BluetoothDeviceMock {
     /// playback state (with cached cover-art path) under a single lock, mirroring
     /// the single-`GetManagedObjects` production path.
     ///
-    /// `fallback` mirrors production's `read_active_device().or(fallback)` active
-    /// -device arbitration for playback selection, but the returned `active_addr`
-    /// is the arbitrated device only (never the fallback): the Devices-screen
-    /// badge must not promote a standby device merely because it was the last
-    /// playing one. A `bluealsa_fault` degrades only `link` (leaving `playback`
-    /// usable), matching the production failure-domain split; a `fault` fails
-    /// the whole call like a `BlueZ` object-query failure.
+    /// The mock does not model multi-player fallback arbitration: `fallback` is
+    /// accepted for signature parity with the production path but not applied,
+    /// because the mock's `playback` field is already the arbitrated result. The
+    /// returned `active_addr` is `state.active_device` only (never the fallback),
+    /// matching production's badge semantics. A `bluealsa_fault` degrades only
+    /// `link` (leaving `playback` usable); a `fault` fails the whole call.
     fn link_and_playback_snapshot(
         &self,
         fallback: Option<BtAddress>,
     ) -> Result<LinkAndPlaybackSnapshot, BtError> {
-        let _ = fallback; // playback selection only; active_addr excludes it
+        let _ = fallback; // signature parity; mock playback is pre-arbitrated
         let state = self.state.read().unwrap_or_else(|p| {
             tracing::warn!(error = %p, "mock state lock poisoned; recovering");
             p.into_inner()
