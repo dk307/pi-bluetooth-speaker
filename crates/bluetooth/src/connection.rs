@@ -1436,6 +1436,18 @@ impl DbusClient {
         &self,
         target_adapter: Option<&str>,
     ) -> Result<BluezSnapshot, BtError> {
+        let preferred = self.read_active_device();
+        self.query_bluez_with_preferred(target_adapter, preferred)
+    }
+
+    /// Queries `org.bluez` `GetManagedObjects` with an explicit `preferred`
+    /// active device, so callers that already resolved the fallback address can
+    /// reuse it without a second `read_active_device` round-trip.
+    pub(crate) fn query_bluez_with_preferred(
+        &self,
+        target_adapter: Option<&str>,
+        preferred: Option<BtAddress>,
+    ) -> Result<BluezSnapshot, BtError> {
         let proxy = zbus::blocking::fdo::ObjectManagerProxy::builder(&self.conn())
             .destination("org.bluez")
             .and_then(|b| b.path("/"))
@@ -1443,7 +1455,6 @@ impl DbusClient {
 
         let objects = proxy.get_managed_objects()?;
 
-        let preferred = self.read_active_device();
         let (adapter, devices, playback) =
             Self::parse_bluez_all_for(&objects, target_adapter, preferred)?;
         Ok((adapter, devices, playback))
@@ -2685,6 +2696,35 @@ impl BluetoothDeviceMock {
         })
     }
 
+    /// Mock counterpart of [`BluetoothDevice::link_and_playback_snapshot`]:
+    /// reads the shared mock state once, deriving both the link snapshot and the
+    /// playback state (with cached cover-art path) under a single lock, mirroring
+    /// the single-`GetManagedObjects` production path.
+    fn link_and_playback_snapshot(
+        &self,
+    ) -> Result<(LinkSnapshot, Option<BtPlaybackState>), BtError> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(ref fault) = state.fault {
+            return Err(BtError::mock_fault(fault.clone()));
+        }
+        let snapshot = LinkSnapshot {
+            adapter: state.adapter.clone(),
+            devices: state.devices.clone().into_boxed_slice(),
+            pcms: state.pcms.clone().into_boxed_slice(),
+        };
+        let mut pb = state.playback.clone();
+        if let Some(ref mut p) = pb
+            && p.cover_art_path.is_none()
+            && let (Some(addr), Some(handle)) = (p.device_address, &p.image_handle)
+        {
+            p.cover_art_path = cover_art_cached_path_in(&state.cache_dir, addr, handle);
+        }
+        Ok((snapshot, pb))
+    }
+
     fn get_adapter_mut<'a>(
         state: &'a mut MockState,
         target_adapter: Option<&str>,
@@ -3190,6 +3230,45 @@ impl BluetoothDevice {
             dev.link_snapshot()
         })
         .await
+    }
+
+    /// Returns the link snapshot and playback state from a single `org.bluez`
+    /// `GetManagedObjects` round-trip.
+    ///
+    /// The screen monitor needs both link details and playback state every tick;
+    /// fetching them separately issued two `GetManagedObjects` calls (each
+    /// ~28 KiB on a busy adapter). This fetches the object map once via
+    /// [`Self::query_bluez`] (which already parses adapter, devices, and
+    /// playback from the same snapshot), queries `BlueALSA`, and resolves cover art
+    /// exactly like [`Self::playback_state`].
+    ///
+    /// # Errors
+    /// Returns [`BtError`] if D-Bus communication fails or a mock fault is injected.
+    pub fn link_and_playback_snapshot(
+        &self,
+        fallback: Option<BtAddress>,
+    ) -> Result<(LinkSnapshot, Option<BtPlaybackState>), BtError> {
+        match &*self.backend {
+            Backend::Mock(mock) => mock.link_and_playback_snapshot(),
+            Backend::Dbus(dbus) => {
+                // `query_bluez_with_preferred` resolves the arbitrated active
+                // device first, falling back to the caller's last-known device,
+                // matching `playback_state_for` semantics with one GMO round-trip.
+                let preferred = dbus.read_active_device().or(fallback);
+                let (adapter, devices, mut playback) =
+                    dbus.query_bluez_with_preferred(None, preferred)?;
+                dbus.resolve_cover_art(&mut playback);
+                let pcms = dbus.query_bluealsa(&devices)?;
+                Ok((
+                    LinkSnapshot {
+                        adapter,
+                        devices,
+                        pcms,
+                    },
+                    playback,
+                ))
+            }
+        }
     }
 
     /// Returns the active media player playback state, if available.

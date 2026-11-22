@@ -10,11 +10,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::agent::AgentCapabilityMode;
 use crate::config::BtManagerConfig;
-use speaker_bluetooth::{BluetoothDevice, BluetoothStatus, BtError};
+use speaker_bluetooth::{BluetoothDevice, BtError};
 use speaker_common::diag::{
     CliParse, DEFAULT_BT_CONFIG_PATH, env_args, next_arg_value, resolve_cli_opts,
 };
@@ -22,6 +22,18 @@ use zbus::Connection;
 
 /// Default status poll interval (5 seconds).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Minimum spacing between signal-driven monitor ticks.
+///
+/// The monitor blocks on the shared property-change flag, which the D-Bus
+/// signal listener wakes for every `PropertiesChanged` on a Bluetooth object.
+/// During AVRCP playback `BlueZ` emits those at up to ~10 Hz; before the tick
+/// was coalesced behind a ~0.5 s `status_async()` snapshot, so the effective
+/// cadence stayed near the keep-alive. Now that a tick is a cheap
+/// `link_snapshot_async()`, an ungated wake would re-poll at signal rate. This
+/// floor keeps signal-driven ticks from outrunning the keep-alive while still
+/// surfacing track/position changes well under a second late.
+const MIN_SIGNAL_TICK_SPACING: Duration = Duration::from_millis(200);
 
 /// Bluetooth manager service command-line options..
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,21 +178,28 @@ where
 
 /// Executes one monitor tick.
 ///
-/// Returns the resulting status so callers can react to transitions; transient
-/// poll errors are logged as warnings and reported to the caller. Unchanged
-/// snapshots log at `debug` only — steady-state ticks would otherwise flood
-/// the journal on a long-lived daemon; callers log at `info` on transitions.
+/// Returns `(connected_count, is_streaming)` so callers can react to
+/// transitions; transient poll errors are logged as warnings and reported to
+/// the caller. Unchanged snapshots log at `debug` only — steady-state ticks
+/// would otherwise flood the journal on a long-lived daemon; callers log at
+/// `info` on transitions.
+///
+/// Uses [`speaker_bluetooth::BluetoothDevice::link_snapshot_async`] rather than
+/// [`speaker_bluetooth::BluetoothDevice::status_async`]: the monitor loop only
+/// needs connected-device and PCM counts, which `LinkSnapshot` carries, while the
+/// full status would additionally run four systemd unit probes (each emitting a
+/// `GetUnit` + property-cache storm), a cover-art lookup, and an `hciconfig`
+/// subprocess spawn on every tick. At the observed ~1 Hz tick rate that overhead
+/// is the dominant `dbus-daemon` load.
 ///
 /// # Errors
-/// Propagates [`crate::hardware::BtError`] when the status snapshot fails.
-pub async fn run_tick(bt: &BluetoothDevice) -> Result<BluetoothStatus, BtError> {
-    let status = bt.status_async().await?;
-    tracing::debug!(
-        connected = status.connected_count(),
-        streaming = status.is_streaming(),
-        "Bluetooth status tick"
-    );
-    Ok(status)
+/// Propagates [`crate::hardware::BtError`] when the link snapshot fails.
+pub async fn run_tick(bt: &BluetoothDevice) -> Result<(usize, bool), BtError> {
+    let snapshot = bt.link_snapshot_async().await?;
+    let connected = snapshot.devices.iter().filter(|d| d.connected).count();
+    let streaming = snapshot.pcms.iter().any(|p| p.running);
+    tracing::debug!(connected, streaming, "Bluetooth status tick");
+    Ok((connected, streaming))
 }
 
 fn spawn_auto_trust_subsystem(
@@ -366,9 +385,9 @@ pub async fn run_app(bt: BluetoothDevice, opts: BtManagerOptions) -> ExitCode {
             tracing::info!("shutdown requested, stopping monitor loop");
             break;
         }
+        let tick_started = Instant::now();
         match run_tick(&bt).await {
-            Ok(status) => {
-                let signature = (status.connected_count(), status.is_streaming());
+            Ok(signature) => {
                 if last_status != Some(signature) {
                     tracing::info!(
                         connected = signature.0,
@@ -404,8 +423,21 @@ pub async fn run_app(bt: BluetoothDevice, opts: BtManagerOptions) -> ExitCode {
         .await;
         // A keep-alive timeout (`false`) or signaled change (`true`) are both
         // fine; only a cancelled/poisoned blocking task is worth a debug note.
-        if let Err(e) = wait_result {
-            tracing::debug!(error = %e, "Property-change wait task failed");
+        let signaled = match wait_result {
+            Ok(signaled) => signaled,
+            Err(e) => {
+                tracing::debug!(error = %e, "Property-change wait task failed");
+                false
+            }
+        };
+        // Burst guard: a signal can arrive microseconds after the previous tick
+        // (AVRCP emits PropertiesChanged at up to ~10 Hz during playback). Without
+        // a floor the cheap link-snapshot tick would re-run at signal rate and
+        // re-flood the bus. Hold signal-driven ticks to `MIN_SIGNAL_TICK_SPACING`;
+        // keep-alive timeouts already respect the longer `effective_interval`.
+        if signaled && let Some(wait) = MIN_SIGNAL_TICK_SPACING.checked_sub(tick_started.elapsed())
+        {
+            tokio::time::sleep(wait).await;
         }
     }
 

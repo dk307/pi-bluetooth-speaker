@@ -248,9 +248,9 @@ fn run_tick_surfaces_status_from_mock() {
         .enable_all()
         .build()
         .expect("runtime");
-    let status = rt.block_on(run_tick(&bt)).expect("mock status");
+    let (connected, _streaming) = rt.block_on(run_tick(&bt)).expect("mock status");
     // The mock initializes with one default connected peer.
-    assert_eq!(status.connected_count(), 1);
+    assert_eq!(connected, 1);
 }
 
 #[test]

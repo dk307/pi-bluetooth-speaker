@@ -1446,6 +1446,31 @@ fn bluetooth_mock_playback_state_mutation_and_faults() {
 }
 
 #[test]
+fn link_and_playback_snapshot_returns_both_from_mock() {
+    let (device, mock) = BluetoothDevice::new_mocked();
+    mock.set_player_status("playing");
+
+    let (snapshot, playback) = device.link_and_playback_snapshot(None).unwrap();
+    // Mock initializes with one connected device and a running PCM.
+    assert_eq!(snapshot.devices.len(), 1);
+    assert!(snapshot.devices.iter().any(|d| d.connected));
+    assert!(snapshot.pcms.iter().any(|p| p.running));
+    assert_eq!(
+        playback.as_ref().map(|p| p.status.as_ref()),
+        Some("playing")
+    );
+
+    // Fault injection propagates as a typed error.
+    mock.set_fault(Some("combined fault".into()));
+    assert!(
+        device
+            .link_and_playback_snapshot(None)
+            .unwrap_err()
+            .is_mock_fault()
+    );
+}
+
+#[test]
 fn parse_bluez_all_with_media_player() {
     let mut objects: ManagedObjects = HashMap::new();
 

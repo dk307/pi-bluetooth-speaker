@@ -813,7 +813,12 @@ pub fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
     ))
 }
 
-/// Queries the Bluetooth device once and stages playback/cover deltas into `update`.
+/// Stages playback/cover deltas into `update` from a pre-fetched playback state.
+///
+/// The caller resolves the playback state once per tick (via
+/// [`speaker_bluetooth::BluetoothDevice::link_and_playback_snapshot`], sharing a
+/// single `org.bluez` `GetManagedObjects` with the link snapshot) and passes it
+/// here so this function issues no D-Bus calls of its own.
 ///
 /// On `Ok(None)` publishes the connection placeholder so stale optimistic UI
 /// state is cleared; on query errors keeps the last published state. Cover art
@@ -821,15 +826,14 @@ pub fn decode_cover_buffer(path: &str) -> Option<CoverPixelBuffer> {
 /// previous art and is retried after [`COVER_DECODE_RETRY`] elapses.
 #[cfg(feature = "ui")]
 pub fn publish_playback_state(
-    bt: &speaker_bluetooth::BluetoothDevice,
+    playback: Result<&Option<speaker_bluetooth::BtPlaybackState>, &speaker_bluetooth::BtError>,
     update: &mut BtSharedUpdate,
     last_pb: &mut Option<speaker_bluetooth::BtPlaybackState>,
     cover: &mut CoverState,
     settle: &mut Option<SettleWindow>,
 ) {
-    let fallback_addr = last_pb.as_ref().and_then(|p| p.device_address);
-    match bt.playback_state_for(fallback_addr) {
-        Ok(Some(ref pb)) => {
+    match playback {
+        Ok(Some(pb)) => {
             // Compute device_changed before settle-expiry resets `last_pb` to
             // `None`, otherwise the force-publish tick on the same device
             // would look like a device switch and clear prior cover art.
@@ -1110,25 +1114,30 @@ impl BtMonitorState {
         }
     }
 
-    /// Queries one lightweight link snapshot, stages PCM changes into `update`,
-    /// and refreshes the cached link details used to pick the active device row.
+    /// Stages PCM changes into `update` and refreshes the cached link details
+    /// used to pick the active device row, from a pre-fetched link snapshot.
     ///
     /// Returns the snapshot on success so the caller can rebuild Devices-screen
     /// rows from the same query, or `None` on a transient D-Bus error (the last
     /// published rows are kept; see [`BtMonitorState::stage_devices_update`]).
+    ///
+    /// `snapshot` and `active_addr` are resolved once by the caller (via
+    /// [`speaker_bluetooth::BluetoothDevice::link_and_playback_snapshot`], which
+    /// shares one `org.bluez` `GetManagedObjects` with the playback state), so
+    /// this function issues no D-Bus calls of its own.
     pub fn publish_link_state(
         &mut self,
-        bt: &speaker_bluetooth::BluetoothDevice,
         update: &mut BtSharedUpdate,
+        active_addr: Option<speaker_bluetooth::BtAddress>,
+        snapshot: Result<&speaker_bluetooth::LinkSnapshot, &speaker_bluetooth::BtError>,
     ) -> Option<speaker_bluetooth::LinkSnapshot> {
-        let snapshot = match bt.link_snapshot() {
-            Ok(s) => s,
+        let snapshot = match snapshot {
+            Ok(s) => s.clone(),
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to query Bluetooth link snapshot");
                 return None;
             }
         };
-        let active_addr = bt.active_device();
         self.last_active_device = active_addr;
         let active_pcm =
             speaker_bluetooth::select_active_pcm_for(&snapshot.pcms, active_addr).cloned();
@@ -1842,16 +1851,25 @@ impl BtMonitorState {
         }
 
         let mut update = BtSharedUpdate::default();
-        // Publish the authoritative state; transient D-Bus errors keep the last
-        // published state instead of flashing the placeholder over live playback.
+        // One `org.bluez` `GetManagedObjects` feeds both the playback state and
+        // the link snapshot (and the arbitrated active device), so the whole
+        // tick issues a single bluez round-trip instead of two. Both publish
+        // helpers keep the last published state on error (logging at `warn`
+        // internally), so we pass the shared result by reference.
+        let fallback_addr = self.last_pb.as_ref().and_then(|p| p.device_address);
+        let combined = bt.link_and_playback_snapshot(fallback_addr);
+        // Publish the authoritative state; a missing playback result publishes
+        // the connection placeholder so stale optimistic UI state is cleared.
         publish_playback_state(
-            bt,
+            combined.as_ref().map(|(_, pb)| pb),
             &mut update,
             &mut self.last_pb,
             &mut self.cover,
             &mut self.settle,
         );
-        let snapshot = self.publish_link_state(bt, &mut update);
+        let active_addr = bt.active_device();
+        let snapshot =
+            self.publish_link_state(&mut update, active_addr, combined.as_ref().map(|(s, _)| s));
         let built = snapshot
             .as_ref()
             .map(|snapshot| self.build_device_rows(snapshot));
