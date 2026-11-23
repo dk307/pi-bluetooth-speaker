@@ -388,6 +388,10 @@ impl AmpController {
         if self.ctrl == CtrlState::Faulted {
             self.fault_recovery().await?;
             self.ctrl = CtrlState::Muted;
+            if self.stream_live {
+                self.stream_live = false;
+                self.start_stream().await?;
+            }
             return Ok(());
         }
         let flags = self.device.read_live_errors_async().await?;
@@ -408,6 +412,32 @@ impl AmpController {
         self.handle_faults(flags).await
     }
 
+    /// Confirm a critical fault reading before running a destructive `/ENABLE`
+    /// reset recovery.
+    ///
+    /// A single spurious I2C read of `0x7C` (with `0x6D` latched history also
+    /// free of critical faults) must not mute playback and reset the
+    /// amplifier. If neither the confirmation live read nor `0x6D` reports a
+    /// critical fault, logs a warning and returns `Ok(false)`.
+    async fn confirm_critical_fault(
+        &self,
+        initial: speaker_hardware::AmpErrorFlags,
+    ) -> AmpResult<bool> {
+        let confirm = self.device.read_live_errors_async().await?;
+        let latched = self.device.read_latched_errors_async().await;
+        if !has_critical_fault(confirm) && matches!(latched, Ok(l) if !has_critical_fault(l)) {
+            warn!(
+                ?initial,
+                ?confirm,
+                ?latched,
+                "Critical amp fault read did not repeat and latched history has no critical fault; ignoring spurious read"
+            );
+            return Ok(false);
+        }
+        warn!(?initial, ?confirm, ?latched, "Confirmed critical amp fault");
+        Ok(true)
+    }
+
     /// Classify and act on live error flags (plan §3.1 GPIO edge row).
     /// Critical faults are evaluated FIRST so a thermal warning can never
     /// mask an OCP/DC/flying-cap condition; `PllClockLoss` during playback
@@ -424,22 +454,21 @@ impl AmpController {
         if flags == speaker_hardware::AmpErrorFlags::NONE {
             return Ok(());
         }
-        // 1. Critical faults → full recovery (priority over thermal warn).
+        // 1. Critical faults → confirm before full recovery (priority over thermal warn).
         if has_critical_fault(flags) {
+            if !self.confirm_critical_fault(flags).await? {
+                return Ok(());
+            }
             warn!(?flags, "Critical amp fault; entering fault recovery");
             self.ctrl = CtrlState::Faulted;
-            // Capture BEFORE clearing: if the fault interrupted a live
-            // stream, the handshake must re-run immediately after recovery.
-            // CamillaDSP usually never stops through a transient amp fault
-            // (it keeps processing the BT stream), so the DSP watcher never
-            // emits a new Stopped→Running edge — waiting for one leaves the
-            // amp muted indefinitely (live incident 2026-11-14: a PVDD
-            // glitch muted playback for 53 minutes until a track change).
-            let was_stream_live = self.stream_live;
-            self.stream_live = false;
+            // Preserve `stream_live` until `fault_recovery()` succeeds: if
+            // recovery fails mid-way and is retried on the next safety tick,
+            // `stream_live` must still be `true` so `start_stream()` runs once
+            // recovery succeeds (instead of stranding the amp muted).
             self.fault_recovery().await?;
             self.ctrl = CtrlState::Muted;
-            if was_stream_live {
+            if self.stream_live {
+                self.stream_live = false;
                 // Re-run the bounded PLL handshake now: if the clock is
                 // back (the usual transient case) the amp unmutes at once
                 // at the user's level; `start_stream`'s internal guards
@@ -626,7 +655,7 @@ impl AmpController {
             self.ctrl = CtrlState::Muted;
             return Ok(());
         }
-        if has_critical_fault(flags) {
+        if has_critical_fault(flags) && self.confirm_critical_fault(flags).await? {
             warn!(
                 ?flags,
                 "Critical fault at stream start; running fault recovery instead of unmute"

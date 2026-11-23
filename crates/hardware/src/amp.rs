@@ -1577,6 +1577,9 @@ struct MockState {
     pm2_config: Pm2Config,
     dcu_monitor: DcuMonitor,
     live_errors: AmpErrorFlags,
+    /// Optional one-shot override returned by the next `read_live_errors`
+    /// call and immediately cleared, modeling a single spurious bus read.
+    one_shot_live_errors: Option<AmpErrorFlags>,
     latched_errors: AmpErrorFlags,
     fault: Option<Box<str>>,
     // Transient single-shot write failures (test seam): the next N write
@@ -1626,6 +1629,7 @@ impl AmpDeviceMock {
                     ch1: DcuChannelStatus::Active,
                 },
                 live_errors: AmpErrorFlags::NONE,
+                one_shot_live_errors: None,
                 latched_errors: AmpErrorFlags::NONE,
                 fault: None,
                 transient_write_failures: 0,
@@ -1652,6 +1656,16 @@ impl AmpDeviceMock {
     pub fn set_live_errors(&self, flags: AmpErrorFlags) {
         let mut state = self.state.write().expect("mock lock poisoned");
         state.live_errors = flags;
+    }
+
+    /// Arms a one-shot simulated live error value for the next
+    /// `read_live_errors` call only (subsequent reads return `live_errors`).
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_live_errors_one_shot(&self, flags: AmpErrorFlags) {
+        let mut state = self.state.write().expect("mock lock poisoned");
+        state.one_shot_live_errors = Some(flags);
     }
 
     /// Sets the simulated latched historical error flags.
@@ -1737,9 +1751,12 @@ impl AmpDeviceMock {
     }
 
     fn read_live_errors(&self) -> Result<AmpErrorFlags, AmpError> {
-        let state = self.state.read().expect("mock lock poisoned");
+        let mut state = self.state.write().expect("mock lock poisoned");
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
+        }
+        if let Some(one_shot) = state.one_shot_live_errors.take() {
+            return Ok(one_shot);
         }
         Ok(state.live_errors)
     }
@@ -2413,10 +2430,71 @@ impl LimiterSlew {
     }
 }
 
+/// `rppal::i2c::I2c` wrapper whose `embedded_hal` `WriteRead` uses
+/// `I2c::write_read` (`ioctl(I2C_RDWR)` atomic Repeated START) instead of
+/// `rppal`'s default `embedded_hal` impl, which splits `write_read` into a
+/// separate `write()` + `STOP` and `read()` + `STOP`.
+struct RppalAtomicI2c {
+    i2c: I2c,
+    address: u16,
+}
+
+impl RppalAtomicI2c {
+    fn new(i2c: I2c, address: AmpI2cAddress) -> Self {
+        Self {
+            i2c,
+            address: address.as_u16(),
+        }
+    }
+
+    fn ensure_address(&mut self, address: u8) -> Result<(), rppal::i2c::Error> {
+        let addr = u16::from(address);
+        if self.address != addr {
+            self.i2c.set_slave_address(addr)?;
+            self.address = addr;
+        }
+        Ok(())
+    }
+}
+
+impl Write for RppalAtomicI2c {
+    type Error = rppal::i2c::Error;
+
+    fn write(&mut self, address: u8, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.ensure_address(address)?;
+        self.i2c.write(bytes)?;
+        Ok(())
+    }
+}
+
+impl Read for RppalAtomicI2c {
+    type Error = rppal::i2c::Error;
+
+    fn read(&mut self, address: u8, buffer: &mut [u8]) -> Result<(), Self::Error> {
+        self.ensure_address(address)?;
+        self.i2c.read(buffer)?;
+        Ok(())
+    }
+}
+
+impl WriteRead for RppalAtomicI2c {
+    type Error = rppal::i2c::Error;
+
+    fn write_read(
+        &mut self,
+        address: u8,
+        bytes: &[u8],
+        buffer: &mut [u8],
+    ) -> Result<(), Self::Error> {
+        self.ensure_address(address)?;
+        self.i2c.write_read(bytes, buffer)
+    }
+}
+
 /// Internal I2C / mock backend dispatch for [`AmpDevice`].
 enum Backend {
     Hardware {
-        device: Mutex<HardwareDevice<I2c>>,
+        device: Mutex<HardwareDevice<RppalAtomicI2c>>,
         bus: u8,
         address: AmpI2cAddress,
     },
@@ -2469,7 +2547,7 @@ impl AmpDevice {
         validate_rpi3_bus(bus)?;
         let mut i2c = I2c::with_bus(bus)?;
         i2c.set_slave_address(address.as_u16())?;
-        let device = HardwareDevice::new(i2c, address);
+        let device = HardwareDevice::new(RppalAtomicI2c::new(i2c, address), address);
         Ok(Self {
             inner: Arc::new(Backend::Hardware {
                 device: Mutex::new(device),
