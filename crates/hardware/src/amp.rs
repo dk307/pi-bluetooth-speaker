@@ -19,6 +19,7 @@
 //!   [`DcuMonitor`], and [`AmpI2cAddress`].
 
 use std::backtrace::Backtrace;
+use std::collections::VecDeque;
 use std::fmt::{self, Display, Formatter};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -1577,9 +1578,9 @@ struct MockState {
     pm2_config: Pm2Config,
     dcu_monitor: DcuMonitor,
     live_errors: AmpErrorFlags,
-    /// Optional one-shot override returned by the next `read_live_errors`
-    /// call and immediately cleared, modeling a single spurious bus read.
-    one_shot_live_errors: Option<AmpErrorFlags>,
+    /// Optional queued overrides returned one-per-call by `read_live_errors`
+    /// before falling back to `live_errors`.
+    live_error_queue: VecDeque<AmpErrorFlags>,
     latched_errors: AmpErrorFlags,
     fault: Option<Box<str>>,
     // Transient single-shot write failures (test seam): the next N write
@@ -1629,7 +1630,7 @@ impl AmpDeviceMock {
                     ch1: DcuChannelStatus::Active,
                 },
                 live_errors: AmpErrorFlags::NONE,
-                one_shot_live_errors: None,
+                live_error_queue: VecDeque::new(),
                 latched_errors: AmpErrorFlags::NONE,
                 fault: None,
                 transient_write_failures: 0,
@@ -1664,8 +1665,17 @@ impl AmpDeviceMock {
     /// # Panics
     /// Panics if the mock state lock is poisoned.
     pub fn set_live_errors_one_shot(&self, flags: AmpErrorFlags) {
+        self.set_live_errors_sequence([flags]);
+    }
+
+    /// Queues a sequence of simulated live error values consumed one per
+    /// `read_live_errors` call before falling back to `live_errors`.
+    ///
+    /// # Panics
+    /// Panics if the mock state lock is poisoned.
+    pub fn set_live_errors_sequence(&self, seq: impl IntoIterator<Item = AmpErrorFlags>) {
         let mut state = self.state.write().expect("mock lock poisoned");
-        state.one_shot_live_errors = Some(flags);
+        state.live_error_queue = seq.into_iter().collect();
     }
 
     /// Sets the simulated latched historical error flags.
@@ -1755,8 +1765,8 @@ impl AmpDeviceMock {
         if let Some(ref fault) = state.fault {
             return Err(AmpError::mock_fault(fault.clone()));
         }
-        if let Some(one_shot) = state.one_shot_live_errors.take() {
-            return Ok(one_shot);
+        if let Some(next) = state.live_error_queue.pop_front() {
+            return Ok(next);
         }
         Ok(state.live_errors)
     }

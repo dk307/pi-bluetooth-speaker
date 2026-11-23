@@ -1425,3 +1425,26 @@ async fn failed_fault_recovery_mid_stream_resumes_playback_on_safety_tick_retry(
     assert_eq!(controller.ctrl_state(), CtrlState::Playing);
     assert!(!gpio_mock.mute_pin_low());
 }
+
+#[tokio::test]
+async fn spurious_critical_fault_at_stream_start_does_not_throttle_or_reset() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    // 1st read (pll_lock_handshake) = NONE, 2nd read (post-handshake check) =
+    // spurious 0x51 (includes HighTempWarning bit 4), 3rd read (confirmation) = NONE.
+    // Must NOT reset and must NOT falsely apply -6 dB thermal throttle.
+    f.amp_mock
+        .set_live_errors_sequence([AmpErrorFlags::NONE, AmpErrorFlags::from_bits(0x51)]);
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert_eq!(f.gpio_mock.reset_calls(), 0);
+    assert_eq!(f.amp_mock.mock_master_volume_raw(), 60);
+}
