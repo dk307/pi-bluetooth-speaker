@@ -388,10 +388,7 @@ impl AmpController {
         if self.ctrl == CtrlState::Faulted {
             self.fault_recovery().await?;
             self.ctrl = CtrlState::Muted;
-            if self.stream_live {
-                self.stream_live = false;
-                self.start_stream().await?;
-            }
+            self.resume_stream_after_recovery().await?;
             return Ok(());
         }
         let flags = self.device.read_live_errors_async().await?;
@@ -439,6 +436,21 @@ impl AmpController {
         Ok((true, confirm))
     }
 
+    /// Re-run the PLL handshake after a successful fault recovery if a stream
+    /// was live, preserving `stream_live = true` if `start_stream()` itself
+    /// fails with a transient bus error.
+    async fn resume_stream_after_recovery(&mut self) -> AmpResult<()> {
+        if !self.stream_live {
+            return Ok(());
+        }
+        self.stream_live = false;
+        if let Err(e) = self.start_stream().await {
+            self.stream_live = true;
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Classify and act on live error flags (plan §3.1 GPIO edge row).
     /// Critical faults are evaluated FIRST so a thermal warning can never
     /// mask an OCP/DC/flying-cap condition; `PllClockLoss` during playback
@@ -451,37 +463,32 @@ impl AmpController {
     ///
     /// # Errors
     /// Propagated hardware faults.
-    pub async fn handle_faults(&mut self, flags: speaker_hardware::AmpErrorFlags) -> AmpResult<()> {
+    pub async fn handle_faults(
+        &mut self,
+        mut flags: speaker_hardware::AmpErrorFlags,
+    ) -> AmpResult<()> {
         if flags == speaker_hardware::AmpErrorFlags::NONE {
             return Ok(());
         }
         // 1. Critical faults → confirm before full recovery (priority over thermal warn).
         if has_critical_fault(flags) {
-            let (confirmed, _) = self.confirm_critical_fault(flags).await?;
-            if !confirmed {
+            let (confirmed, confirm_flags) = self.confirm_critical_fault(flags).await?;
+            if confirmed {
+                warn!(?flags, "Critical amp fault; entering fault recovery");
+                self.ctrl = CtrlState::Faulted;
+                // Preserve `stream_live` until `fault_recovery()` succeeds: if
+                // recovery fails mid-way and is retried on the next safety tick,
+                // `stream_live` must still be `true` so `start_stream()` runs once
+                // recovery succeeds (instead of stranding the amp muted).
+                self.fault_recovery().await?;
+                self.ctrl = CtrlState::Muted;
+                self.resume_stream_after_recovery().await?;
                 return Ok(());
             }
-            warn!(?flags, "Critical amp fault; entering fault recovery");
-            self.ctrl = CtrlState::Faulted;
-            // Preserve `stream_live` until `fault_recovery()` succeeds: if
-            // recovery fails mid-way and is retried on the next safety tick,
-            // `stream_live` must still be `true` so `start_stream()` runs once
-            // recovery succeeds (instead of stranding the amp muted).
-            self.fault_recovery().await?;
-            self.ctrl = CtrlState::Muted;
-            if self.stream_live {
-                self.stream_live = false;
-                // Re-run the bounded PLL handshake now: if the clock is
-                // back (the usual transient case) the amp unmutes at once
-                // at the user's level; `start_stream`'s internal guards
-                // keep it muted for a user mute (with `stream_live` set so
-                // a later unmute restores instantly) and re-run recovery
-                // if the fault is still live. If the clock is genuinely
-                // gone, the handshake times out and we stay muted — the
-                // next real StreamStarting edge retries as before.
-                self.start_stream().await?;
+            flags = confirm_flags;
+            if flags == speaker_hardware::AmpErrorFlags::NONE {
+                return Ok(());
             }
-            return Ok(());
         }
         // 2. PLL clock loss while a stream is live (playing OR user-muted
         //    mid-stream) = the stream died: mute across the gap; the next
