@@ -1327,3 +1327,124 @@ mod error_tests {
         assert_eq!(returns_result().unwrap(), 42);
     }
 }
+
+#[tokio::test]
+async fn spurious_single_shot_critical_fault_skips_recovery_and_keeps_playing() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+
+    // Single-shot spurious 0x51 read (0x7C clears on confirmation and 0x6D
+    // latched history has no critical fault, even if a non-critical bit like
+    // PllClockLoss is present): must NOT mute or reset the amplifier.
+    f.amp_mock
+        .set_live_errors_one_shot(AmpErrorFlags::from_bits(0x51));
+    f.amp_mock
+        .set_latched_errors(fault_flags(AmpFault::PllClockLoss));
+    f.controller.handle_safety_tick().await.unwrap();
+
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert_eq!(f.gpio_mock.reset_calls(), 0);
+    assert!(!f.gpio_mock.mute_pin_low());
+    assert!(!f.amp_mock.mock_serial_muted());
+}
+
+#[tokio::test]
+async fn confirmed_critical_fault_via_latched_history_runs_recovery() {
+    let mut f = fixture();
+    f.gpio_mock.set_reset_hook(Some(Arc::new({
+        let amp_mock = f.amp_mock.clone();
+        move || {
+            amp_mock.set_mock_serial_muted(false);
+            amp_mock.set_live_errors(AmpErrorFlags::NONE);
+        }
+    })));
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+
+    // Live register clears before confirmation, but 0x6D latched history
+    // confirms a real transient fault occurred: recovery must run.
+    f.amp_mock
+        .set_live_errors_one_shot(AmpErrorFlags::from_bits(0x51));
+    f.amp_mock
+        .set_latched_errors(AmpErrorFlags::from_bits(0x51));
+    f.controller.handle_safety_tick().await.unwrap();
+
+    assert_eq!(f.gpio_mock.reset_calls(), 1);
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+}
+
+#[tokio::test]
+async fn failed_fault_recovery_mid_stream_resumes_playback_on_safety_tick_retry() {
+    let dir = tempdir().unwrap();
+    let (backend, backend_ctrl) = MockAmpBackend::new_mocked();
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    let state_file = StateFile::new(dir.path().join("amp-state.json"));
+    let (device, amp_mock) = AmpDevice::new_mocked();
+    let mut controller = AmpController::new(
+        Arc::new(backend),
+        Arc::new(device),
+        gpio,
+        state_file,
+        AmpState::default(),
+    );
+    controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(controller.ctrl_state(), CtrlState::Playing);
+
+    // Critical fault mid-stream where recovery fails mid-way.
+    amp_mock.set_live_errors(fault_flags(AmpFault::OvercurrentProtect));
+    backend_ctrl.set_serial_mute_fail_sticky(true);
+    controller.handle_safety_tick().await.unwrap_err();
+    assert_eq!(controller.ctrl_state(), CtrlState::Faulted);
+
+    // Bus recovers: the safety tick retry completes recovery AND re-runs
+    // start_stream() so playback resumes instead of staying muted.
+    backend_ctrl.set_serial_mute_fail_sticky(false);
+    amp_mock.set_live_errors(AmpErrorFlags::NONE);
+    controller.handle_safety_tick().await.unwrap();
+    assert_eq!(controller.ctrl_state(), CtrlState::Playing);
+    assert!(!gpio_mock.mute_pin_low());
+}
+
+#[tokio::test]
+async fn spurious_critical_fault_at_stream_start_does_not_throttle_or_reset() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    // 1st read (pll_lock_handshake) = NONE, 2nd read (post-handshake check) =
+    // spurious 0x51 (includes HighTempWarning bit 4), 3rd read (confirmation) = NONE.
+    // Must NOT reset and must NOT falsely apply -6 dB thermal throttle.
+    f.amp_mock
+        .set_live_errors_sequence([AmpErrorFlags::NONE, AmpErrorFlags::from_bits(0x51)]);
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert_eq!(f.gpio_mock.reset_calls(), 0);
+    assert_eq!(f.amp_mock.mock_master_volume_raw(), 60);
+}
