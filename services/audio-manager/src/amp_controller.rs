@@ -386,9 +386,7 @@ impl AmpController {
         // failed mid-way) is worse than repeated retry attempts, and the
         // retry path itself re-mutes before anything else.
         if self.ctrl == CtrlState::Faulted {
-            self.fault_recovery().await?;
-            self.ctrl = CtrlState::Muted;
-            self.resume_stream_after_recovery().await?;
+            self.recover_and_resume().await?;
             return Ok(());
         }
         let flags = self.device.read_live_errors_async().await?;
@@ -423,12 +421,12 @@ impl AmpController {
     ) -> AmpResult<(bool, speaker_hardware::AmpErrorFlags)> {
         let confirm = self.device.read_live_errors_async().await?;
         let latched = self.device.read_latched_errors_async().await;
-        if !has_critical_fault(confirm) && matches!(latched, Ok(l) if !has_critical_fault(l)) {
+        if !has_critical_fault(confirm) && !matches!(latched, Ok(l) if has_critical_fault(l)) {
             warn!(
                 ?initial,
                 ?confirm,
                 ?latched,
-                "Critical amp fault read did not repeat and latched history has no critical fault; ignoring spurious read"
+                "Critical amp fault read did not repeat and latched history shows no critical fault; ignoring spurious read"
             );
             return Ok((false, confirm));
         }
@@ -436,16 +434,20 @@ impl AmpController {
         Ok((true, confirm))
     }
 
-    /// Re-run the PLL handshake after a successful fault recovery if a stream
-    /// was live, preserving `stream_live = true` if `start_stream()` itself
-    /// fails with a transient bus error.
-    async fn resume_stream_after_recovery(&mut self) -> AmpResult<()> {
+    /// Run `fault_recovery()`, transition to `Muted`, and re-run the PLL
+    /// handshake if a stream was live. If `start_stream()` fails with a
+    /// transient bus error, restore `ctrl = Faulted` and `stream_live = true`
+    /// so the next safety tick retries instead of stranding the amp muted.
+    async fn recover_and_resume(&mut self) -> AmpResult<()> {
+        self.fault_recovery().await?;
+        self.ctrl = CtrlState::Muted;
         if !self.stream_live {
             return Ok(());
         }
         self.stream_live = false;
         if let Err(e) = self.start_stream().await {
             self.stream_live = true;
+            self.ctrl = CtrlState::Faulted;
             return Err(e);
         }
         Ok(())
@@ -476,13 +478,7 @@ impl AmpController {
             if confirmed {
                 warn!(?flags, "Critical amp fault; entering fault recovery");
                 self.ctrl = CtrlState::Faulted;
-                // Preserve `stream_live` until `fault_recovery()` succeeds: if
-                // recovery fails mid-way and is retried on the next safety tick,
-                // `stream_live` must still be `true` so `start_stream()` runs once
-                // recovery succeeds (instead of stranding the amp muted).
-                self.fault_recovery().await?;
-                self.ctrl = CtrlState::Muted;
-                self.resume_stream_after_recovery().await?;
+                self.recover_and_resume().await?;
                 return Ok(());
             }
             flags = confirm_flags;
