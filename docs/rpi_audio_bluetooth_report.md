@@ -689,6 +689,15 @@ sed -i 's/return false;/return NULL;/' src/shared/ad.c
 # (Automated end-to-end via scripts/build_bluez_pi.sh)
 patch -p1 < /path/to/repo/baseline/patches/bluez-5.88-mediaplayer-refresh-track.patch
 
+# 3c. Apply stale-track-duration patch:
+# Drops the previous track's Duration when the addressed track changes, so a
+# new track whose GetElementAttributes response omits the duration attribute
+# (AVRCP 1.3 peers, live/internet radio) reports "unknown" instead of the
+# previous track's length. Without this, BlueZ keeps the old Duration and
+# media_player_set_duration() cannot overwrite a non-zero value.
+# (Automated end-to-end via scripts/build_bluez_pi.sh)
+patch -p1 < /path/to/repo/baseline/patches/bluez-5.88-track-duration.patch
+
 # 4. Configure BlueZ with systemd integration and appliance paths
 ./configure \
   --prefix=/usr \
