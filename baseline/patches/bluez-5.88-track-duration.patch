@@ -10,27 +10,27 @@
  	return strcmp(key, "Item") ? TRUE : FALSE;
  }
  
-@@ -2012,6 +2009,25 @@
+@@ -2012,6 +2009,21 @@
  
  	media_item_set_playable(item, true);
  
 +	/*
 +	 * A new track must not inherit the previous track's Duration.
-+	 * clear_metadata() keeps Duration on purpose (see remove_metadata),
-+	 * so drop it here whenever the addressed track actually changes.
-+	 * Without this, a track whose GetElementAttributes response omits
-+	 * the Duration attribute (e.g. AVRCP 1.3 peers, live streams)
-+	 * keeps displaying the previous track's length indefinitely, and
++	 * clear_metadata() preserves Duration by default; drop it here
++	 * whenever the addressed track actually changes.  Without this,
++	 * a track whose GetElementAttributes response omits the Duration
++	 * attribute (e.g. AVRCP 1.3 peers, live streams) keeps displaying
++	 * the previous track's length indefinitely, and
 +	 * media_player_set_duration() cannot repair it because it ignores
-+	 * any update while a non-zero duration is present. The following
-+	 * GetPlayStatus() then repopulates a valid duration, or leaves
-+	 * the track genuinely unknown.
++	 * any update while a non-zero duration is present.  The subsequent
++	 * GetPlayStatus() then repopulates a valid duration, or leaves the
++	 * track genuinely unknown.
 +	 */
 +	{
 +		const char *cur = g_hash_table_lookup(mp->track, "Item");
 +
 +		if (!cur || strcmp(cur, item->path) != 0)
-+			g_hash_table_remove(mp->track, "Duration");
++			g_hash_table_remove(item->metadata, "Duration");
 +	}
 +
  	if (mp->track != item->metadata) {

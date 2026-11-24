@@ -49,8 +49,8 @@ fi
 
 REMOTE_PATCH="/tmp/bluez-5.88-mediaplayer-refresh-track.patch"
 REMOTE_TRACK_DURATION_PATCH="/tmp/bluez-5.88-track-duration.patch"
-scp "${PATCH_FILE}" "${REMOTE_HOST}:${REMOTE_PATCH}"
-scp "${TRACK_DURATION_PATCH_FILE}" "${REMOTE_HOST}:${REMOTE_TRACK_DURATION_PATCH}"
+scp "${PATCH_FILE}" "${REMOTE_HOST}:${REMOTE_PATCH}" || { echo "Failed to copy RefreshTrack patch" >&2; exit 1; }
+scp "${TRACK_DURATION_PATCH_FILE}" "${REMOTE_HOST}:${REMOTE_TRACK_DURATION_PATCH}" || { echo "Failed to copy track-duration patch" >&2; exit 1; }
 
 ssh "${REMOTE_HOST}" bash -s -- "${BLUEZ_VERSION}" "${BLUEZ_TARBALL}" "${BLUEZ_URL}" "${BLUEZ_SHA256}" "${REMOTE_PATCH}" "${BLUETOOTH_ONLY}" "${REMOTE_TRACK_DURATION_PATCH}" <<'EOF'
 set -euo pipefail
@@ -81,16 +81,16 @@ cd "${SRC_DIR}"
 # GCC 14 (C23 default) fix in bt_ad_has_data() in src/shared/ad.c
 sed -i '/^struct bt_ad_data \*bt_ad_has_data/,/^}/ s/return false;/return NULL;/' src/shared/ad.c
 
-# Apply RefreshTrack patch idempotently
-if grep -q 'media_player_refresh_track' profiles/audio/player.c; then
+# Apply RefreshTrack patch idempotently (dry-run probe)
+if patch --dry-run -p1 -R < "${REMOTE_PATCH}" >/dev/null 2>&1; then
   echo "[bluez] RefreshTrack patch already applied."
 else
   patch -p1 < "${REMOTE_PATCH}"
   echo "[bluez] Applied RefreshTrack patch."
 fi
 
-# Apply track-duration patch idempotently
-if grep -q 'A new track must not inherit the previous track' profiles/audio/player.c; then
+# Apply track-duration patch idempotently (dry-run probe)
+if patch --dry-run -p1 -R < "${REMOTE_TRACK_DURATION_PATCH}" >/dev/null 2>&1; then
   echo "[bluez] track-duration patch already applied."
 else
   patch -p1 < "${REMOTE_TRACK_DURATION_PATCH}"
@@ -124,7 +124,7 @@ restart_bluetooth() {
   # bluealsa-aplay (BindsTo=bluealsa.service) and bt-manager (After=bluealsa.service),
   # leaving no A2DP endpoints registered ("Protocol not available") and the appliance
   # unable to accept connections. Bring the whole dependent stack back up, in order.
-  systemctl start bluetooth.service || true
+  systemctl start bluetooth.service
   systemctl start bluealsa.service || true
   systemctl start bt-manager.service || true
   systemctl start bluealsa-aplay.service || true
