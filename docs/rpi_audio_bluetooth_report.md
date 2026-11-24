@@ -933,5 +933,7 @@ pip install --break-system-packages git+https://github.com/HEnquist/pycamilladsp
 ### 10.11. Console Display Formatting & USB/DMA Boot Flags
 Suppresses the blinking text cursor on the framebuffer / DSI display console, expands the atomic DMA pool to 4 MiB, and disables the 64-bit emulated `dwc_otg` FIQ/FSM to prevent RTL8761BU `command tx timeout` wedges under 60 fps visualizer load (see [bluetooh_disconnect_issues.md](bluetooh_disconnect_issues.md)):
 ```bash
-sudo sed -i 's/$/ vt.global_cursor_default=0 coherent_pool=4M dwc_otg.fiq_enable=0 dwc_otg.fiq_fsm_enable=0/' /boot/firmware/cmdline.txt
+for p in vt.global_cursor_default=0 coherent_pool=4M dwc_otg.fiq_enable=0 dwc_otg.fiq_fsm_enable=0; do
+  grep -qE "(^|[[:space:]])${p%%=*}=" /boot/firmware/cmdline.txt || sudo sed -i "s/$/ $p/" /boot/firmware/cmdline.txt
+done
 ```

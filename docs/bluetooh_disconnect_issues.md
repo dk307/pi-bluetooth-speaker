@@ -342,10 +342,11 @@ mid-stream wedge at ~20 min. The bisect remains the decisive test.
 - [x] **`dwc_otg` 64-bit FIQ/FSM mitigation (§14, Step 0 & Step 1) — DONE:** `coherent_pool=4M` alone
       still wedged (+5 m 20 s); adding `dwc_otg.fiq_enable=0 dwc_otg.fiq_fsm_enable=0` ran
       ~27.5 min (run 1) and ~58 min (run 2) with 60 fps `radial_fft` ON and **0 anomalies**.
-- [ ] **Step 3 — Ethernet (`eth0`) coexistence soak:** run a sustained `eth0` transfer / update
-      alongside BT streaming + 60 fps visualizer under `dwc_otg.fiq_enable=0 dwc_otg.fiq_fsm_enable=0`
-      and verify 0 `corrupted ACL packet` / 0 wedges; if clean, persist those two flags to
-      `baseline/boot/cmdline.txt` and `baseline/install.sh`.
+- [ ] **Step 3 — Ethernet (`eth0`) coexistence soak (post-persistence validation):** `dwc_otg.fiq_enable=0`
+      and `dwc_otg.fiq_fsm_enable=0` are already persisted in `baseline/boot/cmdline.txt` and
+      `baseline/install.sh` to match the live Pi; run a sustained `eth0` transfer / update alongside
+      BT streaming + 60 fps visualizer and verify 0 `corrupted ACL packet` / 0 wedges (revert those
+      two flags if `eth0` shows a regression).
 - [ ] **Crash #9 write-up pending** (intervening session, signature identical to #5/#6) —
       append §4 count/timeline + 3-way comparison when details are re-collected.
 - [ ] After every wedge the dongle renumbers `hci0`↔`hci1` — scripts/diagnostics must not
@@ -480,6 +481,8 @@ mid-stream wedge at ~20 min. The bisect remains the decisive test.
    eliminated both the wedges and `corrupted ACL packet` across **~85+ cumulative visualizer-ON
    minutes** (27.5 min + 58 min) with **<1% IRQ/softirq CPU overhead** (`0.0% hi`, `0.3–0.9% si`)
    while keeping 480 Mbps USB for `eth0`.
-3. **Pending (Step 3):** test a sustained `eth0` transfer / system update while BT streaming +
-   60 fps visualizer are active. Once verified, persist `dwc_otg.fiq_enable=0 dwc_otg.fiq_fsm_enable=0`
-   into `baseline/boot/cmdline.txt` and `baseline/install.sh`.
+3. **Pending (Step 3 — post-persistence validation):** `dwc_otg.fiq_enable=0` and
+   `dwc_otg.fiq_fsm_enable=0` are already persisted in `baseline/boot/cmdline.txt` and
+   `baseline/install.sh` to match the live Pi. Run a sustained `eth0` transfer / system update
+   while BT streaming + 60 fps visualizer are active to confirm no `eth0` regression or BT wedges
+   (revert those two flags if `eth0` regresses).
