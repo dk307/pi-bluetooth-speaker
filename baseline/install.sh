@@ -62,6 +62,24 @@ if ! grep -q "vt.global_cursor_default=0" /boot/firmware/cmdline.txt 2>/dev/null
     sed -i 's/$/ vt.global_cursor_default=0/' /boot/firmware/cmdline.txt
 fi
 
+# Ensure 4M atomic DMA coherent pool and disable 64-bit emulated dwc_otg FIQ/FSM
+# (prevents RTL8761BU command tx timeout wedges under 60 fps visualizer load)
+if [ -f /boot/firmware/cmdline.txt ]; then
+    if grep -qE '(^|[[:space:]])coherent_pool=[^[:space:]]+' /boot/firmware/cmdline.txt; then
+        sed -i -E 's/(^|[[:space:]])coherent_pool=[^[:space:]]+/\1coherent_pool=4M/' /boot/firmware/cmdline.txt
+    else
+        sed -i 's/$/ coherent_pool=4M/' /boot/firmware/cmdline.txt
+    fi
+    for param in dwc_otg.fiq_enable=0 dwc_otg.fiq_fsm_enable=0; do
+        key="${param%%=*}"
+        if grep -qE "(^|[[:space:]])${key}=[^[:space:]]+" /boot/firmware/cmdline.txt; then
+            sed -i -E "s/(^|[[:space:]])${key}=[^[:space:]]+/\\1${param}/" /boot/firmware/cmdline.txt
+        else
+            sed -i "s/$/ ${param}/" /boot/firmware/cmdline.txt
+        fi
+    done
+fi
+
 # ------------------------------------------------------------------------------
 # 4. ALSA Configuration & Sound Routing
 # ------------------------------------------------------------------------------

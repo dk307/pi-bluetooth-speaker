@@ -13,7 +13,7 @@ baseline/
 ├── verify.sh                      # Automated 25-point audit & validation test suite
 ├── boot/
 │   ├── config.txt                 # Boot firmware configuration (/boot/firmware/config.txt)
-│   ├── cmdline.txt                # Kernel command line parameters (with vt.global_cursor_default=0)
+│   ├── cmdline.txt                # Kernel command line (vt.global_cursor_default=0, coherent_pool=4M, dwc_otg FIQ/FSM disabled)
 │   └── overlays/
 │       ├── merus-amp-custom.dtbo  # Precompiled custom device tree overlay (pinctrl stripped)
 │       └── make_custom_overlay.sh # Script to rebuild custom DTBO from stock merus-amp.dtbo
