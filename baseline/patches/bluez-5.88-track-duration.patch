@@ -1,16 +1,6 @@
 --- a/profiles/audio/player.c
 +++ b/profiles/audio/player.c
-@@ -1421,9 +1421,6 @@
- 
- static gboolean remove_metadata(void *key, void *value, void *user_data)
- {
--	if (!strcmp(key, "Duration"))
--		return FALSE;
--
- 	return strcmp(key, "Item") ? TRUE : FALSE;
- }
- 
-@@ -2012,6 +2009,21 @@
+@@ -2012,6 +2012,25 @@
  
  	media_item_set_playable(item, true);
  
