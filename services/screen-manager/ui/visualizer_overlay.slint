@@ -16,7 +16,7 @@ export component VisualizerOverlay inherits Rectangle {
     width: 800px;
     height: 480px;
     clip: true;
-    background: #090B10;
+    background: MaterialPalette.background;
 
     // 0 = Radial FFT, 1 = 24-Band ERB Linear Spectrum
     in property <int> visualizer_mode: 0;
@@ -40,7 +40,7 @@ export component VisualizerOverlay inherits Rectangle {
 
         width: 100%;
         height: 100%;
-        background: #090B10;
+        background: MaterialPalette.background;
 
         // Subtle static concentric reference rings (cached once into GPU FBO)
         Rectangle {
@@ -56,7 +56,7 @@ export component VisualizerOverlay inherits Rectangle {
                 height: 340px;
                 border-radius: 170px;
                 border-width: 1px;
-                border-color: #161D2B;
+                border-color: MaterialPalette.outline_variant.transparentize(0.5);
                 background: transparent;
             }
 
@@ -67,7 +67,7 @@ export component VisualizerOverlay inherits Rectangle {
                 height: r_outer * 2;
                 border-radius: r_outer;
                 border-width: 1px;
-                border-color: #1A2336;
+                border-color: MaterialPalette.outline_variant.transparentize(0.5);
                 background: transparent;
             }
         }
@@ -91,7 +91,7 @@ export component VisualizerOverlay inherits Rectangle {
             border-radius: r_inner - 4px;
             border-width: 2px;
             border-color: MaterialPalette.outline_variant;
-            background: #121622;
+            background: MaterialPalette.surface;
             clip: true;
             cache-rendering-hint: true;
 
@@ -117,7 +117,7 @@ export component VisualizerOverlay inherits Rectangle {
     if root.visualizer_mode == 1 : Rectangle {
         width: 100%;
         height: 100%;
-        background: #090B10;
+        background: MaterialPalette.background;
 
         // Subtle horizontal reference grid lines (static, cached)
         Rectangle {
@@ -131,7 +131,7 @@ export component VisualizerOverlay inherits Rectangle {
                 y: 28px + (parent.height - 56px) * frac;
                 width: parent.width - 48px;
                 height: 1px;
-                background: #1C2333;
+                background: MaterialPalette.outline_variant.transparentize(0.5);
             }
         }
 
@@ -155,7 +155,7 @@ export component VisualizerOverlay inherits Rectangle {
                 height: parent.height;
                 background: transparent;
 
-                // Spectrum bar with vertical gradient
+                // Spectrum bar with theme-driven vertical gradient
                 Rectangle {
                     x: 0px;
                     y: parent.height - bar_h;
@@ -164,10 +164,10 @@ export component VisualizerOverlay inherits Rectangle {
                     border-radius: 0px;
                     background: @linear-gradient(
                         180deg,
-                        #FF5252 0%,
-                        #FFB300 28%,
-                        #26E6A4 68%,
-                        #00B8D4 100%
+                        MaterialPalette.tertiary 0%,
+                        MaterialPalette.secondary 25%,
+                        MaterialPalette.primary 65%,
+                        MaterialPalette.primary_container 100%
                     );
                 }
 
@@ -178,7 +178,7 @@ export component VisualizerOverlay inherits Rectangle {
                     width: parent.width;
                     height: 3px;
                     border-radius: 0px;
-                    background: MaterialPalette.primary;
+                    background: MaterialPalette.on_surface;
                 }
             }
         }

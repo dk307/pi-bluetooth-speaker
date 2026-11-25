@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use screen_manager::settings_catalog::{SettingId, apply_toggle};
-use screen_manager::ui::{AppShell, Framebuffer, MainWindow, VisualizerUiState};
+use screen_manager::ui::{AppShell, Framebuffer, MainWindow, ThemePreset, VisualizerUiState};
 use screen_manager::visualizer::dsp_math::{
     ERB_BAND_COUNT, ErbBandMapper, SpectrumBallistics, erb_to_hz, hz_to_erb, normalize_dbfs,
     smoothing_coeff,
@@ -362,4 +362,39 @@ fn visualizer_bridge_updates_24_band_vec_model() {
     assert_eq!(radial_img.size().height, 228);
     let rgba = radial_img.to_rgba8_premultiplied().expect("rgba8 buffer");
     assert!(rgba.as_bytes().iter().any(|&b| b != 0));
+}
+
+#[test]
+fn visualizer_radial_recolors_on_theme_change() {
+    let fb = Framebuffer::new_mocked().0;
+    let _fb_window = fb.init_platform().expect("init_platform");
+    let window = MainWindow::new().expect("MainWindow builds");
+    let bridge = VisualizerUiState::new();
+    bridge.bind_to_window(&window);
+
+    let out = VisualizerOutput {
+        spectrum_bars: [0.75; ERB_BAND_COUNT],
+        spectrum_peaks: [0.95; ERB_BAND_COUNT],
+    };
+
+    ThemePreset::McIntoshBlue.apply(&window);
+    bridge.apply_for_mode(&window, VisualizerMode::RadialFft, &out);
+    let mcintosh_bytes = window
+        .get_viz_radial_image()
+        .to_rgba8_premultiplied()
+        .expect("mcintosh buffer")
+        .as_bytes()
+        .to_vec();
+
+    // Switching theme with identical spectrum values must still re-render with the new palette.
+    ThemePreset::MarantzAmber.apply(&window);
+    bridge.apply_for_mode(&window, VisualizerMode::RadialFft, &out);
+    let marantz_bytes = window
+        .get_viz_radial_image()
+        .to_rgba8_premultiplied()
+        .expect("marantz buffer")
+        .as_bytes()
+        .to_vec();
+
+    assert_ne!(mcintosh_bytes, marantz_bytes);
 }
