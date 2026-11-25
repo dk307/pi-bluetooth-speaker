@@ -34,13 +34,12 @@ export component VisualizerOverlay inherits Rectangle {
     if root.visualizer_mode == 0 : Rectangle {
         property <length> cx: 400px;
         property <length> cy: 240px;
+        // Must match 2× R_INNER (61.0) in radial_render.rs.
         property <length> r_inner: 122px;
-        property <length> max_bar_len: 102px;
-        property <length> r_outer: r_inner + max_bar_len;
 
         width: 100%;
         height: 100%;
-        background: MaterialPalette.background;
+        background: transparent;
 
         // Primary-colored drop shadow behind both the radial bars and central hub
         Rectangle {
@@ -52,8 +51,6 @@ export component VisualizerOverlay inherits Rectangle {
             background: MaterialPalette.surface;
             drop-shadow-blur: 32px;
             drop-shadow-color: MaterialPalette.primary.transparentize(0.5);
-            drop-shadow-offset-x: 0px;
-            drop-shadow-offset-y: 0px;
             cache-rendering-hint: true;
         }
 
@@ -102,7 +99,7 @@ export component VisualizerOverlay inherits Rectangle {
     if root.visualizer_mode == 1 : Rectangle {
         width: 100%;
         height: 100%;
-        background: MaterialPalette.background;
+        background: transparent;
 
         // Subtle horizontal reference grid lines (static, cached)
         Rectangle {

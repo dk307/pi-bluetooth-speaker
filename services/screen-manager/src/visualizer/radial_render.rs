@@ -15,6 +15,7 @@ pub const RADIAL_BUF_SIZE: u32 = 228;
 
 const RADIAL_BUF_USIZE: usize = RADIAL_BUF_SIZE as usize;
 const RADIAL_CENTER: f32 = 114.0;
+// Half-resolution geometry (2× upscaled by Slint to match `r_inner: 122px` in visualizer_overlay.slint).
 const R_INNER: f32 = 61.0;
 const MAX_BAR_LEN: f32 = 51.0;
 const R_OUTER: f32 = R_INNER + MAX_BAR_LEN;
@@ -26,7 +27,7 @@ const SPOKE_HALF_WIDTH: f32 = 2.125;
 pub struct RadialPalette {
     /// Inner-most bar color at the hub base (`grad_t = 1.0`).
     pub base: [u8; 3],
-    /// Lower-mid bar color (`grad_t = 0.65`).
+    /// Lower-mid bar color (`grad_t = 0.80`).
     pub mid: [u8; 3],
     /// Upper-high bar color (`grad_t = 0.25`).
     pub high: [u8; 3],
