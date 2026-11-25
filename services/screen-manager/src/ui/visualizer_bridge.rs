@@ -19,7 +19,6 @@ pub struct VisualizerUiState {
     last_linear_bars: Cell<[f32; ERB_BAND_COUNT]>,
     last_linear_peaks: Cell<[f32; ERB_BAND_COUNT]>,
     last_radial_bars: Cell<[f32; ERB_BAND_COUNT]>,
-    last_radial_peaks: Cell<[f32; ERB_BAND_COUNT]>,
     last_radial_palette: Cell<Option<RadialPalette>>,
     radial_initialized: Cell<bool>,
 }
@@ -56,7 +55,6 @@ impl VisualizerUiState {
             last_linear_bars: Cell::new([0.0; ERB_BAND_COUNT]),
             last_linear_peaks: Cell::new([0.0; ERB_BAND_COUNT]),
             last_radial_bars: Cell::new([0.0; ERB_BAND_COUNT]),
-            last_radial_peaks: Cell::new([0.0; ERB_BAND_COUNT]),
             last_radial_palette: Cell::new(None),
             radial_initialized: Cell::new(false),
         }
@@ -81,11 +79,7 @@ impl VisualizerUiState {
                 let palette = radial_palette(window);
                 if !self.radial_initialized.get()
                     || self.last_radial_palette.get() != Some(palette)
-                    || frame_changed(
-                        &self.last_radial_bars.get(),
-                        &self.last_radial_peaks.get(),
-                        out,
-                    )
+                    || bars_changed(&self.last_radial_bars.get(), &out.spectrum_bars)
                 {
                     self.render_radial_to_window(window, out, palette);
                 }
@@ -126,14 +120,12 @@ impl VisualizerUiState {
         out: &VisualizerOutput,
         palette: RadialPalette,
     ) {
-        let img = self.radial_renderer.borrow_mut().render(
-            &out.spectrum_bars,
-            &out.spectrum_peaks,
-            palette,
-        );
+        let img = self
+            .radial_renderer
+            .borrow_mut()
+            .render(&out.spectrum_bars, palette);
         window.set_viz_radial_image(img);
         self.last_radial_bars.set(out.spectrum_bars);
-        self.last_radial_peaks.set(out.spectrum_peaks);
         self.last_radial_palette.set(Some(palette));
         self.radial_initialized.set(true);
     }
@@ -150,7 +142,6 @@ fn radial_palette(window: &MainWindow) -> RadialPalette {
         mid: color_rgb(p.get_primary()),
         high: color_rgb(p.get_secondary()),
         tip: color_rgb(p.get_tertiary()),
-        peak: color_rgb(p.get_on_surface()),
     }
 }
 
@@ -158,17 +149,6 @@ fn value_changed(prev: f32, next: f32) -> bool {
     (next - prev).abs() >= SUBPIXEL_DEADBAND || (next == 0.0 && prev != 0.0)
 }
 
-fn frame_changed(
-    prev_bars: &[f32; ERB_BAND_COUNT],
-    prev_peaks: &[f32; ERB_BAND_COUNT],
-    out: &VisualizerOutput,
-) -> bool {
-    for i in 0..ERB_BAND_COUNT {
-        if value_changed(prev_bars[i], out.spectrum_bars[i])
-            || value_changed(prev_peaks[i], out.spectrum_peaks[i])
-        {
-            return true;
-        }
-    }
-    false
+fn bars_changed(prev_bars: &[f32; ERB_BAND_COUNT], next_bars: &[f32; ERB_BAND_COUNT]) -> bool {
+    (0..ERB_BAND_COUNT).any(|i| value_changed(prev_bars[i], next_bars[i]))
 }
