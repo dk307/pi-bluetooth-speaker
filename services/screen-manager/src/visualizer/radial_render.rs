@@ -15,17 +15,41 @@ pub const RADIAL_BUF_SIZE: u32 = 228;
 
 const RADIAL_BUF_USIZE: usize = RADIAL_BUF_SIZE as usize;
 const RADIAL_CENTER: f32 = 114.0;
-const R_INNER: f32 = 58.0;
-const MAX_BAR_LEN: f32 = 54.0;
+const R_INNER: f32 = 61.0;
+const MAX_BAR_LEN: f32 = 51.0;
 const R_OUTER: f32 = R_INNER + MAX_BAR_LEN;
 const MIN_BAR_LEN: f32 = 1.5;
-const PEAK_CAP_THICKNESS: f32 = 1.5;
-const SPOKE_HALF_WIDTH: f32 = 1.5;
+const SPOKE_HALF_WIDTH: f32 = 2.125;
+
+/// Theme-derived RGB color stops for the Radial FFT visualizer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RadialPalette {
+    /// Inner-most bar color at the hub base (`grad_t = 1.0`).
+    pub base: [u8; 3],
+    /// Lower-mid bar color (`grad_t = 0.65`).
+    pub mid: [u8; 3],
+    /// Upper-high bar color (`grad_t = 0.25`).
+    pub high: [u8; 3],
+    /// Outer tip / peak-level bar color (`grad_t = 0.0`).
+    pub tip: [u8; 3],
+}
+
+impl Default for RadialPalette {
+    fn default() -> Self {
+        Self {
+            base: [0x07, 0x3C, 0x4D],
+            mid: [0x00, 0xC8, 0xFF],
+            high: [0x70, 0xE1, 0xFF],
+            tip: [0xFF, 0x33, 0x44],
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct SpokePixel {
     byte_offset: usize,
     radial_px: f32,
+    grad_t: f32,
     alpha_u8: u8,
     bar_premul: [u8; 4],
 }
@@ -38,6 +62,7 @@ struct SpokePixel {
 #[derive(Debug)]
 pub struct RadialFftRenderer {
     band_pixels: [Vec<SpokePixel>; ERB_BAND_COUNT],
+    palette: RadialPalette,
     buffers: [SharedPixelBuffer<Rgba8Pixel>; 2],
     next_buf: usize,
 }
@@ -52,22 +77,33 @@ impl RadialFftRenderer {
     /// Builds the 48-spoke pixel LUT and allocates the ping-pong `228×228` RGBA buffers.
     #[must_use]
     pub fn new() -> Self {
+        let palette = RadialPalette::default();
         let mut band_pixels: [Vec<SpokePixel>; ERB_BAND_COUNT] =
             std::array::from_fn(|_| Vec::with_capacity(1_800));
 
+        // Map all 24 ERB bands across 48 spokes using 4-quadrant butterfly symmetry:
+        // even bands (0,2..22) run 12→3 o'clock and 6→9 o'clock; odd bands (1,3..23)
+        // run 6→3 o'clock and 12→9 o'clock. This balances bass at both top & bottom
+        // with smooth, seam-free treble transitions on the left & right.
         for (idx, band_vec) in band_pixels.iter_mut().enumerate() {
-            for side in [-1.0_f32, 1.0_f32] {
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "idx is in 0..24 which is exact in f32"
-                )]
-                let angle_rad = side * (idx as f32 + 0.5) * 7.5_f32.to_radians();
-                append_spoke_pixels(angle_rad, band_vec);
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "idx / 2 is in 0..12 which is exact in f32"
+            )]
+            let step_deg = ((idx / 2) as f32 + 0.5) * 7.5_f32;
+            let angles_deg = if idx.is_multiple_of(2) {
+                [step_deg, 180.0 + step_deg]
+            } else {
+                [180.0 - step_deg, 360.0 - step_deg]
+            };
+            for deg in angles_deg {
+                append_spoke_pixels(deg.to_radians(), &palette, band_vec);
             }
         }
 
         Self {
             band_pixels,
+            palette,
             buffers: [
                 SharedPixelBuffer::new(RADIAL_BUF_SIZE, RADIAL_BUF_SIZE),
                 SharedPixelBuffer::new(RADIAL_BUF_SIZE, RADIAL_BUF_SIZE),
@@ -76,13 +112,23 @@ impl RadialFftRenderer {
         }
     }
 
-    /// Renders `bars` and `peaks` into the inactive ping-pong buffer and returns a Slint [`slint::Image`].
-    pub fn render(
-        &mut self,
-        bars: &[f32; ERB_BAND_COUNT],
-        peaks: &[f32; ERB_BAND_COUNT],
-        peak_rgb: [u8; 3],
-    ) -> slint::Image {
+    /// Recomputes pre-multiplied bar colors in the LUT when the theme palette changes.
+    pub fn set_palette(&mut self, palette: RadialPalette) {
+        if self.palette == palette {
+            return;
+        }
+        self.palette = palette;
+        for band_vec in &mut self.band_pixels {
+            for sp in band_vec {
+                sp.bar_premul =
+                    premul_rgba(sample_bar_gradient(&self.palette, sp.grad_t), sp.alpha_u8);
+            }
+        }
+    }
+
+    /// Renders `bars` into the inactive ping-pong buffer and returns a Slint [`slint::Image`].
+    pub fn render(&mut self, bars: &[f32; ERB_BAND_COUNT], palette: RadialPalette) -> slint::Image {
+        self.set_palette(palette);
         let idx = self.next_buf;
         self.next_buf = 1 - idx;
         let bytes = self.buffers[idx].make_mut_bytes();
@@ -91,15 +137,9 @@ impl RadialFftRenderer {
             let bar_len = (MAX_BAR_LEN * bars[band_idx].clamp(0.0, 1.0)).max(MIN_BAR_LEN);
             let bar_end = R_INNER + bar_len;
 
-            let peak_len = (MAX_BAR_LEN * peaks[band_idx].clamp(0.0, 1.0)).max(MIN_BAR_LEN);
-            let peak_end = (R_INNER + peak_len + PEAK_CAP_THICKNESS).min(R_OUTER);
-            let peak_start = peak_end - PEAK_CAP_THICKNESS;
-
             for sp in spoke_pixels {
                 let dst = &mut bytes[sp.byte_offset..sp.byte_offset + 4];
-                if sp.radial_px >= peak_start && sp.radial_px <= peak_end {
-                    dst.copy_from_slice(&premul_rgba(peak_rgb, sp.alpha_u8));
-                } else if sp.radial_px <= bar_end {
+                if sp.radial_px <= bar_end {
                     dst.copy_from_slice(&sp.bar_premul);
                 } else {
                     dst.fill(0);
@@ -111,7 +151,7 @@ impl RadialFftRenderer {
     }
 }
 
-fn append_spoke_pixels(angle_rad: f32, out: &mut Vec<SpokePixel>) {
+fn append_spoke_pixels(angle_rad: f32, palette: &RadialPalette, out: &mut Vec<SpokePixel>) {
     let ux = angle_rad.sin();
     let uy = -angle_rad.cos();
     let px = angle_rad.cos();
@@ -197,10 +237,11 @@ fn append_spoke_pixels(angle_rad: f32, out: &mut Vec<SpokePixel>) {
             }
 
             let grad_t = ((R_OUTER - radial) / MAX_BAR_LEN).clamp(0.0, 1.0);
-            let bar_premul = premul_rgba(sample_bar_gradient(grad_t), alpha_u8);
+            let bar_premul = premul_rgba(sample_bar_gradient(palette, grad_t), alpha_u8);
             out.push(SpokePixel {
                 byte_offset: (y * RADIAL_BUF_USIZE + x) * 4,
                 radial_px: radial,
+                grad_t,
                 alpha_u8,
                 bar_premul,
             });
@@ -251,16 +292,16 @@ fn premul_rgba(rgb: [u8; 3], alpha: u8) -> [u8; 4] {
     [r, g, b, alpha]
 }
 
-fn sample_bar_gradient(t: f32) -> [u8; 3] {
-    const STOPS: [(f32, [u8; 3]); 4] = [
-        (0.00, [0xFF, 0x52, 0x52]),
-        (0.28, [0xFF, 0xB3, 0x00]),
-        (0.68, [0x26, 0xE6, 0xA4]),
-        (1.00, [0x00, 0xB8, 0xD4]),
+fn sample_bar_gradient(palette: &RadialPalette, t: f32) -> [u8; 3] {
+    let stops: [(f32, [u8; 3]); 4] = [
+        (0.00, palette.tip),
+        (0.25, palette.high),
+        (0.80, palette.mid),
+        (1.00, palette.base),
     ];
 
     let t = t.clamp(0.0, 1.0);
-    for pair in STOPS.windows(2) {
+    for pair in stops.windows(2) {
         let (t0, c0) = pair[0];
         let (t1, c1) = pair[1];
         if t <= t1 {
@@ -272,7 +313,7 @@ fn sample_bar_gradient(t: f32) -> [u8; 3] {
             ];
         }
     }
-    STOPS[3].1
+    stops[3].1
 }
 
 fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {

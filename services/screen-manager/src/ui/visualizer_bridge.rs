@@ -7,7 +7,7 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::ui::{MainWindow, MaterialPalette, SpectrumBandItem};
 use crate::visualizer::dsp_math::ERB_BAND_COUNT;
-use crate::visualizer::{RadialFftRenderer, VisualizerMode, VisualizerOutput};
+use crate::visualizer::{RadialFftRenderer, RadialPalette, VisualizerMode, VisualizerOutput};
 
 /// Minimum normalized bar/peak delta (~0.4 px) before pushing a Slint update.
 const SUBPIXEL_DEADBAND: f32 = 0.003;
@@ -19,8 +19,7 @@ pub struct VisualizerUiState {
     last_linear_bars: Cell<[f32; ERB_BAND_COUNT]>,
     last_linear_peaks: Cell<[f32; ERB_BAND_COUNT]>,
     last_radial_bars: Cell<[f32; ERB_BAND_COUNT]>,
-    last_radial_peaks: Cell<[f32; ERB_BAND_COUNT]>,
-    last_radial_peak_rgb: Cell<[u8; 3]>,
+    last_radial_palette: Cell<Option<RadialPalette>>,
     radial_initialized: Cell<bool>,
 }
 
@@ -56,8 +55,7 @@ impl VisualizerUiState {
             last_linear_bars: Cell::new([0.0; ERB_BAND_COUNT]),
             last_linear_peaks: Cell::new([0.0; ERB_BAND_COUNT]),
             last_radial_bars: Cell::new([0.0; ERB_BAND_COUNT]),
-            last_radial_peaks: Cell::new([0.0; ERB_BAND_COUNT]),
-            last_radial_peak_rgb: Cell::new([0, 0, 0]),
+            last_radial_palette: Cell::new(None),
             radial_initialized: Cell::new(false),
         }
     }
@@ -66,7 +64,7 @@ impl VisualizerUiState {
     pub fn bind_to_window(&self, window: &MainWindow) {
         window.set_viz_spectrum_bands(ModelRc::from(Rc::clone(&self.spectrum_bands)));
         let zero = VisualizerOutput::default();
-        self.render_radial_to_window(window, &zero, primary_rgb(window));
+        self.render_radial_to_window(window, &zero, radial_palette(window));
     }
 
     /// Pushes a [`VisualizerOutput`] frame to the active mode's Slint target only.
@@ -78,16 +76,12 @@ impl VisualizerUiState {
     ) {
         match mode {
             VisualizerMode::RadialFft => {
-                let peak_rgb = primary_rgb(window);
+                let palette = radial_palette(window);
                 if !self.radial_initialized.get()
-                    || self.last_radial_peak_rgb.get() != peak_rgb
-                    || frame_changed(
-                        &self.last_radial_bars.get(),
-                        &self.last_radial_peaks.get(),
-                        out,
-                    )
+                    || self.last_radial_palette.get() != Some(palette)
+                    || bars_changed(&self.last_radial_bars.get(), &out.spectrum_bars)
                 {
-                    self.render_radial_to_window(window, out, peak_rgb);
+                    self.render_radial_to_window(window, out, palette);
                 }
             }
             VisualizerMode::LinearSpectrum => {
@@ -124,41 +118,37 @@ impl VisualizerUiState {
         &self,
         window: &MainWindow,
         out: &VisualizerOutput,
-        peak_rgb: [u8; 3],
+        palette: RadialPalette,
     ) {
-        let img = self.radial_renderer.borrow_mut().render(
-            &out.spectrum_bars,
-            &out.spectrum_peaks,
-            peak_rgb,
-        );
+        let img = self
+            .radial_renderer
+            .borrow_mut()
+            .render(&out.spectrum_bars, palette);
         window.set_viz_radial_image(img);
         self.last_radial_bars.set(out.spectrum_bars);
-        self.last_radial_peaks.set(out.spectrum_peaks);
-        self.last_radial_peak_rgb.set(peak_rgb);
+        self.last_radial_palette.set(Some(palette));
         self.radial_initialized.set(true);
     }
 }
 
-fn primary_rgb(window: &MainWindow) -> [u8; 3] {
-    let primary = window.global::<MaterialPalette>().get_primary();
-    [primary.red(), primary.green(), primary.blue()]
+fn color_rgb(c: slint::Color) -> [u8; 3] {
+    [c.red(), c.green(), c.blue()]
+}
+
+fn radial_palette(window: &MainWindow) -> RadialPalette {
+    let p = window.global::<MaterialPalette>();
+    RadialPalette {
+        base: color_rgb(p.get_primary_container()),
+        mid: color_rgb(p.get_primary()),
+        high: color_rgb(p.get_secondary()),
+        tip: color_rgb(p.get_tertiary()),
+    }
 }
 
 fn value_changed(prev: f32, next: f32) -> bool {
     (next - prev).abs() >= SUBPIXEL_DEADBAND || (next == 0.0 && prev != 0.0)
 }
 
-fn frame_changed(
-    prev_bars: &[f32; ERB_BAND_COUNT],
-    prev_peaks: &[f32; ERB_BAND_COUNT],
-    out: &VisualizerOutput,
-) -> bool {
-    for i in 0..ERB_BAND_COUNT {
-        if value_changed(prev_bars[i], out.spectrum_bars[i])
-            || value_changed(prev_peaks[i], out.spectrum_peaks[i])
-        {
-            return true;
-        }
-    }
-    false
+fn bars_changed(prev_bars: &[f32; ERB_BAND_COUNT], next_bars: &[f32; ERB_BAND_COUNT]) -> bool {
+    (0..ERB_BAND_COUNT).any(|i| value_changed(prev_bars[i], next_bars[i]))
 }
