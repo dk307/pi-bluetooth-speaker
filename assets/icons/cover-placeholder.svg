@@ -1,27 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <defs>
-    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#1e1e24" />
-      <stop offset="100%" stop-color="#121216" />
-    </linearGradient>
-    <linearGradient id="accent-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#ff6b6b" />
-      <stop offset="100%" stop-color="#5f27cd" />
-    </linearGradient>
-  </defs>
-  
-  <!-- Background -->
-  <rect width="256" height="256" fill="url(#bg-grad)" />
-  
-  <!-- Outer Disc & Grooves -->
-  <circle cx="128" cy="128" r="88" fill="#0d0d11" stroke="#2a2a35" stroke-width="2" />
-  <circle cx="128" cy="128" r="74" fill="none" stroke="#1f1f27" stroke-width="1.5" stroke-dasharray="120 20" />
-  <circle cx="128" cy="128" r="60" fill="none" stroke="#1f1f27" stroke-width="1.5" stroke-dasharray="80 30" />
-  <circle cx="128" cy="128" r="46" fill="none" stroke="#2a2a35" stroke-width="1" />
-  
-  <!-- Center Label -->
-  <circle cx="128" cy="128" r="30" fill="url(#accent-grad)" />
-  
-  <!-- Spindle Hole -->
-  <circle cx="128" cy="128" r="8" fill="#121216" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="none">
+  <rect class="phone-frame" x="157" y="107" width="200" height="300" rx="35" stroke="#FFFFFF" stroke-opacity="0.8627" stroke-width="10" />
+  <circle class="speaker-dot" cx="257" cy="153" r="10" fill="#FFFFFF" fill-opacity="0.5098" />
+  <circle class="bluetooth-ring" cx="257" cy="277" r="76" stroke="#FFFFFF" stroke-opacity="0.8627" stroke-width="10" />
+  <path class="bluetooth-symbol" d="M 233 255 L 281.5 299 L 257 320 L 257 234 L 281.5 255 L 233 299" stroke="#FFFFFF" stroke-opacity="1.0000" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" />
+  <path class="wave-inner" d="M 135.5 191.5 A 138 138 0 0 0 135.5 322.5" stroke="#FFFFFF" stroke-opacity="0.5098" stroke-width="12" stroke-linecap="round" />
+  <path class="wave-outer" d="M 112.9 152.5 A 178 178 0 0 0 112.9 361.5" stroke="#FFFFFF" stroke-opacity="0.8627" stroke-width="12" stroke-linecap="round" />
+  <path class="wave-inner" d="M 378.5 191.5 A 138 138 0 0 1 378.5 322.5" stroke="#FFFFFF" stroke-opacity="0.5098" stroke-width="12" stroke-linecap="round" />
+  <path class="wave-outer" d="M 401.1 152.5 A 178 178 0 0 1 401.1 361.5" stroke="#FFFFFF" stroke-opacity="0.8627" stroke-width="12" stroke-linecap="round" />
 </svg>
