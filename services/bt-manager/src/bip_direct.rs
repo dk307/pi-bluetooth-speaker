@@ -1047,16 +1047,12 @@ impl BipPixel {
 
 #[inline]
 fn proportional_height(w: u32, max_w: u32, max_h: u32) -> u32 {
-    if max_w > 0 {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "proportional height fits within u32 bounds"
-        )]
-        let h = ((u64::from(w) * u64::from(max_h)) / u64::from(max_w)) as u32;
-        h
-    } else {
-        max_h
-    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "proportional height fits within u32 bounds"
+    )]
+    let h = ((u64::from(w) * u64::from(max_h)) / u64::from(max_w.max(1))) as u32;
+    h
 }
 
 #[inline]

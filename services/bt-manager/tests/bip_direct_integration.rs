@@ -33,6 +33,7 @@ struct StubCoverArtServer {
     get_srm: Arc<Mutex<bool>>,
     /// Optional properties XML response for `x-bt/img-properties` queries.
     properties_xml: Option<String>,
+    properties_outcomes: std::collections::VecDeque<Result<Vec<u8>, Response>>,
 }
 
 impl obex_protocol::tokio::Handler for StubCoverArtServer {
@@ -77,7 +78,11 @@ impl obex_protocol::tokio::Handler for StubCoverArtServer {
         });
         let is_properties = mime.as_deref() == Some(MIME_IMAGE_PROPERTIES);
         let outcome = if is_properties {
-            if let Some(xml) = &self.properties_xml {
+            if let Some(prop_outcome) = self.properties_outcomes.pop_front() {
+                prop_outcome.map(|body| {
+                    Object::new([Header::Type(MIME_IMAGE_PROPERTIES.to_string())], body)
+                })
+            } else if let Some(xml) = &self.properties_xml {
                 Ok(Object::new(
                     [Header::Type(MIME_IMAGE_PROPERTIES.to_string())],
                     xml.as_bytes().to_vec(),
@@ -170,6 +175,7 @@ fn new_retry_stub(get_outcomes: Vec<Result<Vec<u8>, Response>>) -> SharedStub {
         descriptor_history: Arc::new(Mutex::new(Vec::new())),
         get_srm: Arc::new(Mutex::new(false)),
         properties_xml: None,
+        properties_outcomes: std::collections::VecDeque::new(),
     }))
 }
 
@@ -1299,14 +1305,27 @@ fn bip_image_properties_parse_malformed() {
     // Skips malformed variant tags while preserving valid formats
     let mixed_xml = r#"<image-properties handle="0000001">
         <variant encoding="WEBP" />
+        <native my-encoding="PNG" encoding pixel="200*200" />
         <native encoding="JPEG" pixel="200*200" />
         <variant encoding="JPEG" pixel="invalid" />
         <variant encoding="JPEG" pixel="640*480" />
+        <variant encoding="JPEG" pixel="800*800
     </image-properties>"#;
     let mixed = BipImageProperties::parse(mixed_xml).expect("must parse valid tags");
     assert_eq!(mixed.formats.len(), 2);
     assert_eq!(mixed.formats[0].pixel, BipPixel::Fixed(200, 200));
     assert_eq!(mixed.formats[1].pixel, BipPixel::Fixed(640, 480));
+}
+
+#[test]
+fn bip_error_is_transport_fault_classifies_errors() {
+    let io_err = || std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+    assert!(BipError::rfcomm_connect(io_err()).is_transport_fault());
+    assert!(BipError::l2cap_connect(io_err()).is_transport_fault());
+    assert!(BipError::sdp_lookup_details("simulated").is_transport_fault());
+    assert!(BipError::obex(obex_protocol::Error::Io(io_err())).is_transport_fault());
+    assert!(!BipError::image_rejected("OBEX GET", ResponseCode::NotFound).is_transport_fault());
+    assert!(!BipError::invalid_handle("bad").is_transport_fault());
 }
 
 #[test]
@@ -1540,6 +1559,95 @@ async fn persistent_session_caches_rejected_variant_across_fetches() {
     assert_eq!(
         *s.descriptor_history.lock().await,
         vec![false, true, false, false]
+    );
+}
+
+#[tokio::test]
+async fn get_image_properties_on_rejects_invalid_utf8_and_malformed_xml() {
+    let stub = new_stub(Ok(vec![]));
+    stub.lock().await.properties_outcomes = std::collections::VecDeque::from([
+        Ok(vec![0xFF, 0xFE]),
+        Ok(b"<not-image-properties/>".to_vec()),
+    ]);
+    let (client_half, server_half) = duplex_pair();
+    let server_task = spawn_stub_server(Arc::clone(&stub), server_half);
+
+    let mut client = bt_manager::bip_direct::cover_art_client(client_half);
+    client
+        .connect([Header::Target(AVRCP_COVER_ART_UUID.to_vec())])
+        .await
+        .expect("connect");
+
+    let utf8_err = bt_manager::bip_direct::get_image_properties_on(&mut client, "0000001")
+        .await
+        .expect_err("invalid UTF-8 must error");
+    assert!(utf8_err.to_string().contains("UTF-8"));
+    assert!(!utf8_err.is_transport_fault());
+    assert_eq!(utf8_err.response_code(), None);
+
+    let xml_err = bt_manager::bip_direct::get_image_properties_on(&mut client, "0000001")
+        .await
+        .expect_err("malformed XML must error");
+    assert!(xml_err.to_string().contains("parse"));
+    assert!(!xml_err.is_transport_fault());
+    assert_eq!(xml_err.response_code(), None);
+
+    drop(client);
+    let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn persistent_session_does_not_poison_properties_cache_on_malformed_xml() {
+    let valid_xml = r#"<image-properties version="1.0" handle="0000002">
+  <native encoding="JPEG" pixel="200*200" />
+  <variant encoding="JPEG" pixel="640*480" />
+</image-properties>"#;
+
+    let native_body = body_bytes(256, 0x11);
+    let variant_body = body_bytes(512, 0x22);
+
+    let stub = new_retry_stub(vec![Ok(native_body.clone()), Ok(variant_body.clone())]);
+    {
+        let mut guard = stub.lock().await;
+        guard.properties_outcomes = std::collections::VecDeque::from([Ok(b"garbled".to_vec())]);
+        guard.properties_xml = Some(valid_xml.to_string());
+    };
+
+    let stub_clone = Arc::clone(&stub);
+    let mut session = PersistentBipSession::with_channel_factory(move |_| {
+        Box::new(CustomServingChannel(Arc::clone(&stub_clone)))
+    });
+
+    let address = test_address();
+    let res1 = session
+        .fetch_image(
+            &address,
+            &BipTransport::SdpRfcomm,
+            BipImageType::Native,
+            "0000001",
+        )
+        .await
+        .expect("garbled properties must fall back to native");
+    assert_eq!(res1, native_body);
+
+    let res2 = session
+        .fetch_image(
+            &address,
+            &BipTransport::SdpRfcomm,
+            BipImageType::Native,
+            "0000002",
+        )
+        .await
+        .expect("subsequent track must still negotiate variant");
+    assert_eq!(res2, variant_body);
+
+    session.release();
+    let s = stub.lock().await;
+    // Fetch 1: properties GET (false, garbled), native GET (false)
+    // Fetch 2: properties GET (false, valid), variant GET (true)
+    assert_eq!(
+        *s.descriptor_history.lock().await,
+        vec![false, false, false, true]
     );
 }
 
