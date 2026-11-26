@@ -2,13 +2,66 @@
 #![cfg(feature = "ui")]
 
 use screen_manager::ui::boot::{
-    BootCheckId, BootCheckStatus, BootCheckUpdate, BootProbe, ProbeFn, probe_display,
+    BootCheckId, BootCheckStatus, BootCheckUpdate, BootProbe, ProbeFn, probe_amp_with,
+    probe_bluetooth_with, probe_display, probe_dsp_with, probe_sensors_with,
 };
+use speaker_bluetooth::BluetoothDevice;
+use speaker_dsp::DspDevice;
+use speaker_hardware::{AmpDevice, LightSensor, SensorId, TempSensor, Temperature};
 
 fn collect(probes: [ProbeFn; 5]) -> Vec<BootCheckUpdate> {
     let mut updates = Vec::new();
     BootProbe::from_probes(probes).run(&mut |update| updates.push(update));
     updates
+}
+
+#[test]
+fn check_id_labels_and_probe_debug_are_stable() {
+    // Every label arm of `BootCheckId` (regression: UI boot rows must keep
+    // their user-facing strings) plus the manual `Debug for BootProbe` impl.
+    assert_eq!(BootCheckId::Display.label(), "Display");
+    assert_eq!(BootCheckId::Amp.label(), "I2S Amplifier");
+    assert_eq!(BootCheckId::Dsp.label(), "CamillaDSP");
+    assert_eq!(BootCheckId::Bluetooth.label(), "Bluetooth Stack");
+    assert_eq!(BootCheckId::Sensors.label(), "Sensors & Bus");
+
+    let probe = BootProbe::from_probes(std::array::from_fn(|_| {
+        let probe: ProbeFn = Box::new(|| Ok("ok".into()));
+        probe
+    }));
+    let debug = format!("{probe:?}");
+    assert!(debug.contains("BootProbe"), "Debug output: {debug}");
+    assert!(debug.contains("probe_count"), "Debug output: {debug}");
+}
+
+#[test]
+fn real_probe_bodies_run_hermetically_against_mocked_devices() {
+    // The production probe bodies (status formatting, fault/operational
+    // checks) run against mocked devices so this suite performs no live
+    // I2C, sysfs or D-Bus I/O ("Ensure Hermetic Tests").
+    let (amp, _amp_ctrl) = AmpDevice::new_mocked();
+    let amp_detail = probe_amp_with(&amp).expect("mocked amp reports no live faults");
+    assert!(amp_detail.contains("mode:"), "amp detail: {amp_detail}");
+
+    let (dsp, _dsp_ctrl) = DspDevice::new_mocked();
+    let dsp_detail = probe_dsp_with(&dsp).expect("mocked dsp operational");
+    assert!(dsp_detail.contains("load:"), "dsp detail: {dsp_detail}");
+
+    let (bt, _bt_ctrl) = BluetoothDevice::new_mocked();
+    let bt_detail = probe_bluetooth_with(&bt).expect("mocked adapter operational");
+    assert!(bt_detail.contains("connected"), "bt detail: {bt_detail}");
+
+    let (temp, temp_ctrl) = TempSensor::new_mocked();
+    temp_ctrl.set_temperature(
+        SensorId::parse("28-00000feedbee").expect("valid 1-wire id"),
+        Temperature::from_celsius(25.0).expect("valid temperature"),
+    );
+    let (light, _light_ctrl) = LightSensor::new_mocked();
+    let sensor_detail = probe_sensors_with(&temp, &light).expect("mocked sensors");
+    assert!(
+        sensor_detail.contains("°C"),
+        "sensor detail: {sensor_detail}"
+    );
 }
 
 #[test]

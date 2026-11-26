@@ -687,7 +687,7 @@ All crates are pinned to their exact latest release version using the `=` prefix
 ```toml
 [package]
 name = "audio-ui"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 authors = ["Audio Appliance Team"]
@@ -937,7 +937,7 @@ rustflags = [
     - **CamillaDSP:** Native Rust binary (`/usr/local/bin/camilladsp`)
     - **Screen Console:** Native Rust binary (`/usr/local/bin/screen-manager`)
     - **Bluetooth Manager & Agent:** Native Rust binary (`/usr/local/bin/bt-manager`)
-    - **BlueALSA & BlueZ:** Native C binaries (`/usr/bin/bluealsa`, `/usr/libexec/bluetooth/bluetoothd`)
+    - **BlueALSA & BlueZ:** Native C binaries (`/usr/local/bin/bluealsad`, `/usr/libexec/bluetooth/bluetoothd`)
 
 ---
 

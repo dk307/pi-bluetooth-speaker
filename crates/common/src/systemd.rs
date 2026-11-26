@@ -111,8 +111,16 @@ pub fn check_systemd_unit(
 ) -> zbus::Result<ServiceState> {
     match manager.get_unit(name) {
         Ok(path) => {
+            // The unit proxy is short-lived: both property getters run back-to-back
+            // and the proxy is dropped immediately after. `CacheProperties::No`
+            // turns each getter into a single `Properties.Get`; the default lazy
+            // cache would instead emit `AddMatch`×2 + `GetNameOwner` + `GetAll`
+            // and `RemoveMatch`×2 on drop, which floods `dbus-daemon` on every
+            // unit probe. Nothing observes future property changes, so there is
+            // no cache to benefit from.
             let unit = match SystemdUnitProxyBlocking::builder(conn)
                 .path(path)
+                .map(|b| b.cache_properties(zbus::proxy::CacheProperties::No))
                 .and_then(zbus::blocking::proxy::Builder::build)
             {
                 Ok(u) => u,

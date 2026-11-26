@@ -1,0 +1,205 @@
+import { MaterialPalette } from "@material/material.slint";
+
+/// Per-band normalized level & peak-hold cap for the 24-band ERB spectrum.
+export struct SpectrumBandItem {
+    value: float,
+    peak: float,
+}
+
+/// Full-screen `800×480` music visualizer overlay.
+///
+/// Supports:
+/// - Mode 0: Bilateral 48-bar Radial FFT around central circular album art
+/// - Mode 1: 24-Band Glasberg–Moore ERB Linear Spectrum with 3 px peak-hold caps
+/// - Tap anywhere to return to Now Playing; swipe left/right to switch modes.
+export component VisualizerOverlay inherits Rectangle {
+    width: 800px;
+    height: 480px;
+    clip: true;
+    background: MaterialPalette.background;
+
+    // 0 = Radial FFT, 1 = 24-Band ERB Linear Spectrum
+    in property <int> visualizer_mode: 0;
+    in property <[SpectrumBandItem]> spectrum_bands;
+    in property <image> radial_image;
+    in property <bool> spectrum_led_mask: true;
+    in property <bool> has_cover_art: false;
+    in property <image> cover_image;
+
+    callback close_requested();
+    callback next_visualizer();
+    callback prev_visualizer();
+
+    // Mode 0: Bilateral 48-Bar Radial FFT Visualizer (pre-rendered SharedPixelBuffer)
+    if root.visualizer_mode == 0 : Rectangle {
+        property <length> cx: 400px;
+        property <length> cy: 240px;
+        property <length> r_inner: 122px;
+        property <length> max_bar_len: 102px;
+        property <length> r_outer: r_inner + max_bar_len;
+
+        width: 100%;
+        height: 100%;
+        background: MaterialPalette.background;
+
+        // Primary-colored drop shadow behind both the radial bars and central hub
+        Rectangle {
+            x: cx - (r_inner - 4px);
+            y: cy - (r_inner - 4px);
+            width: (r_inner - 4px) * 2;
+            height: (r_inner - 4px) * 2;
+            border-radius: r_inner - 4px;
+            background: MaterialPalette.surface;
+            drop-shadow-blur: 32px;
+            drop-shadow-color: MaterialPalette.primary.transparentize(0.5);
+            drop-shadow-offset-x: 0px;
+            drop-shadow-offset-y: 0px;
+            cache-rendering-hint: true;
+        }
+
+        // Single pre-rendered 48-spoke Radial FFT buffer (456×456 centered on 400×240)
+        Image {
+            x: cx - 228px;
+            y: cy - 228px;
+            width: 456px;
+            height: 456px;
+            source: root.radial_image;
+            image-fit: fill;
+        }
+
+        // Central circular ring: album cover art or minimal dark hub (cached in GPU FBO)
+        Rectangle {
+            x: cx - (r_inner - 4px);
+            y: cy - (r_inner - 4px);
+            width: (r_inner - 4px) * 2;
+            height: (r_inner - 4px) * 2;
+            border-radius: r_inner - 4px;
+            border-width: 2px;
+            border-color: MaterialPalette.outline_variant;
+            background: MaterialPalette.surface;
+            clip: true;
+            cache-rendering-hint: true;
+
+            if root.has_cover_art : Image {
+                width: 100%;
+                height: 100%;
+                source: root.cover_image;
+                image-fit: cover;
+            }
+
+            if !root.has_cover_art : Image {
+                width: 100%;
+                height: 100%;
+                source: @image-url("../../../assets/icons/cover-placeholder.svg");
+                colorize: MaterialPalette.primary;
+                image-fit: cover;
+            }
+        }
+    }
+
+    // Mode 1: 24-Band ERB Linear Frequency Spectrum
+    if root.visualizer_mode == 1 : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: MaterialPalette.background;
+
+        // Subtle horizontal reference grid lines (static, cached)
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: transparent;
+            cache-rendering-hint: true;
+
+            for frac in [0.25, 0.5, 0.75] : Rectangle {
+                x: 24px;
+                y: 28px + (parent.height - 56px) * frac;
+                width: parent.width - 48px;
+                height: 1px;
+                background: MaterialPalette.outline_variant.transparentize(0.5);
+            }
+        }
+
+        // 24 sharp ERB bars + 3 px peak-hold caps (no border-radius, no shadows)
+        Rectangle {
+            x: 24px;
+            y: 28px;
+            width: 752px;
+            height: 424px;
+            background: transparent;
+
+            for band[idx] in root.spectrum_bands : Rectangle {
+                property <length> slot_w: parent.width / 24;
+                property <length> bar_w: self.slot_w - 6px;
+                property <length> bar_h: Math.max(2px, parent.height * Math.clamp(band.value, 0.0, 1.0));
+                property <length> peak_y: parent.height - Math.max(3px, parent.height * Math.clamp(band.peak, 0.0, 1.0));
+
+                x: idx * self.slot_w + 3px;
+                y: 0px;
+                width: self.bar_w;
+                height: parent.height;
+                background: transparent;
+
+                // Spectrum bar with theme-driven vertical gradient
+                Rectangle {
+                    x: 0px;
+                    y: parent.height - bar_h;
+                    width: parent.width;
+                    height: bar_h;
+                    border-radius: 0px;
+                    background: @linear-gradient(
+                        180deg,
+                        MaterialPalette.tertiary 0%,
+                        MaterialPalette.secondary 25%,
+                        MaterialPalette.primary 65%,
+                        MaterialPalette.primary_container 100%
+                    );
+                }
+
+                // 3 px peak-hold cap
+                Rectangle {
+                    x: 0px;
+                    y: Math.clamp(peak_y, 0px, parent.height - 3px);
+                    width: parent.width;
+                    height: 3px;
+                    border-radius: 0px;
+                    background: MaterialPalette.on_surface;
+                }
+            }
+        }
+
+        // Static horizontal-slit LED mask PNG overlay
+        if root.spectrum_led_mask : Image {
+            x: 0px;
+            y: 0px;
+            width: 800px;
+            height: 480px;
+            source: @image-url("../../../assets/skins/spectrum-led-mask.png");
+            image-fit: fill;
+            cache-rendering-hint: true;
+        }
+    }
+
+    // Gesture layer: swipe left/right cycles visualizers; tap returns to Now Playing.
+    swipe := SwipeGestureHandler {
+        width: 100%;
+        height: 100%;
+        handle-swipe-left: true;
+        handle-swipe-right: true;
+
+        swiped => {
+            if (self.current-position.x - self.pressed-position.x < -40px) {
+                root.next_visualizer();
+            } else if (self.current-position.x - self.pressed-position.x > 40px) {
+                root.prev_visualizer();
+            }
+        }
+
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => {
+                root.close_requested();
+            }
+        }
+    }
+}

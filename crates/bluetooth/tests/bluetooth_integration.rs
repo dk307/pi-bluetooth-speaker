@@ -8,7 +8,8 @@ use speaker_bluetooth::bluetooth_test_helpers::{DbusClient, ManagedObjects};
 use speaker_bluetooth::{
     BlueAlsaPcm, BluetoothControllerInfo, BluetoothDevice, BluetoothHardwareInfo,
     BluetoothServices, BtAddress, BtDevice, BtError, BtPlaybackState, bluetooth_test_helpers,
-    decode_pcm_format, format_duration_ms, seek_offset_us, validate_bip_handle,
+    decode_pcm_format, format_duration_ms, format_duration_ms_ui, seek_offset_us,
+    validate_bip_handle,
 };
 use speaker_common::systemd::ServiceState;
 
@@ -1151,6 +1152,24 @@ fn playback_state_and_duration_formatting() {
     assert_eq!(format_duration_ms(3_661_000), "01:01:01");
     assert_eq!(format_duration_ms(36_000_000), "10:00:00");
 
+    // UI formatter: leading-zero omission for <10 min tracks
+    assert_eq!(format_duration_ms_ui(0, 0), "0:00");
+    assert_eq!(format_duration_ms_ui(0, 400_000), "0:00");
+    assert_eq!(format_duration_ms_ui(65_000, 195_000), "1:05");
+    assert_eq!(format_duration_ms_ui(195_000, 195_000), "3:15");
+    assert_eq!(format_duration_ms_ui(300_000, 400_000), "5:00");
+    assert_eq!(format_duration_ms_ui(599_000, 599_000), "9:59");
+    // >=10 min tracks keep the leading zero
+    assert_eq!(format_duration_ms_ui(0, 600_000), "00:00");
+    assert_eq!(format_duration_ms_ui(599_000, 600_000), "09:59");
+    assert_eq!(format_duration_ms_ui(300_000, 600_000), "05:00");
+    assert_eq!(format_duration_ms_ui(600_000, 600_000), "10:00");
+    // >=1 h always uses HH:MM:SS
+    assert_eq!(format_duration_ms_ui(3_600_000, 3_600_000), "01:00:00");
+    assert_eq!(format_duration_ms_ui(3_661_000, 3_661_000), "01:01:01");
+    // Defensive: position > 1h on sub-hour track
+    assert_eq!(format_duration_ms_ui(3_600_000, 600_000), "01:00:00");
+
     let def = BtPlaybackState::default();
     assert_eq!(def.device_address, None);
     assert_eq!(def.device_name.as_ref(), "Bluetooth Audio Device");
@@ -1165,6 +1184,8 @@ fn playback_state_and_duration_formatting() {
     assert_eq!(def.obex_port, None);
     assert_eq!(def.image_handle, None);
     assert_eq!(def.cover_art_path, None);
+    assert_eq!(def.phone_volume, None);
+    assert_eq!(def.phone_volume_percent(), None);
     assert_eq!(def.progress_ratio(), 0.0);
     assert_eq!(def.format_position(), "00:00");
     assert_eq!(def.format_duration(), "00:00");
@@ -1182,11 +1203,26 @@ fn playback_state_and_duration_formatting() {
         obex_port: Some(4097),
         image_handle: Some("img001".into()),
         cover_art_path: Some("/tmp/test.jpg".into()),
+        phone_volume: None,
+        equalizer: None,
+        repeat: None,
+        shuffle: None,
+        scan: None,
     };
     assert!(state.is_playing());
     assert_eq!(state.format_position(), "02:05");
     assert_eq!(state.format_duration(), "06:55");
     assert!((state.progress_ratio() - (125.0 / 415.0)).abs() < 1e-4);
+
+    // AVRCP absolute volume → percentage conversion (0-127 → 0-100, rounded)
+    state.phone_volume = speaker_bluetooth::AvrcpVolume::new(0);
+    assert_eq!(state.phone_volume_percent(), Some(0));
+    state.phone_volume = speaker_bluetooth::AvrcpVolume::new(127);
+    assert_eq!(state.phone_volume_percent(), Some(100));
+    state.phone_volume = speaker_bluetooth::AvrcpVolume::new(64);
+    assert_eq!(state.phone_volume_percent(), Some(50));
+    state.phone_volume = speaker_bluetooth::AvrcpVolume::new(80);
+    assert_eq!(state.phone_volume_percent(), Some(63));
 
     state.status = "Playing".into();
     assert!(state.is_playing());
@@ -1206,6 +1242,70 @@ fn playback_state_and_duration_formatting() {
     assert_eq!(state.progress_ratio(), 1.0);
     state.duration_ms = 0;
     assert_eq!(state.progress_ratio(), 0.0);
+
+    // `u32::MAX` is BlueZ's "unknown timeline" sentinel: it must never be
+    // formatted as a timestamp (that produced the bogus `1193:...` readout).
+    state.duration_ms = u32::MAX;
+    assert!(!state.duration_known());
+    assert_eq!(state.progress_ratio(), 0.0);
+    state.position_ms = u32::MAX;
+    assert!(!state.position_known());
+    state.duration_ms = 415_000;
+    assert!(state.duration_known());
+}
+
+#[test]
+fn avrcp_volume_construction_and_serde_roundtrip() {
+    use speaker_bluetooth::{AVRCP_MAX_VOLUME, AvrcpVolume};
+
+    // Boundary construction: 0 and the maximum are valid, one above is rejected.
+    assert_eq!(AvrcpVolume::new(0).map(AvrcpVolume::get), Some(0));
+    assert_eq!(
+        AvrcpVolume::new(AVRCP_MAX_VOLUME).map(AvrcpVolume::get),
+        Some(AVRCP_MAX_VOLUME)
+    );
+    assert!(AvrcpVolume::new(AVRCP_MAX_VOLUME + 1).is_none());
+    assert!(AvrcpVolume::new(u16::MAX).is_none());
+
+    // Percentage conversion boundaries (0-127 -> 0-100, rounded).
+    assert_eq!(AvrcpVolume::new(0).map(AvrcpVolume::to_percent), Some(0));
+    assert_eq!(AvrcpVolume::new(64).map(AvrcpVolume::to_percent), Some(50));
+    assert_eq!(AvrcpVolume::new(80).map(AvrcpVolume::to_percent), Some(63));
+    assert_eq!(
+        AvrcpVolume::new(AVRCP_MAX_VOLUME).map(AvrcpVolume::to_percent),
+        Some(100)
+    );
+
+    // Serialization emits the raw 0-127 level.
+    let vol = AvrcpVolume::new(96).expect("96 is within range");
+    assert_eq!(serde_json::to_string(&vol).expect("serialize"), "96");
+
+    // Deserialization validates the invariant: in-range values round-trip,
+    // out-of-range values are rejected with a canonical error.
+    let de: AvrcpVolume = serde_json::from_str("96").expect("96 deserializes");
+    assert_eq!(de, vol);
+    let err = serde_json::from_str::<AvrcpVolume>("200")
+        .expect_err("200 exceeds the AVRCP maximum and must be rejected");
+    assert!(
+        err.to_string().contains("exceeds maximum"),
+        "unexpected error: {err}"
+    );
+    let err = serde_json::from_str::<AvrcpVolume>("70000")
+        .expect_err("values beyond u16 must be rejected");
+    assert!(
+        err.to_string().contains("invalid value"),
+        "unexpected: {err}"
+    );
+
+    // A full BtPlaybackState round-trips through serde with the validated volume.
+    let state = BtPlaybackState {
+        phone_volume: Some(vol),
+        ..BtPlaybackState::default()
+    };
+    let json = serde_json::to_string(&state).expect("state serializes");
+    let back: BtPlaybackState = serde_json::from_str(&json).expect("state deserializes");
+    assert_eq!(back.phone_volume, Some(vol));
+    assert_eq!(back.phone_volume_percent(), Some(76));
 }
 
 #[test]
@@ -1346,6 +1446,71 @@ fn bluetooth_mock_playback_state_mutation_and_faults() {
 }
 
 #[test]
+fn link_and_playback_snapshot_returns_both_from_mock() {
+    let (device, mock) = BluetoothDevice::new_mocked();
+    mock.set_player_status("playing");
+
+    let combined = device.link_and_playback_snapshot(None).unwrap();
+    // Mock initializes with one connected device and a running PCM.
+    let snapshot = combined.link.expect("mock link snapshot is Ok");
+    assert_eq!(snapshot.devices.len(), 1);
+    assert!(snapshot.devices.iter().any(|d| d.connected));
+    assert!(snapshot.pcms.iter().any(|p| p.running));
+    assert_eq!(
+        combined.playback.as_ref().map(|p| p.status.as_ref()),
+        Some("playing")
+    );
+
+    // Fault injection propagates as a typed error (BlueZ failure fails both).
+    mock.set_fault(Some("combined fault".into()));
+    assert!(
+        device
+            .link_and_playback_snapshot(None)
+            .unwrap_err()
+            .is_mock_fault()
+    );
+
+    // Reset the BlueZ fault, then inject a BlueALSA-only fault: playback keeps
+    // updating while link degrades to Err (the failure-domain split).
+    mock.set_fault(None);
+    mock.set_bluealsa_fault(Some("bluealsa down".into()));
+    let combined = device.link_and_playback_snapshot(None).unwrap();
+    assert!(
+        combined.link.is_err(),
+        "BlueALSA fault must degrade only the link snapshot"
+    );
+    assert!(
+        combined.playback.is_some(),
+        "playback must keep updating when BlueALSA fails"
+    );
+    // `link_snapshot()` must also propagate the BlueALSA fault as Err, matching
+    // the production D-Bus arm which calls `query_bluealsa(&devices)?`.
+    assert!(
+        device.link_snapshot().is_err(),
+        "link_snapshot() must propagate BlueALSA fault as Err"
+    );
+
+    // `active_addr` is the arbitrated device only: the fallback (last-known
+    // playback device) must never promote a standby device to "Active". Set an
+    // arbitrated active device on the mock and verify the fallback is ignored.
+    mock.set_bluealsa_fault(None);
+    let arbitrated = speaker_bluetooth::BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    let fallback = speaker_bluetooth::BtAddress::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+    mock.set_active_device(Some(arbitrated));
+    let combined = device.link_and_playback_snapshot(Some(fallback)).unwrap();
+    assert_eq!(
+        combined.active_addr,
+        Some(arbitrated),
+        "active_addr must be the arbitrated device, not the fallback"
+    );
+    assert_ne!(
+        combined.active_addr,
+        Some(fallback),
+        "fallback must not leak into the arbitrated active_addr"
+    );
+}
+
+#[test]
 fn parse_bluez_all_with_media_player() {
     let mut objects: ManagedObjects = HashMap::new();
 
@@ -1419,6 +1584,7 @@ fn parse_bluez_all_with_media_player() {
         .unwrap();
     player_props.insert("Track".to_string(), to_val(Value::Dict(track_dict)));
     player_props.insert("ObexPort".to_string(), to_val(Value::from(4097u16)));
+    player_props.insert("Volume".to_string(), to_val(Value::from(96u16)));
 
     player_ifaces.insert(iface("org.bluez.MediaPlayer1"), player_props);
     objects.insert(player_path, player_ifaces);
@@ -1452,6 +1618,30 @@ fn parse_bluez_all_with_media_player() {
         pb.player_path.as_deref(),
         Some("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0")
     );
+    // MediaPlayer1.Volume (AVRCP absolute volume) parsed and converted
+    assert_eq!(pb.phone_volume, speaker_bluetooth::AvrcpVolume::new(96));
+    assert_eq!(pb.phone_volume_percent(), Some(76));
+}
+
+#[test]
+fn parse_bluez_playback_rejects_out_of_range_phone_volume() {
+    let mut objects: ManagedObjects = HashMap::new();
+
+    // MediaPlayer1 with an out-of-spec Volume (> 127) must be reported as absent
+    let player_path = OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0")
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let mut player_ifaces = HashMap::new();
+    let mut player_props = HashMap::new();
+    player_props.insert("Status".to_string(), to_val("playing"));
+    player_props.insert("Volume".to_string(), to_val(Value::from(200u16)));
+    player_ifaces.insert(iface("org.bluez.MediaPlayer1"), player_props);
+    objects.insert(player_path, player_ifaces);
+
+    let (_, _, playback) = DbusClient::parse_bluez_all(&objects, None).unwrap();
+    let pb = playback.expect("playback should still parse");
+    assert_eq!(pb.phone_volume, None);
+    assert_eq!(pb.phone_volume_percent(), None);
 }
 
 #[test]
@@ -2357,6 +2547,88 @@ async fn reconciler_real_dbus_wire_and_bluealsa_fallback_integration() {
     assert_eq!(*calls.connected.lock().unwrap(), 1);
 }
 
+/// Builds one `org.bluealsa.PCM1` object for the resolver regression tests.
+fn pcm_object(
+    path: &str,
+    running: bool,
+) -> (
+    OwnedObjectPath,
+    HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>,
+) {
+    let mut props = HashMap::new();
+    props.insert(
+        "Device".to_string(),
+        to_val(OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF").unwrap()),
+    );
+    props.insert("Transport".to_string(), to_val("A2DP-sink"));
+    props.insert("Mode".to_string(), to_val("source"));
+    props.insert("Running".to_string(), to_val(running));
+    props.insert("Channels".to_string(), to_val(2u8));
+    props.insert("Sampling".to_string(), to_val(48000u32));
+    props.insert("Volume".to_string(), to_val(vec![0x50u8, 0x50u8]));
+    let mut ifaces = HashMap::new();
+    ifaces.insert(iface("org.bluealsa.PCM1"), props);
+    (OwnedObjectPath::try_from(path).unwrap(), ifaces)
+}
+
+#[test]
+fn reverse_writes_target_a2dp_sink_pcm_only() {
+    // Regression (CodeRabbit): reverse amp-level writes must never land on a
+    // running HFP PCM during a call — the resolvers filter candidates to A2DP
+    // sink PCMs (both `a2dpsnk` and `a2dpsink` path spellings) before
+    // selection, and report no-active-player when only HFP exists.
+    let mut call_objects: ManagedObjects = HashMap::new();
+    let (hfp_path, hfp_ifaces) = pcm_object(
+        "/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/hfpag/source",
+        true,
+    );
+    call_objects.insert(hfp_path, hfp_ifaces);
+    assert!(
+        DbusClient::resolve_pcm_volume_target(&call_objects, 50)
+            .unwrap_err()
+            .is_no_active_player(),
+        "a running HFP PCM must never receive the music volume write"
+    );
+    assert!(
+        DbusClient::resolve_pcm_mute_target(&call_objects, true)
+            .unwrap_err()
+            .is_no_active_player()
+    );
+
+    // A running HFP PCM plus a paused A2DP PCM: the A2DP PCM wins (first
+    // available A2DP stream), never the call stream.
+    let mut mixed_objects = call_objects.clone();
+    let (a2dp_path, a2dp_ifaces) = pcm_object(
+        "/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/a2dpsink/source",
+        false,
+    );
+    mixed_objects.insert(a2dp_path, a2dp_ifaces);
+    let (target, _) = DbusClient::resolve_pcm_volume_target(&mixed_objects, 40).unwrap();
+    assert!(
+        target.contains("a2dp"),
+        "volume must target the A2DP PCM, got {target}"
+    );
+
+    // A running A2DP PCM outranks a paused one.
+    let mut two_a2dp = mixed_objects;
+    let a2dp_key =
+        OwnedObjectPath::try_from("/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/a2dpsink/source")
+            .unwrap();
+    if let Some(ifaces) = two_a2dp.get_mut(&a2dp_key) {
+        for (key, value) in ifaces
+            .get_mut(&iface("org.bluealsa.PCM1"))
+            .unwrap()
+            .iter_mut()
+        {
+            if key == "Running" {
+                *value = to_val(true);
+            }
+        }
+    }
+    let (target, _) = DbusClient::resolve_pcm_volume_target(&two_a2dp, 60).unwrap();
+    assert!(target.contains("a2dpsink"));
+}
+
 #[test]
 fn dbus_pcm_volume_and_mute_target_resolution_and_mock_controls() {
     use speaker_bluetooth::{
@@ -2408,7 +2680,8 @@ fn dbus_pcm_volume_and_mute_target_resolution_and_mock_controls() {
     pcm_props.insert("Volume".to_string(), to_val(vec![0x7Fu8, 0x7Fu8]));
     pcm_ifaces.insert(iface("org.bluealsa.PCM1"), pcm_props);
     bluealsa_objects.insert(
-        OwnedObjectPath::try_from("/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/hfpag/source").unwrap(),
+        OwnedObjectPath::try_from("/org/bluealsa/hci0/dev_AA_BB_CC_DD_EE_FF/a2dpsnk/source")
+            .unwrap(),
         pcm_ifaces,
     );
 
@@ -2451,4 +2724,219 @@ fn dbus_pcm_volume_and_mute_target_resolution_and_mock_controls() {
     mock.clear_pcms();
     assert!(device.set_volume(50).unwrap_err().is_no_active_player());
     assert!(device.set_mute(true).unwrap_err().is_no_active_player());
+}
+
+#[test]
+fn preferred_active_device_overrides_path_sort_in_player_and_pcm_selection() {
+    use speaker_bluetooth::{BlueAlsaPcm, BtAddress, select_active_pcm_for};
+
+    let addr_a = BtAddress::parse_str("C4:03:A8:BD:EF:74").unwrap();
+    let addr_b = BtAddress::parse_str("30:E0:44:67:38:A2").unwrap();
+
+    // 30:... sorts before C4:..., so without `preferred`, B wins. With
+    // `preferred = Some(addr_a)`, A wins.
+    let mk_pcm = |addr: BtAddress, path: &str, running: bool| BlueAlsaPcm {
+        pcm_path: path.into(),
+        device_address: addr,
+        resolved_name: "Dev".into(),
+        transport: "A2DP-sink".into(),
+        running,
+        selected_codec: "SBC".into(),
+        available_codecs: vec![].into_boxed_slice(),
+        sampling_rate: 48_000,
+        channels: 2,
+        format: "S16_LE".into(),
+        volume: None,
+        volume_percent: Some(50),
+        muted: false,
+        delay: None,
+    };
+    let pcms = [
+        mk_pcm(
+            addr_b,
+            "/org/bluealsa/hci0/dev_30_E0_44_67_38_A2/a2dpsnk/source",
+            true,
+        ),
+        mk_pcm(
+            addr_a,
+            "/org/bluealsa/hci0/dev_C4_03_A8_BD_EF_74/a2dpsnk/source",
+            true,
+        ),
+    ];
+    assert_eq!(
+        select_active_pcm_for(&pcms, None).unwrap().device_address,
+        addr_b
+    );
+    assert_eq!(
+        select_active_pcm_for(&pcms, Some(addr_a))
+            .unwrap()
+            .device_address,
+        addr_a
+    );
+
+    // If the preferred device exposes both HFP and A2DP PCMs, A2DP wins.
+    let hfp_a = mk_pcm(
+        addr_a,
+        "/org/bluealsa/hci0/dev_C4_03_A8_BD_EF_74/hfphf/source",
+        true,
+    );
+    let mixed = [hfp_a, pcms[1].clone()];
+    assert_eq!(
+        select_active_pcm_for(&mixed, Some(addr_a))
+            .unwrap()
+            .pcm_path
+            .as_ref(),
+        "/org/bluealsa/hci0/dev_C4_03_A8_BD_EF_74/a2dpsnk/source"
+    );
+}
+
+#[test]
+fn preferred_active_device_overrides_player_sort_and_resolves_avrcp_path() {
+    use speaker_bluetooth::BtAddress;
+
+    let addr_a = BtAddress::parse_str("C4:03:A8:BD:EF:74").unwrap();
+    let addr_b = BtAddress::parse_str("30:E0:44:67:38:A2").unwrap();
+    let mut objects: ManagedObjects = HashMap::new();
+    let mut adapter_ifaces = HashMap::new();
+    let mut adapter_props = HashMap::new();
+    adapter_props.insert("Address".to_string(), to_val("DC:A6:32:11:22:33"));
+    adapter_props.insert("Powered".to_string(), to_val(true));
+    adapter_ifaces.insert(iface("org.bluez.Adapter1"), adapter_props);
+    objects.insert(
+        OwnedObjectPath::try_from("/org/bluez/hci0").unwrap(),
+        adapter_ifaces,
+    );
+
+    for (mac, path_seg, title) in [
+        ("30:E0:44:67:38:A2", "dev_30_E0_44_67_38_A2", "Silent Pixel"),
+        (
+            "C4:03:A8:BD:EF:74",
+            "dev_C4_03_A8_BD_EF_74",
+            "Active Laptop",
+        ),
+    ] {
+        let dev_path = format!("/org/bluez/hci0/{path_seg}");
+        let mut dev_ifaces = HashMap::new();
+        let mut dev_props = HashMap::new();
+        dev_props.insert("Address".to_string(), to_val(mac));
+        dev_props.insert("Name".to_string(), to_val(title));
+        dev_props.insert("Connected".to_string(), to_val(true));
+        dev_props.insert("Paired".to_string(), to_val(true));
+        dev_props.insert("Trusted".to_string(), to_val(true));
+        dev_ifaces.insert(iface("org.bluez.Device1"), dev_props);
+        objects.insert(
+            OwnedObjectPath::try_from(dev_path.as_str()).unwrap(),
+            dev_ifaces,
+        );
+
+        let player_path = format!("{dev_path}/avrcp/player0");
+        let mut p_ifaces = HashMap::new();
+        let mut p_props = HashMap::new();
+        p_props.insert(
+            "Device".to_string(),
+            to_val(OwnedObjectPath::try_from(dev_path.as_str()).unwrap()),
+        );
+        p_props.insert("Status".to_string(), to_val("playing"));
+        let mut track: HashMap<String, OwnedValue> = HashMap::new();
+        track.insert("Title".to_string(), to_val(title));
+        p_props.insert(
+            "Track".to_string(),
+            OwnedValue::try_from(zbus::zvariant::Value::from(track)).unwrap(),
+        );
+        p_ifaces.insert(iface("org.bluez.MediaPlayer1"), p_props);
+        objects.insert(
+            OwnedObjectPath::try_from(player_path.as_str()).unwrap(),
+            p_ifaces,
+        );
+    }
+
+    assert_eq!(
+        DbusClient::find_player_path_for_device(&objects, addr_a).as_deref(),
+        Some("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74/avrcp/player0")
+    );
+
+    // When a single device exposes an idle player0 and a playing player1,
+    // `find_player_path_for_device` prefers the playing player1.
+    let p0_path =
+        OwnedObjectPath::try_from("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74/avrcp/player0").unwrap();
+    if let Some(p0_props) = objects
+        .get_mut(&p0_path)
+        .and_then(|ifaces| ifaces.get_mut(&iface("org.bluez.MediaPlayer1")))
+    {
+        p0_props.insert("Status".to_string(), to_val("stopped"));
+    }
+    let mut p1_ifaces = HashMap::new();
+    let mut p1_props = HashMap::new();
+    p1_props.insert(
+        "Device".to_string(),
+        to_val(OwnedObjectPath::try_from("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74").unwrap()),
+    );
+    p1_props.insert("Status".to_string(), to_val("playing"));
+    p1_ifaces.insert(iface("org.bluez.MediaPlayer1"), p1_props);
+    objects.insert(
+        OwnedObjectPath::try_from("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74/avrcp/player1").unwrap(),
+        p1_ifaces,
+    );
+    assert_eq!(
+        DbusClient::find_player_path_for_device(&objects, addr_a).as_deref(),
+        Some("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74/avrcp/player1")
+    );
+    let (_, _, pb_default) = DbusClient::parse_bluez_all_for(&objects, Some("hci0"), None).unwrap();
+    assert_eq!(pb_default.unwrap().device_address, Some(addr_b));
+    let (_, _, pb_pref) =
+        DbusClient::parse_bluez_all_for(&objects, Some("hci0"), Some(addr_a)).unwrap();
+    assert_eq!(pb_pref.unwrap().device_address, Some(addr_a));
+}
+
+#[test]
+fn find_device_path_supports_non_hci0_and_extracts_player_states() {
+    use speaker_bluetooth::BtAddress;
+
+    let addr_a = BtAddress::parse_str("C4:03:A8:BD:EF:74").unwrap();
+    let addr_c = BtAddress::parse_str("11:22:33:44:55:66").unwrap();
+
+    let mut objects: ManagedObjects = HashMap::new();
+    let mut hci0_dev = HashMap::new();
+    let mut hci0_props = HashMap::new();
+    hci0_props.insert("Address".to_string(), to_val("C4:03:A8:BD:EF:74"));
+    hci0_dev.insert(iface("org.bluez.Device1"), hci0_props);
+    objects.insert(
+        OwnedObjectPath::try_from("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74").unwrap(),
+        hci0_dev,
+    );
+
+    let mut hci1_dev = HashMap::new();
+    let mut hci1_props = HashMap::new();
+    hci1_props.insert("Address".to_string(), to_val("11:22:33:44:55:66"));
+    hci1_dev.insert(iface("org.bluez.Device1"), hci1_props);
+    objects.insert(
+        OwnedObjectPath::try_from("/org/bluez/hci1/dev_11_22_33_44_55_66").unwrap(),
+        hci1_dev,
+    );
+
+    let mut p_ifaces = HashMap::new();
+    let mut p_props = HashMap::new();
+    p_props.insert(
+        "Device".to_string(),
+        to_val(OwnedObjectPath::try_from("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74").unwrap()),
+    );
+    p_props.insert("Status".to_string(), to_val("playing"));
+    p_ifaces.insert(iface("org.bluez.MediaPlayer1"), p_props);
+    objects.insert(
+        OwnedObjectPath::try_from("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74/avrcp/player0").unwrap(),
+        p_ifaces,
+    );
+
+    assert_eq!(
+        DbusClient::find_device_path(&objects, addr_a).as_deref(),
+        Some("/org/bluez/hci0/dev_C4_03_A8_BD_EF_74")
+    );
+    assert_eq!(
+        DbusClient::find_device_path(&objects, addr_c).as_deref(),
+        Some("/org/bluez/hci1/dev_11_22_33_44_55_66")
+    );
+    let states: std::collections::HashMap<_, _> = DbusClient::player_playing_states(&objects)
+        .into_iter()
+        .collect();
+    assert_eq!(states.get(&addr_a), Some(&true));
 }

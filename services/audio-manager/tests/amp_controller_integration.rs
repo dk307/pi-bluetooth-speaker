@@ -363,8 +363,11 @@ async fn critical_fault_recovers_and_returns_to_muted() {
         "Limiter re-enabled during recovery"
     );
     assert_eq!(f.amp_mock.mock_master_volume_raw(), 100, "volume restored");
-    // A real /ENABLE reset pulse (HIGH->LOW) wiped the registers.
-    assert_eq!(f.gpio_mock.reset_calls(), 1);
+    // A real /ENABLE reset pulse (HIGH->LOW) wiped the registers. The live
+    // fault (still set in the mock) makes the post-recovery re-handshake
+    // detect a critical condition and run one more recovery before
+    // settling muted — 2 pulses total.
+    assert_eq!(f.gpio_mock.reset_calls(), 2);
 }
 
 #[tokio::test]
@@ -628,6 +631,117 @@ async fn stream_restart_after_fault_recovery_resumes() {
     assert!(!f.amp_mock.mock_serial_muted());
     assert!(!f.gpio_mock.mute_pin_low());
     assert_eq!(f.amp_mock.mock_master_volume_raw(), 60);
+}
+
+#[tokio::test]
+async fn critical_fault_mid_playback_rehandshakes_without_stream_edge() {
+    let mut f = fixture();
+    // Model the transient-glitch timeline: the /ENABLE reset pulse also
+    // clears the live fault (the glitch was gone by the time recovery
+    // finished), and the wipe clears the serial mute bit.
+    f.gpio_mock.set_reset_hook(Some(Arc::new({
+        let amp_mock = f.amp_mock.clone();
+        move || {
+            amp_mock.set_mock_serial_muted(false);
+            amp_mock.set_live_errors(AmpErrorFlags::NONE);
+        }
+    })));
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+
+    // Transient PVDD glitch mid-playback.
+    f.amp_mock
+        .set_live_errors(fault_flags(AmpFault::UndervoltagePvdd));
+    f.controller.handle_error_edge().await.unwrap();
+
+    // The clock survived the glitch (CamillaDSP kept running, so no new
+    // Stopped->Running edge will ever arrive): recovery must re-run the
+    // PLL handshake immediately and unmute. Regression for the 2026-11-14
+    // incident where recovery stranded the amp muted for 53 minutes.
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert!(!f.amp_mock.mock_serial_muted());
+    assert!(!f.gpio_mock.mute_pin_low());
+    assert_eq!(f.amp_mock.mock_master_volume_raw(), 60, "level restored");
+}
+
+#[tokio::test]
+async fn critical_fault_mid_stream_user_mute_keeps_stream_live_for_unmute() {
+    let mut f = fixture();
+    f.gpio_mock.set_reset_hook(Some(Arc::new({
+        let amp_mock = f.amp_mock.clone();
+        move || {
+            amp_mock.set_mock_serial_muted(false);
+            amp_mock.set_live_errors(AmpErrorFlags::NONE);
+        }
+    })));
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    // User mutes mid-stream; the DSP keeps running (stream stays live).
+    f.controller
+        .handle_command(AmpCommandKind::SetMute(true))
+        .await
+        .unwrap();
+
+    f.amp_mock
+        .set_live_errors(fault_flags(AmpFault::UndervoltagePvdd));
+    f.controller.handle_error_edge().await.unwrap();
+
+    // The re-handshake honors the user mute (never overrides it), but
+    // marks the stream live again so a later unmute restores playback
+    // instantly — without waiting for a DSP lifecycle edge.
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
+    assert!(f.amp_mock.mock_serial_muted());
+    f.controller
+        .handle_command(AmpCommandKind::SetMute(false))
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert!(!f.amp_mock.mock_serial_muted());
+    assert!(!f.gpio_mock.mute_pin_low());
+}
+
+#[tokio::test]
+async fn critical_fault_with_dead_clock_stays_muted_until_stream_edge() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+
+    // Critical fault WITH a persistent PLL clock loss (the DSP actually
+    // stopped): the post-recovery handshake cannot lock.
+    f.amp_mock.set_live_errors(AmpErrorFlags::from_bits(
+        (1 << AmpFault::UndervoltagePvdd.bit()) | (1 << AmpFault::PllClockLoss.bit()),
+    ));
+    f.controller.handle_error_edge().await.unwrap();
+
+    // Fail-safe: stays muted; the next real StreamStarting edge retries.
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Muted);
+    assert!(f.amp_mock.mock_serial_muted());
+    f.amp_mock.set_live_errors(AmpErrorFlags::NONE);
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert!(!f.amp_mock.mock_serial_muted());
 }
 
 #[tokio::test]
@@ -945,7 +1059,7 @@ async fn run_loop_replies_edge_close_errors_and_shutdown() {
             .expect("reply must arrive")
             .is_ok()
     );
-    let raw80 = amp_curve::PERCENT_TO_RAW[80];
+    let raw80 = speaker_hardware::amp::PERCENT_TO_RAW[80];
     assert_eq!(f.state_file.load().unwrap().level_raw, raw80);
 
     // 2. Failing command: reply carries the error summary and the loop
@@ -984,7 +1098,7 @@ async fn run_loop_replies_edge_close_errors_and_shutdown() {
             .expect("reply must arrive")
             .is_ok()
     );
-    let raw70 = amp_curve::PERCENT_TO_RAW[70];
+    let raw70 = speaker_hardware::amp::PERCENT_TO_RAW[70];
     assert_eq!(f.state_file.load().unwrap().level_raw, raw70);
 
     // 4. Shutdown signal ends the loop promptly.
@@ -1122,4 +1236,215 @@ async fn gpio_mute_asserted_before_serial_mute_in_recovery() {
         "GPIO /MUTE must assert before the serial mute write attempt"
     );
     assert!(gpio_mock.reset_calls() >= 1, "reset pulse must still run");
+}
+
+#[cfg(test)]
+mod error_tests {
+    use audio_manager::error::{AmpError, AmpResult};
+
+    #[test]
+    fn error_hardware_validation() {
+        let err = AmpError::hardware_validation("test reason");
+        assert!(matches!(err, AmpError::HardwareValidation { .. }));
+        assert!(err.summary().contains("test reason"));
+    }
+
+    #[test]
+    fn error_dbus_name_taken() {
+        let err = AmpError::DBusNameTaken;
+        assert!(matches!(err, AmpError::DBusNameTaken));
+        assert!(err.summary().contains("already taken"));
+    }
+
+    #[test]
+    fn error_card_missing() {
+        let err = AmpError::card_missing("sndrpihifiberry");
+        assert!(matches!(err, AmpError::CardMissing { .. }));
+        assert!(err.summary().contains("sndrpihifiberry"));
+    }
+
+    #[test]
+    fn error_control_error() {
+        let err = AmpError::control_error("bad control");
+        assert!(matches!(err, AmpError::ControlError(_)));
+        assert!(err.summary().contains("bad control"));
+    }
+
+    #[test]
+    fn error_state_file() {
+        let err = AmpError::state_file("corrupted file");
+        assert!(matches!(err, AmpError::StateFile(_)));
+        assert!(err.summary().contains("corrupted file"));
+    }
+
+    #[test]
+    fn error_internal() {
+        let err = AmpError::internal("internal failure");
+        assert!(matches!(err, AmpError::Internal(_)));
+        assert!(err.summary().contains("internal failure"));
+    }
+
+    #[test]
+    fn error_summary_no_backtrace() {
+        let err = AmpError::hardware_validation("test");
+        let summary = err.summary();
+        assert!(!summary.contains("Backtrace"));
+        assert!(!summary.contains("panicked"));
+    }
+
+    #[test]
+    fn error_display_has_message() {
+        let err = AmpError::hardware_validation("test");
+        let display = format!("{}", err);
+        assert!(display.contains("Hardware validation failed"));
+    }
+
+    #[test]
+    fn error_source_chain() {
+        let err = AmpError::internal("test");
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "test");
+        let amp_err = AmpError::from(io_err);
+        assert!(matches!(amp_err, AmpError::Io(_)));
+    }
+
+    #[test]
+    fn error_from_anyhow() {
+        let any_err = anyhow::anyhow!("anyhow error");
+        let amp_err = AmpError::from(any_err);
+        assert!(matches!(amp_err, AmpError::Anyhow(_)));
+    }
+
+    #[test]
+    fn amp_result_type() {
+        fn returns_result() -> AmpResult<i32> {
+            Ok(42)
+        }
+        assert_eq!(returns_result().unwrap(), 42);
+    }
+}
+
+#[tokio::test]
+async fn spurious_single_shot_critical_fault_skips_recovery_and_keeps_playing() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+
+    // Single-shot spurious 0x51 read (0x7C clears on confirmation and 0x6D
+    // latched history has no critical fault, even if a non-critical bit like
+    // PllClockLoss is present): must NOT mute or reset the amplifier.
+    f.amp_mock
+        .set_live_errors_one_shot(AmpErrorFlags::from_bits(0x51));
+    f.amp_mock
+        .set_latched_errors(fault_flags(AmpFault::PllClockLoss));
+    f.controller.handle_safety_tick().await.unwrap();
+
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert_eq!(f.gpio_mock.reset_calls(), 0);
+    assert!(!f.gpio_mock.mute_pin_low());
+    assert!(!f.amp_mock.mock_serial_muted());
+}
+
+#[tokio::test]
+async fn confirmed_critical_fault_via_latched_history_runs_recovery() {
+    let mut f = fixture();
+    f.gpio_mock.set_reset_hook(Some(Arc::new({
+        let amp_mock = f.amp_mock.clone();
+        move || {
+            amp_mock.set_mock_serial_muted(false);
+            amp_mock.set_live_errors(AmpErrorFlags::NONE);
+        }
+    })));
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+
+    // Live register clears before confirmation, but 0x6D latched history
+    // confirms a real transient fault occurred: recovery must run.
+    f.amp_mock
+        .set_live_errors_one_shot(AmpErrorFlags::from_bits(0x51));
+    f.amp_mock
+        .set_latched_errors(AmpErrorFlags::from_bits(0x51));
+    f.controller.handle_safety_tick().await.unwrap();
+
+    assert_eq!(f.gpio_mock.reset_calls(), 1);
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+}
+
+#[tokio::test]
+async fn failed_fault_recovery_mid_stream_resumes_playback_on_safety_tick_retry() {
+    let dir = tempdir().unwrap();
+    let (backend, backend_ctrl) = MockAmpBackend::new_mocked();
+    let (gpio, gpio_mock) = AmpGpio::new_mocked();
+    let state_file = StateFile::new(dir.path().join("amp-state.json"));
+    let (device, amp_mock) = AmpDevice::new_mocked();
+    let mut controller = AmpController::new(
+        Arc::new(backend),
+        Arc::new(device),
+        gpio,
+        state_file,
+        AmpState::default(),
+    );
+    controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+    controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+    assert_eq!(controller.ctrl_state(), CtrlState::Playing);
+
+    // Critical fault mid-stream where recovery fails mid-way.
+    amp_mock.set_live_errors(fault_flags(AmpFault::OvercurrentProtect));
+    backend_ctrl.set_serial_mute_fail_sticky(true);
+    controller.handle_safety_tick().await.unwrap_err();
+    assert_eq!(controller.ctrl_state(), CtrlState::Faulted);
+
+    // Bus recovers: the safety tick retry completes recovery AND re-runs
+    // start_stream() so playback resumes instead of staying muted.
+    backend_ctrl.set_serial_mute_fail_sticky(false);
+    amp_mock.set_live_errors(AmpErrorFlags::NONE);
+    controller.handle_safety_tick().await.unwrap();
+    assert_eq!(controller.ctrl_state(), CtrlState::Playing);
+    assert!(!gpio_mock.mute_pin_low());
+}
+
+#[tokio::test]
+async fn spurious_critical_fault_at_stream_start_does_not_throttle_or_reset() {
+    let mut f = fixture();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    // 1st read (pll_lock_handshake) = NONE, 2nd read (post-handshake check) =
+    // spurious 0x51 (includes HighTempWarning bit 4), 3rd read (confirmation) = NONE.
+    // Must NOT reset and must NOT falsely apply -6 dB thermal throttle.
+    f.amp_mock
+        .set_live_errors_sequence([AmpErrorFlags::NONE, AmpErrorFlags::from_bits(0x51)]);
+    f.controller
+        .handle_command(AmpCommandKind::StreamStarting)
+        .await
+        .unwrap();
+
+    assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
+    assert_eq!(f.gpio_mock.reset_calls(), 0);
+    assert_eq!(f.amp_mock.mock_master_volume_raw(), 60);
 }

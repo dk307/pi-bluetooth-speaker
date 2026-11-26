@@ -1,12 +1,12 @@
 //! Integration tests for amp_state module.
 
-use amp_curve::PERCENT_TO_RAW;
 use audio_manager::AmpState;
+use speaker_hardware::amp::PERCENT_TO_RAW;
 
 #[test]
 fn default_state() {
     let s = AmpState::default();
-    assert_eq!(s.level_raw, 116);
+    assert_eq!(s.level_raw, 114);
     assert!(!s.muted);
 }
 
@@ -108,11 +108,11 @@ fn level_percent_inverse() {
             muted: false,
         };
         let back = s.level_percent(&PERCENT_TO_RAW);
-        // Round-trip may not be exact due to quantization of the perceptual curve.
-        // Allow up to 3% difference.
+        // The 1 dB register step means at most two percents share a raw
+        // value, so the midpoint inverse is always within 1 %.
         let diff = (back as i16 - p as i16).abs();
         assert!(
-            diff <= 4,
+            diff <= 1,
             "percent {} -> raw {} -> back {}",
             p,
             PERCENT_TO_RAW[p],
@@ -141,9 +141,9 @@ fn hardware_level_percent() {
         };
         let back = s.hardware_level_percent(&PERCENT_TO_RAW);
         let diff = (back as i16 - p as i16).abs();
-        // Allow up to 3% difference due to quantization
+        // Midpoint inverse; at most two percents share a raw step.
         assert!(
-            diff <= 4,
+            diff <= 1,
             "percent {} -> raw {} -> back {}",
             p,
             PERCENT_TO_RAW[p],
@@ -160,6 +160,6 @@ fn hardware_level_percent_muted_keeps_level() {
         muted: true,
     };
     let p = s.hardware_level_percent(&PERCENT_TO_RAW);
-    // raw 100 (-44 dB) reads back as the nearest/midpoint percent (~20%).
-    assert_eq!(p, 20);
+    // raw 100 (-44 dB) reads back as the midpoint of percent 27/28.
+    assert_eq!(p, 28);
 }

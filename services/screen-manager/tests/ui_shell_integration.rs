@@ -2,6 +2,20 @@
 
 /// Simulates the `bt-monitor` worker: drains queued transport commands,
 /// executes them on the device, and applies authoritative state to the UI.
+/// Simulates the `amp-volume` worker: drains amp commands, applies them to the
+/// mocked audio-manager client, and publishes the authoritative read-back.
+#[cfg(feature = "ui")]
+fn drain_amp_commands(
+    amp_commands: &screen_manager::volume::AmpVolumeCommandQueue,
+    client: &screen_manager::volume::AmpVolumeClient,
+    shell: &screen_manager::ui::AppShell,
+) {
+    for command in amp_commands.drain() {
+        let state = client.apply(command).expect("mock amp write");
+        shell.apply_amp_volume(&state);
+    }
+}
+
 #[cfg(feature = "ui")]
 fn drain_worker_commands(
     bt: &speaker_bluetooth::BluetoothDevice,
@@ -21,12 +35,6 @@ fn drain_worker_commands(
             }
             speaker_bluetooth::TransportCommand::Seek(pos) => {
                 let _ = bt.player_seek(pos);
-            }
-            speaker_bluetooth::TransportCommand::SetVolume(pct) => {
-                let _ = bt.set_volume(pct);
-            }
-            speaker_bluetooth::TransportCommand::SetMute(muted) => {
-                let _ = bt.set_mute(muted);
             }
         }
     }
@@ -242,8 +250,9 @@ fn ui_shell_callbacks_and_debug_formatting() {
     shell.window().invoke_select_theme(1);
     assert_eq!(shell.current_theme(), ThemePreset::MarantzAmber);
 
-    // Invoke cycle theme callback
-    shell.window().invoke_cycle_theme();
+    // Cycle theme via the programmatic API (the Slint cycle_theme callback
+    // chain was removed with the Cycle Next Theme button).
+    let _ = shell.cycle_theme();
     assert_eq!(shell.current_theme(), ThemePreset::CyberpunkNeon);
 }
 
@@ -291,14 +300,14 @@ fn ui_shell_now_playing_properties_and_playback_state() {
     assert!(!shell.is_playing());
     assert!(!shell.is_muted());
     assert_eq!(shell.window().get_progress_ratio(), 0.0);
-    assert_eq!(shell.window().get_position_text(), "00:00");
-    assert_eq!(shell.window().get_duration_text(), "00:00");
+    assert_eq!(shell.window().get_position_text(), "0:00");
+    assert_eq!(shell.window().get_duration_text(), "0:00");
 
     // Playback state updates
     shell.set_playback_state(true, 65_000, 195_000);
     assert!(shell.is_playing());
-    assert_eq!(shell.window().get_position_text(), "01:05");
-    assert_eq!(shell.window().get_duration_text(), "03:15");
+    assert_eq!(shell.window().get_position_text(), "1:05");
+    assert_eq!(shell.window().get_duration_text(), "3:15");
     let ratio = shell.window().get_progress_ratio();
     assert!((ratio - (65.0 / 195.0)).abs() < 1e-4);
 
@@ -326,18 +335,14 @@ fn ui_shell_now_playing_properties_and_playback_state() {
         "AAC-LC | 44.1kHz/16-bit ➔ DSP 48k"
     );
 
-    // Peak levels & NaN / boundary clamping
-    shell.set_peak_levels(0.85, 0.42);
-    assert_eq!(shell.window().get_left_peak_ratio(), 0.85);
-    assert_eq!(shell.window().get_right_peak_ratio(), 0.42);
-
-    shell.set_peak_levels(1.5, -0.5);
-    assert_eq!(shell.window().get_left_peak_ratio(), 1.0);
-    assert_eq!(shell.window().get_right_peak_ratio(), 0.0);
-
-    shell.set_peak_levels(f32::NAN, f32::INFINITY);
-    assert_eq!(shell.window().get_left_peak_ratio(), 0.0);
-    assert_eq!(shell.window().get_right_peak_ratio(), 1.0);
+    // Visualizer open / close & mode cycling
+    assert!(!shell.is_visualizer_active());
+    shell.open_visualizer();
+    assert!(shell.is_visualizer_active());
+    shell.window().invoke_next_visualizer();
+    assert_eq!(shell.window().get_visualizer_mode(), 1);
+    shell.close_visualizer();
+    assert!(!shell.is_visualizer_active());
 
     // Cover art toggle
     assert!(!shell.window().get_has_cover_art());
@@ -360,6 +365,11 @@ fn ui_shell_now_playing_properties_and_playback_state() {
         obex_port: None,
         image_handle: None,
         cover_art_path: None,
+        phone_volume: None,
+        equalizer: None,
+        repeat: None,
+        shuffle: None,
+        scan: None,
     };
     shell.apply_bluetooth_playback(&playback);
     assert_eq!(shell.window().get_track_title(), "Telegraph Road");
@@ -384,6 +394,117 @@ fn ui_shell_now_playing_properties_and_playback_state() {
     assert_eq!(shell.window().get_track_album(), "Brothers in Arms");
     assert_eq!(shell.window().get_volume_value(), 78.0);
     assert!(shell.is_playing());
+}
+
+/// `BlueZ` uses `u32::MAX` (`Track.Duration` / `Position`) for "the peer did not
+/// describe the timeline". Formatting it as a timestamp produced a bogus
+/// `1193:...` hours readout, so the shell must classify the timeline as unknown
+/// and let the view hide (or degrade) the seek row.
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_unknown_timeline_degrades_seek_row() {
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use slint::ComponentHandle;
+    use speaker_bluetooth::BtPlaybackState;
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    let known = BtPlaybackState {
+        device_name: "Pixel Phone".into(),
+        status: "playing".into(),
+        title: "Telegraph Road".into(),
+        artist: "Dire Straits".into(),
+        album: "Love over Gold".into(),
+        position_ms: 300_000,
+        duration_ms: 860_000,
+        ..BtPlaybackState::default()
+    };
+    shell.apply_bluetooth_playback(&known);
+    assert!(shell.window().get_duration_known());
+    assert!(shell.window().get_position_known());
+    assert_eq!(shell.window().get_position_text(), "05:00");
+    assert_eq!(shell.window().get_duration_text(), "14:20");
+
+    // Position only: indeterminate track (thin + shimmer), no duration readout.
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        duration_ms: u32::MAX,
+        position_ms: 65_000,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert!(!shell.window().get_duration_known());
+    assert!(shell.window().get_position_known());
+    assert_eq!(shell.window().get_position_text(), "1:05");
+    assert_eq!(shell.window().get_duration_text(), "");
+    assert_eq!(shell.window().get_duration_ms(), 0);
+
+    // Neither known: both readouts blank and the row is hidden by the view.
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        duration_ms: u32::MAX,
+        position_ms: u32::MAX,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert!(!shell.window().get_duration_known());
+    assert!(!shell.window().get_position_known());
+    assert_eq!(shell.window().get_position_text(), "");
+    assert_eq!(shell.window().get_duration_text(), "");
+
+    // A total length with no playhead: still indeterminate (no meaningful fill),
+    // but the duration readout is known.
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        duration_ms: 860_000,
+        position_ms: u32::MAX,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert!(shell.window().get_duration_known());
+    assert!(!shell.window().get_position_known());
+    assert_eq!(shell.window().get_position_text(), "");
+    assert_eq!(shell.window().get_duration_text(), "14:20");
+
+    // All four seek-row presentations must render without error.
+    shell.window().show().expect("Failed to show MainWindow");
+    shell.apply_bluetooth_playback(&known);
+    assert!(
+        fb.render_frame(&window)
+            .expect("render determinate seek bar")
+    );
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        duration_ms: u32::MAX,
+        position_ms: 65_000,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert!(
+        fb.render_frame(&window)
+            .expect("render indeterminate shimmer track")
+    );
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        duration_ms: 860_000,
+        position_ms: u32::MAX,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert!(
+        fb.render_frame(&window)
+            .expect("render shimmer track with duration only")
+    );
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        duration_ms: u32::MAX,
+        position_ms: u32::MAX,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert!(fb.render_frame(&window).expect("render hidden seek row"));
+
+    // A determinate timeline re-enables the full seek row.
+    shell.apply_bluetooth_playback(&known);
+    assert!(shell.window().get_duration_known());
+    assert_eq!(shell.window().get_duration_text(), "14:20");
 }
 
 /// A snapshot whose track advertises art (`ImgHandle`) but whose file is not
@@ -412,6 +533,11 @@ fn ui_shell_pending_fetch_keeps_cover_art() {
         obex_port: Some(4097),
         image_handle: Some("2698226".into()),
         cover_art_path: None,
+        phone_volume: None,
+        equalizer: None,
+        repeat: None,
+        shuffle: None,
+        scan: None,
     };
     shell.set_has_cover_art(true);
     shell.apply_bluetooth_playback(&pending);
@@ -469,6 +595,11 @@ fn ui_shell_cover_art_and_pcm_stream_updates() {
         obex_port: None,
         image_handle: None,
         cover_art_path: Some(img_path.to_string_lossy().to_string().into_boxed_str()),
+        phone_volume: None,
+        equalizer: None,
+        repeat: None,
+        shuffle: None,
+        scan: None,
     };
     shell.apply_bluetooth_playback(&playback);
     // The bt-monitor worker decodes and publishes the cover via set_cover_image;
@@ -507,7 +638,40 @@ fn ui_shell_cover_art_and_pcm_stream_updates() {
     assert_eq!(shell.window().get_stream_codec(), "LDAC");
     assert_eq!(shell.window().get_stream_sample_rate(), "96 kHz");
     assert_eq!(shell.window().get_stream_bit_depth(), "24-bit");
-    assert_eq!(shell.window().get_volume_value(), 85.0);
+    // The codec-HUD summary line follows the active stream: `96 kHz •
+    // 24-bit • Stereo` for this PCM, and the missing delay renders the
+    // placeholder.
+    assert_eq!(
+        shell.window().get_bt_stream_format(),
+        "96 kHz • 24-bit • Stereo"
+    );
+    assert_eq!(shell.window().get_bt_delay_text(), "—");
+
+    // A non-1000-multiple rate keeps one decimal; mono and multichannel
+    // labels cover the remaining channel arms; a present delay is shown.
+    pcm.sampling_rate = 44_100;
+    pcm.channels = 1;
+    pcm.delay = Some("42 ms".into());
+    shell.apply_pcm_stream(&pcm);
+    // The top-bar badge keeps its integer-kHz rounding; only the codec-HUD
+    // summary line carries the precise rate.
+    assert_eq!(shell.window().get_stream_sample_rate(), "44 kHz");
+    assert_eq!(
+        shell.window().get_bt_stream_format(),
+        "44.1 kHz • 24-bit • Mono"
+    );
+    assert_eq!(shell.window().get_bt_delay_text(), "42 ms");
+
+    pcm.channels = 5;
+    shell.apply_pcm_stream(&pcm);
+    assert_eq!(
+        shell.window().get_bt_stream_format(),
+        "44.1 kHz • 24-bit • 5 ch"
+    );
+    // PCM volume/mute are phone-owned stream metadata; the shell level and
+    // mute indicator reflect the amp exclusively (apply_amp_volume) and are
+    // untouched by PCM pushes (75 % is the Slint default level).
+    assert_eq!(shell.window().get_volume_value(), 75.0);
     assert!(!shell.window().get_is_muted());
 
     pcm.sampling_rate = 0;
@@ -555,7 +719,7 @@ fn ui_shell_now_playing_callbacks() {
     shell.window().invoke_next_track();
     shell.window().invoke_previous_track();
     shell.window().invoke_volume_changed(60.0);
-    shell.window().invoke_cycle_theme();
+    let _ = shell.cycle_theme();
     shell.window().invoke_source_clicked();
     shell.window().invoke_night_mode_clicked();
 
@@ -574,13 +738,13 @@ fn ui_shell_now_playing_callbacks() {
     // Playback state and position text sync
     shell.set_playback_state(false, 65_000, 100_000);
     assert_eq!(shell.window().get_progress_ratio(), 0.65);
-    assert_eq!(shell.window().get_position_text(), "01:05");
+    assert_eq!(shell.window().get_position_text(), "1:05");
     shell.set_playback_state(false, 100_000, 100_000);
     assert_eq!(shell.window().get_progress_ratio(), 1.0);
-    assert_eq!(shell.window().get_position_text(), "01:40");
+    assert_eq!(shell.window().get_position_text(), "1:40");
     shell.set_playback_state(false, 0, 100_000);
     assert_eq!(shell.window().get_progress_ratio(), 0.0);
-    assert_eq!(shell.window().get_position_text(), "00:00");
+    assert_eq!(shell.window().get_position_text(), "0:00");
 
     // Wire interactive bluetooth transport via the decoupled command queue.
     let (bt, _) = speaker_bluetooth::BluetoothDevice::new_mocked();
@@ -675,6 +839,11 @@ fn ui_shell_cover_art_loading_and_error_handling() {
         obex_port: Some(4097),
         image_handle: Some("h123".into()),
         cover_art_path: None,
+        phone_volume: None,
+        equalizer: None,
+        repeat: None,
+        shuffle: None,
+        scan: None,
     };
 
     // No cover art initially
@@ -702,9 +871,10 @@ fn ui_shell_cover_art_loading_and_error_handling() {
 
 #[cfg(feature = "ui")]
 #[test]
-fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
+fn ui_shell_volume_hud_config_and_amp_auto_popup() {
     use screen_manager::config::{
-        CoreConfig, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+        CodecHudTimeoutMs, CoreConfig, MarqueeFps, VolumeHudFadeMs, VolumeHudTimeoutMs,
+        VolumeStepPercent,
     };
     use screen_manager::ui::{AppShell, Framebuffer, MainWindow, ThemePreset};
     use slint::ComponentHandle;
@@ -719,9 +889,9 @@ fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
     assert!(!shell.is_volume_hud_visible());
     assert!(!shell.is_volume_hud_active());
     assert_eq!(shell.volume_hud_opacity(), 0.0);
-    assert_eq!(shell.volume_step_percent(), 2);
-    assert_eq!(shell.volume_hud_timeout_ms(), 4_000);
-    assert_eq!(shell.volume_hud_fade_ms(), 200);
+    assert_eq!(shell.volume_step_percent().value(), 2);
+    assert_eq!(shell.volume_hud_timeout_ms().value(), 4_000);
+    assert_eq!(shell.volume_hud_fade_ms().value(), 200);
 
     // 2. Apply CoreConfig overrides
     let cfg = CoreConfig {
@@ -730,19 +900,22 @@ fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
         volume_step_percent: VolumeStepPercent::new(4),
         volume_hud_timeout_ms: VolumeHudTimeoutMs::new(1_500),
         volume_hud_fade_ms: VolumeHudFadeMs::new(150),
+        codec_hud_timeout_ms: CodecHudTimeoutMs::new(10_000),
+        ..CoreConfig::default()
     };
     shell.apply_config(&cfg);
     assert_eq!(shell.current_theme(), ThemePreset::MarantzAmber);
-    assert_eq!(shell.volume_step_percent(), 4);
-    assert_eq!(shell.volume_hud_timeout_ms(), 1_500);
-    assert_eq!(shell.volume_hud_fade_ms(), 150);
+    assert_eq!(shell.volume_step_percent().value(), 4);
+    assert_eq!(shell.volume_hud_timeout_ms().value(), 1_500);
+    assert_eq!(shell.volume_hud_fade_ms().value(), 150);
 
     // Reset step to 2% per user default
-    shell.set_volume_step_percent(2);
-    assert_eq!(shell.volume_step_percent(), 2);
+    shell.set_volume_step_percent(VolumeStepPercent::new(2));
+    assert_eq!(shell.volume_step_percent().value(), 2);
 
-    // 3. Initial PCM seed does NOT pop up the Volume HUD on boot
-    let mut pcm = BlueAlsaPcm {
+    // 3. PCM stream metadata never drives the volume: the level and mute
+    // indicator reflect the amp exclusively (apply_amp_volume).
+    let pcm = BlueAlsaPcm {
         pcm_path: "/org/bluealsa/pcm0".into(),
         device_address: BtAddress::new([1, 2, 3, 4, 5, 6]),
         resolved_name: "Phone".into(),
@@ -755,36 +928,58 @@ fn ui_shell_volume_hud_config_and_pcm_auto_popup() {
         format: "S16_LE".into(),
         volume: Some("L: 64 R: 64".into()),
         volume_percent: Some(50),
-        muted: false,
+        muted: true,
         delay: None,
     };
     shell.apply_pcm_stream(&pcm);
-    assert_eq!(shell.volume(), 50.0);
+    assert_eq!(shell.volume(), 75.0);
+    assert!(!shell.is_volume_hud_visible());
+    assert!(!shell.is_muted());
+
+    // 4. The initial authoritative amp snapshot drives the shell level and
+    // mute silently; startup must not pop up the Volume HUD.
+    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(64, false));
+    assert_eq!(shell.volume(), 64.0);
+    assert!(!shell.is_muted());
     assert!(
         !shell.is_volume_hud_visible(),
-        "initial startup PCM seed must not pop up the Volume HUD"
+        "initial startup amp snapshot must not pop up the Volume HUD"
     );
 
-    // 4. Subsequent external PCM volume change DOES open the Volume HUD
-    pcm.volume_percent = Some(64);
-    shell.apply_pcm_stream(&pcm);
-    assert_eq!(shell.volume(), 64.0);
+    // 5. A subsequent authoritative volume change opens the HUD, regardless
+    // of whether it originated on the screen or from a phone.
+    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(42, false));
+    assert_eq!(shell.volume(), 42.0);
     assert!(
         shell.is_volume_hud_visible(),
-        "external AVRCP/BlueALSA volume change must open the Volume HUD"
+        "authoritative external amp volume change must open the Volume HUD"
     );
-    assert!(shell.is_volume_hud_active());
 
-    // Dismiss HUD manually and verify marquee suppression toggles cleanly
-    shell.set_marquee_compose_in_rust(true);
+    // 6. A mute change also refreshes the same overlay.
+    shell.dismiss_volume_hud();
+    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(42, true));
+    assert!(shell.is_muted());
+    assert!(
+        shell.is_volume_hud_visible(),
+        "authoritative external amp mute change must open the Volume HUD"
+    );
+
+    // An unchanged snapshot must not reopen the overlay.
+    shell.dismiss_volume_hud();
+    shell.apply_amp_volume(&screen_manager::volume::AmpVolumeState::new(42, true));
+    assert!(
+        !shell.is_volume_hud_visible(),
+        "unchanged amp snapshot must not reopen the Volume HUD"
+    );
+
+    // Volume HUD user interaction still covers the marquee area; open it
+    // explicitly to verify rendering and dismissal.
+    shell.show_volume_hud();
+    assert!(shell.is_volume_hud_visible());
     shell.set_track_metadata(
         "A Very Long Track Title That Overflows The Viewport Width",
         "Dire Straits",
         "Brothers in Arms",
-    );
-    assert!(
-        shell.marquee_row_specs().is_empty(),
-        "marquee row specs must be suppressed while Volume HUD is active"
     );
     shell.window().show().expect("show window");
     assert!(fb.render_frame(&window).expect("render Volume HUD frame"));
@@ -805,9 +1000,15 @@ fn ui_shell_rotary_encoder_volume_and_mute_integration() {
     let shell = AppShell::new(main_window);
     shell.set_volume(64.0);
 
-    let (bt, _bt_mock) = BluetoothDevice::new_mocked();
+    let (_bt, _bt_mock) = BluetoothDevice::new_mocked();
     let commands = TransportCommandQueue::new();
     shell.wire_bluetooth_transport(&commands);
+    // Encoder volume targets the amp; a mock amp client simulates the worker.
+    let amp_commands = screen_manager::volume::AmpVolumeCommandQueue::new();
+    shell.wire_amp_volume(&amp_commands);
+    let (amp_client, _amp_mock) = screen_manager::volume::AmpVolumeClient::new_mocked(
+        screen_manager::volume::AmpVolumeState::new(64, false),
+    );
 
     let (encoder, enc_mock) = EncoderDevice::new_mocked();
     let mut tracker = EncoderVolumeTracker::seeded(&encoder.read_status().unwrap());
@@ -821,19 +1022,19 @@ fn ui_shell_rotary_encoder_volume_and_mute_integration() {
     assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
     assert_eq!(shell.volume(), 70.0);
     assert!(shell.is_volume_hud_visible());
-    drain_worker_commands(&bt, &commands, &shell);
+    drain_amp_commands(&amp_commands, &amp_client, &shell);
     assert_eq!(
-        bt.status().unwrap().pcms[0].volume_percent,
-        Some(70),
-        "rotary encoder CW detents must update BlueALSA PCM volume"
+        amp_client.state().unwrap().level,
+        70,
+        "rotary encoder CW detents must update the amp level"
     );
 
     // Rotate 5 detents CCW (-10% at 2%/detent -> 70% - 10% = 60%)
     enc_mock.simulate_rotation(RotationDirection::CounterClockwise, 5);
     assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
     assert_eq!(shell.volume(), 60.0);
-    drain_worker_commands(&bt, &commands, &shell);
-    assert_eq!(bt.status().unwrap().pcms[0].volume_percent, Some(60));
+    drain_amp_commands(&amp_commands, &amp_client, &shell);
+    assert_eq!(amp_client.state().unwrap().level, 60);
 
     // Press encoder push-switch -> toggles mute on and keeps Volume HUD visible
     enc_mock.set_switch_pressed(true);
@@ -841,17 +1042,17 @@ fn ui_shell_rotary_encoder_volume_and_mute_integration() {
     assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
     assert!(shell.is_muted());
     assert!(shell.is_volume_hud_visible());
-    drain_worker_commands(&bt, &commands, &shell);
-    assert!(bt.status().unwrap().pcms[0].muted);
+    drain_amp_commands(&amp_commands, &amp_client, &shell);
+    assert!(amp_client.state().unwrap().muted);
 
     // Turning encoder while muted automatically unmutes and applies step
     enc_mock.simulate_rotation(RotationDirection::Clockwise, 1);
     assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
     assert!(!shell.is_muted());
     assert_eq!(shell.volume(), 62.0);
-    drain_worker_commands(&bt, &commands, &shell);
-    assert!(!bt.status().unwrap().pcms[0].muted);
-    assert_eq!(bt.status().unwrap().pcms[0].volume_percent, Some(62));
+    drain_amp_commands(&amp_commands, &amp_client, &shell);
+    assert!(!amp_client.state().unwrap().muted);
+    assert_eq!(amp_client.state().unwrap().level, 62);
 
     // Equal CW and CCW detents in same poll still refresh HUD visibility
     shell.dismiss_volume_hud();
@@ -868,4 +1069,485 @@ fn ui_shell_rotary_encoder_volume_and_mute_integration() {
     enc_mock.set_switch_pressed(false);
     assert!(tracker.poll_and_apply(&encoder, &shell).unwrap());
     assert!(shell.is_volume_hud_visible());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_touch_scale_and_virtual_keyboard_integration() {
+    use screen_manager::ui::{
+        AppShell, Framebuffer, MainWindow, MaterialStyleMetrics, TouchScale, VirtualKeyboard,
+    };
+    use slint::ComponentHandle;
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+    shell.window().show().expect("Failed to show MainWindow");
+
+    // 1. Default TouchScale: font_scale = 1.15, widget_scale = 1.075
+    assert!((shell.font_scale() - 1.15).abs() < 1e-4);
+    assert!((shell.widget_scale() - 1.075).abs() < 1e-4);
+
+    let metrics = shell.window().global::<MaterialStyleMetrics>();
+    // Thin stroke tokens remain unscaled integer pixels (1px, 2px, 3px).
+    assert!((metrics.get_size_1() - 1.0).abs() < 1e-4);
+    assert!((metrics.get_size_2() - 2.0).abs() < 1e-4);
+    assert!((metrics.get_size_3() - 3.0).abs() < 1e-4);
+    // Damped widget metrics at default 1.15 (widget_scale = 1.075)
+    assert!((metrics.get_size_32() - 38.0 * 1.075).abs() < 1e-2);
+    assert!((metrics.get_size_40() - 46.0 * 1.075).abs() < 1e-2);
+    assert!((metrics.get_padding_16() - 14.0 * 1.075).abs() < 1e-2);
+    assert!((metrics.get_icon_size_24() - 24.0 * 1.075).abs() < 1e-2);
+
+    // 2. Top bar height: fixed 60px on Tab 0, scaled `size_64` on Tabs 1..=5
+    assert_eq!(shell.current_tab(), 0);
+    assert!((shell.window().get_top_bar_height() - 60.0).abs() < 1e-4);
+
+    shell.set_tab(5);
+    assert!((shell.window().get_top_bar_height() - 56.0 * 1.075).abs() < 1e-2);
+
+    // 3. Scale transitions across 1.0..=1.35 and NaN/out-of-bounds clamping
+    shell.set_font_scale(1.0);
+    assert!((shell.font_scale() - 1.0).abs() < 1e-4);
+    assert!((shell.widget_scale() - 1.0).abs() < 1e-4);
+    assert!((shell.window().get_top_bar_height() - 56.0).abs() < 1e-2);
+
+    shell.set_font_scale(1.35);
+    assert!((shell.font_scale() - 1.35).abs() < 1e-4);
+    assert!((shell.widget_scale() - 1.175).abs() < 1e-4);
+    assert!((shell.window().get_top_bar_height() - 56.0 * 1.175).abs() < 1e-2);
+
+    shell.set_font_scale(0.5);
+    assert!((shell.font_scale() - 1.0).abs() < 1e-4);
+    shell.set_font_scale(2.5);
+    assert!((shell.font_scale() - 1.35).abs() < 1e-4);
+    shell.set_font_scale(f32::NAN);
+    assert!((shell.font_scale() - 1.15).abs() < 1e-4);
+
+    // Callback from FontSizeControl slider updates TouchScale with clamping
+    shell.window().invoke_font_scale_changed(1.25);
+    assert!((shell.font_scale() - 1.25).abs() < 1e-4);
+    assert!((shell.widget_scale() - 1.125).abs() < 1e-4);
+    shell.window().invoke_font_scale_changed(f32::NAN);
+    assert!((shell.font_scale() - 1.15).abs() < 1e-4);
+
+    // Guard against NaN injected directly into the Slint global
+    shell
+        .window()
+        .global::<TouchScale>()
+        .set_font_scale(f32::NAN);
+    assert!((shell.font_scale() - 1.0).abs() < 1e-4);
+    shell.set_font_scale(1.15);
+
+    // 4. Render 800x480 Themes & Scale view and Widget Scale Showcase at 1.0, 1.15, 1.35
+    assert!(!shell.window().get_show_advanced());
+    shell.window().set_show_themes(true);
+    for scale in [1.0_f32, 1.15, 1.35] {
+        shell.set_font_scale(scale);
+        shell.window().set_show_widget_preview(false);
+        assert!(
+            fb.render_frame_full_redraw(&window)
+                .expect("render themes view")
+        );
+        shell.window().set_show_widget_preview(true);
+        assert!(
+            fb.render_frame_full_redraw(&window)
+                .expect("render widget showcase")
+        );
+    }
+
+    // 5. VirtualKeyboard lifecycle & app_bar_back hierarchy
+    let vk = shell.window().global::<VirtualKeyboard>();
+    assert!(!vk.get_visible());
+    vk.invoke_open("Speaker Name".into(), "DietPi".into());
+    assert!(vk.get_visible());
+    assert_eq!(vk.get_label().as_str(), "Speaker Name");
+    assert_eq!(vk.get_current_text().as_str(), "DietPi");
+
+    vk.invoke_push_key("X".into());
+    assert_eq!(vk.get_current_text().as_str(), "DietPiX");
+    assert!(
+        fb.render_frame_full_redraw(&window)
+            .expect("render virtual keyboard")
+    );
+
+    // Pressing app_bar_back while VirtualKeyboard is open closes the keyboard first
+    shell.window().invoke_app_bar_back();
+    assert!(!vk.get_visible());
+    assert!(shell.window().get_show_widget_preview());
+
+    // Re-open, clear, and submit
+    vk.invoke_open("Speaker Name".into(), "DietPi".into());
+    vk.invoke_clear();
+    assert_eq!(vk.get_current_text().as_str(), "");
+    vk.invoke_push_key("H".into());
+    vk.invoke_push_key("I".into());
+    vk.invoke_submit();
+    assert!(!vk.get_visible());
+    assert_eq!(vk.get_current_text().as_str(), "HI");
+
+    // Next app_bar_back exits widget preview -> themes -> settings -> Now Playing
+    shell.window().invoke_app_bar_back();
+    assert!(!shell.window().get_show_widget_preview());
+    assert!(shell.window().get_show_themes());
+
+    shell.window().invoke_app_bar_back();
+    assert!(!shell.window().get_show_themes());
+    assert_eq!(shell.current_tab(), 5);
+
+    shell.window().invoke_app_bar_back();
+    assert_eq!(shell.current_tab(), 0);
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_advanced_settings_subscreen_hidden_by_default_and_scrollable() {
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+
+    let (mut fb, _) = Framebuffer::new_mocked();
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    assert!(!shell.window().get_show_advanced());
+    shell.set_tab(5);
+    shell.window().set_show_themes(true);
+    assert!(
+        fb.render_frame_full_redraw(&window)
+            .expect("render Screen Settings without Advanced")
+    );
+
+    shell.window().set_show_advanced(true);
+    assert!(
+        fb.render_frame_full_redraw(&window)
+            .expect("render scrollable Advanced sub-screen")
+    );
+
+    // Back exits Advanced -> Screen Settings -> Settings hub.
+    shell.window().invoke_app_bar_back();
+    assert!(!shell.window().get_show_advanced());
+    assert!(shell.window().get_show_themes());
+
+    shell.window().invoke_app_bar_back();
+    assert!(!shell.window().get_show_themes());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_generic_settings_callbacks_clamp_and_sync_models() {
+    use screen_manager::config::{CoreConfig, MarqueeFps};
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use slint::Model;
+    use speaker_common::diag::ScopedTempDir;
+
+    let _window = Framebuffer::new_mocked()
+        .0
+        .init_platform()
+        .expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    let dir = ScopedTempDir::new("generic-settings");
+    let path = dir.path().join("settings.json");
+    shell.wire_config(&path);
+
+    // Unknown IDs are ignored gracefully.
+    shell.window().invoke_setting_step("nonexistent".into(), 1);
+    shell
+        .window()
+        .invoke_setting_toggle("nonexistent".into(), true);
+
+    // Step volume_step_percent up from default (2 -> 3) and then down to min (1).
+    shell
+        .window()
+        .invoke_setting_step("volume_step_percent".into(), 1);
+    assert_eq!(shell.window().get_volume_step_percent(), 3);
+    for _ in 0..5 {
+        shell
+            .window()
+            .invoke_setting_step("volume_step_percent".into(), -1);
+    }
+    assert_eq!(shell.window().get_volume_step_percent(), 1);
+
+    // Step HUD values down to their minimums (bounds clamping at min).
+    for _ in 0..25 {
+        shell
+            .window()
+            .invoke_setting_step("volume_hud_timeout_ms".into(), -1);
+        shell
+            .window()
+            .invoke_setting_step("volume_hud_fade_ms".into(), -1);
+    }
+    for _ in 0..50 {
+        shell
+            .window()
+            .invoke_setting_step("codec_hud_timeout_ms".into(), -1);
+    }
+    assert_eq!(shell.window().get_volume_hud_timeout_ms(), 250);
+    assert_eq!(shell.window().get_volume_hud_fade_ms(), 0);
+    assert_eq!(shell.window().get_codec_hud_timeout_ms(), 250);
+
+    // Toggle Marquee FPS (30/60) and Title display mode (Marquee/Split), and
+    // verify programmatic setter syncs the model too.
+    shell.set_marquee_fps(MarqueeFps::FPS_60);
+    assert_eq!(shell.marquee_fps().value(), 60);
+    shell
+        .window()
+        .invoke_setting_toggle("marquee_fps".into(), false);
+    assert_eq!(shell.marquee_fps().value(), 30);
+    shell
+        .window()
+        .invoke_setting_toggle("title_display_mode".into(), true);
+    assert_eq!(
+        shell.title_display_mode(),
+        screen_manager::config::TitleDisplayMode::Split
+    );
+
+    // Verify basic_settings, visualizer_settings, and advanced_settings models reflect the updated state.
+    let basic_rows = shell.window().get_basic_settings();
+    assert_eq!(basic_rows.row_count(), 2);
+    let title_row = basic_rows.row_data(0).expect("title_display_mode row");
+    assert_eq!(title_row.id.as_str(), "title_display_mode");
+    assert!(!title_row.is_advanced);
+    assert!(title_row.right_selected);
+    let auto_row = basic_rows.row_data(1).expect("auto_brightness row");
+    assert_eq!(auto_row.id.as_str(), "auto_brightness");
+    assert!(!auto_row.is_advanced);
+    assert!(auto_row.right_selected);
+
+    let viz_rows = shell.window().get_visualizer_settings();
+    assert_eq!(viz_rows.row_count(), 4);
+    assert_eq!(
+        viz_rows.row_data(0).expect("autostart row").id.as_str(),
+        "visualizer_auto_start"
+    );
+    assert_eq!(
+        viz_rows.row_data(3).expect("led mask row").id.as_str(),
+        "spectrum_led_mask"
+    );
+
+    let adv_rows = shell.window().get_advanced_settings();
+    assert_eq!(adv_rows.row_count(), 6);
+    let vol_row = adv_rows.row_data(1).expect("volume_step_percent row");
+    assert_eq!(vol_row.id.as_str(), "volume_step_percent");
+    assert!(vol_row.is_advanced);
+    assert!(!vol_row.can_decrease);
+    assert!(vol_row.can_increase);
+
+    let clamped = shell.current_config();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if CoreConfig::load(&path).is_ok_and(|c| c == clamped) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(CoreConfig::load(&path).expect("persisted"), clamped);
+    assert_eq!(clamped.marquee_fps, MarqueeFps::FPS_30);
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_screen_settings_save_round_trip_and_clamping() {
+    use screen_manager::config::{
+        CodecHudTimeoutMs, CoreConfig, FontScale, ManualBrightnessPercent, MarqueeFps,
+        VolumeHudFadeMs, VolumeHudTimeoutMs, VolumeStepPercent,
+    };
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use speaker_common::diag::ScopedTempDir;
+    use std::path::Path;
+
+    /// Polls `path` until the persisted config satisfies `condition`, panicking
+    /// after a generous deadline (CI's ARM runner is slow).
+    fn wait_until_persisted(path: &Path, condition: impl Fn(&CoreConfig) -> bool) -> CoreConfig {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(config) = CoreConfig::load(path)
+                && condition(&config)
+            {
+                return config;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background persist did not complete within 10s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    let _window = Framebuffer::new_mocked()
+        .0
+        .init_platform()
+        .expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    // Saving without a wired config path must fail cleanly, never panic.
+    assert!(shell.save_current_config().unwrap_err().is_invalid_value());
+
+    // Wire a temp JSON path and apply a non-default configuration.
+    let dir = ScopedTempDir::new("screen-settings");
+    let path = dir.path().join("settings.json");
+    shell.wire_config(&path);
+
+    let cfg = CoreConfig {
+        theme: Some(screen_manager::ui::ThemePreset::CyberpunkNeon),
+        marquee_fps: MarqueeFps::FPS_30,
+        title_display_mode: screen_manager::config::TitleDisplayMode::Split,
+        volume_step_percent: VolumeStepPercent::new(7),
+        volume_hud_timeout_ms: VolumeHudTimeoutMs::new(5_250),
+        volume_hud_fade_ms: VolumeHudFadeMs::new(650),
+        codec_hud_timeout_ms: CodecHudTimeoutMs::new(45_000),
+        font_scale: FontScale::from_percent(125),
+        auto_brightness_enabled: false,
+        brightness_manual_percent: ManualBrightnessPercent::new(60),
+        ..CoreConfig::default()
+    };
+    shell.apply_config(&cfg);
+
+    // The window-backed snapshot must mirror the applied config exactly.
+    assert_eq!(shell.current_config(), cfg);
+
+    // Saving persists to the wired path and reloads identically.
+    shell.save_current_config().expect("save must succeed");
+    let reloaded = CoreConfig::load(&path).expect("reload");
+    assert_eq!(reloaded, cfg);
+
+    // Stepper callback persists asynchronously to disk.
+    shell
+        .window()
+        .invoke_setting_step("volume_step_percent".into(), 1);
+    assert_eq!(shell.window().get_volume_step_percent(), 8);
+    let _live = wait_until_persisted(&path, |c| c.volume_step_percent.value() == 8);
+
+    // Persisting to an unwritable path logs an error instead of panicking.
+    shell.wire_config(std::path::Path::new("/nonexistent-dir/settings.json"));
+    shell
+        .window()
+        .invoke_setting_step("volume_step_percent".into(), 1);
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn track_title_splits_long_titles_and_preserves_short_titles() {
+    use screen_manager::config::TitleDisplayMode;
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use speaker_bluetooth::BtPlaybackState;
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+
+    // Default mode is Marquee.
+    assert_eq!(shell.title_display_mode(), TitleDisplayMode::Marquee);
+    assert!(!shell.window().get_title_split_mode());
+
+    // Short title stays on one line (line2 is empty).
+    shell.set_track_metadata("Money for Nothing", "Dire Straits", "Brothers in Arms");
+    assert_eq!(shell.window().get_track_title(), "Money for Nothing");
+    assert_eq!(shell.window().get_track_title_line1(), "Money for Nothing");
+    assert_eq!(shell.window().get_track_title_line2(), "");
+
+    // Long title splits semantically across line1 and line2.
+    shell.apply_bluetooth_playback(&BtPlaybackState {
+        title: "Kesariya (From \"Brahmastra\")".into(),
+        artist: "Arijit Singh".into(),
+        album: "Brahmastra".into(),
+        duration_ms: 268_000,
+        position_ms: 12_000,
+        status: "playing".into(),
+        ..BtPlaybackState::default()
+    });
+    assert_eq!(
+        shell.window().get_track_title(),
+        "Kesariya (From \"Brahmastra\")"
+    );
+    assert_eq!(shell.window().get_track_title_line1(), "Kesariya");
+    assert_eq!(
+        shell.window().get_track_title_line2(),
+        "(From \"Brahmastra\")"
+    );
+
+    // Switching to Split mode enables the split view in Slint and renders cleanly.
+    shell.set_title_display_mode(TitleDisplayMode::Split);
+    assert_eq!(shell.title_display_mode(), TitleDisplayMode::Split);
+    assert!(shell.window().get_title_split_mode());
+    assert!(fb.render_frame(&window).expect("render split title frame"));
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_shell_font_size_slider_touch_interaction() {
+    use screen_manager::ui::{AppShell, Framebuffer, MainWindow};
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use slint::{ComponentHandle, LogicalPosition};
+
+    let mut fb = Framebuffer::new_mocked().0;
+    let window = fb.init_platform().expect("Failed to initialize platform");
+    let main_window = MainWindow::new().expect("Failed to initialize MainWindow");
+    let shell = AppShell::new(main_window);
+    shell.window().show().expect("Failed to show MainWindow");
+
+    shell.set_tab(5);
+    shell.window().set_show_themes(true);
+    shell.set_font_scale(1.15);
+    assert!(
+        fb.render_frame_full_redraw(&window)
+            .expect("render Screen Settings")
+    );
+
+    // First verify ThemePresetCard at (220, 100) receives taps inside Screen Settings
+    let theme_pos = LogicalPosition::new(220.0, 100.0);
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: theme_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: theme_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert_eq!(
+        shell.current_theme(),
+        screen_manager::ui::ThemePreset::MarantzAmber,
+        "tapping second ThemePresetCard inside ScrollView must switch theme"
+    );
+
+    // Tap the large "A" button (x ≈ 665px, y ≈ 165px) to step up by 0.05.
+    let inc_pos = LogicalPosition::new(665.0, 165.0);
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: inc_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: inc_pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert!(
+        shell.font_scale() > 1.15,
+        "tapping large A button must increase font_scale (got {})",
+        shell.font_scale()
+    );
+
+    // Drag across the FontSizeControl slider track (x 250 -> x 600 at y=165) to verify sliding works.
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: LogicalPosition::new(250.0, 165.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(600.0, 165.0),
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: LogicalPosition::new(600.0, 165.0),
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerExited);
+    assert!(
+        shell.font_scale() > 1.25,
+        "sliding FontSizeControl slider to the right must increase font_scale (got {})",
+        shell.font_scale()
+    );
 }

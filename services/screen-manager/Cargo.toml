@@ -16,10 +16,11 @@ speaker-common = { workspace = true }
 speaker-hardware = { workspace = true }
 speaker-bluetooth = { workspace = true }
 speaker-dsp = { workspace = true }
+speaker-title-breaker = { workspace = true }
 config = { workspace = true }
 tempfile = { workspace = true }
 image = { workspace = true }
-memmap2 = { workspace = true, optional = true }
+libblur = { workspace = true, optional = true }
 libc = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
@@ -27,16 +28,17 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+zbus = { workspace = true, features = ["tokio", "blocking-api"] }
 
 # Slint UI
 i-slint-core = { workspace = true, optional = true }
 slint = { workspace = true, optional = true }
+swash = { workspace = true, optional = true }
 
 [features]
 default = ["ui"]
-ui = ["dep:slint", "dep:slint-build", "dep:i-slint-core", "dep:memmap2"]
-linuxkms = ["ui", "slint/backend-linuxkms"]
-simulator = ["ui", "slint/backend-winit", "slint/renderer-femtovg"]
+ui = ["dep:slint", "dep:slint-build", "dep:i-slint-core", "dep:libblur", "dep:swash"]
+simulator = ["ui", "slint/backend-winit"]
 test-util = []
 
 [dev-dependencies]

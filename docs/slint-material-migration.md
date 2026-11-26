@@ -858,7 +858,7 @@ pub fn apply_theme_preset(window: &MainWindow, preset: u8) {
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| Material components don't compile with Slint 1.18.1 | Medium | High | Pin material-components to commit tested with 1.18.1; test in CI |
+| Material components don't compile with Slint 1.19.0 | Medium | High | Pin material-components to commit tested with 1.19.0; test in CI |
 | Metric overrides not respected (cascade order) | Medium | Medium | Import overrides BEFORE `material.slint` in appwindow.slint |
 | Custom SVG icons not colorizing via `Icon` | Low | Medium | `Icon` component uses `colorize: MaterialPalette.on_background` - test with our SVGs |
 | Typography overrides break `MaterialText` layout | Low | Medium | Test all 13 text styles in SettingsView first |
@@ -972,7 +972,7 @@ All changes are additive (new files) or localized (per-view) until Phase 6.
 - **Docs**: https://material.slint.dev/getting-started/
 - **Source**: https://github.com/slint-ui/slint/tree/master/ui-libraries/material
 - **Gallery Example**: https://github.com/slint-ui/slint/tree/master/ui-libraries/material/examples/gallery
-- **Requires**: Slint 1.18+ (project uses 1.18.1 ✓)
+- **Requires**: Slint 1.18+ (project uses 1.19.0 ✓)
 
 ### Integration Pattern (from official docs)
 ```rust
@@ -1028,3 +1028,18 @@ Plan P5 gated ≥90% lines/functions; workspace is 89.16%/91.67% (repo gate 85% 
 
 ### Verification
 Host framebuffer probes: all 5 presets render distinct primaries on Settings; all Material tabs recolor on preset switch. Device: aarch64 release deployed, `screen-manager` active.
+
+### Known pitfall: stale Slint build cache masks `.slint` edits
+`slint-build` generated code lives under `target/<triple>/release/build/screen-manager-*/out`; incremental
+`cargo build` can ship a binary compiled from the **previous** `.slint` contents when only `.slint` files
+change (observed twice: deployed binaries silently kept the old UI while sources were already updated).
+Before deploying or debugging UI changes, force regeneration:
+
+```bash
+cargo clean -p screen-manager
+cargo build -p screen-manager --target aarch64-unknown-linux-gnu --release
+```
+
+A quick sanity check: run a clean `-p screen-manager` build and compare the binary sha256 against the
+cached one — if the clean rebuild produces a *different* hash, the cache was stale. Also note a failing
+`.slint` compile in a cached build dir only surfaces on `cargo clean`, so always build clean after UI edits.

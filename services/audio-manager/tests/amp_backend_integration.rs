@@ -20,7 +20,8 @@ async fn mock_backend_write_state() {
     assert!(!result.muted);
     assert_eq!(result.level_raw, 80);
 
-    let write = ctrl.last_write().unwrap();
+    let writes = ctrl.all_writes();
+    let write = writes.last().unwrap();
     assert!(!write.muted);
     assert_eq!(write.level_raw, 80);
 }
@@ -46,7 +47,8 @@ async fn mock_backend_write_state_muted() {
     assert_eq!(result.level_raw, 80);
     assert_eq!(result.hardware_level(), 80);
 
-    let write = ctrl.last_write().unwrap();
+    let writes = ctrl.all_writes();
+    let write = writes.last().unwrap();
     assert!(write.muted);
     assert_eq!(write.level_raw, 80);
 }
@@ -233,4 +235,186 @@ async fn mock_backend_tracks_full_call_history_and_state() {
     let (_validate, writes, reads) = ctrl.call_counts();
     assert!(writes >= 1, "write_state calls must be counted");
     assert!(reads >= 3, "read_state calls must be counted");
+}
+
+#[tokio::test]
+async fn mock_backend_write_state_preserves_mixer_level() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_state(AmpState {
+        level_raw: 100,
+        muted: true,
+    });
+
+    let result = backend
+        .write_state(&AmpState {
+            level_raw: 50,
+            muted: false,
+        })
+        .await
+        .unwrap();
+    assert!(!result.muted);
+    // The mixer level should update even when transitioning from muted to unmuted
+    assert_eq!(result.level_raw, 50);
+    assert_eq!(result.hardware_level(), 50);
+
+    let writes = ctrl.all_writes();
+    let write = writes.last().unwrap();
+    assert!(!write.muted);
+    assert_eq!(write.level_raw, 50);
+}
+
+#[tokio::test]
+async fn mock_backend_write_state_preserves_muted_flag() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_state(AmpState {
+        level_raw: 80,
+        muted: false,
+    });
+
+    // Write muted state - hardware_level preserves the mixer level
+    // (mute is handled by serial mute bit separately)
+    let result = backend
+        .write_state(&AmpState {
+            level_raw: 80,
+            muted: true,
+        })
+        .await
+        .unwrap();
+    assert!(result.muted);
+    assert_eq!(result.level_raw, 80);
+    assert_eq!(result.hardware_level(), 80); // mixer level preserved
+
+    let writes = ctrl.all_writes();
+    let write = writes.last().unwrap();
+    assert!(write.muted);
+}
+
+#[tokio::test]
+async fn mock_backend_multiple_writes() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_state(AmpState::default());
+
+    // Sequence of writes
+    backend
+        .write_state(&AmpState {
+            level_raw: 20,
+            muted: false,
+        })
+        .await
+        .unwrap();
+    backend
+        .write_state(&AmpState {
+            level_raw: 40,
+            muted: true,
+        })
+        .await
+        .unwrap();
+    backend
+        .write_state(&AmpState {
+            level_raw: 60,
+            muted: false,
+        })
+        .await
+        .unwrap();
+    backend
+        .write_state(&AmpState {
+            level_raw: 80,
+            muted: true,
+        })
+        .await
+        .unwrap();
+
+    let writes = ctrl.all_writes();
+    assert_eq!(writes.len(), 4);
+    assert_eq!(writes[0].level_raw, 20);
+    assert!(!writes[0].muted);
+    assert_eq!(writes[1].level_raw, 40);
+    assert!(writes[1].muted);
+    assert_eq!(writes[2].level_raw, 60);
+    assert!(!writes[2].muted);
+    assert_eq!(writes[3].level_raw, 80);
+    assert!(writes[3].muted);
+}
+
+#[tokio::test]
+async fn mock_backend_write_state_with_fault() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_write_fail(true);
+
+    let err = backend
+        .write_state(&AmpState {
+            level_raw: 50,
+            muted: false,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("mock write failure"));
+}
+
+#[tokio::test]
+async fn mock_backend_fault_recovery() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_write_fail(true);
+
+    let err = backend
+        .write_state(&AmpState {
+            level_raw: 50,
+            muted: false,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("mock write failure"));
+
+    // Recover
+    ctrl.set_write_fail(false);
+    let result = backend
+        .write_state(&AmpState {
+            level_raw: 50,
+            muted: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(result.level_raw, 50);
+    assert!(!result.muted);
+}
+
+#[tokio::test]
+async fn mock_backend_persists_state_across_writes() {
+    let (backend, ctrl) = MockAmpBackend::new_mocked();
+    ctrl.set_state(AmpState {
+        level_raw: 100,
+        muted: false,
+    });
+
+    // First write
+    backend
+        .write_state(&AmpState {
+            level_raw: 80,
+            muted: false,
+        })
+        .await
+        .unwrap();
+    // Second write with mute
+    backend
+        .write_state(&AmpState {
+            level_raw: 80,
+            muted: true,
+        })
+        .await
+        .unwrap();
+    // Third write - unmute
+    backend
+        .write_state(&AmpState {
+            level_raw: 80,
+            muted: false,
+        })
+        .await
+        .unwrap();
+
+    let writes = ctrl.all_writes();
+    assert_eq!(writes.len(), 3);
+    assert!(!writes[0].muted);
+    assert!(writes[1].muted);
+    assert!(!writes[2].muted);
+    assert_eq!(writes[2].level_raw, 80);
 }

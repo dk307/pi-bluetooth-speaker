@@ -24,7 +24,7 @@ Repository: [https://github.com/dk307/pi-bluetooth-speaker](https://github.com/d
   [bluealsa.service (v5.0.0)]
          │
          ▼
-  [bluealsa-aplay.service -D default]
+  [bluealsa-aplay.service -D default --volume=none --single-audio]
          │
          ▼
   [ALSA Loopback Card 0: pcm.dsp_dmix @ 48kHz S32_LE]
@@ -69,8 +69,8 @@ pi-bluetooth-speaker/
 │   └── bluetooth/            # Bluez, BlueALSA, BIP cover art protocol (speaker-bluetooth)
 ├── services/                 # Appliance background daemons
 │   ├── README.md             # Service architecture and roadmap
-│   ├── screen-manager/       # Touchscreen Appliance Console & UI (screen-manager.service)
-│   └── bt-manager/           # Bluetooth Manager daemon & BIP cover art service (bt-manager.service)
+│   ├── screen-manager/       # Touchscreen Appliance Console & UI, incl. ambient auto-brightness loop (screen-manager.service)
+│   └── bt-manager/           # Bluetooth Manager daemon, active-source arbiter & BIP cover art service (bt-manager.service)
 ├── tools/                    # Hardware diagnostic utilities
 │   └── diagnostics/          # CLI probes: amp-info, bt-info, dsp-info, encoder-read, light-read, temp-read
 └── docs/                     # Architectural documentation & technical reports
@@ -113,3 +113,8 @@ cargo build --target aarch64-unknown-linux-gnu --release --bins
 # Run interactive desktop simulator on workstation
 cargo run -p screen-manager --features simulator
 ```
+
+### Versioning and Releases
+
+Workspace versions are updated automatically from conventional commits by release-plz. See
+[the release process](docs/releasing.md) for the bump rules and tag workflow.

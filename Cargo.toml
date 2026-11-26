@@ -6,7 +6,6 @@ members = [
     "crates/dsp",
     "crates/bluetooth",
     "crates/title-breaker",
-    "crates/amp_curve",
     "services/screen-manager",
     "services/bt-manager",
     "services/audio-manager",
@@ -14,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.0.0"
+version = "2.3.0"
 edition = "2024"
 authors = ["Audio Appliance Team"]
 license = "Apache-2.0"
@@ -55,18 +54,19 @@ anyhow = "=1.0.102"
 # Image Processing (Cover Art Scaling & Procedural Vinyl)
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
 
+# CPU Blur for the Overlay Backdrop Effect.
+# Only the plain NEON path is enabled: the `rdm` feature requires ARMv8.2 dot-product
+# instructions that the BCM2837 Cortex-A53 (ARMv8.0-A) does not implement.
+libblur = { version = "=0.24.0", default-features = false, features = ["neon"] }
+
 # Logging & Structured Tracing
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 
 # Async Trait for Trait-based Dependency Injection / Mocks
 async-trait = "=0.1.86"
-memmap2 = "=0.9.12"
 thiserror = "=2.0.21"
 sd-notify = "=0.1.1"
-
-# Shared volume curve for Merus MA12070P amplifier
-amp-curve = { path = "crates/amp_curve" }
 
 # Direct OBEX Cover Art over RFCOMM/L2CAP (AVRCP/BIP)
 bluer = { version = "=0.17.4", default-features = false, features = ["rfcomm", "l2cap"] }
@@ -78,10 +78,22 @@ bluesdp = "=0.1.1"
 libc = "=0.2.191"
 ctrlc = "=3.4.2"
 
+# CamillaDSP 5.0.0-beta.2 official typed protocol & config schema
+camilladsp-schema = { git = "https://github.com/HEnquist/camilladsp.git", rev = "1ea8b9c5518bf9df7ae612d3b51bd791ceb46269" }
+
 # UI Framework (Slint with Linux Framebuffer & KMS/DRM backends)
-slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "renderer-software", "software-renderer-systemfonts"] }
-i-slint-core = { version = "=1.18.1", features = ["svg", "image-decoders", "image-default-formats"] }
-slint-build = "=1.18.1"
+slint = { version = "=1.19.0", default-features = false, features = [
+  "std",
+  "compat-1-18",
+  "renderer-skia-opengl",
+  "renderer-software",
+  "software-renderer-systemfonts",
+  "backend-linuxkms",
+  "backend-linuxkms-libinput",
+] }
+i-slint-core = { version = "=1.19.0", features = ["svg", "image-decoders", "image-default-formats"] }
+slint-build = "=1.19.0"
+swash = "=0.2.10"
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"

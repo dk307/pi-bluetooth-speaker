@@ -358,6 +358,87 @@ impl ThemePreset {
 
         // Single source of truth for the preset index (skin selection reads this).
         window.global::<AppTheme>().set_active_preset(self.index());
+
+        // Pre-render the 7 discrete AmbientWaveIndicator frames (and the
+        // combined 448x24 horizontal sprite sheet) into SharedPixelBuffers
+        // matching this theme's primary/secondary colors.
+        let (frames, sprite_sheet) = self.build_ambient_wave_sprites();
+        let sprites = window.global::<crate::ui::AmbientWaveSprites>();
+        sprites.set_frames(slint::ModelRc::new(slint::VecModel::from(frames)));
+        sprites.set_sprite_sheet(sprite_sheet);
+    }
+
+    /// Pre-renders the 7 `64x24` `AmbientWaveIndicator` frames (ticks `0..6`
+    /// playing + index `6` paused `4px` idle stubs) and a single `448x24`
+    /// horizontal sprite sheet for this theme.
+    fn build_ambient_wave_sprites(self) -> (Vec<slint::Image>, slint::Image) {
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 24;
+        const FRAME_COUNT: u32 = 7;
+        const SHEET_WIDTH: u32 = WIDTH * FRAME_COUNT;
+        const BAR_WIDTH: u32 = 4;
+        const BAR_XS: [u32; 5] = [0, 8, 16, 24, 32];
+        const WAVE_HEIGHTS: [[u32; 5]; 7] = [
+            [20, 18, 7, 16, 16],
+            [14, 10, 12, 22, 8],
+            [8, 18, 18, 16, 8],
+            [14, 24, 12, 9, 16],
+            [20, 18, 7, 16, 8],
+            [14, 10, 12, 22, 8],
+            [4, 4, 4, 4, 4],
+        ];
+
+        let (primary, secondary, ..) = self.material_base_colors();
+        let primary_px =
+            slint::Rgba8Pixel::new(primary.red(), primary.green(), primary.blue(), 255);
+        let secondary_px =
+            slint::Rgba8Pixel::new(secondary.red(), secondary.green(), secondary.blue(), 255);
+        let bar_colors = [
+            primary_px,
+            secondary_px,
+            primary_px,
+            secondary_px,
+            primary_px,
+        ];
+
+        let mut sheet_buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(SHEET_WIDTH, HEIGHT);
+        let sheet_pixels = sheet_buf.make_mut_slice();
+
+        let frames = WAVE_HEIGHTS
+            .iter()
+            .enumerate()
+            .map(|(frame_idx, heights)| {
+                let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(WIDTH, HEIGHT);
+                let pixels = buf.make_mut_slice();
+                let frame_x_off = (frame_idx as u32) * WIDTH;
+
+                for ((&bar_x, &bar_h), &color) in
+                    BAR_XS.iter().zip(heights.iter()).zip(bar_colors.iter())
+                {
+                    let y0 = (HEIGHT - bar_h) / 2;
+                    let y1 = y0 + bar_h;
+                    for y in y0..y1 {
+                        // Round top/bottom rows (border-radius: 2px on 4px bar).
+                        let is_cap_row = y == y0 || y + 1 == y1;
+                        let (x_start, x_end) = if is_cap_row {
+                            (bar_x + 1, bar_x + BAR_WIDTH - 1)
+                        } else {
+                            (bar_x, bar_x + BAR_WIDTH)
+                        };
+                        let row_off = (y * WIDTH) as usize;
+                        let sheet_row_off = (y * SHEET_WIDTH + frame_x_off) as usize;
+                        for x in x_start..x_end {
+                            pixels[row_off + x as usize] = color;
+                            sheet_pixels[sheet_row_off + x as usize] = color;
+                        }
+                    }
+                }
+                // Pixels are either alpha=255 or (0,0,0,0), so already premultiplied.
+                slint::Image::from_rgba8_premultiplied(buf)
+            })
+            .collect();
+
+        (frames, slint::Image::from_rgba8_premultiplied(sheet_buf))
     }
 
     /// Applies this theme preset to a [`SplashScreen`] component.

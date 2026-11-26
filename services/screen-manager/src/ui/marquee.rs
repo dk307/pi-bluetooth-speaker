@@ -1,431 +1,173 @@
-//! Offscreen pre-rendering of marquee text strips into cached [`slint::Image`] buffers.
+//! Premultiplied `SharedPixelBuffer` rasterizer for overflowing marquee titles.
 //!
-//! Re-shaping and re-rasterizing long marquee strings on every animation frame costs
-//! ~8 ms of CPU per 16.7 ms frame on the Raspberry Pi 3's software renderer. This module
-//! rasterizes the title marquee strip exactly once per text,
-//! color, or typography change into a transparent-background [`slint::Image`], which
-//! [`AppShell`](super::shell::AppShell) then hands to the declarative `MarqueeText`
-//! scroller for cheap per-frame pixel blits.
+//! Renders the full title string into a single `Rgba8Pixel` buffer only when
+//! the title text, font scale, or theme color changes, so 60 Hz scrolling in
+//! Slint only translates `Image.x` without per-frame text shaping or glyph
+//! rasterization.
 
-use std::fmt::{self, Formatter};
-use std::rc::Rc;
-use std::sync::Arc;
+use swash::FontRef;
+use swash::scale::image::Content;
+use swash::scale::{Render, ScaleContext, Source};
+use swash::zeno::Format;
 
-use slint::Color;
-use slint::ComponentHandle;
-use slint::SharedString;
-use slint::platform::software_renderer::{
-    MinimalSoftwareWindow, PremultipliedRgbaColor, TargetPixel,
-};
+/// Embedded `ExtraBold` font matching `MarqueeText` (`font-weight: 800`).
+const INTER_EXTRABOLD_TTF: &[u8] = include_bytes!("../../../../assets/fonts/Inter-ExtraBold.ttf");
 
-use super::generated::MarqueeRasterizer;
+/// `VideoCore` IV `GL_MAX_TEXTURE_SIZE` ceiling (Issue #11785): textures wider
+/// than 2048 px fail `glTexImage2D` with `GL_INVALID_VALUE` and render black.
+pub const MAX_MARQUEE_STRIP_WIDTH: u32 = 2048;
 
-/// Marquee strip typography, in physical pixels at the appliance panel's 1.0 scale factor.
+/// Base marquee font size in logical pixels (matches `now_playing.slint`).
+const BASE_FONT_SIZE_PX: f32 = 32.0;
+
+/// Extra vertical padding (px) above ascent and below descent so hinted
+/// ascenders/descenders (e.g. `g`, `y`, `q`, `É`) are never clipped.
+const VERTICAL_SLACK_PX: f32 = 2.0;
+
+/// Rasterizes `text` at `BASE_FONT_SIZE_PX * font_scale` with premultiplied
+/// alpha for `color` (`(r, g, b)`), returning an empty image for empty `text`.
 ///
-/// These constants are the single source of truth for marquee typography since the strips
-/// replace declarative `Text` elements inside `MarqueeText`.
-#[derive(Debug)]
-pub struct MarqueeTypography;
-
-impl MarqueeTypography {
-    /// Track title strip font size in pixels.
-    pub const TITLE_FONT_SIZE_PX: u32 = 32;
-    /// Track title strip font weight (extra bold).
-    pub const TITLE_FONT_WEIGHT: i32 = 800;
-    /// Artist/album strip font size in pixels.
-    pub const ARTIST_FONT_SIZE_PX: u32 = 22;
-    /// Artist/album strip font weight (Bold).
-    pub const ARTIST_FONT_WEIGHT: i32 = 700;
-}
-
-/// Straight-alpha RGBA pixel implementing Slint's [`TargetPixel`] for offscreen rasterization.
-///
-/// Unlike the opaque scanout [`Bgrx8888Pixel`](super::framebuffer::Bgrx8888Pixel), this type
-/// preserves per-pixel alpha so the rasterized strip can be blended over themed backgrounds.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct RgbaPremulPixel {
-    /// Red color component (premultiplied by alpha).
-    pub red: u8,
-    /// Green color component (premultiplied by alpha).
-    pub green: u8,
-    /// Blue color component (premultiplied by alpha).
-    pub blue: u8,
-    /// Alpha coverage (0 = fully transparent, 255 = opaque).
-    pub alpha: u8,
-}
-
-impl TargetPixel for RgbaPremulPixel {
-    fn blend(&mut self, color: PremultipliedRgbaColor) {
-        let inv_alpha = u16::from(u8::MAX - color.alpha);
-        self.red = ((u16::from(self.red) * inv_alpha) / 255) as u8 + color.red;
-        self.green = ((u16::from(self.green) * inv_alpha) / 255) as u8 + color.green;
-        self.blue = ((u16::from(self.blue) * inv_alpha) / 255) as u8 + color.blue;
-        self.alpha = ((u16::from(self.alpha) * inv_alpha) / 255) as u8 + color.alpha;
-    }
-
-    fn from_rgb(red: u8, green: u8, blue: u8) -> Self {
-        Self {
-            red,
-            green,
-            blue,
-            alpha: u8::MAX,
-        }
-    }
-
-    fn background() -> Self {
-        Self::default()
-    }
-}
-
-/// A rasterized marquee text strip: a transparent-background image plus its intrinsic size.
-#[derive(Debug, Clone)]
-pub struct MarqueeStrip {
-    image: slint::Image,
-    width: u32,
-    height: u32,
-    /// Raw premultiplied RGBA pixels backing `image`, shared cheaply with the
-    /// framebuffer-side marquee composer.
-    pixels: Arc<[RgbaPremulPixel]>,
-    /// Stable strip identity assigned by the [`MarqueeStripCache`] on creation.
-    ///
-    /// Unlike `Arc` buffer addresses (which are not stable across clones and can be
-    /// recycled after a re-render replaces the buffer), this monotonically increasing
-    /// counter gives the framebuffer-side composer a reliable "strip changed" signal.
-    id: u64,
-}
-
-impl MarqueeStrip {
-    /// An empty strip (no visible content; the marquee scroller renders nothing).
-    #[must_use]
-    pub fn empty() -> Self {
-        Self {
-            image: slint::Image::default(),
-            width: 0,
-            height: 0,
-            pixels: Arc::from([]),
-            id: 0,
-        }
-    }
-
-    /// Stable identity of this strip assigned by the [`MarqueeStripCache`].
-    ///
-    /// `0` marks strips created outside the cache (empty placeholders); cache-managed
-    /// strips always carry a strictly positive, never-reused identity.
-    #[must_use]
-    pub const fn strip_id(&self) -> u64 {
-        self.id
-    }
-
-    /// The raw premultiplied RGBA pixel buffer backing the strip image.
-    #[must_use]
-    pub fn pixels(&self) -> &[RgbaPremulPixel] {
-        &self.pixels
-    }
-
-    /// A cheap shared handle to the strip pixel buffer.
-    #[must_use]
-    pub fn pixels_arc(&self) -> Arc<[RgbaPremulPixel]> {
-        Arc::clone(&self.pixels)
-    }
-
-    /// The strip image to scroll.
-    #[must_use]
-    pub const fn image(&self) -> &slint::Image {
-        &self.image
-    }
-
-    /// Strip width in physical pixels.
-    #[must_use]
-    pub const fn width(&self) -> u32 {
-        self.width
-    }
-
-    /// Strip height in physical pixels.
-    #[must_use]
-    pub const fn height(&self) -> u32 {
-        self.height
-    }
-
-    /// Whether the strip carries no visible content.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.width == 0 || self.height == 0
-    }
-}
-
-/// Identifies a rasterization request; strips are re-rendered only when the key changes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StripKey {
-    text: Box<str>,
-    color: (u8, u8, u8),
-    font_size_px: u32,
-    font_weight: i32,
-    font_family: Box<str>,
-}
-
-/// A single marquee strip rasterization request.
-#[derive(Debug, Clone)]
-pub struct StripRequest {
-    /// Text to rasterize on a single line.
-    pub text: Box<str>,
-    /// Text color (straight RGB, no alpha).
-    pub color: (u8, u8, u8),
-    /// Font size in pixels.
-    pub font_size_px: u32,
-    /// Font weight (400 = regular, 800 = extra bold).
-    pub font_weight: i32,
-    /// Font family name (must be registered in Slint's font database).
-    pub font_family: Box<str>,
-}
-
-impl StripRequest {
-    fn key(&self) -> StripKey {
-        StripKey {
-            text: self.text.clone(),
-            color: self.color,
-            font_size_px: self.font_size_px,
-            font_weight: self.font_weight,
-            font_family: self.font_family.clone(),
-        }
-    }
-}
-
-/// Single-slot marquee strip cache (title) wrapping one offscreen rasterizer.
-///
-/// Strips are re-rendered only when their [`StripRequest`] key changes, so repeated
-/// 250 ms playback-state ticks with unchanged metadata perform no rasterization work.
-#[derive(Debug, Default)]
-pub struct MarqueeStripCache {
-    rasterizer: Option<MarqueeStripRasterizer>,
-    title: Option<(StripKey, MarqueeStrip)>,
-    /// Next monotonically increasing strip identity to hand out (`0` is reserved for
-    /// uncached/empty strips, so cache-managed strips always carry a positive id).
-    next_id: u64,
-}
-
-impl MarqueeStripCache {
-    /// The currently cached title strip, if any.
-    #[must_use]
-    pub fn title(&self) -> Option<&MarqueeStrip> {
-        self.title.as_ref().map(|(_, strip)| strip)
-    }
-
-    /// Rasterizes the title strip for `request`, or returns `None` when the cached strip
-    /// already matches (no re-render, no property invalidation).
-    #[must_use]
-    pub fn rasterize_title(&mut self, request: &StripRequest) -> Option<MarqueeStrip> {
-        Self::rasterize_slot(
-            &mut self.rasterizer,
-            &mut self.title,
-            &mut self.next_id,
-            request,
-            "title",
-        )
-    }
-
-    /// How many actual rasterization passes were performed (cache misses).
-    #[must_use]
-    pub fn renders(&self) -> usize {
-        self.rasterizer
-            .as_ref()
-            .map_or(0, MarqueeStripRasterizer::renders)
-    }
-
-    fn rasterize_slot(
-        rasterizer: &mut Option<MarqueeStripRasterizer>,
-        slot: &mut Option<(StripKey, MarqueeStrip)>,
-        next_id: &mut u64,
-        request: &StripRequest,
-        label: &str,
-    ) -> Option<MarqueeStrip> {
-        if let Some((key, _strip)) = slot
-            && *key == request.key()
-        {
-            return None;
-        }
-        if rasterizer.is_none() {
-            match MarqueeStripRasterizer::new() {
-                Ok(created) => *rasterizer = Some(created),
-                Err(err) => {
-                    tracing::warn!("Marquee strip rasterizer unavailable ({label}): {err}");
-                    return None;
-                }
-            }
-        }
-        let mut strip = rasterizer
-            .as_mut()
-            .expect("rasterizer created above")
-            .rasterize(request);
-        // Assign a stable identity independent of heap addresses so the framebuffer
-        // composer can detect strip changes without pointer-identity comparisons.
-        strip.id = next_id.wrapping_add(1);
-        *next_id = strip.id;
-        *slot = Some((request.key(), strip.clone()));
-        Some(strip)
-    }
-}
-
-/// Offscreen single-strip rasterizer bound to its own throwaway Slint window.
-///
-/// Created lazily after the platform is registered; renders one strip per
-/// [`rasterize`](Self::rasterize) call and caches only the most recent request.
-pub struct MarqueeStripRasterizer {
-    window: Rc<MinimalSoftwareWindow>,
-    rasterizer: MarqueeRasterizer,
-    key: Option<StripKey>,
-    strip: MarqueeStrip,
-    renders: usize,
-}
-
-impl fmt::Debug for MarqueeStripRasterizer {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MarqueeStripRasterizer")
-            .field("renders", &self.renders)
-            .finish_non_exhaustive()
-    }
-}
-
-impl MarqueeStripRasterizer {
-    /// Creates the offscreen rasterizer on a fresh throwaway Slint window.
-    ///
-    /// Must be called after [`Framebuffer::init_platform`](super::framebuffer::Framebuffer::init_platform)
-    /// has registered the software platform so the primary window claim is already taken.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FramebufferError`](super::framebuffer::FramebufferError) if the offscreen
-    /// component cannot be instantiated or shown.
-    pub fn new() -> Result<Self, super::framebuffer::FramebufferError> {
-        let rasterizer = MarqueeRasterizer::new()
-            .map_err(|err| super::framebuffer::FramebufferError::platform(err.to_string()))?;
-        // `MarqueeRasterizer::new()` routes through the platform's `create_window_adapter`,
-        // which remembers the freshly created secondary window it hands out.
-        let window = super::framebuffer::take_last_secondary_window().ok_or_else(|| {
-            super::framebuffer::FramebufferError::platform(
-                "marquee rasterizer window was not created by the software platform".to_string(),
-            )
-        })?;
-        rasterizer
-            .show()
-            .map_err(|err| super::framebuffer::FramebufferError::platform(err.to_string()))?;
-        Ok(Self {
-            window,
-            rasterizer,
-            key: None,
-            strip: MarqueeStrip::empty(),
-            renders: 0,
-        })
-    }
-
-    /// Rasterizes `request` into a cached strip, re-rendering only when the request key
-    /// differs from the previously rendered one.
-    ///
-    /// # Panics
-    /// Panics if the Slint window adapter internals are in an invalid state (a Slint
-    /// engine bug, never an expected runtime condition).
-    #[must_use]
-    pub fn rasterize(&mut self, request: &StripRequest) -> MarqueeStrip {
-        if self.key.as_ref() == Some(&request.key()) {
-            return self.strip.clone();
-        }
-        // Parley-based text layout (Slint >= 1.14) reports non-zero font metrics for
-        // empty strings; treat empty text as no strip explicitly.
-        if request.text.trim().is_empty() {
-            self.key = Some(request.key());
-            self.strip = MarqueeStrip::empty();
-            return self.strip.clone();
-        }
-        let (red, green, blue) = request.color;
-        self.rasterizer
-            .set_raster_text(SharedString::from(request.text.as_ref()));
-        self.rasterizer
-            .set_raster_color(Color::from_rgb_u8(red, green, blue));
-        self.rasterizer
-            .set_raster_font_family(SharedString::from(request.font_family.as_ref()));
-        self.rasterizer.set_raster_font_weight(request.font_weight);
-
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "font sizes are small u32 pixel values with exact f32 representation"
-        )]
-        let font_size_px = request.font_size_px as f32;
-        self.rasterizer.set_raster_font_size_px(font_size_px);
-
-        let width = ceil_length(self.rasterizer.get_text_width_px());
-        let height = ceil_length(self.rasterizer.get_text_height_px());
-        if width == 0 || height == 0 {
-            self.key = Some(request.key());
-            self.strip = MarqueeStrip::empty();
-            return self.strip.clone();
-        }
-
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "raster dimensions are small u32 pixel values with exact f32 representation"
-        )]
-        let (width_f32, height_f32) = (width as f32, height as f32);
-        self.window
-            .set_size(slint::LogicalSize::new(width_f32, height_f32));
-        self.window.request_redraw();
-
-        let mut buffer = vec![RgbaPremulPixel::default(); width as usize * height as usize];
-        self.window.draw_if_needed(|renderer| {
-            renderer.render(&mut buffer, width as usize);
-        });
-
-        self.strip = MarqueeStrip {
-            image: premul_to_image(&buffer, width, height),
-            width,
-            height,
-            pixels: Arc::from(buffer.into_boxed_slice()),
-            // Strips are handed a stable identity only once they enter a
-            // [`MarqueeStripCache`] slot (see `rasterize_slot`).
-            id: 0,
-        };
-        self.key = Some(request.key());
-        self.renders += 1;
-        self.strip.clone()
-    }
-
-    /// How many actual rasterization passes were performed (cache misses).
-    #[must_use]
-    pub const fn renders(&self) -> usize {
-        self.renders
-    }
-}
-
-/// Rounds a text metric in pixels up to at least one physical pixel (zero stays zero).
+/// # Panics
+/// Panics if the embedded `Inter-ExtraBold.ttf` asset fails to parse (`M-PANIC-ON-BUG`).
 #[must_use]
-fn ceil_length(px: f32) -> u32 {
-    if px <= 0.0 {
-        0
-    } else {
+pub fn rasterize_marquee_strip(text: &str, font_scale: f32, color: (u8, u8, u8)) -> slint::Image {
+    if text.is_empty() || !font_scale.is_finite() {
+        return slint::Image::default();
+    }
+
+    let font = FontRef::from_index(INTER_EXTRABOLD_TTF, 0)
+        .expect("embedded Inter-ExtraBold.ttf must parse");
+    let size_px = (BASE_FONT_SIZE_PX * font_scale.clamp(1.0, 1.35)).round();
+    let metrics = font.metrics(&[]).scale(size_px);
+    let ascent = metrics.ascent.ceil() + VERTICAL_SLACK_PX / 2.0;
+    let descent = metrics.descent.abs().ceil() + VERTICAL_SLACK_PX / 2.0;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "ascent + descent + slack is positive and bounded (~62 px at 1.35x scale)"
+    )]
+    let height = (ascent + descent).ceil().max(1.0) as u32;
+
+    let charmap = font.charmap();
+    let glyph_metrics = font.glyph_metrics(&[]).scale(size_px);
+
+    // First pass: collect glyph IDs, advances, and total width. Fall back to
+    // live Slint `Text` (empty Image) if any glyph is missing from Inter
+    // (`.notdef` / gid 0) or if the strip exceeds VideoCore IV's 2048 px limit.
+    let mut glyphs = Vec::with_capacity(text.chars().count());
+    let mut cursor_x: f32 = 0.0;
+    for ch in text.chars() {
+        let gid = charmap.map(ch);
+        if gid == 0 && !ch.is_whitespace() {
+            return slint::Image::default();
+        }
+        let advance = glyph_metrics.advance_width(gid);
+        if cursor_x + advance > MAX_MARQUEE_STRIP_WIDTH as f32 {
+            return slint::Image::default();
+        }
+        glyphs.push((gid, cursor_x));
+        cursor_x += advance;
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "cursor_x is non-negative and <= MAX_MARQUEE_STRIP_WIDTH"
+    )]
+    let width = (cursor_x.ceil() as u32).clamp(1, MAX_MARQUEE_STRIP_WIDTH);
+
+    let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(width, height);
+    let pixels = buf.make_mut_slice();
+
+    let mut ctx = ScaleContext::new();
+    let mut scaler = ctx.builder(font).size(size_px).hint(true).build();
+    let mut render = Render::new(&[Source::Outline]);
+
+    for (gid, gx) in glyphs {
+        let Some(img) = render.format(Format::Alpha).render(&mut scaler, gid) else {
+            continue;
+        };
+        if img.content != Content::Mask || img.placement.width == 0 || img.placement.height == 0 {
+            continue;
+        }
         #[expect(
             clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "value is verified positive and ceiled before truncation"
+            reason = "glyph origin is bounded within the 2048x64 strip"
         )]
-        let ceiled = px.ceil() as u32;
-        ceiled
+        let origin_x = gx.round() as i32 + img.placement.left;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "baseline + placement.top is bounded within the strip height"
+        )]
+        let origin_y = ascent as i32 - img.placement.top;
+
+        blit_glyph_mask(pixels, width, height, origin_x, origin_y, &img, color);
     }
+
+    slint::Image::from_rgba8_premultiplied(buf)
 }
 
-/// Converts premultiplied render pixels into an RGBA [`slint::Image`].
-fn premul_to_image(buffer: &[RgbaPremulPixel], width: u32, height: u32) -> slint::Image {
-    let mut shared = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(width, height);
-    for (dst, src) in shared.make_mut_slice().iter_mut().zip(buffer.iter()) {
-        *dst = slint::Rgba8Pixel {
-            r: src.red,
-            g: src.green,
-            b: src.blue,
-            a: src.alpha,
-        };
+/// Composites a single alpha-mask glyph into a premultiplied `Rgba8Pixel` buffer
+/// using standard premultiplied source-over blending.
+fn blit_glyph_mask(
+    pixels: &mut [slint::Rgba8Pixel],
+    width: u32,
+    height: u32,
+    origin_x: i32,
+    origin_y: i32,
+    img: &swash::scale::image::Image,
+    color: (u8, u8, u8),
+) {
+    let (cr, cg, cb) = (u16::from(color.0), u16::from(color.1), u16::from(color.2));
+    let Ok(mask_w) = i32::try_from(img.placement.width) else {
+        return;
+    };
+    let Ok(mask_h) = i32::try_from(img.placement.height) else {
+        return;
+    };
+    let gw = mask_w.cast_unsigned() as usize;
+    let (buf_w, buf_h) = (width.cast_signed(), height.cast_signed());
+    let x0 = origin_x.max(0);
+    let y0 = origin_y.max(0);
+    let x1 = (origin_x + mask_w).min(buf_w);
+    let y1 = (origin_y + mask_h).min(buf_h);
+    if x0 >= x1 || y0 >= y1 {
+        return;
     }
-    slint::Image::from_rgba8_premultiplied(shared)
-}
 
-const _: () = {
-    assert!(size_of::<RgbaPremulPixel>() == 4);
-    assert!(size_of::<slint::Rgba8Pixel>() == 4);
-};
+    for py in y0..y1 {
+        let src_y = (py - origin_y).cast_unsigned() as usize;
+        let dst_row = py.cast_unsigned() as usize * width as usize;
+        let src_row = src_y * gw;
+        for px in x0..x1 {
+            let src_x = (px - origin_x).cast_unsigned() as usize;
+            let cov = img.data[src_row + src_x];
+            if cov == 0 {
+                continue;
+            }
+            let dst = &mut pixels[dst_row + px.cast_unsigned() as usize];
+            let a = u16::from(cov);
+            let inv_src_a = 255 - a;
+            // Premultiplied source-over: src + dst * (1 - src.a).
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "premultiplied source-over result is bounded in 0..=255"
+            )]
+            let (pr, pg, pb) = (
+                ((cr * a + 127) / 255) as u8,
+                ((cg * a + 127) / 255) as u8,
+                ((cb * a + 127) / 255) as u8,
+            );
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "dst * (1 - src.a) / 255 fits in u8"
+            )]
+            {
+                dst.r = pr.saturating_add(((u16::from(dst.r) * inv_src_a + 127) / 255) as u8);
+                dst.g = pg.saturating_add(((u16::from(dst.g) * inv_src_a + 127) / 255) as u8);
+                dst.b = pb.saturating_add(((u16::from(dst.b) * inv_src_a + 127) / 255) as u8);
+                dst.a = cov.saturating_add(((u16::from(dst.a) * inv_src_a + 127) / 255) as u8);
+            }
+        }
+    }
+}

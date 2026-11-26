@@ -23,11 +23,11 @@ pub struct AmpState {
 }
 
 impl Default for AmpState {
-    /// Default: 50% volume (≈ -28 dB), unmuted.
+    /// Default: 50% volume (≈ -30 dB), unmuted.
     fn default() -> Self {
-        // 50% from PERCENT_TO_RAW table: index 50 = 116 raw
+        // 50% from PERCENT_TO_RAW: index 50 = raw 114 (-30 dB).
         Self {
-            level_raw: 116,
+            level_raw: 114,
             muted: false,
         }
     }
@@ -89,10 +89,10 @@ impl AmpState {
 
     /// Get the current level as percent (0..100) for D-Bus reporting.
     /// Canonical inverse of PERCENT_TO_RAW: returns the midpoint percent of
-    /// the raw value's flat segment (the curve's top segment is compressed —
-    /// several percents share one raw step), bounding the roundtrip error to
-    /// half the segment width. Falls back to the nearest raw when the level
-    /// is outside the curve's range.
+    /// the raw value's flat segment. The 1 dB register granularity makes at
+    /// most two percents share a raw step, so the roundtrip error is ≤ 1 %.
+    /// Falls back to the nearest raw when the level is outside the curve's
+    /// range.
     pub fn level_percent(&self, curve: &PercentToRaw) -> u8 {
         Self::raw_to_percent(self.level_raw, curve)
             .unwrap_or_else(|| Self::nearest_percent(self.level_raw, curve))

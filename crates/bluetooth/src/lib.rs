@@ -1,9 +1,12 @@
 //! Bluetooth & `BlueALSA` peripheral drivers, D-Bus connection management,
 //! AVRCP transport, and Cover Art client contract.
 
+pub mod active_source;
 pub mod connection;
 pub mod cover_art;
 pub mod cover_service;
+pub mod device_admin;
+pub mod pairing_agent;
 pub mod reconciler;
 pub mod transport;
 
@@ -12,7 +15,18 @@ pub use connection::{
     BCM43438_FIRMWARE_PATH, BCM43438_UART_BAUD_RATE, BT_ADDRESS_OCTETS, BluetoothControllerInfo,
     BluetoothDevice, BluetoothDeviceMock, BluetoothHardwareInfo, BluetoothServices,
     BluetoothStatus, BluezSnapshot, BtAdapter, BtAddress, BtDevice, BtError, DEFAULT_BT_ADAPTER,
-    LinkSnapshot, resolve_cover_art_with,
+    LinkAndPlaybackSnapshot, LinkSnapshot, resolve_cover_art_with,
+};
+
+#[doc(inline)]
+pub use device_admin::{
+    AdminAction, DeviceCommand, DeviceCommandQueue, PairingStatus, device_action_message,
+    device_object_path,
+};
+
+#[doc(inline)]
+pub use pairing_agent::{
+    PairingAgentHandle, PairingCode, SCREEN_AGENT_CAPABILITY, SCREEN_AGENT_PATH,
 };
 
 #[doc(inline)]
@@ -24,10 +38,18 @@ pub use connection::test_helpers as bluetooth_test_helpers;
 
 #[doc(inline)]
 pub use transport::{
-    BT_NO_CONNECTION_TITLE, BlueAlsaPcm, BtPlaybackState, TransportCommand, TransportCommandQueue,
-    apply_mute_to_volume_bytes, decode_pcm_format, encode_volume_bytes, format_duration_ms,
-    format_volume_bytes, percent_to_bluealsa_level, playback_progress_ratio, seek_offset_us,
-    select_active_pcm,
+    AVRCP_MAX_VOLUME, AVRCP_VOLUME_MAX, AvrcpVolume, BT_NO_CONNECTION_TITLE, BlueAlsaPcm,
+    BtPlaybackState, PERCENT_VOLUME_MAX, TransportCommand, TransportCommandQueue,
+    UNKNOWN_TRACK_TIME_MS, apply_mute_to_volume_bytes, avrcp_avg_to_percent, decode_pcm_format,
+    duration_known_ms, encode_volume_bytes, format_duration_ms, format_duration_ms_ui,
+    format_volume_bytes, percent_to_bluealsa_level, playback_progress_ratio, position_known_ms,
+    seek_offset_us, select_active_pcm, select_active_pcm_for,
+};
+
+#[doc(inline)]
+pub use active_source::{
+    ACTIVE_DEVICE_PROPERTY, ACTIVE_SOURCE_DBUS_NAME, ACTIVE_SOURCE_INTERFACE,
+    ACTIVE_SOURCE_OBJECT_PATH, device_address_from_path, format_active_device, parse_active_device,
 };
 
 #[doc(inline)]

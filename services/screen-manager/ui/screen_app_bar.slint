@@ -1,0 +1,106 @@
+// Copyright © 2024
+// SPDX-License-Identifier: MIT
+
+import {
+    FilledIconButton,
+    MaterialPalette,
+    MaterialStyleMetrics,
+    MaterialText,
+    MaterialTypography,
+} from "@material/material.slint";
+
+// Centered-title app bar with the action icon on the RIGHT edge.
+// Scales its bar height (`MaterialStyleMetrics.size_64`), centered title
+// (`MaterialTypography.display_small`), and trailing action button
+// (`MaterialStyleMetrics.size_40`) with `TouchScale`.
+// Used by the screen bars (tabs 1-5, Back on the right, primary title) and by
+// the Volume / Codec HUD overlay headers (Close on the right, secondary title).
+component CenteredAppBar inherits Rectangle {
+    height: MaterialStyleMetrics.size_64;
+    in property <string> title;
+    in property <color> title_color: MaterialPalette.primary;
+    in property <image> trailing_icon;
+    in property <string> trailing_tooltip: "Back";
+    callback trailing_clicked();
+    // Optional secondary action icon, positioned NEXT TO the trailing icon
+    // (left of it) — used by overlays whose primary action (e.g. the devices
+    // screen's Add Device) lives in the app bar alongside Close.
+    in property <bool> has_action: false;
+    in property <image> action_icon;
+    in property <string> action_tooltip: "";
+    callback action_clicked();
+
+    background: MaterialPalette.surface_container;
+
+    // Title: centered in the bar so the trailing icon never skews it.
+    // Symmetric horizontal reserve (`2 * (size_40 + padding_24)`) guarantees
+    // long titles elide before reaching the right-hand action button.
+    MaterialText {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        text: root.title;
+        color: root.title_color;
+        style: {
+            font_size: MaterialTypography.display_small.font_size,
+            font_weight: 700,
+        };
+        overflow: elide;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: parent.width - 2 * (MaterialStyleMetrics.size_40 + MaterialStyleMetrics.padding_24)
+               - (root.has_action ? MaterialStyleMetrics.size_40 + 8px : 0px);
+    }
+
+    // Secondary action icon (Add Device): directly left of the trailing icon,
+    // sharing its 40px circle footprint and right margin so the pair reads as
+    // one control cluster against the bar surface.
+    if root.has_action: Rectangle {
+        x: parent.width - 2 * self.width - 12px - 8px;
+        y: (parent.height - self.height) / 2;
+        width: MaterialStyleMetrics.size_40;
+        height: MaterialStyleMetrics.size_40;
+
+        FilledIconButton {
+            width: 100%;
+            height: 100%;
+            icon: root.action_icon;
+            tooltip: root.action_tooltip;
+            clicked => { root.action_clicked(); }
+        }
+    }
+
+    // Trailing action icon (Back / Close): filled primary circle, right-most
+    // with a 12px margin — scales with `MaterialStyleMetrics.size_40`.
+    Rectangle {
+        x: parent.width - self.width - 12px;
+        y: (parent.height - self.height) / 2;
+        width: MaterialStyleMetrics.size_40;
+        height: MaterialStyleMetrics.size_40;
+
+        FilledIconButton {
+            width: 100%;
+            height: 100%;
+            icon: root.trailing_icon;
+            tooltip: root.trailing_tooltip;
+            clicked => { root.trailing_clicked(); }
+        }
+    }
+
+    // Crisp 1px divider line at the bottom edge (unscaled integer pixel).
+    Rectangle {
+        y: parent.height - self.height;
+        width: parent.width;
+        height: MaterialStyleMetrics.size_1;
+        background: MaterialPalette.outline_variant;
+    }
+}
+
+export component ScreenAppBar inherits CenteredAppBar {
+    title_color: MaterialPalette.primary;
+    trailing_tooltip: "Back";
+}
+
+export component OverlayAppBar inherits CenteredAppBar {
+    title_color: MaterialPalette.secondary;
+    trailing_tooltip: "Close";
+}

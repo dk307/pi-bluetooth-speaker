@@ -2,8 +2,10 @@
 
 use bt_manager::agent::AgentCapabilityMode;
 use bt_manager::daemon::{
-    BtManagerOptions, is_bluealsa_volume_signal, parse_cli_args_from, parse_interval_secs,
-    parse_ticks, run_app, run_tick,
+    BtManagerOptions, parse_cli_args_from, parse_interval_secs, parse_ticks, run_app, run_tick,
+};
+use bt_manager::volume_sync::{
+    is_audio_manager_amp_signal, is_bluealsa_volume_signal, volume_bytes_from_value,
 };
 use speaker_bluetooth::BluetoothDevice;
 use speaker_common::diag::CliParse;
@@ -246,9 +248,9 @@ fn run_tick_surfaces_status_from_mock() {
         .enable_all()
         .build()
         .expect("runtime");
-    let status = rt.block_on(run_tick(&bt)).expect("mock status");
+    let (connected, _streaming) = rt.block_on(run_tick(&bt)).expect("mock status");
     // The mock initializes with one default connected peer.
-    assert_eq!(status.connected_count(), 1);
+    assert_eq!(connected, 1);
 }
 
 #[test]
@@ -282,6 +284,30 @@ fn run_app_fails_on_malformed_config() {
         .build()
         .expect("runtime");
     assert_eq!(rt.block_on(run_app(bt, opts)), ExitCode::FAILURE);
+}
+
+#[test]
+fn audio_manager_amp_signal_predicate() {
+    // Level change on the amp interface -> must react
+    assert!(is_audio_manager_amp_signal(
+        "org.speaker.AudioManager1",
+        ["Level"].into_iter(),
+    ));
+    // Mute change -> must react
+    assert!(is_audio_manager_amp_signal(
+        "org.speaker.AudioManager1",
+        ["Muted"].into_iter(),
+    ));
+    // Other interface -> ignore
+    assert!(!is_audio_manager_amp_signal(
+        "org.bluealsa.PCM1",
+        ["Level"].into_iter(),
+    ));
+    // Unrelated property -> ignore
+    assert!(!is_audio_manager_amp_signal(
+        "org.speaker.AudioManager1",
+        ["Codec"].into_iter(),
+    ));
 }
 
 #[test]
@@ -319,7 +345,6 @@ fn bluealsa_volume_signal_predicate() {
 
 #[test]
 fn volume_bytes_from_value_parses_scalar_and_rejects_garbage() {
-    use bt_manager::daemon::volume_bytes_from_value;
     use zbus::zvariant::Value;
 
     // Scalar byte (`BlueALSA` may emit a single `y` for mono transports)

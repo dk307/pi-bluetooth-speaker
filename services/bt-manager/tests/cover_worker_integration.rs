@@ -44,6 +44,11 @@ fn test_playback(handle: Option<&str>) -> BtPlaybackState {
         obex_port: Some(4097),
         image_handle: handle.map(Box::from),
         cover_art_path: None,
+        phone_volume: None,
+        equalizer: None,
+        repeat: None,
+        shuffle: None,
+        scan: None,
     }
 }
 
@@ -62,6 +67,7 @@ struct Counters {
     ensures: Arc<AtomicUsize>,
     releases: Arc<AtomicUsize>,
     keepalives: Arc<AtomicUsize>,
+    refreshes: Arc<AtomicUsize>,
 }
 
 impl Counters {
@@ -79,6 +85,10 @@ impl Counters {
 
     fn releases(&self) -> usize {
         self.releases.load(Ordering::SeqCst)
+    }
+
+    fn refreshes(&self) -> usize {
+        self.refreshes.load(Ordering::SeqCst)
     }
 }
 
@@ -172,6 +182,7 @@ impl BipSessionKeeper for FakeKeeper {
 /// Fake [`PlaybackSource`] yielding scripted results.
 struct FakeSource {
     results: Mutex<VecDeque<Result<Option<BtPlaybackState>, BtError>>>,
+    counters: Arc<Counters>,
 }
 
 #[async_trait::async_trait]
@@ -186,6 +197,10 @@ impl PlaybackSource for FakeSource {
             // Exhausted script: behave as "nothing playing".
             None => Ok(None),
         }
+    }
+
+    async fn refresh_track(&mut self, _player_path: &str) {
+        self.counters.refreshes.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -237,6 +252,7 @@ impl TestHarness {
         CoverArtWorker::new(
             Box::new(FakeSource {
                 results: Mutex::new(std::mem::take(&mut self.source_results)),
+                counters: Arc::clone(&self.counters),
             }),
             Box::new(FakeKeeper {
                 body: self.body,
@@ -286,6 +302,7 @@ async fn poll_once_publishes_image_and_ensures_session() {
     assert_eq!(harness.counters.ensures(), 1);
     assert_eq!(harness.counters.fetches(), 1);
     assert_eq!(harness.counters.releases(), 0);
+    assert_eq!(harness.counters.refreshes(), 0);
     assert_eq!(harness.last_transport(), Some(BipTransport::L2capPsm(4097)));
 }
 
@@ -991,6 +1008,7 @@ async fn initial_connection_re_queries_after_new_bip_session() {
     worker.poll_once().await;
     assert_eq!(harness.state.get().handle(), Some("1234567"));
     assert_eq!(harness.counters.ensures(), 1);
+    assert_eq!(harness.counters.refreshes(), 1);
     assert_eq!(harness.counters.fetches(), 1);
     assert_eq!(worker.missing_handle_retries(), 0);
 }
@@ -1038,4 +1056,55 @@ async fn track_change_resets_missing_handle_retries_budget() {
         worker.last_track(),
         Some(("Track 2", track2.artist.as_ref()))
     );
+}
+
+struct FakeMediaPlayer1 {
+    calls: Arc<AtomicUsize>,
+}
+
+#[zbus::interface(name = "org.bluez.MediaPlayer1")]
+impl FakeMediaPlayer1 {
+    fn refresh_track(&self) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn device_playback_source_refresh_track_calls_dbus_and_handles_missing_method() {
+    let (_guard, address) = spawn_private_bus_sync();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _server = zbus::connection::Builder::address(address.as_str())
+        .expect("valid bus address")
+        .name("org.bluez")
+        .expect("valid well-known name")
+        .serve_at(
+            "/org/bluez/hci0/dev_11_22_33_44_55_66/player0",
+            FakeMediaPlayer1 {
+                calls: Arc::clone(&calls),
+            },
+        )
+        .expect("serve FakeMediaPlayer1")
+        .build()
+        .await
+        .expect("start fake BlueZ server");
+
+    let client = zbus::connection::Builder::address(address.as_str())
+        .expect("valid bus address")
+        .build()
+        .await
+        .expect("connect client to private bus");
+
+    let (bt, _mock) = speaker_bluetooth::BluetoothDevice::new_mocked();
+    let mut source = DevicePlaybackSource::new(bt, Some(client));
+
+    source
+        .refresh_track("/org/bluez/hci0/dev_11_22_33_44_55_66/player0")
+        .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Unpatched / absent player object exercises the warn-and-continue error path.
+    source
+        .refresh_track("/org/bluez/hci0/dev_11_22_33_44_55_66/missing_player")
+        .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

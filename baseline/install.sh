@@ -62,11 +62,33 @@ if ! grep -q "vt.global_cursor_default=0" /boot/firmware/cmdline.txt 2>/dev/null
     sed -i 's/$/ vt.global_cursor_default=0/' /boot/firmware/cmdline.txt
 fi
 
+# Ensure 4M atomic DMA coherent pool and disable 64-bit emulated dwc_otg FIQ/FSM
+# (prevents RTL8761BU command tx timeout wedges under 60 fps visualizer load)
+if [ -f /boot/firmware/cmdline.txt ]; then
+    if grep -qE '(^|[[:space:]])coherent_pool=[^[:space:]]+' /boot/firmware/cmdline.txt; then
+        sed -i -E 's/(^|[[:space:]])coherent_pool=[^[:space:]]+/\1coherent_pool=4M/' /boot/firmware/cmdline.txt
+    else
+        sed -i 's/$/ coherent_pool=4M/' /boot/firmware/cmdline.txt
+    fi
+    for param in dwc_otg.fiq_enable=0 dwc_otg.fiq_fsm_enable=0; do
+        key="${param%%=*}"
+        if grep -qE "(^|[[:space:]])${key}=[^[:space:]]+" /boot/firmware/cmdline.txt; then
+            sed -i -E "s/(^|[[:space:]])${key}=[^[:space:]]+/\\1${param}/" /boot/firmware/cmdline.txt
+        else
+            sed -i "s/$/ ${param}/" /boot/firmware/cmdline.txt
+        fi
+    done
+fi
+
 # ------------------------------------------------------------------------------
 # 4. ALSA Configuration & Sound Routing
 # ------------------------------------------------------------------------------
 echo "==> [4/10] Configuring ALSA routing and loopback definitions..."
 cp "${SCRIPT_DIR}/etc/asound.conf" /etc/asound.conf
+if [ -f "${SCRIPT_DIR}/etc/modprobe.d/snd-aloop.conf" ]; then
+    mkdir -p /etc/modprobe.d
+    cp "${SCRIPT_DIR}/etc/modprobe.d/snd-aloop.conf" /etc/modprobe.d/
+fi
 if [ -f "${SCRIPT_DIR}/etc/alsa/20-bluealsa.conf" ]; then
     mkdir -p /etc/alsa/conf.d
     cp "${SCRIPT_DIR}/etc/alsa/20-bluealsa.conf" /etc/alsa/conf.d/
@@ -78,14 +100,19 @@ cp "${SCRIPT_DIR}/alsa/asound.state" /var/lib/alsa/asound.state
 alsactl restore || true
 
 # ------------------------------------------------------------------------------
-# 5. CamillaDSP Installation (v4.1.3)
+# 5. CamillaDSP Installation (v5.0.0-beta.2)
 # ------------------------------------------------------------------------------
-echo "==> [5/10] Setting up CamillaDSP binary, crossover filters, and service..."
+echo "==> [5/10] Setting up CamillaDSP binary, configuration, and service..."
 mkdir -p /etc/camilladsp /var/log/camilladsp /usr/local/bin
 
-if [ ! -f /usr/local/bin/camilladsp ]; then
-    echo "Downloading CamillaDSP v4.1.3 aarch64 release..."
-    wget -q https://github.com/HEnquist/camilladsp/releases/download/v4.1.3/camilladsp-linux-aarch64.tar.gz -O /tmp/camilladsp.tar.gz
+if [ ! -f /usr/local/bin/camilladsp ] || ! /usr/local/bin/camilladsp --version 2>/dev/null | grep -q '5\.0\.0-beta\.2'; then
+    if [ -f /usr/local/bin/camilladsp ] && [ ! -f /usr/local/bin/camilladsp-4.1.3 ]; then
+        cp -a /usr/local/bin/camilladsp /usr/local/bin/camilladsp-4.1.3
+    fi
+    CAMILLADSP_SHA256="f8e8e0b1dee43083eb61ab3f05a43984b41415854dbd7616d890b5a57719ecee"
+    echo "Downloading CamillaDSP v5.0.0-beta.2 aarch64 release (or build from source via scripts/build_camilladsp_pi.sh)..."
+    wget -q https://github.com/HEnquist/camilladsp/releases/download/v5.0.0-beta.2/camilladsp-linux-aarch64.tar.gz -O /tmp/camilladsp.tar.gz
+    echo "${CAMILLADSP_SHA256}  /tmp/camilladsp.tar.gz" | sha256sum -c -
     tar -xzf /tmp/camilladsp.tar.gz -C /usr/local/bin/
     chmod +x /usr/local/bin/camilladsp
     rm -f /tmp/camilladsp.tar.gz
@@ -112,45 +139,19 @@ if [ ! -f /usr/lib/aarch64-linux-gnu/libldacBT_enc.so ] && [ ! -f /usr/lib/libld
 fi
 
 # ------------------------------------------------------------------------------
-# 7. Build BlueALSA v4.3.1 from Source with Full Codec Support
+# 7. BlueALSA — bootstrap only (private v5 stack is built separately)
 # ------------------------------------------------------------------------------
-echo "==> [7/10] Building and installing BlueALSA v4.3.1 from source..."
-cd /usr/src
-if [ ! -d bluez-alsa ]; then
-    git clone https://github.com/arkq/bluez-alsa.git
-fi
-cd bluez-alsa
-git checkout v4.3.1
-autoreconf --install --force
+# BlueZ precedent: this script only bootstraps the distro bluez-alsa-utils
+# (already installed in step 1) so audio works on a fresh image. The
+# authoritative, A53-tuned BlueALSA v5.0.0 stack (private binaries + codec
+# libraries under /usr/local, apt package removed) is built by the host-side
+# driver `scripts/build_bluealsa_pi.sh` against the pinned commits in
+# `scripts/codecs/versions.lock`. Run that after this baseline install to
+# replace the bootstrap with the private stack. Keeping the build in one
+# place avoids two divergent recipes (this file previously built v4.3.1).
+echo "==> [7/10] BlueALSA bootstrap (distro package); private v5 via scripts/build_bluealsa_pi.sh"
 
-mkdir -p build && cd build
-make clean || true
-
-../configure \
-    --prefix=/usr \
-    --sysconfdir=/etc \
-    --localstatedir=/var \
-    --with-alsaconfdir=/etc/alsa/conf.d \
-    --enable-systemd \
-    --enable-aplay \
-    --enable-faststream \
-    --enable-opus \
-    --enable-mp3lame \
-    --enable-mpg123 \
-    --enable-aptx \
-    --enable-aptx-hd \
-    --with-libfreeaptx \
-    --enable-aac \
-    --enable-ldac \
-    --enable-lc3-swb \
-    --enable-msbc \
-    --enable-midi
-
-make -j"$(nproc)"
-make install
-ldconfig
-
-# BlueALSA runtime state paths & compatibility symlinks
+# BlueALSA runtime state path (survives the later private install)
 mkdir -p /var/lib/bluealsa
 mkdir -p /usr/var/lib
 ln -sfn /var/lib/bluealsa /usr/var/lib/bluealsa
@@ -167,6 +168,10 @@ chmod +x /usr/local/bin/bt-auto-trust-agent.py
 cp "${SCRIPT_DIR}/etc/systemd/system/bluealsa.service" /etc/systemd/system/
 cp "${SCRIPT_DIR}/etc/systemd/system/bluealsa-aplay.service" /etc/systemd/system/
 cp "${SCRIPT_DIR}/etc/systemd/system/bt-agent.service" /etc/systemd/system/
+
+mkdir -p /etc/dbus-1/system.d
+cp "${SCRIPT_DIR}/etc/dbus-1/system.d/"*.conf /etc/dbus-1/system.d/
+systemctl reload dbus || true
 
 # ------------------------------------------------------------------------------
 # 9. Hardware Diagnostic & Monitoring Scripts

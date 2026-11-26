@@ -130,6 +130,19 @@ pub fn probe_display() -> Box<str> {
 
 fn probe_amp() -> Result<Box<str>, Box<str>> {
     let device = AmpDevice::new().map_err(|e| e.summary().into_boxed_str())?;
+    probe_amp_with(&device)
+}
+
+/// Formats the amplifier boot-check detail from an injected device handle.
+///
+/// Split out of [`probe_amp`] so integration tests can exercise the status
+/// logic against `AmpDevice::new_mocked()` instead of live I2C ("Ensure
+/// Hermetic Tests").
+///
+/// # Errors
+///
+/// Returns an error when the status read fails or live faults are present.
+pub fn probe_amp_with(device: &AmpDevice) -> Result<Box<str>, Box<str>> {
     let status = device
         .read_status()
         .map_err(|e| e.summary().into_boxed_str())?;
@@ -146,7 +159,19 @@ fn probe_amp() -> Result<Box<str>, Box<str>> {
 }
 
 fn probe_dsp() -> Result<Box<str>, Box<str>> {
-    let device = DspDevice::new();
+    probe_dsp_with(&DspDevice::new())
+}
+
+/// Formats the `CamillaDSP` boot-check detail from an injected device handle.
+///
+/// Split out of [`probe_dsp`] so integration tests can exercise the status
+/// logic against `DspDevice::new_mocked()` instead of a live `CamillaDSP`
+/// connection ("Ensure Hermetic Tests").
+///
+/// # Errors
+///
+/// Returns an error when the status read fails or the DSP is not operational.
+pub fn probe_dsp_with(device: &DspDevice) -> Result<Box<str>, Box<str>> {
     let status = device
         .read_status()
         .map_err(|e| e.summary().into_boxed_str())?;
@@ -164,6 +189,20 @@ fn probe_dsp() -> Result<Box<str>, Box<str>> {
 
 fn probe_bluetooth() -> Result<Box<str>, Box<str>> {
     let device = BluetoothDevice::new_blocking().map_err(|e| e.summary().into_boxed_str())?;
+    probe_bluetooth_with(&device)
+}
+
+/// Formats the Bluetooth boot-check detail from an injected device handle.
+///
+/// Split out of [`probe_bluetooth`] so integration tests can exercise the
+/// status logic against `BluetoothDevice::new_mocked()` instead of live
+/// D-Bus ("Ensure Hermetic Tests").
+///
+/// # Errors
+///
+/// Returns an error when the status query fails or the adapter is not
+/// operational.
+pub fn probe_bluetooth_with(device: &BluetoothDevice) -> Result<Box<str>, Box<str>> {
     let status = device.status().map_err(|e| e.summary().into_boxed_str())?;
     if !status.is_operational() {
         return Err("adapter not operational".into());
@@ -182,10 +221,25 @@ fn probe_bluetooth() -> Result<Box<str>, Box<str>> {
 
 fn probe_sensors() -> Result<Box<str>, Box<str>> {
     let temp = TempSensor::new();
+    let light = LightSensor::new().map_err(|e| e.summary().into_boxed_str())?;
+    probe_sensors_with(&temp, &light)
+}
+
+/// Formats the temperature/light-sensor boot-check detail from injected
+/// device handles.
+///
+/// Split out of [`probe_sensors`] so integration tests can exercise the
+/// read-and-format logic against `TempSensor::new_mocked()` /
+/// `LightSensor::new_mocked()` instead of live 1-Wire/I2C ("Ensure
+/// Hermetic Tests").
+///
+/// # Errors
+///
+/// Returns an error when either sensor read fails.
+pub fn probe_sensors_with(temp: &TempSensor, light: &LightSensor) -> Result<Box<str>, Box<str>> {
     let temperature = temp
         .read_primary_temperature()
         .map_err(|e| e.summary().into_boxed_str())?;
-    let light = LightSensor::new().map_err(|e| e.summary().into_boxed_str())?;
     let lux = light.read_lux().map_err(|e| e.summary().into_boxed_str())?;
     Ok(format!("{:.1} °C | {} lux", temperature.celsius(), lux).into())
 }

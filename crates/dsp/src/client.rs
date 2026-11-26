@@ -18,7 +18,12 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
+use camilladsp_schema::config::{CaptureDevice, Configuration, PlaybackDevice};
+use camilladsp_schema::protocol::{
+    ProcessingState as SchemaProcessingState, StopReason as SchemaStopReason, WsCommand, WsReply,
+    WsResult,
+};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
@@ -381,6 +386,42 @@ impl DspChannelLevels {
     }
 }
 
+/// Runtime configuration summary read from `CamillaDSP` (`GetConfigJson`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DspConfigInfo {
+    /// Configured sample rate in Hz.
+    pub samplerate: Option<u32>,
+    /// Configured chunk size in samples.
+    pub chunksize: Option<u32>,
+    /// Configured capture device identifier (e.g. `hw:Loopback,1,0`).
+    pub capture_device: Option<Box<str>>,
+    /// Configured capture sample format (e.g. `S32_LE`).
+    pub capture_format: Option<Box<str>>,
+    /// Configured playback device identifier (e.g. `hw:sndrpihifiberry,0`).
+    pub playback_device: Option<Box<str>>,
+    /// Configured playback sample format (e.g. `S32_LE`).
+    pub playback_format: Option<Box<str>>,
+    /// Names of configured mixers.
+    pub mixers: Vec<Box<str>>,
+    /// Names of configured filters.
+    pub filters: Vec<Box<str>>,
+    /// Names of configured processors.
+    pub processors: Vec<Box<str>>,
+    /// Number of pipeline stages configured.
+    pub pipeline_stages: usize,
+}
+
+impl DspConfigInfo {
+    /// Returns `true` when no mixers, filters, processors, or pipeline stages are configured.
+    #[must_use]
+    pub fn is_passthrough(&self) -> bool {
+        self.pipeline_stages == 0
+            && self.mixers.is_empty()
+            && self.filters.is_empty()
+            && self.processors.is_empty()
+    }
+}
+
 /// Snapshot of the `CamillaDSP` audio pipeline status.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DspStatus {
@@ -396,6 +437,8 @@ pub struct DspStatus {
     pub config_title: Option<Box<str>>,
     /// Active configuration file path.
     pub config_path: Option<Box<str>>,
+    /// Live configuration summary read from `CamillaDSP` (`GetConfigJson`).
+    pub config: Option<DspConfigInfo>,
     /// Measured capture sample rate in Hz.
     pub capture_rate: Option<u32>,
     /// Current audio processing state.
@@ -454,7 +497,7 @@ impl DspStatus {
     }
 }
 
-/// Static hardware and pipeline configuration info for `CamillaDSP` on Raspberry Pi 3.
+/// Static service metadata for `CamillaDSP` on Raspberry Pi 3.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DspHardwareInfo {
     /// Systemd service unit name.
@@ -463,40 +506,19 @@ pub struct DspHardwareInfo {
     pub default_host: &'static str,
     /// Default local WebSocket port.
     pub default_port: u16,
-    /// Primary crossover engine configuration path.
-    pub config_path: &'static str,
     /// Service log output path.
     pub log_path: &'static str,
-    /// ALSA capture device identifier.
-    pub capture_device: &'static str,
-    /// ALSA playback hardware device identifier.
-    pub playback_device: &'static str,
-    /// Subwoofer infrasonic high-pass filter frequency in Hz.
-    pub infrasonic_hpf_hz: u32,
-    /// Subwoofer to coaxial satellite crossover frequency in Hz.
-    pub crossover_freq_hz: u32,
-    /// Coaxial tweeter padding shelf frequency in Hz.
-    pub tweeter_shelf_hz: u32,
-    /// Standard ALSA chunk size in samples.
-    pub chunk_size: u32,
 }
 
 impl DspHardwareInfo {
-    /// Returns the standard hardware profile for the Raspberry Pi 3 Bluetooth Speaker appliance.
+    /// Returns the standard service profile for the Raspberry Pi 3 Bluetooth Speaker appliance.
     #[must_use]
     pub const fn rpi3() -> Self {
         Self {
             service_unit: "camilladsp.service",
             default_host: DEFAULT_DSP_HOST,
             default_port: DEFAULT_DSP_PORT,
-            config_path: "/etc/camilladsp/crossover.yml",
             log_path: "/var/log/camilladsp/camilladsp.log",
-            capture_device: "hw:Loopback,1,0",
-            playback_device: "hw:sndrpihifiberry,0",
-            infrasonic_hpf_hz: 45,
-            crossover_freq_hz: 180,
-            tweeter_shelf_hz: 3000,
-            chunk_size: DEFAULT_DSP_BUFFER_CAPACITY,
         }
     }
 }
@@ -681,6 +703,7 @@ struct MockState {
     version: Option<Box<str>>,
     config_title: Option<Box<str>>,
     config_path: Option<Box<str>>,
+    config: Option<DspConfigInfo>,
     capture_rate: Option<u32>,
     state: ProcessingState,
     processing_load: f32,
@@ -696,7 +719,10 @@ struct MockState {
     capture_rms: Vec<f32>,
     playback_peaks: Vec<f32>,
     playback_rms: Vec<f32>,
+    last_set_config: Option<String>,
+    last_set_config_json: Option<String>,
     injected_fault: Option<String>,
+    state_events: tokio::sync::broadcast::Sender<Option<ProcessingState>>,
 }
 
 impl Default for DspDeviceMock {
@@ -713,8 +739,20 @@ impl DspDeviceMock {
             inner: Arc::new(Mutex::new(MockState {
                 service: ServiceState::Active,
                 version: Some("4.1.3".into()),
-                config_title: Some("CamillaDSP Crossover Engine".into()),
+                config_title: Some("CamillaDSP".into()),
                 config_path: Some("/etc/camilladsp/crossover.yml".into()),
+                config: Some(DspConfigInfo {
+                    samplerate: Some(48000),
+                    chunksize: Some(DEFAULT_DSP_BUFFER_CAPACITY),
+                    capture_device: Some("hw:Loopback,1,0".into()),
+                    capture_format: Some("S32_LE".into()),
+                    playback_device: Some("hw:sndrpihifiberry,0".into()),
+                    playback_format: Some("S32_LE".into()),
+                    mixers: Vec::new(),
+                    filters: Vec::new(),
+                    processors: Vec::new(),
+                    pipeline_stages: 0,
+                }),
                 capture_rate: Some(48000),
                 state: ProcessingState::Running,
                 processing_load: 3.45,
@@ -730,7 +768,10 @@ impl DspDeviceMock {
                 capture_rms: vec![-20.1, -19.8],
                 playback_peaks: vec![-18.5, -18.2],
                 playback_rms: vec![-23.4, -23.1],
+                last_set_config: None,
+                last_set_config_json: None,
                 injected_fault: None,
+                state_events: tokio::sync::broadcast::channel(32).0,
             })),
         }
     }
@@ -745,7 +786,8 @@ impl DspDeviceMock {
     /// Sets the simulated processing state.
     pub fn set_state(&self, state: ProcessingState) {
         if let Ok(mut g) = self.inner.lock() {
-            g.state = state;
+            g.state = state.clone();
+            let _ = g.state_events.send(Some(state));
         }
     }
 
@@ -788,6 +830,16 @@ impl DspDeviceMock {
     pub fn set_config_title(&self, title: Option<&str>) {
         if let Ok(mut g) = self.inner.lock() {
             g.config_title = title.map(Into::into);
+        }
+    }
+
+    /// Sets the simulated parsed configuration summary.
+    pub fn set_config(&self, config: Option<DspConfigInfo>) {
+        if let Ok(mut g) = self.inner.lock() {
+            if let Some(chunk) = config.as_ref().and_then(|c| c.chunksize) {
+                g.buffer_capacity = chunk;
+            }
+            g.config = config;
         }
     }
 
@@ -840,6 +892,7 @@ impl DspDeviceMock {
     pub fn inject_fault(&self, msg: impl Into<String>) {
         if let Ok(mut g) = self.inner.lock() {
             g.injected_fault = Some(msg.into());
+            let _ = g.state_events.send(None);
         }
     }
 
@@ -848,6 +901,39 @@ impl DspDeviceMock {
         if let Ok(mut g) = self.inner.lock() {
             g.injected_fault = None;
         }
+    }
+
+    async fn subscribe_state(
+        &self,
+    ) -> Result<tokio::sync::mpsc::Receiver<ProcessingState>, DspError> {
+        let (initial, mut sub_rx) = {
+            let g = self.inner.lock().expect("dsp mock mutex poisoned");
+            if let Some(ref fault) = g.injected_fault {
+                return Err(DspError::protocol_error(fault.clone()));
+            }
+            (g.state.clone(), g.state_events.subscribe())
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        if tx.send(initial).await.is_err() {
+            return Ok(rx);
+        }
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = tx.closed() => break,
+                    evt = sub_rx.recv() => match evt {
+                        Ok(Some(state)) => {
+                            if tx.send(state).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(None) | Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    }
+                }
+            }
+        });
+        Ok(rx)
     }
 
     /// Mock state-only read (sibling of [`Self::read_status`]).
@@ -871,6 +957,7 @@ impl DspDeviceMock {
             version: g.version.clone(),
             config_title: g.config_title.clone(),
             config_path: g.config_path.clone(),
+            config: g.config.clone(),
             capture_rate: g.capture_rate,
             state: g.state.clone(),
             processing_load: g.processing_load,
@@ -887,12 +974,60 @@ impl DspDeviceMock {
         })
     }
 
+    pub(crate) fn levels_snapshot(&self) -> Option<(Vec<f32>, Vec<f32>)> {
+        let guard = self.inner.lock().unwrap_or_else(|p| {
+            tracing::warn!("DspDeviceMock mutex poisoned during levels_snapshot; recovering");
+            p.into_inner()
+        });
+        if guard.injected_fault.is_some()
+            || !matches!(
+                guard.state,
+                ProcessingState::Running | ProcessingState::Paused
+            )
+        {
+            return None;
+        }
+        Some((guard.capture_rms.clone(), guard.capture_peaks.clone()))
+    }
+
+    /// Returns the most recent YAML configuration uploaded via `set_config` on this mock.
+    #[must_use]
+    pub fn last_set_config(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.last_set_config.clone())
+    }
+
+    /// Returns the most recent JSON configuration uploaded via `set_config_json` on this mock.
+    #[must_use]
+    pub fn last_set_config_json(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.last_set_config_json.clone())
+    }
+
     fn reset_clipped(&self) -> Result<(), DspError> {
         let mut g = self.inner.lock().expect("dsp mock mutex poisoned");
         if let Some(ref fault) = g.injected_fault {
             return Err(DspError::protocol_error(fault.clone()));
         }
         g.clipped_samples = 0;
+        Ok(())
+    }
+
+    fn set_config_slot(&self, is_json: bool, payload: &str) -> Result<(), DspError> {
+        let mut g = self.inner.lock().expect("dsp mock mutex poisoned");
+        if let Some(ref fault) = g.injected_fault {
+            return Err(DspError::protocol_error(fault.clone()));
+        }
+        let slot = if is_json {
+            &mut g.last_set_config_json
+        } else {
+            &mut g.last_set_config
+        };
+        *slot = Some(payload.to_owned());
         Ok(())
     }
 }
@@ -1058,9 +1193,106 @@ impl DspDevice {
         speaker_common::runtime::run_blocking("dsp state", move || dev.read_state()).await
     }
 
+    /// Opens a push subscription to `CamillaDSP` processing state changes (`SubscribeState`).
+    ///
+    /// Seeds the returned channel with the current state (via `GetState`) and then
+    /// streams `StateEvent` transitions as they arrive. The channel closes when the
+    /// WebSocket disconnects or an error occurs; dropping the receiver unsubscribes
+    /// and closes the WebSocket cleanly.
+    ///
+    /// # Errors
+    /// Returns [`DspError`] if connecting or subscribing fails.
+    pub async fn subscribe_state(
+        &self,
+    ) -> Result<tokio::sync::mpsc::Receiver<ProcessingState>, DspError> {
+        match &*self.backend {
+            Backend::Mock { mock, .. } => mock.subscribe_state().await,
+            Backend::Hardware { host, port } => {
+                Self::subscribe_hardware_state(host.clone(), *port).await
+            }
+        }
+    }
+
+    async fn subscribe_hardware_state(
+        host: DspHost,
+        port: DspPort,
+    ) -> Result<tokio::sync::mpsc::Receiver<ProcessingState>, DspError> {
+        // Subscribe BEFORE seeding via GetState so no transition between the
+        // two round trips can be missed: any edge after SubscribeState is
+        // buffered on `ws`, while any earlier state is observed by `query_state`.
+        let mut ws = Self::connect_ws(&host, port).await?;
+        match Self::send_ws_command(&mut ws, &WsCommand::SubscribeState).await? {
+            WsReply::SubscribeState { result } => check_ws_result("SubscribeState", result)?,
+            other => return Err(unexpected_reply("SubscribeState", &other)),
+        }
+
+        let mut initial_state = Self::query_state(host.clone(), port).await?;
+
+        // Drain any StateEvent frames that arrived between SubscribeState and
+        // GetState. Because GetState runs on a separate socket, a drained event
+        // could be older than `initial_state`; re-query GetState if any event
+        // arrived during bootstrap so we never overwrite a newer snapshot with
+        // an older event.
+        for _ in 0..4 {
+            let mut saw_event = false;
+            while let Some(Some(Ok(Message::Text(text)))) = ws.next().now_or_never() {
+                if let Ok(reply) = serde_json::from_str::<WsReply>(&text)
+                    && extract_state_event(reply).is_some()
+                {
+                    saw_event = true;
+                }
+            }
+            if !saw_event {
+                break;
+            }
+            initial_state = Self::query_state(host.clone(), port).await?;
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        if tx.send(initial_state).await.is_err() {
+            return Ok(rx);
+        }
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = tx.closed() => {
+                        if let Ok(payload) = serde_json::to_string(&WsCommand::StopSubscription) {
+                            let _ = tokio::time::timeout(
+                                Duration::from_millis(500),
+                                ws.send(Message::Text(payload.into())),
+                            ).await;
+                        }
+                        let _ = tokio::time::timeout(Duration::from_millis(500), ws.close(None)).await;
+                        break;
+                    }
+                    msg = ws.next() => {
+                        let text = match msg {
+                            Some(Ok(Message::Text(text))) => text,
+                            Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_))) => {
+                                continue;
+                            }
+                            _ => break,
+                        };
+                        let Ok(reply) = serde_json::from_str::<WsReply>(&text) else {
+                            continue;
+                        };
+                        if let Some(state) = extract_state_event(reply)
+                            && tx.send(state).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+
     async fn query_state(host: DspHost, port: DspPort) -> Result<ProcessingState, DspError> {
         let mut ws = Self::connect_ws(&host, port).await?;
-        let val = Self::send_command(&mut ws, "GetState").await?;
+        let reply = Self::send_ws_command(&mut ws, &WsCommand::GetState).await?;
         // Close with a proper WebSocket closing handshake: this poll runs at
         // 2-4 Hz for the lifecycle watcher, and dropping the stream without a
         // close frame makes the CamillaDSP socket server log a
@@ -1069,10 +1301,16 @@ impl DspDevice {
         // Bound the handshake wait so an unresponsive server can never hang
         // the lifecycle watcher's poll loop.
         let _ = tokio::time::timeout(Duration::from_millis(500), ws.close(None)).await;
-        let s = val
-            .as_str()
-            .ok_or_else(|| DspError::protocol_error("invalid GetState string response"))?;
-        Ok(ProcessingState::parse_state(s))
+        match reply {
+            WsReply::GetState { result, value } => {
+                check_ws_result("GetState", result)?;
+                Ok(value.into())
+            }
+            other => Err(DspError::protocol_error(format!(
+                "unexpected reply '{}' for GetState",
+                other.name()
+            ))),
+        }
     }
 
     /// Reads `CamillaDSP` pipeline telemetry asynchronously.
@@ -1120,7 +1358,87 @@ impl DspDevice {
         .await
     }
 
-    async fn connect_ws(
+    fn send_config_sync(&self, is_json: bool, payload: &str) -> Result<(), DspError> {
+        match &*self.backend {
+            Backend::Mock { mock, .. } => mock.set_config_slot(is_json, payload),
+            Backend::Hardware { host, port } => {
+                let host_clone = host.clone();
+                let port_val = *port;
+                let owned = payload.to_owned();
+                let cmd = if is_json {
+                    WsCommand::SetConfigJson { value: owned }
+                } else {
+                    WsCommand::SetConfig { value: owned }
+                };
+                let handle = std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| DspError::invalid_state(e.to_string()))?;
+                    rt.block_on(Self::send_hardware_unit_cmd(host_clone, port_val, cmd))
+                });
+                handle
+                    .join()
+                    .unwrap_or_else(|e| std::panic::resume_unwind(e))
+            }
+        }
+    }
+
+    /// Uploads and immediately applies a YAML configuration string on `CamillaDSP`.
+    ///
+    /// # Errors
+    /// Returns [`DspError`] if the WebSocket request fails or `CamillaDSP` rejects the config.
+    pub fn set_config(&self, config_yaml: &str) -> Result<(), DspError> {
+        self.send_config_sync(false, config_yaml)
+    }
+
+    /// Uploads and immediately applies a YAML configuration string asynchronously.
+    ///
+    /// # Errors
+    /// Returns [`DspError`] if the WebSocket request fails or `CamillaDSP` rejects the config.
+    pub async fn set_config_async(&self, config_yaml: &str) -> Result<(), DspError> {
+        let dev = self.clone();
+        let yaml_owned = config_yaml.to_owned();
+        speaker_common::runtime::run_blocking("dsp set config", move || dev.set_config(&yaml_owned))
+            .await
+    }
+
+    /// Uploads and immediately applies a JSON configuration string on `CamillaDSP`.
+    ///
+    /// # Errors
+    /// Returns [`DspError`] if the WebSocket request fails or `CamillaDSP` rejects the config.
+    pub fn set_config_json(&self, config_json: &str) -> Result<(), DspError> {
+        self.send_config_sync(true, config_json)
+    }
+
+    /// Uploads and immediately applies a JSON configuration string asynchronously.
+    ///
+    /// # Errors
+    /// Returns [`DspError`] if the WebSocket request fails or `CamillaDSP` rejects the config.
+    pub async fn set_config_json_async(&self, config_json: &str) -> Result<(), DspError> {
+        let dev = self.clone();
+        let json_owned = config_json.to_owned();
+        speaker_common::runtime::run_blocking("dsp set config json", move || {
+            dev.set_config_json(&json_owned)
+        })
+        .await
+    }
+
+    pub(crate) fn is_mock(&self) -> Option<&DspDeviceMock> {
+        match &*self.backend {
+            Backend::Mock { mock, .. } => Some(mock),
+            Backend::Hardware { .. } => None,
+        }
+    }
+
+    pub(crate) fn hardware_endpoint(&self) -> Option<(&DspHost, DspPort)> {
+        match &*self.backend {
+            Backend::Hardware { host, port } => Some((host, *port)),
+            Backend::Mock { .. } => None,
+        }
+    }
+
+    pub(crate) async fn connect_ws(
         host: &DspHost,
         port: DspPort,
     ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, DspError> {
@@ -1142,17 +1460,18 @@ impl DspDevice {
         Ok(ws)
     }
 
-    async fn send_command<S>(ws: &mut S, cmd: &str) -> Result<serde_json::Value, DspError>
+    pub(crate) async fn send_ws_command<S>(ws: &mut S, cmd: &WsCommand) -> Result<WsReply, DspError>
     where
         S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error>
             + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
             + Unpin,
     {
+        let cmd_name = cmd.name();
         let payload =
             serde_json::to_string(cmd).map_err(|e| DspError::protocol_error(e.to_string()))?;
         ws.send(Message::Text(payload.into()))
             .await
-            .map_err(|e| DspError::protocol_error(format!("failed to send '{cmd}': {e}")))?;
+            .map_err(|e| DspError::protocol_error(format!("failed to send '{cmd_name}': {e}")))?;
 
         let recv_fut = async {
             while let Some(msg) = ws.next().await {
@@ -1170,52 +1489,32 @@ impl DspDevice {
 
         let text = tokio::time::timeout(Duration::from_secs(2), recv_fut)
             .await
-            .map_err(|_timeout_err| DspError::timeout(format!("command '{cmd}' timed out")))??;
+            .map_err(|_timeout_err| {
+                DspError::timeout(format!("command '{cmd_name}' timed out"))
+            })??;
 
-        let val: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-            DspError::protocol_error(format!("invalid JSON in response to '{cmd}': {e}"))
+        let reply: WsReply = serde_json::from_str(&text).map_err(|e| {
+            DspError::protocol_error(format!("invalid JSON in response to '{cmd_name}': {e}"))
         })?;
 
-        // Response format: { "<cmd>": { "result": "Ok", "value": ... } }
-        if let Some(cmd_obj) = val.get(cmd) {
-            let res = cmd_obj
-                .get("result")
-                .and_then(|r| r.as_str())
-                .unwrap_or("Error");
-            if res == "Ok" {
-                Ok(cmd_obj
-                    .get("value")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null))
-            } else {
-                let err_msg = cmd_obj
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown error");
-                Err(DspError::command_failed(cmd, err_msg))
-            }
-        } else {
-            Err(DspError::protocol_error(format!(
-                "missing '{cmd}' key in server response: {val}"
-            )))
+        if let WsReply::Invalid { error } = reply {
+            return Err(DspError::command_failed(cmd_name, error));
         }
+
+        Ok(reply)
     }
 
-    /// Runs an optional telemetry query, logging failures at debug level.
-    ///
-    /// Unlike [`Self::send_command`], a failed query is not fatal: the field is
-    /// reported as absent and a debug log records why it went missing.
-    async fn optional_query<S>(ws: &mut S, cmd: &str) -> Option<serde_json::Value>
+    async fn optional_ws_query<S>(ws: &mut S, cmd: &WsCommand) -> Option<WsReply>
     where
         S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error>
             + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
             + Unpin,
     {
-        match Self::send_command(ws, cmd).await {
-            Ok(value) => Some(value),
+        match Self::send_ws_command(ws, cmd).await {
+            Ok(reply) => Some(reply),
             Err(e) => {
                 tracing::debug!(
-                    command = cmd,
+                    command = cmd.name(),
                     error = %e,
                     "optional DSP telemetry query failed; skipping field"
                 );
@@ -1225,10 +1524,101 @@ impl DspDevice {
     }
 
     async fn reset_hardware_clipped(host: DspHost, port: DspPort) -> Result<(), DspError> {
+        Self::send_hardware_unit_cmd(host, port, WsCommand::ResetClippedSamples).await
+    }
+
+    async fn send_hardware_unit_cmd(
+        host: DspHost,
+        port: DspPort,
+        cmd: WsCommand,
+    ) -> Result<(), DspError> {
+        let cmd_name = cmd.name();
         let mut ws = Self::connect_ws(&host, port).await?;
-        Self::send_command(&mut ws, "ResetClippedSamples").await?;
+        let reply = Self::send_ws_command(&mut ws, &cmd).await?;
         let _ = ws.close(None).await;
-        Ok(())
+        match reply {
+            WsReply::ResetClippedSamples { result }
+            | WsReply::SetConfig { result }
+            | WsReply::SetConfigJson { result } => check_ws_result(cmd_name, result),
+            other => Err(DspError::protocol_error(format!(
+                "unexpected reply '{}' for '{cmd_name}'",
+                other.name()
+            ))),
+        }
+    }
+
+    async fn query_optional_metadata<S>(ws: &mut S) -> OptionalTelemetry
+    where
+        S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error>
+            + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+            + Unpin,
+    {
+        let version = match Self::optional_ws_query(ws, &WsCommand::GetVersion).await {
+            Some(WsReply::GetVersion {
+                result: WsResult::Ok,
+                value,
+            }) => Some(value.into_boxed_str()),
+            _ => None,
+        };
+        let config_title = match Self::optional_ws_query(ws, &WsCommand::GetConfigTitle).await {
+            Some(WsReply::GetConfigTitle {
+                result: WsResult::Ok,
+                value,
+            }) => Some(value.into_boxed_str()),
+            _ => None,
+        };
+        let config_path = match Self::optional_ws_query(ws, &WsCommand::GetConfigFilePath).await {
+            Some(WsReply::GetConfigFilePath {
+                result: WsResult::Ok,
+                value: Some(p),
+            }) => Some(p.into_boxed_str()),
+            _ => None,
+        };
+        let config = match Self::optional_ws_query(ws, &WsCommand::GetConfigJson).await {
+            Some(WsReply::GetConfigJson {
+                result: WsResult::Ok,
+                value,
+            }) => parse_config_json_str(&value),
+            _ => None,
+        };
+        let resampler_load = match Self::optional_ws_query(ws, &WsCommand::GetResamplerLoad).await {
+            Some(WsReply::GetResamplerLoad {
+                result: WsResult::Ok,
+                value,
+            }) => Some(value),
+            _ => None,
+        };
+        let capture_rate = match Self::optional_ws_query(ws, &WsCommand::GetCaptureRate).await {
+            Some(WsReply::GetCaptureRate {
+                result: WsResult::Ok,
+                value,
+            }) => u32::try_from(value).ok(),
+            _ => None,
+        };
+        let volume_db = match Self::optional_ws_query(ws, &WsCommand::GetVolume).await {
+            Some(WsReply::GetVolume {
+                result: WsResult::Ok,
+                value,
+            }) => Some(value),
+            _ => None,
+        };
+        let muted = match Self::optional_ws_query(ws, &WsCommand::GetMute).await {
+            Some(WsReply::GetMute {
+                result: WsResult::Ok,
+                value,
+            }) => Some(value),
+            _ => None,
+        };
+        OptionalTelemetry {
+            version,
+            config_title,
+            config_path,
+            config,
+            resampler_load,
+            capture_rate,
+            volume_db,
+            muted,
+        }
     }
 
     async fn query_hardware_status(
@@ -1238,130 +1628,252 @@ impl DspDevice {
     ) -> Result<DspStatus, DspError> {
         let mut ws = Self::connect_ws(&host, port).await?;
 
-        // 1. Version
-        let version = Self::optional_query(&mut ws, "GetVersion")
-            .await
-            .and_then(|v| v.as_str().map(Into::into));
-
-        // 2. Config Title
-        let config_title = Self::optional_query(&mut ws, "GetConfigTitle")
-            .await
-            .and_then(|v| v.as_str().map(Into::into));
-
-        // 3. Config File Path
-        let config_path = Self::optional_query(&mut ws, "GetConfigFilePath")
-            .await
-            .and_then(|v| v.as_str().map(Into::into));
-
-        // 4. State (mandatory core telemetry)
-        let state_val = Self::send_command(&mut ws, "GetState").await?;
-        let state_str = state_val
-            .as_str()
-            .ok_or_else(|| DspError::protocol_error("invalid GetState string response"))?;
-        let state = ProcessingState::parse_state(state_str);
-
-        // 5. Processing Load (mandatory core telemetry)
-        let load_val = Self::send_command(&mut ws, "GetProcessingLoad").await?;
-        let processing_load = load_val
-            .as_f64()
-            .map(|f| f as f32)
-            .ok_or_else(|| DspError::protocol_error("invalid GetProcessingLoad float response"))?;
-
-        // 6. Resampler Load (optional v4 feature)
-        let resampler_load = Self::optional_query(&mut ws, "GetResamplerLoad")
-            .await
-            .and_then(|v| v.as_f64().map(|f| f as f32));
-
-        // 7. Rate Adjust (mandatory core telemetry)
-        let rate_val = Self::send_command(&mut ws, "GetRateAdjust").await?;
-        let rate_adjust = rate_val
-            .as_f64()
-            .ok_or_else(|| DspError::protocol_error("invalid GetRateAdjust float response"))?;
-
-        // 8. Buffer Level (mandatory core telemetry)
-        let buf_val = Self::send_command(&mut ws, "GetBufferLevel").await?;
-        let buffer_level = buf_val
-            .as_u64()
-            .map(|u| u as u32)
-            .ok_or_else(|| DspError::protocol_error("invalid GetBufferLevel integer response"))?;
-
-        // 9. Clipped Samples (mandatory core telemetry)
-        let clip_val = Self::send_command(&mut ws, "GetClippedSamples").await?;
-        let clipped_samples = clip_val.as_u64().ok_or_else(|| {
-            DspError::protocol_error("invalid GetClippedSamples integer response")
-        })?;
-
-        // 10. Capture Rate (optional, present when capture stream active)
-        let capture_rate = Self::optional_query(&mut ws, "GetCaptureRate")
-            .await
-            .and_then(|v| v.as_u64().map(|u| u as u32));
-
-        // 11. Stop Reason (mandatory core telemetry)
-        let stop_val = Self::send_command(&mut ws, "GetStopReason").await?;
-        let stop_str = stop_val
-            .as_str()
-            .ok_or_else(|| DspError::protocol_error("invalid GetStopReason string response"))?;
-        let stop_reason = StopReason::parse_reason(stop_str);
-
-        // 12. Volume & Mute
-        let volume_db = Self::optional_query(&mut ws, "GetVolume")
-            .await
-            .and_then(|v| v.as_f64().map(|f| f as f32));
-
-        let muted = Self::optional_query(&mut ws, "GetMute")
-            .await
-            .and_then(|v| v.as_bool());
-
-        // 13. Levels: Try GetSignalLevels first, fallback to individual queries
-        let (capture_peaks, capture_rms, playback_peaks, playback_rms) =
-            if let Ok(levels_val) = Self::send_command(&mut ws, "GetSignalLevels").await {
-                parse_levels_object(&levels_val)
-            } else {
-                let cap_p = Self::optional_query(&mut ws, "GetCaptureSignalPeak")
-                    .await
-                    .map(|v| parse_f32_list(&v))
-                    .unwrap_or_default();
-                let cap_r = Self::optional_query(&mut ws, "GetCaptureSignalRms")
-                    .await
-                    .map(|v| parse_f32_list(&v))
-                    .unwrap_or_default();
-                let play_p = Self::optional_query(&mut ws, "GetPlaybackSignalPeak")
-                    .await
-                    .map(|v| parse_f32_list(&v))
-                    .unwrap_or_default();
-                let play_r = Self::optional_query(&mut ws, "GetPlaybackSignalRms")
-                    .await
-                    .map(|v| parse_f32_list(&v))
-                    .unwrap_or_default();
-                (cap_p, cap_r, play_p, play_r)
+        let state = match Self::send_ws_command(&mut ws, &WsCommand::GetState).await? {
+            WsReply::GetState { result, value } => {
+                check_ws_result("GetState", result)?;
+                ProcessingState::from(value)
+            }
+            other => return Err(unexpected_reply("GetState", &other)),
+        };
+        let processing_load =
+            match Self::send_ws_command(&mut ws, &WsCommand::GetProcessingLoad).await? {
+                WsReply::GetProcessingLoad { result, value } => {
+                    check_ws_result("GetProcessingLoad", result)?;
+                    value
+                }
+                other => return Err(unexpected_reply("GetProcessingLoad", &other)),
             };
+        let rate_adjust = match Self::send_ws_command(&mut ws, &WsCommand::GetRateAdjust).await? {
+            WsReply::GetRateAdjust { result, value } => {
+                check_ws_result("GetRateAdjust", result)?;
+                f64::from(value)
+            }
+            other => return Err(unexpected_reply("GetRateAdjust", &other)),
+        };
+        let buffer_level = match Self::send_ws_command(&mut ws, &WsCommand::GetBufferLevel).await? {
+            WsReply::GetBufferLevel { result, value } => {
+                check_ws_result("GetBufferLevel", result)?;
+                u32::try_from(value).map_err(|e| {
+                    DspError::protocol_error(format!("GetBufferLevel exceeded u32 range: {e}"))
+                })?
+            }
+            other => return Err(unexpected_reply("GetBufferLevel", &other)),
+        };
+        let clipped_samples =
+            match Self::send_ws_command(&mut ws, &WsCommand::GetClippedSamples).await? {
+                WsReply::GetClippedSamples { result, value } => {
+                    check_ws_result("GetClippedSamples", result)?;
+                    value as u64
+                }
+                other => return Err(unexpected_reply("GetClippedSamples", &other)),
+            };
+        let stop_reason = match Self::send_ws_command(&mut ws, &WsCommand::GetStopReason).await? {
+            WsReply::GetStopReason { result, value } => {
+                check_ws_result("GetStopReason", result)?;
+                StopReason::from(value)
+            }
+            other => return Err(unexpected_reply("GetStopReason", &other)),
+        };
 
+        let opt = Self::query_optional_metadata(&mut ws).await;
+        let (capture_peaks, capture_rms, playback_peaks, playback_rms) =
+            Self::query_signal_levels(&mut ws).await;
         let _ = ws.close(None).await;
+
+        let buffer_capacity = opt
+            .config
+            .as_ref()
+            .and_then(|c| c.chunksize)
+            .unwrap_or(DEFAULT_DSP_BUFFER_CAPACITY);
 
         Ok(DspStatus {
             service,
             host,
             port,
-            version,
-            config_title,
-            config_path,
-            capture_rate,
+            version: opt.version,
+            config_title: opt.config_title,
+            config_path: opt.config_path,
+            config: opt.config,
+            capture_rate: opt.capture_rate,
             state,
             processing_load,
-            resampler_load,
+            resampler_load: opt.resampler_load,
             rate_adjust,
             buffer_level,
-            buffer_capacity: DEFAULT_DSP_BUFFER_CAPACITY,
-            volume_db,
-            muted,
+            buffer_capacity,
+            volume_db: opt.volume_db,
+            muted: opt.muted,
             clipped_samples,
             stop_reason,
             capture: DspChannelLevels::new(capture_peaks, capture_rms),
             playback: DspChannelLevels::new(playback_peaks, playback_rms),
         })
     }
+
+    async fn query_signal_levels<S>(ws: &mut S) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)
+    where
+        S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error>
+            + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+            + Unpin,
+    {
+        if let Ok(WsReply::GetSignalLevels {
+            result: WsResult::Ok,
+            value: levels,
+        }) = Self::send_ws_command(ws, &WsCommand::GetSignalLevels).await
+        {
+            return (
+                levels.capture_peak,
+                levels.capture_rms,
+                levels.playback_peak,
+                levels.playback_rms,
+            );
+        }
+        let cap_p = match Self::optional_ws_query(ws, &WsCommand::GetCaptureSignalPeak).await {
+            Some(WsReply::GetCaptureSignalPeak {
+                result: WsResult::Ok,
+                value,
+            }) => value,
+            _ => Vec::new(),
+        };
+        let cap_r = match Self::optional_ws_query(ws, &WsCommand::GetCaptureSignalRms).await {
+            Some(WsReply::GetCaptureSignalRms {
+                result: WsResult::Ok,
+                value,
+            }) => value,
+            _ => Vec::new(),
+        };
+        let play_p = match Self::optional_ws_query(ws, &WsCommand::GetPlaybackSignalPeak).await {
+            Some(WsReply::GetPlaybackSignalPeak {
+                result: WsResult::Ok,
+                value,
+            }) => value,
+            _ => Vec::new(),
+        };
+        let play_r = match Self::optional_ws_query(ws, &WsCommand::GetPlaybackSignalRms).await {
+            Some(WsReply::GetPlaybackSignalRms {
+                result: WsResult::Ok,
+                value,
+            }) => value,
+            _ => Vec::new(),
+        };
+        (cap_p, cap_r, play_p, play_r)
+    }
 }
 
+impl From<SchemaProcessingState> for ProcessingState {
+    fn from(value: SchemaProcessingState) -> Self {
+        match value {
+            SchemaProcessingState::Running => Self::Running,
+            SchemaProcessingState::Paused => Self::Paused,
+            SchemaProcessingState::Inactive => Self::Inactive,
+            SchemaProcessingState::Starting => Self::Starting,
+            SchemaProcessingState::Stalled => Self::Stalled,
+        }
+    }
+}
+
+impl From<SchemaStopReason> for StopReason {
+    fn from(value: SchemaStopReason) -> Self {
+        match value {
+            SchemaStopReason::None => Self::None,
+            SchemaStopReason::Done => Self::Done,
+            SchemaStopReason::CaptureError(_) => Self::CaptureError,
+            SchemaStopReason::PlaybackError(_) => Self::PlaybackError,
+            SchemaStopReason::CaptureFormatChange(_) => Self::CaptureFormatChange,
+            SchemaStopReason::PlaybackFormatChange(_) => Self::PlaybackFormatChange,
+            SchemaStopReason::UnknownError(msg) => Self::Unknown(msg.into_boxed_str()),
+        }
+    }
+}
+
+struct OptionalTelemetry {
+    version: Option<Box<str>>,
+    config_title: Option<Box<str>>,
+    config_path: Option<Box<str>>,
+    config: Option<DspConfigInfo>,
+    resampler_load: Option<f32>,
+    capture_rate: Option<u32>,
+    volume_db: Option<f32>,
+    muted: Option<bool>,
+}
+
+fn extract_state_event(reply: WsReply) -> Option<ProcessingState> {
+    match reply {
+        WsReply::StateEvent {
+            result: WsResult::Ok,
+            value,
+        } => Some(ProcessingState::from(value.state)),
+        WsReply::StateEvent {
+            result: WsResult::ProcessingStopped,
+            ..
+        } => Some(ProcessingState::Inactive),
+        _ => None,
+    }
+}
+
+pub(crate) fn unexpected_reply(cmd: &str, reply: &WsReply) -> DspError {
+    DspError::protocol_error(format!("unexpected reply '{}' for '{cmd}'", reply.name()))
+}
+
+pub(crate) fn check_ws_result(cmd: &str, result: WsResult) -> Result<(), DspError> {
+    match result {
+        WsResult::Ok => Ok(()),
+        WsResult::ConfigValidationError { message }
+        | WsResult::ConfigReadError { message }
+        | WsResult::InvalidValueError { message }
+        | WsResult::InvalidRequestError { message }
+        | WsResult::DeviceNotFoundError { message }
+        | WsResult::DeviceBusyError { message }
+        | WsResult::DeviceError { message } => Err(DspError::command_failed(cmd, message)),
+        other => Err(DspError::command_failed(cmd, format!("{other:?}"))),
+    }
+}
+
+fn parse_config_json_str(raw: &str) -> Option<DspConfigInfo> {
+    let cfg: Configuration = serde_json::from_str(raw).ok()?;
+    let (capture_device, capture_format) = match cfg.devices.capture {
+        CaptureDevice::Alsa { device, format, .. } => (
+            Some(device.into_boxed_str()),
+            format.map(|f| format!("{f:?}").into_boxed_str()),
+        ),
+        other => (Some(other.type_name().into()), None),
+    };
+    let (playback_device, playback_format) = match cfg.devices.playback {
+        PlaybackDevice::Alsa { device, format, .. } => (
+            Some(device.into_boxed_str()),
+            format.map(|f| format!("{f:?}").into_boxed_str()),
+        ),
+        other => (Some(other.type_name().into()), None),
+    };
+    Some(DspConfigInfo {
+        samplerate: u32::try_from(cfg.devices.samplerate.get()).ok(),
+        chunksize: u32::try_from(cfg.devices.chunksize.get()).ok(),
+        capture_device,
+        capture_format,
+        playback_device,
+        playback_format,
+        mixers: cfg
+            .mixers
+            .map(|m| m.into_keys().map(String::into_boxed_str).collect())
+            .unwrap_or_default(),
+        filters: cfg
+            .filters
+            .map(|f| f.into_keys().map(String::into_boxed_str).collect())
+            .unwrap_or_default(),
+        processors: cfg
+            .processors
+            .map(|p| p.into_keys().map(String::into_boxed_str).collect())
+            .unwrap_or_default(),
+        pipeline_stages: cfg.pipeline.as_ref().map_or(0, Vec::len),
+    })
+}
+
+#[cfg(feature = "test-util")]
+fn parse_config_json(val: &serde_json::Value) -> Option<DspConfigInfo> {
+    parse_config_json_str(val.as_str()?)
+}
+
+#[cfg(feature = "test-util")]
 fn parse_f32_list(val: &serde_json::Value) -> Vec<f32> {
     val.as_array()
         .map(|arr| {
@@ -1372,6 +1884,7 @@ fn parse_f32_list(val: &serde_json::Value) -> Vec<f32> {
         .unwrap_or_default()
 }
 
+#[cfg(feature = "test-util")]
 fn parse_levels_object(val: &serde_json::Value) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
     let cap_peak = val
         .get("capture_peak")
@@ -1435,8 +1948,14 @@ pub fn format_load_meter(load_pct: f32, width: usize) -> String {
 
 #[cfg(feature = "test-util")]
 pub mod test_helpers {
-    use super::{DspError, parse_f32_list, parse_levels_object};
+    use super::{DspConfigInfo, DspError, parse_config_json, parse_f32_list, parse_levels_object};
     use speaker_common::runtime::FromJoinError;
+
+    /// Helper for testing `GetConfigJson` parsing.
+    #[must_use]
+    pub fn helper_parse_config_json(val: &serde_json::Value) -> Option<DspConfigInfo> {
+        parse_config_json(val)
+    }
 
     /// Helper for testing JSON float list parsing.
     #[must_use]

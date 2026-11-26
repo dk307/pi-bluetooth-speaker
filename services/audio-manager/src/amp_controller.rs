@@ -13,6 +13,7 @@
 //!    Faulted ◄── GPIO error edge / I2C fault    Muted (warn!, stay muted)
 //!      │  recovery: mute → /ENABLE cycle + full
 //!      │  register re-init → Muted
+//!      │    (live stream: immediate PLL re-handshake, no DSP edge needed)
 //! ```
 //!
 //! Event-driven, no polling as the primary path: `tokio::select!` over the
@@ -29,14 +30,14 @@ use anyhow::Context;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use speaker_hardware::{AmpFault, LimiterSlew};
+use speaker_hardware::{AmpFault, I2sFormat, LimiterSlew};
 
 use crate::amp_backend::AmpBackend;
 use crate::amp_gpio::AmpGpio;
 use crate::amp_state::AmpState;
 use crate::error::AmpResult;
 use crate::state_file::StateFile;
-use amp_curve::PERCENT_TO_RAW;
+use speaker_hardware::amp::PERCENT_TO_RAW;
 
 /// Production PLL-lock handshake timeout (plan §3.1: ≤200 ms one-shot).
 ///
@@ -306,7 +307,7 @@ impl AmpController {
             }
             AmpCommandKind::SetMute(false) => {
                 if self.ctrl == CtrlState::Playing
-                    || (self.ctrl == CtrlState::Muted && self.stream_live)
+                    || (self.ctrl == CtrlState::Muted && self.stream_live && self.regs_initialized)
                 {
                     // Stream still live: clear the serial bit AND release
                     // /MUTE (mirrored both directions), back to Playing.
@@ -385,8 +386,7 @@ impl AmpController {
         // failed mid-way) is worse than repeated retry attempts, and the
         // retry path itself re-mutes before anything else.
         if self.ctrl == CtrlState::Faulted {
-            self.fault_recovery().await?;
-            self.ctrl = CtrlState::Muted;
+            self.recover_and_resume().await?;
             return Ok(());
         }
         let flags = self.device.read_live_errors_async().await?;
@@ -407,25 +407,84 @@ impl AmpController {
         self.handle_faults(flags).await
     }
 
+    /// Confirm a critical fault reading before running a destructive `/ENABLE`
+    /// reset recovery.
+    ///
+    /// A single spurious I2C read of `0x7C` (with `0x6D` latched history also
+    /// free of critical faults) must not mute playback and reset the
+    /// amplifier. Returns `(confirmed, confirm_live_flags)` so callers that
+    /// continue after a spurious read evaluate subsequent non-critical checks
+    /// against the fresh confirmation read rather than the stale spurious byte.
+    async fn confirm_critical_fault(
+        &self,
+        initial: speaker_hardware::AmpErrorFlags,
+    ) -> AmpResult<(bool, speaker_hardware::AmpErrorFlags)> {
+        let confirm = self.device.read_live_errors_async().await?;
+        let latched = self.device.read_latched_errors_async().await;
+        if !has_critical_fault(confirm) && !matches!(latched, Ok(l) if has_critical_fault(l)) {
+            warn!(
+                ?initial,
+                ?confirm,
+                ?latched,
+                "Critical amp fault read did not repeat and latched history shows no critical fault; ignoring spurious read"
+            );
+            return Ok((false, confirm));
+        }
+        warn!(?initial, ?confirm, ?latched, "Confirmed critical amp fault");
+        Ok((true, confirm))
+    }
+
+    /// Run `fault_recovery()`, transition to `Muted`, and re-run the PLL
+    /// handshake if a stream was live. If `start_stream()` fails with a
+    /// transient bus error, restore `ctrl = Faulted` and `stream_live = true`
+    /// so the next safety tick retries instead of stranding the amp muted.
+    async fn recover_and_resume(&mut self) -> AmpResult<()> {
+        self.fault_recovery().await?;
+        self.ctrl = CtrlState::Muted;
+        if !self.stream_live {
+            return Ok(());
+        }
+        self.stream_live = false;
+        if let Err(e) = self.start_stream().await {
+            self.stream_live = true;
+            self.ctrl = CtrlState::Faulted;
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Classify and act on live error flags (plan §3.1 GPIO edge row).
     /// Critical faults are evaluated FIRST so a thermal warning can never
     /// mask an OCP/DC/flying-cap condition; `PllClockLoss` during playback
     /// is treated as a stream stop (mute, not recovery).
     ///
+    /// A critical fault that interrupts a live stream re-runs the PLL
+    /// handshake immediately after recovery — the DSP watcher cannot be
+    /// relied on to emit a fresh `StreamStarting` edge, because CamillaDSP
+    /// usually keeps running through a transient amp fault.
+    ///
     /// # Errors
     /// Propagated hardware faults.
-    pub async fn handle_faults(&mut self, flags: speaker_hardware::AmpErrorFlags) -> AmpResult<()> {
+    pub async fn handle_faults(
+        &mut self,
+        mut flags: speaker_hardware::AmpErrorFlags,
+    ) -> AmpResult<()> {
         if flags == speaker_hardware::AmpErrorFlags::NONE {
             return Ok(());
         }
-        // 1. Critical faults → full recovery (priority over thermal warn).
+        // 1. Critical faults → confirm before full recovery (priority over thermal warn).
         if has_critical_fault(flags) {
-            warn!(?flags, "Critical amp fault; entering fault recovery");
-            self.ctrl = CtrlState::Faulted;
-            self.stream_live = false;
-            self.fault_recovery().await?;
-            self.ctrl = CtrlState::Muted;
-            return Ok(());
+            let (confirmed, confirm_flags) = self.confirm_critical_fault(flags).await?;
+            if confirmed {
+                warn!(?flags, "Critical amp fault; entering fault recovery");
+                self.ctrl = CtrlState::Faulted;
+                self.recover_and_resume().await?;
+                return Ok(());
+            }
+            flags = confirm_flags;
+            if flags == speaker_hardware::AmpErrorFlags::NONE {
+                return Ok(());
+            }
         }
         // 2. PLL clock loss while a stream is live (playing OR user-muted
         //    mid-stream) = the stream died: mute across the gap; the next
@@ -518,7 +577,13 @@ impl AmpController {
     /// # Errors
     /// Returns [`AmpError`] on bus faults.
     async fn reinit_registers(&mut self) -> AmpResult<()> {
-        self.device.write_i2s_format_async(0).await?;
+        // Kernel-parity init sequence (ma120x0p probe()): the error-history
+        // clear pulse (0x2D bit 2, 0→1→0) comes FIRST so boot-time faults
+        // latched while the bus was idle never masquerade as fresh faults.
+        self.device.clear_latched_errors_async().await?;
+        self.device
+            .write_i2s_format_async(I2sFormat::StandardI2s)
+            .await?;
         self.device.enable_audio_processor_async().await?;
         self.device.enable_limiter_async().await?;
         // Kernel-parity limiter timing: fast attack, slow release
@@ -586,7 +651,7 @@ impl AmpController {
         }
         // Re-check live faults before releasing the audio path, in
         // priority order: never unmute into a fault condition.
-        let flags = self.device.read_live_errors_async().await?;
+        let mut flags = self.device.read_live_errors_async().await?;
         if flags.has_fault(AmpFault::PllClockLoss) {
             warn!(
                 ?flags,
@@ -596,13 +661,25 @@ impl AmpController {
             return Ok(());
         }
         if has_critical_fault(flags) {
-            warn!(
-                ?flags,
-                "Critical fault at stream start; running fault recovery instead of unmute"
-            );
-            self.fault_recovery().await?;
-            self.ctrl = CtrlState::Muted;
-            return Ok(());
+            let (confirmed, confirm_flags) = self.confirm_critical_fault(flags).await?;
+            if confirmed {
+                warn!(
+                    ?flags,
+                    "Critical fault at stream start; running fault recovery instead of unmute"
+                );
+                self.fault_recovery().await?;
+                self.ctrl = CtrlState::Muted;
+                return Ok(());
+            }
+            flags = confirm_flags;
+            if flags.has_fault(AmpFault::PllClockLoss) {
+                warn!(
+                    ?flags,
+                    "PLL clock loss still live at stream start; staying muted"
+                );
+                self.ctrl = CtrlState::Muted;
+                return Ok(());
+            }
         }
         if flags.has_fault(AmpFault::HighTempWarning) {
             // Warm amp at stream start: apply the -6 dB throttle instead of

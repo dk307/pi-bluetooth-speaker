@@ -56,21 +56,76 @@ impl BlueAlsaPcm {
 /// streaming (`running`) transport, otherwise falling back to the first available stream.
 #[must_use]
 pub fn select_active_pcm(pcms: &[BlueAlsaPcm]) -> Option<&BlueAlsaPcm> {
-    pcms.iter().find(|p| p.running).or_else(|| pcms.first())
+    select_active_pcm_for(pcms, None)
+}
+
+/// Selects the primary [`BlueAlsaPcm`], preferring the arbitrated active
+/// device (see [`crate::active_source`]) over the running/first heuristic.
+///
+/// With several devices connected, path order alone would pick an arbitrary
+/// (possibly muted-by-`--single-audio`) stream; `preferred` pins the choice
+/// to the device that actually owns the speaker.
+#[must_use]
+pub fn select_active_pcm_for(
+    pcms: &[BlueAlsaPcm],
+    preferred: Option<BtAddress>,
+) -> Option<&BlueAlsaPcm> {
+    preferred
+        .and_then(|addr| {
+            pcms.iter()
+                .find(|p| p.device_address == addr && is_a2dp_pcm_path(&p.pcm_path))
+                .or_else(|| pcms.iter().find(|p| p.device_address == addr))
+        })
+        .or_else(|| pcms.iter().find(|p| p.running))
+        .or_else(|| pcms.first())
 }
 
 /// Computes the playback progress ratio clamped to `0.0..=1.0`.
 ///
-/// A zero or unknown duration maps to `0.0`. Shared between
+/// An unreported position or duration (see [`UNKNOWN_TRACK_TIME_MS`]) maps to
+/// `0.0`: an unknown timeline has no meaningful progress. Shared between
 /// [`BtPlaybackState::progress_ratio`] and the UI shell so the ratio logic has
 /// a single source of truth.
 #[must_use]
 pub fn playback_progress_ratio(position_ms: u32, duration_ms: u32) -> f32 {
-    if duration_ms == 0 {
-        0.0
-    } else {
-        (position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
+    match (
+        position_known_ms(position_ms),
+        duration_known_ms(duration_ms),
+    ) {
+        (true, true) => (position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0),
+        _ => 0.0,
     }
+}
+
+/// `BlueZ` `MediaPlayer1` sentinel for a timestamp that the transport does not
+/// report.
+///
+/// `Track.Duration` and `Position` are `uint32` milliseconds; a source that
+/// cannot describe the timeline (e.g. an AVRCP peer that never sent
+/// `EVENT_PLAYBACK_POS_CHANGED` / track info) publishes `0xFFFFFFFF` instead of
+/// a real value. Formatting it as a timestamp yields a nonsense `1193:...`
+/// hours field, so the domain boundary must classify it as *unknown* rather
+/// than as a duration.
+pub const UNKNOWN_TRACK_TIME_MS: u32 = u32::MAX;
+
+/// Returns `true` when `duration_ms` is a usable total track length.
+///
+/// `BlueZ` publishes [`UNKNOWN_TRACK_TIME_MS`] when the peer never described the
+/// track; `0` means the same thing for UI purposes (no timeline to seek within).
+/// This is the single source of truth for the sentinel: both
+/// [`BtPlaybackState::duration_known`] and the presentation layer call it, so
+/// the rule cannot drift between them.
+#[must_use]
+pub fn duration_known_ms(duration_ms: u32) -> bool {
+    duration_ms != UNKNOWN_TRACK_TIME_MS && duration_ms != 0
+}
+
+/// Returns `true` when `position_ms` is a usable elapsed position.
+///
+/// The presentation-layer counterpart of [`duration_known_ms`].
+#[must_use]
+pub fn position_known_ms(position_ms: u32) -> bool {
+    position_ms != UNKNOWN_TRACK_TIME_MS
 }
 
 /// Computes the `MediaPlayer1.Seek` relative offset for an absolute target.
@@ -93,6 +148,48 @@ pub fn format_duration_ms(ms: u32) -> String {
         format!("{hours:02}:{minutes:02}:{seconds:02}")
     } else {
         format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+/// Formats a playback timestamp for the Now Playing progress bar.
+///
+/// Padding is chosen from the *track total* (`total_ms`), not the displayed
+/// position: totals under 10 minutes render `M:SS` (`1:05`), totals from
+/// 10 minutes up to (but not including) 1 hour render padded `MM:SS`
+/// (`05:00`), and totals of 1 hour or more render `HH:MM:SS` (`00:05:00`).
+/// A position that overflows past 1 hour on a sub-hour track also uses
+/// `HH:MM:SS`.
+///
+/// # Examples
+///
+/// ```
+/// use speaker_bluetooth::format_duration_ms_ui;
+/// // 3:15 track -> no leading zero
+/// assert_eq!(format_duration_ms_ui(65_000, 195_000), "1:05");
+/// // 14:20 track -> padded minutes
+/// assert_eq!(format_duration_ms_ui(300_000, 860_000), "05:00");
+/// // 1h track -> HH:MM:SS
+/// assert_eq!(format_duration_ms_ui(300_000, 3_600_000), "00:05:00");
+/// ```
+#[must_use]
+pub fn format_duration_ms_ui(ms: u32, total_ms: u32) -> String {
+    let total_secs = total_ms / 1000;
+    let secs = ms / 1000;
+
+    if total_secs >= 3600 || secs >= 3600 {
+        // Track >= 1h, or defensive position overflow past 1h: HH:MM:SS.
+        format!(
+            "{:02}:{:02}:{:02}",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        )
+    } else if total_secs >= 600 {
+        // Track >= 10 min: padded MM:SS.
+        format!("{:02}:{:02}", secs / 60, secs % 60)
+    } else {
+        // Track < 10 min: no leading zero on minutes.
+        format!("{}:{:02}", secs / 60, secs % 60)
     }
 }
 
@@ -123,6 +220,63 @@ pub struct BtPlaybackState {
     pub image_handle: Option<Box<str>>,
     /// Local cache path to downloaded cover art image (e.g. `/var/cache/speaker-covers/...jpg`).
     pub cover_art_path: Option<Box<str>>,
+    /// Phone/remote device volume (AVRCP absolute volume, 0-127), if reported by `MediaPlayer1`.
+    pub phone_volume: Option<AvrcpVolume>,
+    /// Equalizer setting (e.g., "off", "flat", "bass", "treble"), if reported by `MediaPlayer1`.
+    pub equalizer: Option<Box<str>>,
+    /// Repeat mode (e.g., "off", "alltrack", "group"), if reported by `MediaPlayer1`.
+    pub repeat: Option<Box<str>>,
+    /// Shuffle mode (e.g., "off", "alltrack", "group"), if reported by `MediaPlayer1`.
+    pub shuffle: Option<Box<str>>,
+    /// Scan mode (e.g., "off", "alltrack", "group"), if reported by `MediaPlayer1`.
+    pub scan: Option<Box<str>>,
+}
+
+/// Maximum AVRCP absolute volume value (0-127 per `BlueZ` `MediaPlayer1.Volume` spec).
+pub const AVRCP_MAX_VOLUME: u16 = 127;
+
+/// AVRCP absolute volume (0-127) with validated construction.
+///
+/// `BlueZ` `MediaPlayer1.Volume` is a uint16 in the range 0-127 representing
+/// the remote device's volume level. This newtype enforces the invariant at
+/// construction time, preventing invalid values from propagating through the
+/// system (M-STRONG-TYPES-GUARD).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AvrcpVolume(u16);
+
+impl<'de> serde::Deserialize<'de> for AvrcpVolume {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let v = u16::deserialize(deserializer)?;
+        Self::new(v).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "AVRCP absolute volume {v} exceeds maximum {AVRCP_MAX_VOLUME}"
+            ))
+        })
+    }
+}
+
+impl AvrcpVolume {
+    /// Creates a new `AvrcpVolume` from a raw value, returning `None` if out of range.
+    #[must_use]
+    pub fn new(v: u16) -> Option<Self> {
+        (v <= AVRCP_MAX_VOLUME).then_some(Self(v))
+    }
+
+    /// Returns the raw volume value (0-127).
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+
+    /// Converts to percentage (0-100), rounded.
+    #[must_use]
+    pub fn to_percent(self) -> u8 {
+        ((u32::from(self.0) * 100 + u32::from(AVRCP_MAX_VOLUME) / 2) / u32::from(AVRCP_MAX_VOLUME))
+            as u8
+    }
 }
 
 /// Placeholder title shown whenever no Bluetooth media player is connected.
@@ -145,6 +299,11 @@ impl Default for BtPlaybackState {
             obex_port: None,
             image_handle: None,
             cover_art_path: None,
+            phone_volume: None,
+            equalizer: None,
+            repeat: None,
+            shuffle: None,
+            scan: None,
         }
     }
 }
@@ -154,6 +313,22 @@ impl BtPlaybackState {
     #[must_use]
     pub fn is_playing(&self) -> bool {
         self.status.eq_ignore_ascii_case("playing")
+    }
+
+    /// Returns `true` when the transport reported a usable total track length.
+    ///
+    /// `BlueZ` publishes [`UNKNOWN_TRACK_TIME_MS`] when the peer never described
+    /// the track; a zero duration means the same thing for UI purposes (no
+    /// timeline to seek within).
+    #[must_use]
+    pub fn duration_known(&self) -> bool {
+        duration_known_ms(self.duration_ms)
+    }
+
+    /// Returns `true` when the transport reported a usable elapsed position.
+    #[must_use]
+    pub fn position_known(&self) -> bool {
+        position_known_ms(self.position_ms)
     }
 
     /// Returns the progress ratio between 0.0 and 1.0.
@@ -172,6 +347,30 @@ impl BtPlaybackState {
     #[must_use]
     pub fn format_duration(&self) -> String {
         format_duration_ms(self.duration_ms)
+    }
+
+    /// Converts the AVRCP absolute volume (0-127) to a percentage (0-100),
+    /// rounded. `None` when no phone volume is reported.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use speaker_bluetooth::{BtPlaybackState, AvrcpVolume};
+    /// let mut s = BtPlaybackState::default();
+    /// s.phone_volume = AvrcpVolume::new(0);
+    /// assert_eq!(s.phone_volume_percent(), Some(0));
+    /// s.phone_volume = AvrcpVolume::new(64);
+    /// assert_eq!(s.phone_volume_percent(), Some(50));
+    /// s.phone_volume = AvrcpVolume::new(80);
+    /// assert_eq!(s.phone_volume_percent(), Some(63));
+    /// s.phone_volume = AvrcpVolume::new(127);
+    /// assert_eq!(s.phone_volume_percent(), Some(100));
+    /// s.phone_volume = None;
+    /// assert_eq!(s.phone_volume_percent(), None);
+    /// ```
+    #[must_use]
+    pub fn phone_volume_percent(&self) -> Option<u8> {
+        self.phone_volume.map(AvrcpVolume::to_percent)
     }
 }
 
@@ -197,6 +396,47 @@ pub fn decode_pcm_format(id: u16) -> Box<str> {
     } else {
         format!("{sign}{width}_{bytes_per_sample}{endian}").into()
     }
+}
+
+/// Returns `true` when a `BlueALSA` PCM object path identifies an A2DP stream.
+///
+/// bluez-alsa has emitted both `a2dpsnk` and `a2dpsink` transport tokens across
+/// releases, so match the `a2dp` token prefix instead of one spelling. Matching
+/// whole path segments keeps device (`dev_XX`) and PCM-direction segments from
+/// producing false positives.
+#[must_use]
+pub fn is_a2dp_pcm_path(path: &str) -> bool {
+    path.split('/').any(|segment| segment.starts_with("a2dp"))
+}
+
+/// AVRCP absolute-volume range (`0..=127`).
+///
+/// Single source of truth: re-encodes [`AVRCP_MAX_VOLUME`] (the `BlueZ`
+/// `MediaPlayer1.Volume` bound) as the 7-bit transport range.
+pub const AVRCP_VOLUME_MAX: u8 = AVRCP_MAX_VOLUME as u8;
+
+/// Percent volume range (`0..=100`).
+pub const PERCENT_VOLUME_MAX: u8 = 100;
+
+/// Converts a *fractional* AVRCP absolute volume (`0.0..=127.0`, e.g. the
+/// average of per-channel 7-bit volumes) to a volume percentage, rounding to
+/// nearest and clamping into `0..=100`.
+///
+/// This is a plain linear rescale: the perceptual dB curve is applied once, by
+/// the amplifier's percent → register mapping, not here. AVRCP 0 maps to 0 %,
+/// which the amplifier treats as a hard mute.
+#[must_use]
+pub fn avrcp_avg_to_percent(avg: f64) -> u8 {
+    let percent = ((avg / f64::from(AVRCP_VOLUME_MAX)) * f64::from(PERCENT_VOLUME_MAX))
+        .round()
+        .clamp(0.0, f64::from(PERCENT_VOLUME_MAX));
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "percentage clamped 0.0..=100.0 fits in u8"
+    )]
+    let percent = percent as u8;
+    percent
 }
 
 /// Converts a volume percentage (`0..=100`) to a `BlueALSA` / AVRCP 7-bit level (`0..=127`).
@@ -273,7 +513,7 @@ pub fn format_volume_bytes(
         .join(" ");
 
     let avg_level = f64::from(total_level) / (bytes.len() as f64);
-    let percent = amp_curve::avrcp_avg_to_percent(avg_level);
+    let percent = avrcp_avg_to_percent(avg_level);
 
     (Some(volume.into()), muted, Some(percent))
 }
@@ -289,10 +529,6 @@ pub enum TransportCommand {
     PreviousTrack,
     /// Seek to an absolute playback position in milliseconds.
     Seek(u32),
-    /// Set output volume percentage (`0..=100`) and unmute.
-    SetVolume(u8),
-    /// Set output mute state (`true` = muted, `false` = unmuted).
-    SetMute(bool),
 }
 
 /// Thread-safe command queue bridging Slint render-thread callbacks and the
@@ -329,20 +565,6 @@ impl TransportCommandQueue {
                 poisoned.into_inner()
             }
         };
-        // Coalesce consecutive SetVolume or SetMute updates so rapid slider drags
-        // or rotary encoder turns only execute the latest target on D-Bus without
-        // filling the 32-entry queue.
-        match (lock.back_mut(), command) {
-            (Some(TransportCommand::SetVolume(prev)), TransportCommand::SetVolume(next)) => {
-                *prev = next;
-                return;
-            }
-            (Some(TransportCommand::SetMute(prev)), TransportCommand::SetMute(next)) => {
-                *prev = next;
-                return;
-            }
-            _ => {}
-        }
         // Bounded to 32 commands: rapid-fire clicks can never accumulate an
         // unbounded backlog. Play/pause drops reconcile on the next publish,
         // but seek/navigation drops have no such reconciliation, so overflow

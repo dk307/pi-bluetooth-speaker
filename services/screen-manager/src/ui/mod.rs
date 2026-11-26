@@ -1,8 +1,9 @@
 //! User interface components, views, and Slint declarative bindings.
 //!
 //! Exposes ahead-of-time (AOT) compiled Slint UI components including
-//! [`MainWindow`] and [`SplashScreen`], alongside the physical Linux
-//! framebuffer (`/dev/fb0`) display driver and the unified theme system.
+//! [`MainWindow`] and [`SplashScreen`], the offscreen framebuffer test
+//! harness, and the unified theme system. Production rendering goes through
+//! Slint's `backend-linuxkms` (see `docs/kms_femtovg_migration_plan.md`).
 
 #[expect(
     clippy::all,
@@ -17,34 +18,43 @@ mod generated {
     slint::include_modules!();
 }
 
+pub(crate) mod backdrop;
 pub mod boot;
+pub(crate) mod bt_devices;
 pub(crate) mod framebuffer;
-pub mod input;
-pub(crate) mod marquee;
+pub mod marquee;
+pub mod runtime;
 pub(crate) mod shell;
 pub(crate) mod theme;
+pub(crate) mod visualizer_bridge;
 
+#[doc(inline)]
+pub use backdrop::{
+    BACKDROP_BLUR_RADIUS, BackdropError, BlurredBackdrop, OUTSIDE_BLUR_RADIUS, OVERLAY_TOP_INSET,
+    blur_full_rgba_backdrop, blur_premultiplied_rgba,
+};
 #[doc(inline)]
 pub use boot::{BootCheckId, BootCheckStatus, BootCheckUpdate, BootProbe};
 #[doc(inline)]
-pub use framebuffer::{
-    Bgrx8888Pixel, FrameTiming, Framebuffer, FramebufferError, FramebufferMockCtrl, MarqueeRowSpec,
+#[doc(inline)]
+pub use bt_devices::{
+    BtDevicesController, BtDevicesUpdate, device_row, icon_slug, pairing_code_text, status_text,
+    subtitle_text,
 };
 #[doc(inline)]
-pub use generated::{AppTheme, BootCheckLine, MainWindow, SplashScreen};
+pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError, FramebufferMockCtrl};
 #[doc(inline)]
-pub use input::{
-    TouchAction, TouchCalibration, TouchDecoder, TouchError, TouchInputDevice, TouchMockCtrl,
-};
-#[doc(inline)]
-pub use marquee::{
-    MarqueeStrip, MarqueeStripCache, MarqueeStripRasterizer, MarqueeTypography, RgbaPremulPixel,
-    StripRequest,
+pub use generated::{
+    AmbientWaveSprites, AppTheme, BootCheckLine, BtDeviceRow, MainWindow, MarqueeCompose,
+    MaterialPalette, MaterialStyleMetrics, SettingControlKind, SettingRowItem, SpectrumBandItem,
+    SplashScreen, TouchScale, VirtualKeyboard,
 };
 #[doc(inline)]
 pub use shell::{AppShell, BtLinkDetails, EncoderVolumeTracker};
 #[doc(inline)]
 pub use theme::ThemePreset;
+#[doc(inline)]
+pub use visualizer_bridge::VisualizerUiState;
 
 #[cfg(feature = "test-util")]
 #[doc(hidden)]

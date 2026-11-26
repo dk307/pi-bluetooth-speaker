@@ -1,5 +1,5 @@
 [Unit]
-Description=BlueALSA Bluetooth Audio Daemon (v4.3.1)
+Description=BlueALSA Bluetooth Audio Daemon (v5.0.0)
 After=bluetooth.service
 Requires=bluetooth.service
 
@@ -8,9 +8,7 @@ Type=dbus
 BusName=org.bluealsa
 User=root
 StateDirectory=bluealsa
-ExecStart=/usr/bin/bluealsa -S -p a2dp-sink \
-  -c aptX-HD -c aptX -c AAC -c Opus -c MP3 -c FastStream -c SBC \
-  --sbc-quality=xq
+ExecStart=/usr/local/bin/bluealsad -S -p a2dp-sink --all-codecs -c-opus --sbc-quality=xq+
 Restart=always
 RestartSec=2
 

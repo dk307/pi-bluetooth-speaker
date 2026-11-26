@@ -6,7 +6,7 @@ Requires=sound.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/camilladsp -p 1234 -o /var/log/camilladsp/camilladsp.log /etc/camilladsp/crossover.yml
+ExecStart=/usr/local/bin/camilladsp -w -p 1234 -o /var/log/camilladsp/camilladsp.log /etc/camilladsp/crossover.yml
 Restart=always
 RestartSec=2
 

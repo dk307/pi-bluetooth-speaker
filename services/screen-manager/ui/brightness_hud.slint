@@ -1,0 +1,192 @@
+// Brightness / auto-brightness overlay, opened from the top-bar brightness button.
+//
+// Unlike the Volume HUD, this overlay has no giant numeric readout and no big
+// circular thumb. It shows a dedicated thick pill slider plus the AUTO/MANUAL
+// toggle chip and ambient-lux readout. The slider lives in its own component so
+// the volume overlay and its slider stay completely separate.
+
+import {
+    MaterialPalette,
+    MaterialStyleMetrics,
+    MaterialTypography,
+    TouchScale,
+} from "@material/material.slint";
+import { OverlayAppBar } from "screen_app_bar.slint";
+import { BrightnessSlider } from "brightness_slider.slint";
+
+export component BrightnessHudOverlay inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    // Translucent panel: the blurred backdrop snapshot published by Rust shows
+    // through the overlay, so the panel itself must not be fully opaque. When no
+    // backdrop is available (e.g. the KMS backend, where nothing can be captured)
+    // the panel falls back to the original opaque gradient — otherwise sharp
+    // live content would ghost through the translucency.
+    background: root.overlay_backdrop_available
+        ? @linear-gradient(150deg, MaterialPalette.surface.transparentize(0.25) 0%, MaterialPalette.background.transparentize(0.25) 100%)
+        : @linear-gradient(150deg, MaterialPalette.surface 0%, MaterialPalette.background 100%);
+    border-width: 1px;
+    border-color: MaterialPalette.outline_variant;
+    clip: true;
+
+    // Current manual brightness in the 0..100 percent range.
+    in-out property <float> brightness_value: 100.0;
+    // True while the auto-brightness policy owns the backlight.
+    in-out property <bool> auto_enabled: true;
+    // Latest real ambient sensor reading in lux; only shown when available.
+    in property <float> ambient_lux: 0.0;
+    in property <bool> ambient_lux_available: false;
+    // Mirrors `MainWindow.overlay_backdrop_available`; keys panel translucency.
+    in property <bool> overlay_backdrop_available: false;
+
+    // True while the overlay owns the keyboard focus.
+    out property <bool> has-focus: focus_scope.has-focus;
+    forward-focus: focus_scope;
+
+    // Releases the keyboard focus held by the overlay.
+    public function release_focus() {
+        focus_scope.clear-focus();
+    }
+
+    // NaN-safe ambient reading for the text readout.
+    property <float> clamped-lux: root.ambient_lux >= 0.0 ? root.ambient_lux : 0.0;
+
+    callback brightness_changed(float);
+    callback auto_toggled(bool);
+    callback dismiss_requested();
+    callback interaction_activity();
+
+    // Full-viewport backdrop touch catcher: prevents touches from leaking through to
+    // the underlying tab and allows tapping empty space to dismiss the HUD early.
+    backdrop_touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            root.dismiss_requested();
+        }
+    }
+
+    // Focus scope owning the overlay. `focus-on-click` is disabled so the scope
+    // never swallows touches meant for the controls below it.
+    focus_scope := FocusScope {
+        width: 100%;
+        height: 100%;
+        focus-on-click: false;
+    }
+
+    // Header + body. Layouts own the split; all geometry is derived dynamically.
+    VerticalLayout {
+        Rectangle {
+            height: MaterialStyleMetrics.size_64;
+            width: 100%;
+            OverlayAppBar {
+                width: 100%;
+                height: 100%;
+                title: "Brightness";
+                trailing_icon: @image-url("../../../assets/icons/close.svg");
+                trailing_tooltip: "Close";
+                trailing_clicked => { root.dismiss_requested(); }
+            }
+        }
+
+        VerticalLayout {
+            padding-top: MaterialStyleMetrics.padding_20;
+            padding-bottom: MaterialStyleMetrics.padding_20;
+            padding-left: MaterialStyleMetrics.padding_28;
+            padding-right: MaterialStyleMetrics.padding_28;
+
+            // Ambient lux readout above the bar. Typography tokens scale with the
+            // Settings font-size value through TouchScale.clamped_font_scale.
+            Rectangle {
+                HorizontalLayout {
+                    alignment: center;
+
+                    // Readout only. The full-viewport backdrop TouchArea above would
+                    // otherwise receive taps on this text and dismiss the HUD, making
+                    // the label look like an action button. Swallow the tap and just
+                    // keep the HUD alive; no brightness state is changed here.
+                    Rectangle {
+                        Text {
+                            text: root.ambient_lux_available ? "AMBIENT  " + Math.round(root.clamped-lux) + " lx" : "AMBIENT  --";
+                            color: MaterialPalette.on_surface_variant;
+                            font-size: MaterialTypography.title_large.font_size;
+                            font-weight: MaterialTypography.semibold;
+                            vertical-alignment: center;
+                        }
+
+                        ambient_touch := TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => { root.interaction_activity(); }
+                        }
+                    }
+                }
+            }
+
+            // Thick brightness bar, centered in the space below the app bar.
+            // No large percentage number: the bar itself is the readout.
+            Rectangle {
+                vertical-stretch: 1;
+                background: transparent;
+
+                VerticalLayout {
+                    alignment: center;
+
+                    BrightnessSlider {
+                        width: 100%;
+                        value <=> root.brightness_value;
+                        changed(pct) => {
+                            root.brightness_value = pct;
+                            root.brightness_changed(pct);
+                        }
+                        interaction_activity => { root.interaction_activity(); }
+                    }
+                }
+            }
+
+            // AUTO/MANUAL toggle chip, centered below the bar.
+            Rectangle {
+                HorizontalLayout {
+                    alignment: center;
+
+                    auto_chip := Rectangle {
+                        width: max(180px * TouchScale.widget_scale, auto_layout.min-width);
+                        height: max(MaterialStyleMetrics.size_48, auto_layout.min-height);
+                        border-radius: self.height / 2;
+                        background: root.auto_enabled ? MaterialPalette.primary : MaterialPalette.surface;
+                        border-width: 2px;
+                        border-color: root.auto_enabled ? MaterialPalette.primary : MaterialPalette.outline_variant;
+                        opacity: auto_touch.pressed ? 0.75 : 1.0;
+
+                        auto_layout := HorizontalLayout {
+                            alignment: center;
+                            padding-left: MaterialStyleMetrics.padding_24;
+                            padding-right: MaterialStyleMetrics.padding_24;
+                            padding-top: MaterialStyleMetrics.padding_8;
+                            padding-bottom: MaterialStyleMetrics.padding_8;
+                            spacing: MaterialStyleMetrics.spacing_8;
+
+                            Text {
+                                text: root.auto_enabled ? "AUTO" : "MANUAL";
+                                color: root.auto_enabled ? MaterialPalette.on_primary : MaterialPalette.on_surface;
+                                font-size: MaterialTypography.title_medium.font_size;
+                                font-weight: MaterialTypography.semibold;
+                                letter-spacing: 1px;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        auto_touch := TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => {
+                                root.auto_toggled(!root.auto_enabled);
+                                root.interaction_activity();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

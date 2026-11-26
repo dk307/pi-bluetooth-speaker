@@ -1,13 +1,28 @@
-import { BootCheckLine, SplashScreen } from "splash.slint";
+import { BootCheckLine, SplashContent, SplashScreen } from "splash.slint";
 import { AppTheme } from "app_theme.slint";
-import { MaterialPalette } from "@material/material.slint";
-import { TopStatusBar } from "status_bar.slint";
+import {
+    MaterialPalette,
+    MaterialStyleMetrics,
+    TouchScale,
+    VirtualKeyboard,
+} from "@material/material.slint";
+import { TopStatusBar, CodecSpecs } from "status_bar.slint";
 import { MainViewport } from "viewport.slint";
-import { MarqueeRasterizer } from "marquee_rasterizer.slint";
-import { MarqueeCompose } from "marquee_state.slint";
+import { AmbientWaveSprites, MarqueeCompose } from "marquee_state.slint";
+import { ScreenAppBar } from "screen_app_bar.slint";
+import { VolumeHudOverlay } from "volume_hud.slint";
+import { CodecHudOverlay } from "codec_hud.slint";
+import { BrightnessHudOverlay } from "brightness_hud.slint";
+import { BluetoothDevicesScreen, BtDeviceRow } from "bluetooth_devices.slint";
+import { VirtualKeyboardSheet } from "touch_scale_widgets.slint";
+import { SettingControlKind, SettingRowItem } from "settings_view.slint";
+import {
+    SpectrumBandItem,
+    VisualizerOverlay,
+} from "visualizer_overlay.slint";
 
-// Re-exported so slint-build generates the Rust global accessor for the composer bridge.
-export { MarqueeCompose }
+// Re-exported so slint-build generates the Rust global accessors.
+export { AmbientWaveSprites, MarqueeCompose, TouchScale, VirtualKeyboard }
 
 import "../../../assets/fonts/Inter-Regular.ttf";
 import "../../../assets/fonts/Inter-Medium.ttf";
@@ -15,7 +30,7 @@ import "../../../assets/fonts/Inter-SemiBold.ttf";
 import "../../../assets/fonts/Inter-Bold.ttf";
 import "../../../assets/fonts/Inter-ExtraBold.ttf";
 
-export { BootCheckLine, SplashScreen, MarqueeRasterizer, MaterialPalette, AppTheme }
+export { BootCheckLine, SplashScreen, MaterialPalette, MaterialStyleMetrics, AppTheme, BtDeviceRow, SettingControlKind, SettingRowItem, SpectrumBandItem }
 
 export component MainWindow inherits Window {
     title: "DietPi Audiophile Console";
@@ -30,14 +45,23 @@ export component MainWindow inherits Window {
     in-out property <string> stream_codec: "aptX-HD";
     in-out property <string> stream_sample_rate: "48 kHz";
     in-out property <string> stream_bit_depth: "16-bit";
-    in-out property <bool> show_stream_specs <=> status_bar.show_stream_specs;
+    // Derived at window level (via the CodecSpecs global) so it stays readable from
+    // Rust even when the conditional TopStatusBar element is not mounted.
+    out property <bool> show_stream_specs: !CodecSpecs.is-fixed-spec(root.stream_codec);
     in-out property <string> track_title: "Waiting for Bluetooth Connection...";
+    in-out property <string> track_title_line1: "";
+    in-out property <string> track_title_line2: "";
+    in-out property <bool> title_split_mode: false;
     in-out property <string> track_artist: "";
     in-out property <string> track_album: "";
     in-out property <string> stream_details: "aptX-HD 576k | 48kHz/16-bit -> DSP 32-bit";
-    in-out property <string> position_text: "00:00";
-    in-out property <string> duration_text: "00:00";
+    in-out property <string> position_text: "0:00";
+    in-out property <string> duration_text: "0:00";
     in-out property <int> duration_ms: 0;
+    // `false` when BlueZ reports the timeline as unknown (`u32::MAX` / absent):
+    // the Now Playing view then hides or degrades the seek bar.
+    in-out property <bool> duration_known: true;
+    in-out property <bool> position_known: true;
     in-out property <float> progress_ratio: 0.0;
     in-out property <float> volume_value: 75.0;
     in-out property <bool> is_playing: false;
@@ -48,51 +72,226 @@ export component MainWindow inherits Window {
     in-out property <int> volume_hud_elapsed_ms: 0;
     out property <float> volume_hud_opacity: root.volume_hud_visible ? 1.0 : 0.0;
     animate volume_hud_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
+    // Codec information overlay: opened from the codec badge in the top bar.
+    // It has its own auto-dismiss timeout (default 30s) and shares the HUD fade duration.
+    in-out property <bool> codec_hud_visible: false;
+    in-out property <int> codec_hud_timeout_ms: 30000;
+    in-out property <int> codec_hud_elapsed_ms: 0;
+    // Rotary encoder step per detent; Screen Settings edits and persists it.
+    in-out property <int> volume_step_percent: 2;
+    out property <float> codec_hud_opacity: root.codec_hud_visible ? 1.0 : 0.0;
+    animate codec_hud_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
+    // Brightness / auto-brightness overlay: opened from the top-bar brightness button.
+    in-out property <float> brightness_value: 100.0;
+    in-out property <bool> auto_brightness_enabled: true;
+    in-out property <float> ambient_lux: 0.0;
+    in-out property <bool> ambient_lux_available: false;
+    in-out property <bool> brightness_hud_visible: false;
+    in-out property <int> brightness_hud_timeout_ms: 8000;
+    in-out property <int> brightness_hud_elapsed_ms: 0;
+    in-out property <int> brightness_hud_fade_ms: 200;
+    out property <float> brightness_hud_opacity: root.brightness_hud_visible ? 1.0 : 0.0;
+    animate brightness_hud_opacity { duration: root.brightness_hud_fade_ms * 1ms; easing: ease-out; }
+    // Peak opacity of the three mutually-exclusive HUDs, shared by backdrop and scrim.
+    property <float> max_hud_opacity: Math.max(root.volume_hud_opacity, Math.max(root.codec_hud_opacity, root.brightness_hud_opacity));
     in-out property <bool> has_cover_art: false;
     in-out property <image> cover_image;
-    in-out property <float> left_peak_ratio: 0.0;
-    in-out property <float> right_peak_ratio: 0.0;
+
+    // Blurred snapshot of the screen that the overlays cover. Slint has no
+    // backdrop-blur primitive, so Rust captures the framebuffer shadow buffer
+    // when an overlay opens, blurs it and publishes the result here.
+    in-out property <image> overlay_backdrop;
+
+    // True while a non-empty blurred backdrop is published. The scrim strength
+    // keys off this: with a backdrop the blur provides the separation (0.25
+    // dimming), without one the scrim falls back to full 0.55 dimming.
+    in-out property <bool> overlay_backdrop_available: false;
+
+    // Height of the top status bar. Overlays only ever cover the viewport area
+    // below it, so every overlay layer is aligned on this single inset.
+    // Seeded from Rust's `OVERLAY_TOP_INSET` (backdrop.rs) by `AppShell::new`;
+    // this literal is only the design-preview fallback.
+    in-out property <length> overlay_top_inset: 60px;
+    in-out property <bool> visualizer_active: false;
+    in-out property <int> visualizer_mode: 0;
+    in-out property <int> default_visualizer_mode: 0;
+    in-out property <bool> viz_auto_start: true;
+    in-out property <int> viz_auto_start_secs: 5;
+    in property <[SpectrumBandItem]> viz_spectrum_bands;
+    in property <image> viz_radial_image;
+    in-out property <bool> viz_spectrum_led_mask: true;
+    in-out property <bool> viz_force_60fps: false;
     in-out property <bool> cd_enabled: false;
-    out property <bool> is_animating: root.active_tab == 0 || root.volume_hud_visible || root.volume_hud_opacity > 0.01;
+    out property <bool> is_animating: (root.active_tab == 0 && !root.visualizer_active && !root.bt_devices_open && !root.boot_splash_visible) || root.visualizer_active || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01 || root.brightness_hud_visible || root.brightness_hud_opacity > 0.01
+        // The devices screen keeps frames coming only while a live animation
+        // source runs: the pairing ring (mode 2 + spinning), the Add-Device
+        // scanning spinner (mode 1 + scanning), a pending row action, or a
+        // visible toast (plan A9/A16).
+        || (root.bt_devices_open && ((root.bt_devices_mode == 2 && root.bt_pair_spinning)
+            || (root.bt_devices_mode == 1 && root.bt_scanning)
+            || root.bt_pending_address != ""
+            || root.bt_toast_visible));
+
+    // Lifted to MainWindow for title switching in ScreenAppBar
+    in-out property <bool> show_themes: false;
+    in-out property <bool> show_visualizer: false;
+    in-out property <bool> show_advanced: false;
+    in-out property <bool> show_widget_preview: false;
+    in property <[SettingRowItem]> basic_settings;
+    in property <[SettingRowItem]> visualizer_settings;
+    in property <[SettingRowItem]> advanced_settings;
+    in-out property <string> speaker_alias: "DietPi Speaker";
+
+    // Single source of truth for status bar visibility (Now Playing tab only)
+    out property <bool> show_status_bar: root.active_tab == 0;
+    // Active top bar height: fixed `overlay_top_inset` (60px) on Now Playing (`TopStatusBar`),
+    // scaled `MaterialStyleMetrics.size_64` (`56px * TouchScale.widget_scale`) on screen tabs.
+    out property <length> top_bar_height: root.show_status_bar ? root.overlay_top_inset : MaterialStyleMetrics.size_64;
+    out property <length> hud_top_inset: root.visualizer_active ? 0px : root.top_bar_height;
+
+    // Boot splash overlay state (Appliance boot phase): the KMS backend allows
+    // only one window per process, so boot checks render as an in-window
+    // overlay instead of a separate SplashScreen window.
+    in-out property <bool> boot_splash_visible: false;
+    in-out property <BootCheckLine> boot_current_check: {
+        text: "Starting system checks …",
+        running: true,
+        ok: false,
+    };
+
+    callback prepare_overlay_backdrop();
+
+    // True only on the opening edge: no HUD is visible or still fading out.
+    // The frozen backdrop must be captured exactly once per overlay period —
+    // never again while switching directly between HUDs (AGENTS.md §4.5).
+    function all_huds_closed() -> bool {
+        return !root.volume_hud_visible && root.volume_hud_opacity <= 0.01
+            && !root.codec_hud_visible && root.codec_hud_opacity <= 0.01
+            && !root.brightness_hud_visible && root.brightness_hud_opacity <= 0.01;
+    }
 
     public function show_volume_hud() {
+        if (root.all_huds_closed()) {
+            root.prepare_overlay_backdrop();
+        }
         root.volume_hud_elapsed_ms = 0;
         root.volume_hud_visible = true;
+        root.codec_hud_visible = false;
+        root.brightness_hud_visible = false;
+        root_stack.focus_volume_hud();
     }
 
     public function dismiss_volume_hud() {
         root.volume_hud_visible = false;
         root.volume_hud_elapsed_ms = 0;
+        root_stack.unfocus_volume_hud();
     }
 
+    // Opens the codec information overlay. Volume, codec and brightness HUDs are
+    // mutually exclusive: only one of them can cover the viewport at a time.
+    public function show_codec_hud() {
+        if (root.all_huds_closed()) {
+            root.prepare_overlay_backdrop();
+        }
+        root.codec_hud_elapsed_ms = 0;
+        root.codec_hud_visible = true;
+        root.volume_hud_visible = false;
+        root.brightness_hud_visible = false;
+        root_stack.focus_codec_hud();
+    }
+
+    public function dismiss_codec_hud() {
+        root.codec_hud_visible = false;
+        root.codec_hud_elapsed_ms = 0;
+        root_stack.unfocus_codec_hud();
+    }
+
+    // Opens the brightness overlay from the top-bar brightness button.
+    public function show_brightness_hud() {
+        if (root.all_huds_closed()) {
+            root.prepare_overlay_backdrop();
+        }
+        root.brightness_hud_elapsed_ms = 0;
+        root.brightness_hud_visible = true;
+        root.volume_hud_visible = false;
+        root.codec_hud_visible = false;
+        root_stack.focus_brightness_hud();
+    }
+
+    public function dismiss_brightness_hud() {
+        root.brightness_hud_visible = false;
+        root.brightness_hud_elapsed_ms = 0;
+        root_stack.unfocus_brightness_hud();
+    }
+
+    // True while the Volume HUD overlay owns the keyboard focus.
+    out property <bool> volume_hud_has_focus: root_stack.volume_hud_has_focus;
+    // True while the codec information overlay owns the keyboard focus.
+    out property <bool> codec_hud_has_focus: root_stack.codec_hud_has_focus;
+    // True while the brightness overlay owns the keyboard focus.
+    out property <bool> brightness_hud_has_focus: root_stack.brightness_hud_has_focus;
+
+    // One shared 50 ms HUD tick advances whichever overlay is open and dismisses
+    // it at its own timeout. A single timer avoids the same-rate timer drift that
+    // separate 50 ms timers would introduce (screen-manager AGENTS.md item 19).
     Timer {
         interval: 50ms;
-        running: root.volume_hud_visible;
+        running: root.volume_hud_visible || root.codec_hud_visible || root.brightness_hud_visible;
         triggered() => {
-            root.volume_hud_elapsed_ms += 50;
-            if (root.volume_hud_elapsed_ms >= root.volume_hud_timeout_ms) {
-                root.volume_hud_visible = false;
-                root.volume_hud_elapsed_ms = 0;
+            if (root.volume_hud_visible) {
+                root.volume_hud_elapsed_ms += 50;
+                if (root.volume_hud_elapsed_ms >= root.volume_hud_timeout_ms) {
+                    root.dismiss_volume_hud();
+                }
+            }
+            if (root.codec_hud_visible) {
+                root.codec_hud_elapsed_ms += 50;
+                if (root.codec_hud_elapsed_ms >= root.codec_hud_timeout_ms) {
+                    root.dismiss_codec_hud();
+                }
+            }
+            if (root.brightness_hud_visible) {
+                root.brightness_hud_elapsed_ms += 50;
+                if (root.brightness_hud_elapsed_ms >= root.brightness_hud_timeout_ms) {
+                    root.dismiss_brightness_hud();
+                }
             }
         }
     }
 
-    // Bluetooth details (Tab 2) text, pushed from the bt-monitor worker snapshot.
+    // Connected indicator for the status bar, derived from the latest
+    // devices rows in `apply_bt_devices` (the old tab-2 details props are
+    // retired with the details screen).
     in-out property <bool> bt_connected: false;
-    in-out property <string> bt_device_address: "—";
-    in-out property <string> bt_link_text: "Waiting for connection";
-    in-out property <string> bt_rssi_text: "";
-    in-out property <string> bt_battery_text: "";
+    // Codec-HUD stream summary and codec delay, pushed with each PCM stream
+    // delta by `apply_pcm_stream` (plan A19: values follow the active stream).
     in-out property <string> bt_stream_format: "—";
     in-out property <string> bt_delay_text: "—";
-    in-out property <string> bt_adapter_name: "—";
-    in-out property <string> bt_adapter_address: "—";
-    // Tab to return to when the Bluetooth details screen is dismissed.
+    // Tab to return to when the Bluetooth devices screen is dismissed.
     in-out property <int> previous_tab: 0;
 
-    // Marquee text strips pre-rendered offscreen by `MarqueeStripRasterizer`; the images
-    // are re-rasterized from Rust only when their text, color, or typography changes.
-    in-out property <image> title_marquee_strip;
+    // Bluetooth devices screen (replaces the old tab-2 details screen): the Rust
+    // controller pushes rows/pairing/toast state here; navigation lives in Slint
+    // except pairing-terminal transitions (plan §5).
+    in-out property <bool> bt_devices_open: false;
+    // 0 = paired/active list, 1 = Add Device (discovery), 2 = Connecting/Pairing.
+    in-out property <int> bt_devices_mode: 0;
+    in-out property <[BtDeviceRow]> bt_device_rows: [];
+    in-out property <[BtDeviceRow]> bt_discovered_rows: [];
+    in-out property <bool> bt_scanning: false;
+    in-out property <string> bt_devices_subtitle: "Visible as \"Home Speaker\"";
+    in-out property <string> bt_pair_device_name: "";
+    in-out property <string> bt_pair_code: "";
+    in-out property <bool> bt_pair_spinning: false;
+    in-out property <bool> bt_delete_open: false;
+    in-out property <string> bt_delete_device_name: "";
+    // Address-keyed delete (plan A2): Rust resolves this to the BlueZ device
+    // path — row indices are never trusted across publishes.
+    in-out property <string> bt_delete_address: "";
+    in-out property <bool> bt_toast_visible: false;
+    in-out property <string> bt_toast_text: "";
+    in-out property <int> bt_toast_seq: 0;
+    in-out property <string> bt_pending_address: "";
     // Single source of truth for the artist/album composite shown in the second marquee,
     // shared by the declarative binding and the Rust-side strip rasterizer.
     out property <string> artist_marquee_text:
@@ -106,114 +305,399 @@ export component MainWindow inherits Window {
     callback volume_clicked();
     callback stream_pill_clicked();
     callback volume_changed(float);
+    callback brightness_changed(float);
+    callback auto_brightness_toggled(bool);
     callback source_clicked();
     callback night_mode_clicked();
+    // Raised after the settings tab transition so Rust can log the navigation.
+    callback settings_clicked();
+    callback open_visualizer();
+    callback close_visualizer();
+    callback next_visualizer();
+    callback prev_visualizer();
     callback tab_selected(int);
     callback select_theme(int);
     callback cycle_theme();
+    callback font_scale_changed(float);
+    callback setting_step(string, int);
+    callback setting_toggle(string, bool);
 
-    // Opens the Bluetooth details tab from any screen; calling it again (or `Back`)
-    // returns to the tab it was opened from.
-    public function toggle_bluetooth_details() {
-        if (root.active_tab == 2) {
-            root.active_tab = root.previous_tab == 2 ? 0 : root.previous_tab;
-        } else {
+    // Bluetooth devices screen actions, handled in Rust (DeviceCommandQueue pushes).
+    callback bt_add_device_clicked();
+    callback bt_cancel_scan_clicked();
+    // (row index, from_discovery) — Rust resolves the index to an address (A2).
+    callback bt_row_action(int, bool);
+    callback bt_row_delete(int);
+    callback bt_pair_cancel_clicked();
+    callback bt_delete_confirm_clicked();
+    callback bt_delete_cancel_clicked();
+
+    // Opens the Bluetooth devices screen from any entry point (status bar taps,
+    // Settings tile, CLI); remembers the tab to return to.
+    public function open_bt_devices() {
+        if (root.visualizer_active) {
+            root.visualizer_active = false;
+            root.close_visualizer();
+        }
+        if (!root.bt_devices_open) {
             root.previous_tab = root.active_tab;
-            root.active_tab = 2;
+        }
+        root.bt_devices_open = true;
+    }
+
+    public function close_bt_devices() {
+        // Closing while Add Device is scanning must stop discovery: the worker
+        // stops screen-started discovery only on an explicit cancel, a pairing
+        // reap, or this stop request (review: RF power leak on close).
+        if (root.bt_scanning) {
+            root.bt_cancel_scan_clicked();
+        }
+        root.bt_devices_open = false;
+        root.bt_devices_mode = 0;
+        root.bt_delete_open = false;
+        root.bt_pending_address = "";
+        root.bt_toast_visible = false;
+        root.bt_toast_text = "";
+    }
+
+    // Screen app bar back button handler
+    public function app_bar_back() {
+        if (VirtualKeyboard.visible) {
+            VirtualKeyboard.close();
+        } else if (root.active_tab == 5 && root.show_widget_preview) {
+            root.show_widget_preview = false;
+        } else if (root.active_tab == 5 && root.show_advanced) {
+            root.show_advanced = false;
+        } else if (root.active_tab == 5 && root.show_visualizer) {
+            root.show_visualizer = false;
+        } else if (root.active_tab == 5 && root.show_themes) {
+            root.show_themes = false;
+        } else if (root.active_tab != 0) {
+            // Tabs 1, 3, 4, and 5 (when not in themes): return to previous tab, falling back to Now Playing
+            root.active_tab = root.previous_tab == root.active_tab ? 0 : root.previous_tab;
         }
     }
 
-    VerticalLayout {
-        padding: 0px;
-        spacing: 0px;
+    // Root stacking container (bottom → top): bg_column, hud_backdrop, hud_scrim,
+    // volume_hud / codec_hud, VirtualKeyboardSheet, boot_splash.
+    root_stack := Rectangle {
+        // Background column (home AND screens). Overlay dimming is applied by the
+        // hud_scrim layer below (single dimming mechanism).
+        bg_column := VerticalLayout {
+            width: 100%;
+            height: 100%;
+            visible: !root.visualizer_active;
 
-        // Top Status Bar: 800 x 60
-        status_bar := TopStatusBar {
-            active_source: root.active_source;
-            track_or_device: root.track_or_device;
-            stream_codec: root.stream_codec;
-            stream_sample_rate: root.stream_sample_rate;
-            stream_bit_depth: root.stream_bit_depth;
-            volume_value: root.volume_value;
-            is_muted: root.is_muted;
-            source_clicked => {
-                root.toggle_bluetooth_details();
-                root.source_clicked();
+            // Top bar slot: 60px on Now Playing (`TopStatusBar`), scaled
+            // `MaterialStyleMetrics.size_64` on screen tabs (`ScreenAppBar`).
+            Rectangle {
+                height: root.top_bar_height;
+                width: 100%;
+
+                if root.show_status_bar: status_bar := TopStatusBar {
+                    width: 100%;
+                    height: 100%;
+                    active_source: root.active_source;
+                    track_or_device: root.track_or_device;
+                    stream_codec: root.stream_codec;
+                    stream_sample_rate: root.stream_sample_rate;
+                    stream_bit_depth: root.stream_bit_depth;
+                    volume_value: root.volume_value;
+                    is_muted: root.is_muted;
+                    bt_connected: root.bt_connected;
+                    source_clicked => {
+                        root.open_bt_devices();
+                        root.source_clicked();
+                    }
+                    device_clicked => { root.open_bt_devices(); }
+                    // The codec badge keeps its codec-information overlay from
+                    // the KMS mainline (#62): the HUD reports the negotiated
+                    // stream (format/delay now fed by `apply_pcm_stream`),
+                    // while the devices screen opens from the logo, the device
+                    // name and the Settings grid.
+                    protocol_clicked => { root.show_codec_hud(); }
+                    dim_active: root.auto_brightness_enabled;
+                    night_mode_clicked => { root.show_brightness_hud(); root.night_mode_clicked(); }
+                    volume_clicked => {
+                        root.show_volume_hud();
+                        root.volume_clicked();
+                    }
+                }
+
+                if !root.show_status_bar: screen_app_bar := ScreenAppBar {
+                    width: 100%;
+                    height: 100%;
+                    title: root.active_tab == 1 ? "VU Meter" :
+                           root.active_tab == 3 ? "CD Player" :
+                           root.active_tab == 4 ? "DSP & Tone" :
+                           root.active_tab == 5 ? (root.show_widget_preview ? "Touch Scale Test" : (root.show_themes ? (root.show_advanced ? "Advanced Settings" : (root.show_visualizer ? "Visualizer Settings" : "Screen Settings")) : "Settings")) : "";
+                    trailing_icon: @image-url("../../../assets/icons/back.svg");
+                    trailing_clicked => { root.app_bar_back(); }
+                }
             }
-            device_clicked => { root.toggle_bluetooth_details(); }
-            protocol_clicked => { root.toggle_bluetooth_details(); }
-            night_mode_clicked => { root.night_mode_clicked(); }
-            volume_clicked => {
-                root.show_volume_hud();
-                root.volume_clicked();
+
+            // Main Viewport: fills remaining space — ALWAYS MOUNTED (all `<=>` bindings intact)
+            viewport := MainViewport {
+                active_tab <=> root.active_tab;
+                cd_enabled: root.cd_enabled;
+                track_title: root.track_title;
+                track_title_line1: root.track_title_line1;
+                track_title_line2: root.track_title_line2;
+                title_split_mode: root.title_split_mode;
+                track_artist: root.track_artist;
+                track_album: root.track_album;
+                stream_details: root.stream_details;
+                position_text: root.position_text;
+                duration_text: root.duration_text;
+                duration_ms: root.duration_ms;
+                duration_known: root.duration_known;
+                position_known: root.position_known;
+                progress_ratio: root.progress_ratio;
+                volume_value <=> root.volume_value;
+                is_playing: root.is_playing;
+                animations_paused: root.visualizer_active || root.bt_devices_open || root.boot_splash_visible;
+                is_muted <=> root.is_muted;
+                volume_hud_opacity: root.volume_hud_opacity;
+                has_cover_art: root.has_cover_art;
+                cover_image: root.cover_image;
+                track_or_device: root.track_or_device;
+                stream_codec: root.stream_codec;
+                artist_marquee_text: root.artist_marquee_text;
+                show_themes <=> root.show_themes;
+                show_visualizer <=> root.show_visualizer;
+                show_advanced <=> root.show_advanced;
+                show_widget_preview <=> root.show_widget_preview;
+                basic_settings: root.basic_settings;
+                visualizer_settings: root.visualizer_settings;
+                advanced_settings: root.advanced_settings;
+                speaker_alias <=> root.speaker_alias;
+
+                toggle_play_pause => { root.toggle_play_pause(); }
+                next_track => { root.next_track(); }
+                previous_track => { root.previous_track(); }
+                toggle_mute => { root.toggle_mute(); }
+                stream_pill_clicked => { root.stream_pill_clicked(); }
+                settings_clicked => {
+                    root.previous_tab = root.active_tab;
+                    root.active_tab = 5;
+                    root.settings_clicked();
+                }
+                visualizer_clicked => {
+                    root.visualizer_active = true;
+                    root.open_visualizer();
+                }
+                select_tab(idx) => {
+                    root.previous_tab = root.active_tab;
+                    root.active_tab = idx;
+                }
+                open_bluetooth_devices => { root.open_bt_devices(); }
+                volume_changed(val) => { root.volume_changed(val); }
+                select_theme(idx) => { root.select_theme(idx); }
+                cycle_theme => { root.cycle_theme(); }
+                font_scale_changed(val) => { root.font_scale_changed(val); }
+                setting_step(id, dir) => { root.setting_step(id, dir); }
+                setting_toggle(id, right) => { root.setting_toggle(id, right); }
             }
         }
 
-        // Main Viewport: 800 x 420 (expands to fill bottom space)
-        viewport := MainViewport {
-            active_tab <=> root.active_tab;
-            cd_enabled: root.cd_enabled;
-            track_title: root.track_title;
-            track_artist: root.track_artist;
-            track_album: root.track_album;
-            stream_details: root.stream_details;
-            position_text: root.position_text;
-            duration_text: root.duration_text;
-            duration_ms: root.duration_ms;
-            progress_ratio: root.progress_ratio;
-            volume_value <=> root.volume_value;
-            is_playing: root.is_playing;
-            is_muted <=> root.is_muted;
-            volume_hud_opacity: root.volume_hud_opacity;
+        // Full-screen 800x480 music visualizer overlay (above top bar & viewport, below HUDs).
+        if root.visualizer_active: visualizer_overlay := VisualizerOverlay {
+            width: 100%;
+            height: 100%;
+            visualizer_mode: root.visualizer_mode;
+            spectrum_bands: root.viz_spectrum_bands;
+            radial_image: root.viz_radial_image;
+            spectrum_led_mask: root.viz_spectrum_led_mask;
             has_cover_art: root.has_cover_art;
             cover_image: root.cover_image;
-            left_peak_ratio: root.left_peak_ratio;
-            right_peak_ratio: root.right_peak_ratio;
-            track_or_device: root.track_or_device;
-            stream_codec: root.stream_codec;
-            bt_connected: root.bt_connected;
-            bt_device_address: root.bt_device_address;
-            bt_link_text: root.bt_link_text;
-            bt_rssi_text: root.bt_rssi_text;
-            bt_battery_text: root.bt_battery_text;
-            bt_stream_format: root.bt_stream_format;
-            bt_delay_text: root.bt_delay_text;
-            bt_adapter_name: root.bt_adapter_name;
-            bt_adapter_address: root.bt_adapter_address;
-            title_marquee_strip: root.title_marquee_strip;
-            artist_marquee_text: root.artist_marquee_text;
+            close_requested => {
+                root.visualizer_active = false;
+                root.close_visualizer();
+            }
+            next_visualizer => {
+                root.next_visualizer();
+            }
+            prev_visualizer => {
+                root.prev_visualizer();
+            }
+        }
 
-            toggle_play_pause => { root.toggle_play_pause(); }
-            next_track => { root.next_track(); }
-            previous_track => { root.previous_track(); }
-            toggle_mute => { root.toggle_mute(); }
-            stream_pill_clicked => { root.stream_pill_clicked(); }
-            bluetooth_back_clicked => { root.toggle_bluetooth_details(); }
-            settings_clicked => {
-                root.previous_tab = root.active_tab;
-                root.active_tab = 5;
+        // Bluetooth devices screen: full-window overlay above the tab viewport
+        // and top bar (it carries its own standard overlay app bar), below the
+        // volume HUD.
+        if root.bt_devices_open: bluetooth_devices := BluetoothDevicesScreen {
+            width: 100%;
+            height: 100%;
+            bt_devices_open: root.bt_devices_open;
+            bt_devices_mode <=> root.bt_devices_mode;
+            bt_device_rows: root.bt_device_rows;
+            bt_discovered_rows: root.bt_discovered_rows;
+            bt_scanning: root.bt_scanning;
+            bt_devices_subtitle: root.bt_devices_subtitle;
+            bt_pair_device_name: root.bt_pair_device_name;
+            bt_pair_code: root.bt_pair_code;
+            bt_pair_spinning: root.bt_pair_spinning;
+            bt_delete_open: root.bt_delete_open;
+            bt_delete_device_name: root.bt_delete_device_name;
+            bt_toast_visible <=> root.bt_toast_visible;
+            bt_toast_text: root.bt_toast_text;
+            bt_toast_seq: root.bt_toast_seq;
+            bt_pending_address: root.bt_pending_address;
+            bt_add_device_clicked => { root.bt_add_device_clicked(); }
+            bt_cancel_scan_clicked => { root.bt_cancel_scan_clicked(); }
+            bt_row_action(r, d) => { root.bt_row_action(r, d); }
+            bt_row_delete(r) => { root.bt_row_delete(r); }
+            bt_pair_cancel_clicked => { root.bt_pair_cancel_clicked(); }
+            bt_delete_confirm_clicked => { root.bt_delete_confirm_clicked(); }
+            bt_delete_cancel_clicked => { root.bt_delete_cancel_clicked(); }
+            close_clicked => { root.close_bt_devices(); }
+        }
+
+        // Wrap the HUD backdrop/scrim, modal HUD overlays, and virtual keyboard
+        // sheet in a single `cache-rendering-hint: true` layer. While all
+        // overlays and the keyboard are closed (`visible: false` on every child),
+        // `i_slint_core::item_rendering::render_layer` computes a `0x0` bounding
+        // rect, allocates zero GPU FBO memory (`layer_cache` stores `None`),
+        // and prunes all 110+ hidden items in a single HashMap lookup per 60 Hz frame.
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            cache-rendering-hint: true;
+
+            // Blurred backdrop — the frozen, blurred snapshot of the entire screen
+            // (including the top bar outside the overlay, blurred more strongly).
+            // It sits directly on the background, BELOW the scrim, so the scrim's
+            // 0.25 dimming renders on top of the blur. Published by Rust when an
+            // overlay opens. By design it is not refreshed while the overlay stays
+            // open: content changes underneath only appear after a reopen.
+            hud_backdrop := Image {
+                y: 0;
+                width: 100%;
+                height: 100%;
+                source: root.overlay_backdrop;
+                opacity: root.max_hud_opacity;
+                visible: root.max_hud_opacity > 0.01;
             }
-            settings_back_clicked => {
-                root.active_tab = root.previous_tab == 5 ? 0 : root.previous_tab;
+
+            // HUD scrim (above the backdrop) — dims the entire screen behind the
+            // overlay (including the top bar outside the overlay). The dimming
+            // adapts to backdrop availability: 0.25 when a blurred backdrop is
+            // published (the blur provides most of the separation), falling back
+            // to the pre-backdrop 0.55 when none is — e.g. if snapshot capture fails.
+            hud_scrim := Rectangle {
+                y: 0;
+                width: 100%;
+                height: 100%;
+                background: #000000;
+                opacity: root.max_hud_opacity
+                    * (root.overlay_backdrop_available ? 0.25 : 0.55);
+                visible: root.max_hud_opacity > 0.01;
             }
-            vu_meter_back_clicked => {
-                root.active_tab = root.previous_tab == 1 ? 0 : root.previous_tab;
+
+            // Volume HUD overlay (top layer) — same below-the-top-bar geometry.
+            volume_hud := VolumeHudOverlay {
+                y: root.hud_top_inset;
+                width: 100%;
+                height: parent.height - root.hud_top_inset;
+                overlay_backdrop_available: root.overlay_backdrop_available;
+                visible: root.volume_hud_opacity > 0.01;
+                opacity: root.volume_hud_opacity;
+                volume_value <=> root.volume_value;
+                is_muted <=> root.is_muted;
+                volume_changed(val) => { root.volume_changed(val); }
+                toggle_mute => { root.toggle_mute(); }
+                dismiss_requested => { root.dismiss_volume_hud(); }
+                interaction_activity => { root.show_volume_hud(); }
             }
-            cd_back_clicked => {
-                root.active_tab = root.previous_tab == 3 ? 0 : root.previous_tab;
+
+            // Codec information overlay (top layer) — same below-the-top-bar geometry.
+            codec_hud := CodecHudOverlay {
+                y: root.hud_top_inset;
+                width: 100%;
+                height: parent.height - root.hud_top_inset;
+                overlay_backdrop_available: root.overlay_backdrop_available;
+                visible: root.codec_hud_opacity > 0.01;
+                opacity: root.codec_hud_opacity;
+                codec: root.stream_codec;
+                sample_rate: root.stream_sample_rate;
+                bit_depth: root.stream_bit_depth;
+                stream_format: root.bt_stream_format;
+                delay_text: root.bt_delay_text;
+                connected: root.bt_connected;
+                dismiss_requested => { root.dismiss_codec_hud(); }
             }
-            dsp_back_clicked => {
-                root.active_tab = root.previous_tab == 4 ? 0 : root.previous_tab;
+
+            // Brightness overlay (top layer) — same below-the-top-bar geometry.
+            brightness_hud := BrightnessHudOverlay {
+                y: root.hud_top_inset;
+                width: 100%;
+                height: parent.height - root.hud_top_inset;
+                overlay_backdrop_available: root.overlay_backdrop_available;
+                visible: root.brightness_hud_opacity > 0.01;
+                opacity: root.brightness_hud_opacity;
+                brightness_value <=> root.brightness_value;
+                auto_enabled <=> root.auto_brightness_enabled;
+                ambient_lux: root.ambient_lux;
+                ambient_lux_available: root.ambient_lux_available;
+                brightness_changed(val) => { root.brightness_changed(val); }
+                auto_toggled(on) => { root.auto_brightness_toggled(on); }
+                dismiss_requested => { root.dismiss_brightness_hud(); }
+                interaction_activity => { root.show_brightness_hud(); }
             }
-            select_tab(idx) => {
-                root.previous_tab = root.active_tab;
-                root.active_tab = idx;
+
+            // Bottom-sheet virtual keyboard overlay: pops up whenever a `TextField`
+            // gains focus (`VirtualKeyboard.visible == true`).
+            VirtualKeyboardSheet {
+                width: 100%;
+                height: 100%;
             }
-            volume_changed(val) => { root.volume_changed(val); }
-            dismiss_volume_hud => { root.dismiss_volume_hud(); }
-            volume_hud_activity => { root.show_volume_hud(); }
-            select_theme(idx) => { root.select_theme(idx); }
-            cycle_theme => { root.cycle_theme(); }
+        }
+
+        // True while the Volume HUD overlay owns the keyboard focus.
+        out property <bool> volume_hud_has_focus: volume_hud.has-focus;
+
+        // True while the codec information overlay owns the keyboard focus.
+        out property <bool> codec_hud_has_focus: codec_hud.has-focus;
+
+        // True while the brightness overlay owns the keyboard focus.
+        out property <bool> brightness_hud_has_focus: brightness_hud.has-focus;
+
+        // Transfers the keyboard focus to the Volume HUD overlay.
+        public function focus_volume_hud() {
+            volume_hud.focus();
+        }
+
+        // Releases the keyboard focus held by the Volume HUD overlay.
+        public function unfocus_volume_hud() {
+            volume_hud.release_focus();
+        }
+
+        // Transfers the keyboard focus to the codec information overlay.
+        public function focus_codec_hud() {
+            codec_hud.focus();
+        }
+
+        // Releases the keyboard focus held by the codec information overlay.
+        public function unfocus_codec_hud() {
+            codec_hud.release_focus();
+        }
+
+        // Transfers the keyboard focus to the brightness overlay.
+        public function focus_brightness_hud() {
+            brightness_hud.focus();
+        }
+
+        // Releases the keyboard focus held by the brightness overlay.
+        public function unfocus_brightness_hud() {
+            brightness_hud.release_focus();
+        }
+
+        // Boot splash overlay (top-most): full-window coverage during the
+        // Appliance boot phase; hidden (unmounted) for the shell lifetime.
+        if root.boot_splash_visible: boot_splash := SplashContent {
+            width: 100%;
+            height: 100%;
+            current_check: root.boot_current_check;
         }
     }
 }
