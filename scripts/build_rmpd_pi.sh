@@ -131,6 +131,8 @@ phase_build() {
     sed -i 's/buffer_size: cpal::BufferSize::Default,/buffer_size: cpal::BufferSize::Fixed(2048),/g' "${cpal_utils}"
     log "Applied cpal BufferSize::Fixed(2048) patch to rmpd-player/src/cpal_utils.rs."
   fi
+  grep -q 'buffer_size: cpal::BufferSize::Fixed(2048),' "${cpal_utils}" \
+    || die "Expected cpal BufferSize::Fixed(2048) in ${cpal_utils} after patch"
 
   log "Building rmpd ${RMPD_TAG} (features: ${RMPD_FEATURES}) for aarch64-unknown-linux-gnu..."
   run_cargo_build
@@ -182,12 +184,12 @@ phase_verify() {
     die "Binary references GLIBC > 2.41 symbols (Pi runs Debian 13 Trixie glibc 2.41)"
   fi
 
-  local needed
-  needed="$(aarch64-linux-gnu-objdump -p "${BIN_PATH}" | awk '/NEEDED/ {print $2}' | tr '\n' ' ')"
-  log "DT_NEEDED libraries: ${needed}"
+  local -a needed=()
+  mapfile -t needed < <(aarch64-linux-gnu-objdump -p "${BIN_PATH}" | awk '/NEEDED/ {print $2}')
+  [[ ${#needed[@]} -gt 0 ]] || die "No DT_NEEDED entries found in ${BIN_PATH}"
+  log "DT_NEEDED libraries: ${needed[*]}"
 
-  # shellcheck disable=SC2086
-  ssh -o BatchMode=yes -o ConnectTimeout=5 "${REMOTE_HOST}" bash -s -- ${needed} <<'EOF'
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "${REMOTE_HOST}" bash -s -- "${needed[@]}" <<'EOF'
 set -euo pipefail
 cache="$(ldconfig -p)"
 for lib in "$@"; do
@@ -206,6 +208,7 @@ phase_apply() {
 
   local remote_stage remote_bin remote_unit remote_cfg
   remote_stage="$(ssh "${REMOTE_HOST}" mktemp -d)"
+  trap 'ssh -o BatchMode=yes -o ConnectTimeout=5 "${REMOTE_HOST}" rm -rf "${remote_stage}" >/dev/null 2>&1 || true' RETURN
   remote_bin="${remote_stage}/rmpd"
   remote_unit="${remote_stage}/rmpd.service"
   remote_cfg="${remote_stage}/rmpd.toml.example"
@@ -250,7 +253,9 @@ install -m 644 -o "${PI_USER}" -g "${PI_USER}" "${RUNIT}" "${PI_HOME}/.config/sy
 
 if [[ ! -f "${PI_HOME}/.config/rmpd/rmpd.toml" ]]; then
   install -m 600 -o "${PI_USER}" -g "${PI_USER}" "${RCFG}" "${PI_HOME}/.config/rmpd/rmpd.toml"
-  echo "[rmpd] Seeded ${PI_HOME}/.config/rmpd/rmpd.toml (update HTTP token / sources as needed)."
+  RAND_TOKEN="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+  sed -i "s/replace-with-strong-random-token/${RAND_TOKEN}/" "${PI_HOME}/.config/rmpd/rmpd.toml"
+  echo "[rmpd] Seeded ${PI_HOME}/.config/rmpd/rmpd.toml with generated HTTP token."
 else
   echo "[rmpd] Preserved existing ${PI_HOME}/.config/rmpd/rmpd.toml."
 fi

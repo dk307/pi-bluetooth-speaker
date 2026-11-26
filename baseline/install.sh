@@ -227,6 +227,8 @@ if id -u dietpi >/dev/null 2>&1; then
     install -m 644 -o dietpi -g dietpi "${SCRIPT_DIR}/etc/systemd/user/rmpd.service" /home/dietpi/.config/systemd/user/rmpd.service
     if [ ! -f /home/dietpi/.config/rmpd/rmpd.toml ]; then
         install -m 600 -o dietpi -g dietpi "${SCRIPT_DIR}/etc/rmpd/rmpd.toml.example" /home/dietpi/.config/rmpd/rmpd.toml
+        RAND_TOKEN="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+        sed -i "s/replace-with-strong-random-token/${RAND_TOKEN}/" /home/dietpi/.config/rmpd/rmpd.toml
     fi
     if [ -x /usr/local/bin/rmpd ] && [ -S /run/user/1000/bus ]; then
         sudo -u dietpi XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemctl --user daemon-reload || true
