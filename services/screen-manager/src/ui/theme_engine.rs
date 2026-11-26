@@ -149,15 +149,17 @@ impl<'de> serde::Deserialize<'de> for CoverThemeMode {
     }
 }
 
-/// Bounded FIFO cache mapping cover-art paths to their extracted ARGB seeds.
+/// Bounded FIFO cache mapping sampled cover-art content hashes to their
+/// extracted ARGB seeds.
 ///
-/// Prevents unbounded memory growth over weeks of appliance uptime while
-/// skipping `QuantizerCelebi` on consecutive tracks sharing the same album art.
+/// Keying by a 64-bit hash of the sampled pixels (rather than file path) ensures
+/// overwrites at the same path always recompute, while consecutive tracks with
+/// identical artwork skip `QuantizerCelebi` even across different file paths.
 #[derive(Debug, Clone)]
 pub struct BoundedSeedCache {
     capacity: usize,
-    entries: HashMap<Box<str>, Option<u32>>,
-    order: VecDeque<Box<str>>,
+    entries: HashMap<u64, Option<u32>>,
+    order: VecDeque<u64>,
 }
 
 impl Default for BoundedSeedCache {
@@ -180,18 +182,18 @@ impl BoundedSeedCache {
         }
     }
 
-    /// Looks up a previously extracted seed for `key`.
+    /// Looks up a previously extracted seed for `content_hash`.
     ///
     /// Returns `Some(seed)` on cache hit (where `seed` itself may be `None` for
     /// monochrome artwork) and `None` on cache miss.
     #[must_use]
-    pub fn get(&self, key: &str) -> Option<Option<u32>> {
-        self.entries.get(key).copied()
+    pub fn get(&self, content_hash: u64) -> Option<Option<u32>> {
+        self.entries.get(&content_hash).copied()
     }
 
-    /// Inserts or updates a seed for `key`, evicting the oldest entry if full.
-    pub fn insert(&mut self, key: Box<str>, seed: Option<u32>) {
-        if let Some(existing) = self.entries.get_mut(&key) {
+    /// Inserts or updates a seed for `content_hash`, evicting the oldest entry if full.
+    pub fn insert(&mut self, content_hash: u64, seed: Option<u32>) {
+        if let Some(existing) = self.entries.get_mut(&content_hash) {
             *existing = seed;
             return;
         }
@@ -200,8 +202,8 @@ impl BoundedSeedCache {
         {
             self.entries.remove(&oldest);
         }
-        self.order.push_back(key.clone());
-        self.entries.insert(key, seed);
+        self.order.push_back(content_hash);
+        self.entries.insert(content_hash, seed);
     }
 
     /// Returns the number of cached entries.
@@ -215,6 +217,18 @@ impl BoundedSeedCache {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+/// Computes a fast 64-bit FNV-1a hash of sampled `0xAARRGGBB` pixels for
+/// content-addressed [`BoundedSeedCache`] lookups.
+#[must_use]
+pub fn hash_sampled_pixels(argb_pixels: &[u32]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &px in argb_pixels {
+        hash ^= u64::from(px);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
 }
 
 /// Converts a `0xAARRGGBB` ARGB integer into a [`slint::Color`].

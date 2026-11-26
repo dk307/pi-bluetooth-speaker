@@ -899,15 +899,17 @@ pub fn publish_playback_state(
                 && let Some(path) = cover_path.as_ref()
             {
                 if let Some(buffer) = decode_cover_buffer(path) {
-                    let seed = if let Some(cached) = cover.seed_cache.get(path) {
+                    let sampled = crate::ui::sample_argb_pixels_rgba8(
+                        buffer.as_bytes(),
+                        buffer.width(),
+                        buffer.height(),
+                    );
+                    let content_hash = crate::ui::hash_sampled_pixels(&sampled);
+                    let seed = if let Some(cached) = cover.seed_cache.get(content_hash) {
                         cached
                     } else {
-                        let extracted = crate::ui::extract_cover_seed_rgba8(
-                            buffer.as_bytes(),
-                            buffer.width(),
-                            buffer.height(),
-                        );
-                        cover.seed_cache.insert(path.clone(), extracted);
+                        let extracted = crate::ui::extract_cover_seed(&sampled);
+                        cover.seed_cache.insert(content_hash, extracted);
                         extracted
                     };
                     update.cover = Some(Some(buffer));
@@ -930,9 +932,9 @@ pub fn publish_playback_state(
             if last_pb.as_ref() != Some(&placeholder) {
                 if cover.path.is_some() {
                     update.cover = Some(None);
-                    update.cover_seed = Some(None);
                     cover.clear_path();
                 }
+                update.cover_seed = Some(None);
                 update.playback = Some(placeholder.clone());
                 *last_pb = Some(placeholder);
             }

@@ -134,20 +134,20 @@ fn extract_cover_seed_identifies_vibrant_art_and_rejects_monochrome() {
 fn bounded_seed_cache_evicts_fifo_and_updates_in_place() {
     let mut cache = BoundedSeedCache::new(0); // Clamped to capacity 1.
     assert!(cache.is_empty());
-    cache.insert("/a.jpg".into(), Some(0xFF11_2233));
+    cache.insert(101, Some(0xFF11_2233));
     assert_eq!(cache.len(), 1);
-    assert_eq!(cache.get("/a.jpg"), Some(Some(0xFF11_2233)));
+    assert_eq!(cache.get(101), Some(Some(0xFF11_2233)));
 
     // Updating existing key does not grow cache.
-    cache.insert("/a.jpg".into(), None);
+    cache.insert(101, None);
     assert_eq!(cache.len(), 1);
-    assert_eq!(cache.get("/a.jpg"), Some(None));
+    assert_eq!(cache.get(101), Some(None));
 
-    // Inserting a second key evicts `/a.jpg`.
-    cache.insert("/b.jpg".into(), Some(0xFF44_5566));
+    // Inserting a second key evicts key 101.
+    cache.insert(202, Some(0xFF44_5566));
     assert_eq!(cache.len(), 1);
-    assert_eq!(cache.get("/a.jpg"), None);
-    assert_eq!(cache.get("/b.jpg"), Some(Some(0xFF44_5566)));
+    assert_eq!(cache.get(101), None);
+    assert_eq!(cache.get(202), Some(Some(0xFF44_5566)));
 }
 
 #[test]

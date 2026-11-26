@@ -1806,9 +1806,28 @@ impl AppShell {
             ),
         };
         let prev = last_colors.get();
-        let rebuild_waves =
-            prev.is_none_or(|p| p.primary != next.primary || p.secondary != next.secondary);
-        let rebuild_marquee = prev.is_none_or(|p| p.on_background != next.on_background);
+        let live_palette = window.global::<super::MaterialPalette>();
+        let live_primary = live_palette.get_primary();
+        let live_secondary = live_palette.get_secondary();
+        let live_on_bg = live_palette.get_on_background();
+        let live_matches = (
+            live_primary.red(),
+            live_primary.green(),
+            live_primary.blue(),
+        ) == next.primary
+            && (
+                live_secondary.red(),
+                live_secondary.green(),
+                live_secondary.blue(),
+            ) == next.secondary;
+        let live_on_bg_matches =
+            (live_on_bg.red(), live_on_bg.green(), live_on_bg.blue()) == next.on_background;
+
+        let rebuild_waves = prev
+            .is_none_or(|p| p.primary != next.primary || p.secondary != next.secondary)
+            || !live_matches;
+        let rebuild_marquee =
+            prev.is_none_or(|p| p.on_background != next.on_background) || !live_on_bg_matches;
 
         ThemePreset::apply_scheme(window, preset, scheme, rebuild_waves);
         last_colors.set(Some(next));

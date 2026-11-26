@@ -1181,9 +1181,8 @@ fn publish_track_stopped_clears_cover_while_pending_fetch_keeps_it() {
 fn publish_playback_state_extracts_and_caches_cover_seed() {
     let dir = tempfile::tempdir().unwrap();
     let art_path = dir.path().join("vibrant_cover.png");
-    let img = image::RgbaImage::from_pixel(128, 128, image::Rgba([232, 122, 36, 255]));
+    let img = image::RgbaImage::from_pixel(360, 360, image::Rgba([232, 122, 36, 255]));
     img.save(&art_path).unwrap();
-    let art_str = art_path.to_str().unwrap().to_owned();
 
     let mut pb_state = playback(Some(&art_path), true);
     pb_state.device_address = Some(speaker_bluetooth::BtAddress::new([
@@ -1207,19 +1206,40 @@ fn publish_playback_state_extracts_and_caches_cover_seed() {
         .cover_seed
         .expect("cover_seed must be staged")
         .expect("vibrant art must yield chromatic seed");
-    assert_eq!(cover.seed_cache.get(&art_str), Some(Some(first_seed)));
+    assert_eq!(cover.seed_cache.len(), 1);
 
-    // Resetting `cover.path` and re-publishing hits the seed cache cleanly.
+    // Resetting `cover.path` and re-publishing hits the content-addressed seed cache cleanly.
     cover.path = None;
     let mut update2 = BtSharedUpdate::default();
     publish_playback_state(
-        Ok(&Some(pb_state)),
+        Ok(&Some(pb_state.clone())),
         &mut update2,
         &mut last_pb,
         &mut cover,
         &mut settle,
     );
     assert_eq!(update2.cover_seed, Some(Some(first_seed)));
+    assert_eq!(cover.seed_cache.len(), 1);
+
+    // Overwriting the same path with different artwork (e.g. reused OBEX cache path)
+    // invalidates the content hash and extracts the new seed.
+    let img2 = image::RgbaImage::from_pixel(360, 360, image::Rgba([30, 136, 229, 255]));
+    img2.save(&art_path).unwrap();
+    cover.path = None;
+    let mut update3 = BtSharedUpdate::default();
+    publish_playback_state(
+        Ok(&Some(pb_state)),
+        &mut update3,
+        &mut last_pb,
+        &mut cover,
+        &mut settle,
+    );
+    let second_seed = update3
+        .cover_seed
+        .expect("new cover_seed must be staged")
+        .expect("new vibrant art must yield chromatic seed");
+    assert_ne!(second_seed, first_seed);
+    assert_eq!(cover.seed_cache.len(), 2);
 }
 
 #[cfg(feature = "ui")]
