@@ -637,6 +637,10 @@ pub struct BtSharedUpdate {
     /// on the worker, and the render thread only wraps the buffer in an image.
     // The three cover states (unchanged / clear / show buffer) are intentional.
     pub cover: Option<Option<CoverPixelBuffer>>,
+    /// Cover-art dynamic theme seed delta: outer `Some` = seed state changed;
+    /// inner `Some(argb)` = dominant chromatic seed extracted off-thread,
+    /// inner `None` = monochrome artwork or cover art cleared (revert to preset).
+    pub cover_seed: Option<Option<u32>>,
     /// Authoritative amp level/mute snapshot, if it changed since the last
     /// publish (pushed by the dedicated `amp-volume` worker).
     pub amp_volume: Option<crate::volume::AmpVolumeState>,
@@ -697,6 +701,18 @@ pub struct CoverState {
     /// Instant of the most recent failed decode attempt, if the last attempt
     /// for [`CoverState::path`] failed; `None` once a decode succeeded.
     pub failed_since: Option<Instant>,
+    /// Bounded cache of extracted ARGB theme seeds keyed by cover-art path,
+    /// avoiding repeated `QuantizerCelebi` runs on consecutive album tracks.
+    pub seed_cache: crate::ui::BoundedSeedCache,
+}
+
+#[cfg(feature = "ui")]
+impl CoverState {
+    /// Clears the active cover path and retry timestamp while retaining `seed_cache`.
+    fn clear_path(&mut self) {
+        self.path = None;
+        self.failed_since = None;
+    }
 }
 
 /// Optimistic-UI convergence state for a pending transport command.
@@ -877,12 +893,25 @@ pub fn publish_playback_state(
                 // no BIP service), or playback stopped with no active track:
                 // clear the previous artwork so old cover art never lingers.
                 update.cover = Some(None);
-                *cover = CoverState::default();
+                update.cover_seed = Some(None);
+                cover.clear_path();
             } else if (cover.path != cover_path || retry_due)
                 && let Some(path) = cover_path.as_ref()
             {
                 if let Some(buffer) = decode_cover_buffer(path) {
+                    let seed = if let Some(cached) = cover.seed_cache.get(path) {
+                        cached
+                    } else {
+                        let extracted = crate::ui::extract_cover_seed_rgba8(
+                            buffer.as_bytes(),
+                            buffer.width(),
+                            buffer.height(),
+                        );
+                        cover.seed_cache.insert(path.clone(), extracted);
+                        extracted
+                    };
                     update.cover = Some(Some(buffer));
+                    update.cover_seed = Some(seed);
                     cover.path = cover_path;
                     cover.failed_since = None;
                 } else {
@@ -901,7 +930,8 @@ pub fn publish_playback_state(
             if last_pb.as_ref() != Some(&placeholder) {
                 if cover.path.is_some() {
                     update.cover = Some(None);
-                    *cover = CoverState::default();
+                    update.cover_seed = Some(None);
+                    cover.clear_path();
                 }
                 update.playback = Some(placeholder.clone());
                 *last_pb = Some(placeholder);
@@ -1782,6 +1812,7 @@ impl BtMonitorState {
         if update.playback.is_some()
             || update.pcm.is_some()
             || update.cover.is_some()
+            || update.cover_seed.is_some()
             || update.amp_volume.is_some()
             || update.brightness.is_some()
             || update.devices.is_some()
@@ -1801,6 +1832,9 @@ impl BtMonitorState {
             }
             if update.cover.is_some() {
                 lock.cover = update.cover;
+            }
+            if update.cover_seed.is_some() {
+                lock.cover_seed = update.cover_seed;
             }
             if update.amp_volume.is_some() {
                 lock.amp_volume = update.amp_volume;
@@ -2345,6 +2379,9 @@ pub fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtShared
                 Some(buffer) => shell.set_cover_image(slint::Image::from_rgba8(buffer)),
                 None => shell.set_has_cover_art(false),
             }
+        }
+        if let Some(seed) = lock.cover_seed.take() {
+            shell.set_cover_seed(seed);
         }
         if let Some(amp) = lock.amp_volume.take() {
             shell.apply_amp_volume(&amp);

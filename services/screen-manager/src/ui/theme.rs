@@ -162,7 +162,7 @@ impl ThemePreset {
     }
 
     /// Weighted average of two colors (for container derivation).
-    fn avg_color(a: slint::Color, b: slint::Color, wa: u16, wb: u16) -> slint::Color {
+    pub(crate) fn avg_color(a: slint::Color, b: slint::Color, wa: u16, wb: u16) -> slint::Color {
         let blend = |x: u8, y: u8| -> u8 {
             #[expect(
                 clippy::cast_possible_truncation,
@@ -256,7 +256,7 @@ impl ThemePreset {
 
     /// Builds the dark [`MaterialScheme`] for this preset.
     #[must_use]
-    fn material_scheme_dark(self) -> MaterialScheme {
+    pub(crate) fn material_scheme_dark(self) -> MaterialScheme {
         let avg = Self::avg_color;
         let (
             primary,
@@ -348,30 +348,57 @@ impl ThemePreset {
         palette.set_color_scheme(slint::private_unstable_api::re_exports::ColorScheme::Dark);
     }
 
-    /// Applies this theme preset to a [`MainWindow`] component.
+    /// Applies this theme preset (unmodified by cover art) to a [`MainWindow`] component.
     pub fn apply(self, window: &MainWindow) {
-        // Push Material scheme
+        Self::apply_scheme(window, self, self.material_scheme_dark(), true);
+    }
+
+    /// Applies an explicit dark [`MaterialScheme`] while recording `preset` as
+    /// the active preset index on [`AppTheme`].
+    ///
+    /// Rebuilds the `AmbientWaveSprites` pixel buffers only when
+    /// `rebuild_wave_sprites` is `true`.
+    pub(crate) fn apply_scheme(
+        window: &MainWindow,
+        preset: Self,
+        scheme: MaterialScheme,
+        rebuild_wave_sprites: bool,
+    ) {
+        let primary = scheme.primary;
+        let secondary = scheme.secondary;
+
+        // Push Material scheme (dark-only: light == dark).
         let material_palette = window.global::<MaterialPalette>();
         Self::force_dark(&material_palette);
-        let schemes = self.material_schemes();
+        let schemes = MaterialSchemes {
+            light: scheme.clone(),
+            dark: scheme,
+        };
         material_palette.set_schemes(schemes);
 
         // Single source of truth for the preset index (skin selection reads this).
-        window.global::<AppTheme>().set_active_preset(self.index());
+        window
+            .global::<AppTheme>()
+            .set_active_preset(preset.index());
 
-        // Pre-render the 7 discrete AmbientWaveIndicator frames (and the
-        // combined 448x24 horizontal sprite sheet) into SharedPixelBuffers
-        // matching this theme's primary/secondary colors.
-        let (frames, sprite_sheet) = self.build_ambient_wave_sprites();
-        let sprites = window.global::<crate::ui::AmbientWaveSprites>();
-        sprites.set_frames(slint::ModelRc::new(slint::VecModel::from(frames)));
-        sprites.set_sprite_sheet(sprite_sheet);
+        if rebuild_wave_sprites {
+            // Pre-render the 7 discrete AmbientWaveIndicator frames (and the
+            // combined 448x24 horizontal sprite sheet) into SharedPixelBuffers
+            // matching the resolved scheme's primary/secondary colors.
+            let (frames, sprite_sheet) = Self::build_ambient_wave_sprites_for(primary, secondary);
+            let sprites = window.global::<crate::ui::AmbientWaveSprites>();
+            sprites.set_frames(slint::ModelRc::new(slint::VecModel::from(frames)));
+            sprites.set_sprite_sheet(sprite_sheet);
+        }
     }
 
     /// Pre-renders the 7 `64x24` `AmbientWaveIndicator` frames (ticks `0..6`
     /// playing + index `6` paused `4px` idle stubs) and a single `448x24`
-    /// horizontal sprite sheet for this theme.
-    fn build_ambient_wave_sprites(self) -> (Vec<slint::Image>, slint::Image) {
+    /// horizontal sprite sheet for the given `(primary, secondary)` colors.
+    pub(crate) fn build_ambient_wave_sprites_for(
+        primary: slint::Color,
+        secondary: slint::Color,
+    ) -> (Vec<slint::Image>, slint::Image) {
         const WIDTH: u32 = 64;
         const HEIGHT: u32 = 24;
         const FRAME_COUNT: u32 = 7;
@@ -388,7 +415,6 @@ impl ThemePreset {
             [4, 4, 4, 4, 4],
         ];
 
-        let (primary, secondary, ..) = self.material_base_colors();
         let primary_px =
             slint::Rgba8Pixel::new(primary.red(), primary.green(), primary.blue(), 255);
         let secondary_px =
