@@ -1,0 +1,43 @@
+# rmpd user service (systemd --user) for Raspberry Pi 3 Audio Appliance.
+#
+# Install:
+#   install -Dm644 rmpd.service ~/.config/systemd/user/rmpd.service
+#   sudo loginctl enable-linger "$USER"
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now rmpd.service
+#
+# Type=notify: rmpd sends READY=1 over $NOTIFY_SOCKET once listeners are bound.
+# Running as a user service is required so MPRIS registers on the user session
+# D-Bus (org.mpris.MediaPlayer2.rmpd).
+
+[Unit]
+Description=Rust music player daemon
+Documentation=https://github.com/M0Rf30/rmpd
+After=network-online.target sound.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/rmpd
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+ConfigurationDirectory=rmpd
+StateDirectory=rmpd
+ReadWritePaths=%E/rmpd
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=default.target

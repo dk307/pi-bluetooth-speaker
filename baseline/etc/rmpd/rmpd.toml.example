@@ -1,0 +1,60 @@
+# rmpd configuration template for Raspberry Pi 3 Audio Appliance (rmpd 0.19.0)
+#
+# Copy to ~/.config/rmpd/rmpd.toml (mode 0600) and replace placeholder secrets.
+# Omitting `music_directory` and disabling [database] auto_update/filesystem_watch
+# configures rmpd as a streaming-only player.
+
+[general]
+playlist_directory = "~/.config/rmpd/playlists"
+log_level = "info"
+
+[database]
+auto_update = false
+filesystem_watch = false
+
+[network]
+bind_address = "0.0.0.0"
+port = 6600
+zeroconf_name = "rmpd@%h"
+
+[[output]]
+name = "ALSA"
+type = "default"
+device = "default"
+enabled = true
+# Matches bluealsa-aplay --volume=none: audio-manager owns the Merus hardware
+# mixer exclusively. Use "software" only if client-side gain is desired; never
+# set "hardware".
+mixer_type = "none"
+
+[[integration]]
+name = "desktop"
+type = "mpris"
+
+[[integration]]
+name = "zeroconf"
+type = "mdns"
+port = 6600
+
+[[integration]]
+name = "web"
+type = "http"
+bind = "0.0.0.0:6680"
+token = "replace-with-strong-random-token"
+
+[[source]]
+name = "radio"
+type = "radio"
+
+# Uncomment and configure credentials/feeds on the Pi:
+# [[source]]
+# name = "jelly"
+# type = "jellyfin"
+# url = "https://jellyfin.example.com"
+# username = "alice"
+# password = "s3cr3t"
+#
+# [[source]]
+# name = "podcasts"
+# type = "podcast"
+# feeds = ["https://example.com/podcast.xml"]

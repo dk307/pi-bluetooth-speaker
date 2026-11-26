@@ -33,11 +33,16 @@ baseline/
 │   ├── dbus-1/system.d/
 │   │   ├── org.speaker.Bluetooth.conf # D-Bus policy for active-source arbiter (bt-manager)
 │   │   └── org.speaker.CoverArt.conf  # D-Bus policy for BIP cover-art service (bt-manager)
-│   └── systemd/system/
-│       ├── camilladsp.service     # CamillaDSP 5.0 engine daemon (-w wait mode, WS on 127.0.0.1:1234)
-│       ├── bluealsa.service       # BlueALSA high-res A2DP audio sink daemon
-│       ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA default (--volume=none --single-audio)
-│       └── bt-agent.service       # Legacy standalone agent (superseded by bt-manager.service)
+│   ├── rmpd/
+│   │   └── rmpd.toml.example      # Streaming-only rmpd config template (ALSA default, mixer_type=none)
+│   └── systemd/
+│       ├── system/
+│       │   ├── camilladsp.service     # CamillaDSP 5.0 engine daemon (-w wait mode, WS on 127.0.0.1:1234)
+│       │   ├── bluealsa.service       # BlueALSA high-res A2DP audio sink daemon
+│       │   ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA default (--volume=none --single-audio)
+│       │   └── bt-agent.service       # Legacy standalone agent (superseded by bt-manager.service)
+│       └── user/
+│           └── rmpd.service           # Headless user systemd unit for rmpd (session D-Bus MPRIS)
 ├── alsa/
 │   └── asound.state               # Persisted MA12070P hardware mixer gains & limiter states
 ├── bin/
