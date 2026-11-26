@@ -1180,6 +1180,29 @@ fn bip_select_best_format_skips_oversized_fixed_and_unclampable_range() {
         select_best_format(&props_min_too_large, 360),
         FormatSelection::NativeDefault
     );
+
+    // 7. Variant that shrinks one axis below native (e.g. 640*160 vs 200*200) -> skipped
+    let props_axis_shrink = BipImageProperties {
+        handle: "0000001".into(),
+        formats: vec![
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(200, 200),
+                size: None,
+                is_native: true,
+            },
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(640, 160),
+                size: None,
+                is_native: false,
+            },
+        ],
+    };
+    assert_eq!(
+        select_best_format(&props_axis_shrink, 360),
+        FormatSelection::NativeDefault
+    );
 }
 
 #[test]

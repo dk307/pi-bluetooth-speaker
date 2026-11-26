@@ -1252,7 +1252,7 @@ pub fn select_best_format(properties: &BipImageProperties, target_min_dim: u32) 
             };
 
             let target_area = pixel_area(target_w, target_h);
-            if target_area > native_area && (target_w > native_dim.0 || target_h > native_dim.1) {
+            if target_area > native_area && target_w >= native_dim.0 && target_h >= native_dim.1 {
                 if let Some((curr_w, curr_h)) = best_variant {
                     if target_area > pixel_area(curr_w, curr_h) {
                         best_variant = Some((target_w, target_h));
@@ -1716,7 +1716,9 @@ impl BipSessionKeeper for PersistentBipSession {
                                     self.release();
                                     return Err(e);
                                 }
-                                self.variants_supported = false;
+                                if e.response_code().is_some() {
+                                    self.variants_supported = false;
+                                }
                             }
                         }
                     }
@@ -1731,7 +1733,9 @@ impl BipSessionKeeper for PersistentBipSession {
                         self.release();
                         return Err(e);
                     }
-                    self.properties_supported = false;
+                    if e.response_code().is_some() {
+                        self.properties_supported = false;
+                    }
                 }
             }
         }
