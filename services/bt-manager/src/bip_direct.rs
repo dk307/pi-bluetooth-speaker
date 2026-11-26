@@ -1197,18 +1197,28 @@ pub enum FormatSelection {
     Descriptor { width: u32, height: u32 },
 }
 
+#[inline]
+const fn pixel_area(w: u32, h: u32) -> u64 {
+    (w as u64) * (h as u64)
+}
+
 /// Evaluates available formats from `properties` and selects the best resolution.
 ///
 /// If a higher resolution variant is offered (exceeding native and suitable for display),
 /// returns [`FormatSelection::Descriptor`]. If the native format is already high-resolution
 /// or no better format is offered, returns [`FormatSelection::NativeDefault`].
+///
+/// Per BIP, `Fixed` variants must be requested at their exact advertised dimensions (so
+/// fixed variants exceeding [`MAX_COVER_DIMENSION`] are skipped rather than requesting an
+/// unadvertised size), while `Range` variants are clamped within `[min, max]` and
+/// [`MAX_COVER_DIMENSION`].
 #[must_use]
 pub fn select_best_format(properties: &BipImageProperties, target_min_dim: u32) -> FormatSelection {
     let mut native_dim = (0u32, 0u32);
     for f in &properties.formats {
         if f.is_native {
             let (w, h) = f.pixel.max_dimensions();
-            if w > native_dim.0 {
+            if pixel_area(w, h) > pixel_area(native_dim.0, native_dim.1) {
                 native_dim = (w, h);
             }
         }
@@ -1218,17 +1228,33 @@ pub fn select_best_format(properties: &BipImageProperties, target_min_dim: u32) 
         return FormatSelection::NativeDefault;
     }
 
+    let native_area = pixel_area(native_dim.0, native_dim.1);
     let mut best_variant: Option<(u32, u32)> = None;
     for f in &properties.formats {
         if !f.is_native && f.encoding.eq_ignore_ascii_case("JPEG") {
-            let (max_w, max_h) = f.pixel.max_dimensions();
-            let (target_w, target_h) = clamp_to_max_dimension(max_w, max_h);
+            let Some((target_w, target_h)) = (match f.pixel {
+                BipPixel::Fixed(w, h) => (w.max(h) <= MAX_COVER_DIMENSION).then_some((w, h)),
+                BipPixel::Range {
+                    min_w,
+                    min_h,
+                    max_w,
+                    max_h,
+                } => {
+                    if min_w > MAX_COVER_DIMENSION || min_h > MAX_COVER_DIMENSION {
+                        None
+                    } else {
+                        let (cw, ch) = clamp_to_max_dimension(max_w, max_h);
+                        Some((cw.max(min_w).min(max_w), ch.max(min_h).min(max_h)))
+                    }
+                }
+            }) else {
+                continue;
+            };
 
-            let target_area = u64::from(target_w) * u64::from(target_h);
-            let native_area = u64::from(native_dim.0) * u64::from(native_dim.1);
+            let target_area = pixel_area(target_w, target_h);
             if target_area > native_area && (target_w > native_dim.0 || target_h > native_dim.1) {
                 if let Some((curr_w, curr_h)) = best_variant {
-                    if target_area > (u64::from(curr_w) * u64::from(curr_h)) {
+                    if target_area > pixel_area(curr_w, curr_h) {
                         best_variant = Some((target_w, target_h));
                     }
                 } else {

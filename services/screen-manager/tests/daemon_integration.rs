@@ -1087,6 +1087,62 @@ fn publish_device_gone_clears_cover() {
 
 #[cfg(feature = "ui")]
 #[test]
+fn publish_track_stopped_clears_cover_while_pending_fetch_keeps_it() {
+    let addr = speaker_bluetooth::BtAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    let mut prev_pb = playback(None, true);
+    prev_pb.device_address = Some(addr);
+    prev_pb.title = "Song A".into();
+    let mut last_pb = Some(prev_pb);
+    let mut cover = CoverState {
+        path: Some("/cached/song_a.jpg".into()),
+        failed_since: None,
+    };
+    let mut settle = None;
+
+    // 1. Track change with an ImgHandle whose cover fetch is still pending
+    //    must keep the previous cover to avoid blank-frame flicker.
+    let mut pending_pb = playback(None, true);
+    pending_pb.device_address = Some(addr);
+    pending_pb.title = "Song B".into();
+    pending_pb.image_handle = Some("0000002".into());
+    let mut update = BtSharedUpdate::default();
+    publish_playback_state(
+        Ok(&Some(pending_pb)),
+        &mut update,
+        &mut last_pb,
+        &mut cover,
+        &mut settle,
+    );
+    assert!(
+        update.cover.is_none(),
+        "pending BIP fetch must keep previous cover"
+    );
+    assert_eq!(cover.path.as_deref(), Some("/cached/song_a.jpg"));
+
+    // 2. Track stops with no new track (same connected device, no ImgHandle)
+    //    must clear the stale cover art.
+    let mut stopped_pb = playback(None, false);
+    stopped_pb.device_address = Some(addr);
+    stopped_pb.status = "stopped".into();
+    stopped_pb.title = speaker_bluetooth::BT_NO_CONNECTION_TITLE.into();
+    stopped_pb.image_handle = None;
+    let mut update = BtSharedUpdate::default();
+    publish_playback_state(
+        Ok(&Some(stopped_pb)),
+        &mut update,
+        &mut last_pb,
+        &mut cover,
+        &mut settle,
+    );
+    assert!(
+        update.cover.is_some_and(|c| c.is_none()),
+        "cover must clear when track stops with no new track"
+    );
+    assert!(cover.path.is_none());
+}
+
+#[cfg(feature = "ui")]
+#[test]
 fn poll_encoder_input_applies_rotation_and_faults_gracefully() {
     use screen_manager::daemon::poll_encoder_input;
     use screen_manager::ui::{AppShell, EncoderVolumeTracker, MainWindow};

@@ -1408,7 +1408,7 @@ impl DbusClient {
 
         let (title, artist, album, duration_ms) = if let Some(track_val) = props.get("Track") {
             let title = get_track_prop_str(track_val, "Title")
-                .unwrap_or_else(|| "Waiting for Bluetooth Track...".into());
+                .unwrap_or_else(|| super::transport::BT_NO_TRACK_TITLE.into());
             let artist = get_track_prop_str(track_val, "Artist").unwrap_or_default();
             let album = get_track_prop_str(track_val, "Album").unwrap_or_default();
             let duration_ms = get_track_prop_u32(track_val, "Duration").unwrap_or(0);

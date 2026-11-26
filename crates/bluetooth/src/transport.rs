@@ -284,6 +284,9 @@ impl AvrcpVolume {
 /// property fallbacks in the connection module.
 pub const BT_NO_CONNECTION_TITLE: &str = "Waiting for Bluetooth Connection...";
 
+/// Placeholder title shown when a media player is connected but reports no track title.
+pub const BT_NO_TRACK_TITLE: &str = "Waiting for Bluetooth Track...";
+
 impl Default for BtPlaybackState {
     fn default() -> Self {
         Self {
@@ -313,6 +316,14 @@ impl BtPlaybackState {
     #[must_use]
     pub fn is_playing(&self) -> bool {
         self.status.eq_ignore_ascii_case("playing")
+    }
+
+    /// Returns `true` if the player reports no active track (empty or placeholder title).
+    #[must_use]
+    pub fn has_no_track(&self) -> bool {
+        self.title.is_empty()
+            || self.title.as_ref() == BT_NO_CONNECTION_TITLE
+            || self.title.as_ref() == BT_NO_TRACK_TITLE
     }
 
     /// Returns `true` when the transport reported a usable total track length.

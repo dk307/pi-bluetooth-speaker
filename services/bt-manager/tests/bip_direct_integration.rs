@@ -1096,8 +1096,42 @@ fn bip_select_best_format_range_and_oversized() {
         }
     );
 
-    // 4. Oversized variant -> scaled down to MAX_COVER_DIMENSION (1280)
-    let props_huge = BipImageProperties {
+    // 4. Oversized range variant -> scaled down to MAX_COVER_DIMENSION (1280)
+    let props_huge_range = BipImageProperties {
+        handle: "0000001".into(),
+        formats: vec![
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(200, 200),
+                size: None,
+                is_native: true,
+            },
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Range {
+                    min_w: 200,
+                    min_h: 150,
+                    max_w: 4000,
+                    max_h: 3000,
+                },
+                size: None,
+                is_native: false,
+            },
+        ],
+    };
+    assert_eq!(
+        select_best_format(&props_huge_range, 360),
+        FormatSelection::Descriptor {
+            width: 1280,
+            height: 960
+        }
+    );
+}
+
+#[test]
+fn bip_select_best_format_skips_oversized_fixed_and_unclampable_range() {
+    // 5. Oversized fixed variant -> skipped (never synthesize unadvertised dimensions)
+    let props_huge_fixed = BipImageProperties {
         handle: "0000001".into(),
         formats: vec![
             BipImageFormat {
@@ -1115,11 +1149,36 @@ fn bip_select_best_format_range_and_oversized() {
         ],
     };
     assert_eq!(
-        select_best_format(&props_huge, 360),
-        FormatSelection::Descriptor {
-            width: 1280,
-            height: 960
-        }
+        select_best_format(&props_huge_fixed, 360),
+        FormatSelection::NativeDefault
+    );
+
+    // 6. Range whose minimum exceeds MAX_COVER_DIMENSION -> skipped
+    let props_min_too_large = BipImageProperties {
+        handle: "0000001".into(),
+        formats: vec![
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Fixed(200, 200),
+                size: None,
+                is_native: true,
+            },
+            BipImageFormat {
+                encoding: "JPEG".into(),
+                pixel: BipPixel::Range {
+                    min_w: 2000,
+                    min_h: 2000,
+                    max_w: 4000,
+                    max_h: 4000,
+                },
+                size: None,
+                is_native: false,
+            },
+        ],
+    };
+    assert_eq!(
+        select_best_format(&props_min_too_large, 360),
+        FormatSelection::NativeDefault
     );
 }
 
