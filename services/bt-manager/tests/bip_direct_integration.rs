@@ -984,6 +984,8 @@ fn bip_pixel_parse_fixed_and_range() {
     assert_eq!(BipPixel::parse("200*-800*800"), None);
     assert_eq!(BipPixel::parse("200**-0*0"), None);
     assert_eq!(BipPixel::parse("0**-800*800"), None);
+    assert_eq!(BipPixel::parse("900*900-800*800"), None);
+    assert_eq!(BipPixel::parse("900**-800*600"), None);
 
     let fixed = BipPixel::Fixed(640, 480);
     assert_eq!(fixed.max_dimensions(), (640, 480));
@@ -1207,6 +1209,21 @@ fn bip_select_best_format_skips_oversized_fixed_and_unclampable_range() {
     };
     assert_eq!(
         select_best_format(&props_axis_shrink, 360),
+        FormatSelection::NativeDefault
+    );
+
+    // 8. Missing native entry -> safely fall back to NativeDefault
+    let props_no_native = BipImageProperties {
+        handle: "0000001".into(),
+        formats: vec![BipImageFormat {
+            encoding: "JPEG".into(),
+            pixel: BipPixel::Fixed(640, 480),
+            size: None,
+            is_native: false,
+        }],
+    };
+    assert_eq!(
+        select_best_format(&props_no_native, 360),
         FormatSelection::NativeDefault
     );
 }

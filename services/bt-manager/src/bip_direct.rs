@@ -1023,6 +1023,9 @@ impl BipPixel {
             } else {
                 parse_wh(min_str)?
             };
+            if min_w > max_w || min_h > max_h {
+                return None;
+            }
             Some(Self::Range {
                 min_w,
                 min_h,
@@ -1210,15 +1213,19 @@ const fn pixel_area(w: u32, h: u32) -> u64 {
 /// [`MAX_COVER_DIMENSION`].
 #[must_use]
 pub fn select_best_format(properties: &BipImageProperties, target_min_dim: u32) -> FormatSelection {
-    let mut native_dim = (0u32, 0u32);
+    let mut native_dim: Option<(u32, u32)> = None;
     for f in &properties.formats {
         if f.is_native {
             let (w, h) = f.pixel.max_dimensions();
-            if pixel_area(w, h) > pixel_area(native_dim.0, native_dim.1) {
-                native_dim = (w, h);
+            if native_dim.is_none_or(|(nw, nh)| pixel_area(w, h) > pixel_area(nw, nh)) {
+                native_dim = Some((w, h));
             }
         }
     }
+
+    let Some(native_dim) = native_dim else {
+        return FormatSelection::NativeDefault;
+    };
 
     if native_dim.0 >= target_min_dim && native_dim.1 >= target_min_dim {
         return FormatSelection::NativeDefault;
