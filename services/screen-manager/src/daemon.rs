@@ -867,10 +867,15 @@ pub fn publish_playback_state(
             let retry_due = cover
                 .failed_since
                 .is_some_and(|t| t.elapsed() >= COVER_DECODE_RETRY);
-            if cover_path.is_none() && device_changed && cover.path.is_some() {
+            let track_stopped_or_empty = pb.image_handle.is_none()
+                && (pb.status.eq_ignore_ascii_case("stopped") || pb.has_no_track());
+            if cover_path.is_none()
+                && (device_changed || track_stopped_or_empty)
+                && cover.path.is_some()
+            {
                 // Switched to a device without cover art (e.g. a laptop with
-                // no BIP service): clear the previous device's artwork so the
-                // old phone's cover never lingers on top of the new track.
+                // no BIP service), or playback stopped with no active track:
+                // clear the previous artwork so old cover art never lingers.
                 update.cover = Some(None);
                 *cover = CoverState::default();
             } else if (cover.path != cover_path || retry_due)
@@ -888,9 +893,8 @@ pub fn publish_playback_state(
                     cover.failed_since = Some(Instant::now());
                 }
             }
-            // No cached file (handle-less track or fetch pending) keeps the
-            // previously published art: a snapshot never blanks the cover;
-            // only a device disconnect clears it explicitly.
+            // Active track with pending fetch keeps the previously published
+            // art so a transient BIP download never flickers the placeholder.
         }
         Ok(None) => {
             let placeholder = speaker_bluetooth::BtPlaybackState::default();
