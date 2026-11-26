@@ -53,6 +53,7 @@ anyhow = "=1.0.102"
 
 # Image Processing (Cover Art Scaling & Procedural Vinyl)
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
+mcu-material-color = "=0.2.3"
 
 # CPU Blur for the Overlay Backdrop Effect.
 # Only the plain NEON path is enabled: the `rdm` feature requires ARMv8.2 dot-product

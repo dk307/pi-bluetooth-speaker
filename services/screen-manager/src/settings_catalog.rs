@@ -63,11 +63,14 @@ pub enum SettingId {
     DefaultVisualizer,
     /// Force 60 FPS on music visualizations (`30` = ~33 Hz vs `60` = 60 Hz).
     VisualizerFps,
+    /// Dynamic Material 3 cover-art theming mode (`Off`, `Harmonize`, `Subtle Tint`, `Auto Cover`).
+    CoverThemeMode,
 }
 
 impl SettingId {
     /// All variants of [`SettingId`], used to prove catalog completeness at compile time.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
+        Self::CoverThemeMode,
         Self::TitleDisplayMode,
         Self::MarqueeFps,
         Self::VolumeStepPercent,
@@ -86,6 +89,7 @@ impl SettingId {
     #[must_use]
     pub const fn key(self) -> &'static str {
         match self {
+            Self::CoverThemeMode => "cover_theme_mode",
             Self::TitleDisplayMode => "title_display_mode",
             Self::MarqueeFps => "marquee_fps",
             Self::VolumeStepPercent => "volume_step_percent",
@@ -165,6 +169,12 @@ impl SettingDescriptor {
 
 /// Ordered catalog of all list-row settings rendered in Screen Settings and Advanced Settings.
 pub const SETTINGS_CATALOG: &[SettingDescriptor] = &[
+    SettingDescriptor {
+        id: SettingId::CoverThemeMode,
+        label: "Cover Art Theming",
+        tier: SettingTier::Basic,
+        control: SettingControl::Selector,
+    },
     SettingDescriptor {
         id: SettingId::TitleDisplayMode,
         label: "Track Title",
@@ -437,13 +447,15 @@ pub fn apply_toggle(config: &mut CoreConfig, id: SettingId, right_selected: bool
         | SettingId::VolumeHudFadeMs
         | SettingId::CodecHudTimeoutMs
         | SettingId::VisualizerAutoStartSecs
-        | SettingId::DefaultVisualizer => false,
+        | SettingId::DefaultVisualizer
+        | SettingId::CoverThemeMode => false,
     }
 }
 
 fn selector_value_text(config: &CoreConfig, id: SettingId) -> String {
     match id {
         SettingId::DefaultVisualizer => config.default_visualizer.display_name().to_string(),
+        SettingId::CoverThemeMode => config.cover_theme_mode.display_name().to_string(),
         _ => String::new(),
     }
 }
@@ -456,6 +468,10 @@ fn apply_selector_step(config: &mut CoreConfig, id: SettingId, dir: i32) -> bool
             } else {
                 config.default_visualizer.next()
             };
+            true
+        }
+        SettingId::CoverThemeMode => {
+            config.cover_theme_mode = config.cover_theme_mode.step(dir);
             true
         }
         _ => false,
@@ -481,7 +497,8 @@ fn stepper_value(config: &CoreConfig, id: SettingId) -> i32 {
         | SettingId::SpectrumLedMask
         | SettingId::VisualizerAutoStart
         | SettingId::DefaultVisualizer
-        | SettingId::VisualizerFps => 0,
+        | SettingId::VisualizerFps
+        | SettingId::CoverThemeMode => 0,
     }
 }
 
@@ -534,7 +551,8 @@ fn set_stepper_value(config: &mut CoreConfig, id: SettingId, value: i32) -> bool
         | SettingId::SpectrumLedMask
         | SettingId::VisualizerAutoStart
         | SettingId::DefaultVisualizer
-        | SettingId::VisualizerFps => false,
+        | SettingId::VisualizerFps
+        | SettingId::CoverThemeMode => false,
     }
 }
 
@@ -551,6 +569,7 @@ fn two_option_is_right(config: &CoreConfig, id: SettingId) -> bool {
         | SettingId::VolumeHudFadeMs
         | SettingId::CodecHudTimeoutMs
         | SettingId::VisualizerAutoStartSecs
-        | SettingId::DefaultVisualizer => false,
+        | SettingId::DefaultVisualizer
+        | SettingId::CoverThemeMode => false,
     }
 }

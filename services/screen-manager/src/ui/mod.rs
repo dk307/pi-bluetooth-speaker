@@ -26,6 +26,7 @@ pub mod marquee;
 pub mod runtime;
 pub(crate) mod shell;
 pub(crate) mod theme;
+pub(crate) mod theme_engine;
 pub(crate) mod visualizer_bridge;
 
 #[doc(inline)]
@@ -53,6 +54,12 @@ pub use generated::{
 pub use shell::{AppShell, BtLinkDetails, EncoderVolumeTracker};
 #[doc(inline)]
 pub use theme::ThemePreset;
+#[doc(inline)]
+pub use theme_engine::{
+    BoundedSeedCache, CoverThemeMode, DEFAULT_SEED_CACHE_CAPACITY, MIN_COVER_CHROMA, argb_to_slint,
+    auto_cover_scheme, extract_cover_seed, extract_cover_seed_rgba8, hash_sampled_pixels,
+    resolve_scheme, sample_argb_pixels_rgba8, slint_to_argb,
+};
 #[doc(inline)]
 pub use visualizer_bridge::VisualizerUiState;
 

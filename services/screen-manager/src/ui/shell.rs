@@ -49,6 +49,7 @@ use super::generated::{
     AppTheme, MainWindow, MarqueeCompose, SettingControlKind, SettingRowItem, TouchScale,
 };
 use super::theme::ThemePreset;
+use super::theme_engine::{CoverThemeMode, resolve_scheme};
 use super::visualizer_bridge::VisualizerUiState;
 
 /// Tracks cumulative [`speaker_hardware::EncoderStatus`] counters and translates
@@ -265,6 +266,15 @@ impl SeekRow {
     }
 }
 
+/// RGB snapshot of the baked-buffer colors last applied to [`MainWindow`],
+/// used to skip redundant `AmbientWaveSprites` and `MarqueeCompose` rebuilds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppliedThemeColors {
+    primary: (u8, u8, u8),
+    secondary: (u8, u8, u8),
+    on_background: (u8, u8, u8),
+}
+
 /// Shared state and interactive controller for [`MainWindow`].
 pub struct AppShell {
     window: MainWindow,
@@ -289,6 +299,8 @@ pub struct AppShell {
     visualizer_autostart_timer: Rc<slint::Timer>,
     was_playing: Cell<bool>,
     was_bt_connected: Cell<bool>,
+    active_cover_seed: Rc<Cell<Option<u32>>>,
+    last_theme_colors: Rc<Cell<Option<AppliedThemeColors>>>,
 }
 
 impl Debug for AppShell {
@@ -366,6 +378,8 @@ impl AppShell {
             visualizer_autostart_timer: Rc::new(slint::Timer::default()),
             was_playing: Cell::new(false),
             was_bt_connected: Cell::new(false),
+            active_cover_seed: Rc::new(Cell::new(None)),
+            last_theme_colors: Rc::new(Cell::new(None)),
         };
 
         // One-shot seed, not runtime config: the blur pipeline crops at
@@ -382,18 +396,27 @@ impl AppShell {
         shell
     }
 
-    /// Applies runtime parameters from [`CoreConfig`] (theme, marquee fps, title display mode,
-    /// volume step, Volume HUD timeout/fade durations, and Codec HUD timeout) to this shell.
+    /// Applies runtime parameters from [`CoreConfig`] (theme, cover theme mode, marquee fps,
+    /// title display mode, volume step, Volume HUD timeout/fade durations, and Codec HUD timeout)
+    /// to this shell.
     pub fn apply_config(&self, config: &CoreConfig) {
         Self::apply_config_to_window(&self.window, config);
         Self::sync_settings_models_for(&self.window, &self.settings_models);
         self.set_font_scale(config.font_scale.value());
-        if let Some(theme) = config.theme {
-            self.apply_theme(theme);
-        }
+        let preset = config.theme.unwrap_or_else(|| self.current_theme());
+        Self::apply_resolved_theme(
+            &self.window,
+            preset,
+            config.cover_theme_mode,
+            self.active_cover_seed.get(),
+            &self.last_theme_colors,
+        );
     }
 
     fn apply_config_to_window(window: &MainWindow, config: &CoreConfig) {
+        window
+            .global::<AppTheme>()
+            .set_cover_theme_mode(config.cover_theme_mode.index());
         window
             .global::<MarqueeCompose>()
             .set_marquee_fps(Self::slint_i32(config.marquee_fps.value(), "marquee_fps"));
@@ -785,10 +808,10 @@ impl AppShell {
 
     /// Snapshot builder shared by live persistence and the public getter.
     fn config_from_window(window: &MainWindow) -> CoreConfig {
+        let app_theme = window.global::<AppTheme>();
         CoreConfig {
-            theme: Some(ThemePreset::from_index(
-                window.global::<AppTheme>().get_active_preset(),
-            )),
+            theme: Some(ThemePreset::from_index(app_theme.get_active_preset())),
+            cover_theme_mode: CoverThemeMode::from_index(app_theme.get_cover_theme_mode()),
             marquee_fps: Self::marquee_fps_from_window(window),
             title_display_mode: TitleDisplayMode::from_split(window.get_title_split_mode()),
             volume_step_percent: Self::volume_step_percent_from_window(window),
@@ -1431,14 +1454,63 @@ impl AppShell {
     ///
     /// Cover art path tracking (dedup) lives on the `bt-monitor` worker; the shell
     /// only mirrors the presence flag and the decoded image pushed by the worker.
+    /// Clearing cover art (`false`) also clears any active cover-art theme seed
+    /// and reverts to the active [`ThemePreset`].
     pub fn set_has_cover_art(&self, has_art: bool) {
         self.window.set_has_cover_art(has_art);
+        if !has_art {
+            self.set_cover_seed(None);
+        }
     }
 
     /// Updates the cover art image.
     pub fn set_cover_image(&self, image: slint::Image) {
         self.window.set_cover_image(image);
         self.window.set_has_cover_art(true);
+    }
+
+    /// Returns the currently active cover-art dynamic theming mode.
+    #[must_use]
+    pub fn cover_theme_mode(&self) -> CoverThemeMode {
+        CoverThemeMode::from_index(self.window.global::<AppTheme>().get_cover_theme_mode())
+    }
+
+    /// Updates the active cover-art dynamic theming mode and re-resolves the palette.
+    pub fn set_cover_theme_mode(&self, mode: CoverThemeMode) {
+        self.window
+            .global::<AppTheme>()
+            .set_cover_theme_mode(mode.index());
+        Self::apply_resolved_theme(
+            &self.window,
+            self.current_theme(),
+            mode,
+            self.active_cover_seed.get(),
+            &self.last_theme_colors,
+        );
+        self.sync_settings_model();
+    }
+
+    /// Returns the cached ARGB seed color extracted from the current cover art, if any.
+    #[must_use]
+    pub fn active_cover_seed(&self) -> Option<u32> {
+        self.active_cover_seed.get()
+    }
+
+    /// Updates the extracted cover-art ARGB seed and re-resolves the active palette
+    /// when the seed changed (skipping Slint palette updates when [`CoverThemeMode::Off`]).
+    pub fn set_cover_seed(&self, seed: Option<u32>) {
+        if self.active_cover_seed.replace(seed) != seed {
+            let mode = self.cover_theme_mode();
+            if mode != CoverThemeMode::Off {
+                Self::apply_resolved_theme(
+                    &self.window,
+                    self.current_theme(),
+                    mode,
+                    seed,
+                    &self.last_theme_colors,
+                );
+            }
+        }
     }
 
     /// Applies state from a [`speaker_bluetooth::BtPlaybackState`] point-in-time snapshot.
@@ -1693,10 +1765,76 @@ impl AppShell {
         }
     }
 
-    /// Applies a theme preset to the UI shell.
+    /// Applies a theme preset to the UI shell (incorporating the active
+    /// [`CoverThemeMode`] and cover-art seed, if any).
     pub fn apply_theme(&self, preset: ThemePreset) {
-        preset.apply(&self.window);
-        Self::refresh_marquee_strip(&self.window);
+        Self::apply_resolved_theme(
+            &self.window,
+            preset,
+            self.cover_theme_mode(),
+            self.active_cover_seed.get(),
+            &self.last_theme_colors,
+        );
+    }
+
+    /// Single unified entry point for pushing a resolved Material 3 scheme to
+    /// `MainWindow`, rebuilding `AmbientWaveSprites` and `MarqueeCompose` only
+    /// when their baked colors actually changed.
+    fn apply_resolved_theme(
+        window: &MainWindow,
+        preset: ThemePreset,
+        mode: CoverThemeMode,
+        cover_seed: Option<u32>,
+        last_colors: &Cell<Option<AppliedThemeColors>>,
+    ) {
+        let scheme = resolve_scheme(preset, cover_seed, mode);
+        let next = AppliedThemeColors {
+            primary: (
+                scheme.primary.red(),
+                scheme.primary.green(),
+                scheme.primary.blue(),
+            ),
+            secondary: (
+                scheme.secondary.red(),
+                scheme.secondary.green(),
+                scheme.secondary.blue(),
+            ),
+            on_background: (
+                scheme.onBackground.red(),
+                scheme.onBackground.green(),
+                scheme.onBackground.blue(),
+            ),
+        };
+        let prev = last_colors.get();
+        let live_palette = window.global::<super::MaterialPalette>();
+        let live_primary = live_palette.get_primary();
+        let live_secondary = live_palette.get_secondary();
+        let live_on_bg = live_palette.get_on_background();
+        let live_matches = (
+            live_primary.red(),
+            live_primary.green(),
+            live_primary.blue(),
+        ) == next.primary
+            && (
+                live_secondary.red(),
+                live_secondary.green(),
+                live_secondary.blue(),
+            ) == next.secondary;
+        let live_on_bg_matches =
+            (live_on_bg.red(), live_on_bg.green(), live_on_bg.blue()) == next.on_background;
+
+        let rebuild_waves = prev
+            .is_none_or(|p| p.primary != next.primary || p.secondary != next.secondary)
+            || !live_matches;
+        let rebuild_marquee =
+            prev.is_none_or(|p| p.on_background != next.on_background) || !live_on_bg_matches;
+
+        ThemePreset::apply_scheme(window, preset, scheme, rebuild_waves);
+        last_colors.set(Some(next));
+
+        if rebuild_marquee {
+            Self::refresh_marquee_strip(window);
+        }
     }
 
     /// Cycles to the next available theme preset in cyclic order.
@@ -1847,10 +1985,14 @@ impl AppShell {
     fn setup_settings_callbacks(&self) {
         let win = self.window.as_weak();
         let persist_tx = Rc::clone(&self.persist_tx);
+        let cover_seed = Rc::clone(&self.active_cover_seed);
+        let last_colors = Rc::clone(&self.last_theme_colors);
         self.window.on_select_theme(move |idx| {
             if let Some(w) = win.upgrade() {
                 let preset = ThemePreset::from_index(idx);
-                preset.apply(&w);
+                let mode =
+                    CoverThemeMode::from_index(w.global::<AppTheme>().get_cover_theme_mode());
+                Self::apply_resolved_theme(&w, preset, mode, cover_seed.get(), &last_colors);
                 Self::persist_window_state(&w, &persist_tx);
             }
         });
@@ -1858,6 +2000,8 @@ impl AppShell {
         let win = self.window.as_weak();
         let models = self.settings_models.clone();
         let persist_tx = Rc::clone(&self.persist_tx);
+        let cover_seed = Rc::clone(&self.active_cover_seed);
+        let last_colors = Rc::clone(&self.last_theme_colors);
         self.window.on_setting_step(move |id, dir| {
             let Some(setting_id) = SettingId::from_key(id.as_str()) else {
                 tracing::warn!(setting_id = %id, "ignoring unknown setting_step id");
@@ -1867,6 +2011,17 @@ impl AppShell {
                 let mut config = Self::config_from_window(&w);
                 if apply_step(&mut config, setting_id, dir) {
                     Self::apply_config_to_window(&w, &config);
+                    if setting_id == SettingId::CoverThemeMode {
+                        let preset =
+                            ThemePreset::from_index(w.global::<AppTheme>().get_active_preset());
+                        Self::apply_resolved_theme(
+                            &w,
+                            preset,
+                            config.cover_theme_mode,
+                            cover_seed.get(),
+                            &last_colors,
+                        );
+                    }
                     Self::sync_settings_models_for(&w, &models);
                     Self::persist_window_state(&w, &persist_tx);
                 }

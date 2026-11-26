@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use config::Config as LayeredConfig;
 use serde::{Deserialize, Serialize};
 
-use crate::ui::ThemePreset;
+use crate::ui::{CoverThemeMode, ThemePreset};
 use speaker_common::diag::{DEFAULT_CONFIG_PATH, FALLBACK_CONFIG_PATH};
 use speaker_common::impl_canonical_error_display;
 
@@ -680,6 +680,8 @@ pub struct CoreConfig {
     /// Theme preset override applied on startup; `None` keeps the built-in default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<ThemePreset>,
+    /// Cover-art dynamic Material 3 theming mode (default `"subtle-tint"`).
+    pub cover_theme_mode: CoverThemeMode,
     /// Marquee scroll rate in fps (`30` or `60`).
     pub marquee_fps: MarqueeFps,
     /// Track title display mode (`"marquee"` or `"split"`, default `"marquee"`).
@@ -714,6 +716,7 @@ impl Default for CoreConfig {
     fn default() -> Self {
         Self {
             theme: None,
+            cover_theme_mode: CoverThemeMode::default(),
             marquee_fps: MarqueeFps::default(),
             title_display_mode: TitleDisplayMode::default(),
             volume_step_percent: VolumeStepPercent::default(),

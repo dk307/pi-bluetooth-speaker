@@ -756,6 +756,31 @@ fn bootstrap_worker_publishes_state_without_touching_the_ui_thread() {
 
 #[cfg(feature = "ui")]
 #[test]
+fn apply_shared_bt_state_propagates_and_clears_cover_seed() {
+    use screen_manager::ui::MainWindow;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    let main_window = MainWindow::new().unwrap();
+    let ShellInit { shell, .. } = init_shell(main_window, false, None, None, 60);
+
+    let shared = Arc::new(Mutex::new(BtSharedUpdate {
+        cover_seed: Some(Some(0xFFE8_7A24)),
+        ..BtSharedUpdate::default()
+    }));
+    screen_manager::daemon::apply_shared_bt_state(&shell, &shared);
+    assert_eq!(shell.active_cover_seed(), Some(0xFFE8_7A24));
+
+    *shared.lock().unwrap() = BtSharedUpdate {
+        cover_seed: Some(None),
+        ..BtSharedUpdate::default()
+    };
+    screen_manager::daemon::apply_shared_bt_state(&shell, &shared);
+    assert_eq!(shell.active_cover_seed(), None);
+}
+
+#[cfg(feature = "ui")]
+#[test]
 fn apply_initial_bt_state_leaves_shell_at_defaults_when_no_playback_snapshot() {
     use screen_manager::ui::MainWindow;
 
@@ -1063,6 +1088,7 @@ fn publish_device_gone_clears_cover() {
     let mut cover = CoverState {
         path: Some("/gone.png".into()),
         failed_since: None,
+        seed_cache: screen_manager::ui::BoundedSeedCache::default(),
     };
     let mut update = BtSharedUpdate::default();
     let mut settle = None;
@@ -1082,6 +1108,10 @@ fn publish_device_gone_clears_cover() {
         update.cover.is_some_and(|c| c.is_none()),
         "cover must clear on disconnect"
     );
+    assert!(
+        update.cover_seed.is_some_and(|s| s.is_none()),
+        "cover_seed must clear on disconnect"
+    );
     assert!(cover.path.is_none());
 }
 
@@ -1096,6 +1126,7 @@ fn publish_track_stopped_clears_cover_while_pending_fetch_keeps_it() {
     let mut cover = CoverState {
         path: Some("/cached/song_a.jpg".into()),
         failed_since: None,
+        seed_cache: screen_manager::ui::BoundedSeedCache::default(),
     };
     let mut settle = None;
 
@@ -1138,7 +1169,77 @@ fn publish_track_stopped_clears_cover_while_pending_fetch_keeps_it() {
         update.cover.is_some_and(|c| c.is_none()),
         "cover must clear when track stops with no new track"
     );
+    assert!(
+        update.cover_seed.is_some_and(|s| s.is_none()),
+        "cover_seed must clear when track stops with no new track"
+    );
     assert!(cover.path.is_none());
+}
+
+#[cfg(feature = "ui")]
+#[test]
+fn publish_playback_state_extracts_and_caches_cover_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    let art_path = dir.path().join("vibrant_cover.png");
+    let img = image::RgbaImage::from_pixel(360, 360, image::Rgba([232, 122, 36, 255]));
+    img.save(&art_path).unwrap();
+
+    let mut pb_state = playback(Some(&art_path), true);
+    pb_state.device_address = Some(speaker_bluetooth::BtAddress::new([
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+    ]));
+
+    let mut last_pb = None;
+    let mut cover = CoverState::default();
+    let mut update = BtSharedUpdate::default();
+    let mut settle = None;
+
+    publish_playback_state(
+        Ok(&Some(pb_state.clone())),
+        &mut update,
+        &mut last_pb,
+        &mut cover,
+        &mut settle,
+    );
+
+    let first_seed = update
+        .cover_seed
+        .expect("cover_seed must be staged")
+        .expect("vibrant art must yield chromatic seed");
+    assert_eq!(cover.seed_cache.len(), 1);
+
+    // Resetting `cover.path` and re-publishing hits the content-addressed seed cache cleanly.
+    cover.path = None;
+    let mut update2 = BtSharedUpdate::default();
+    publish_playback_state(
+        Ok(&Some(pb_state.clone())),
+        &mut update2,
+        &mut last_pb,
+        &mut cover,
+        &mut settle,
+    );
+    assert_eq!(update2.cover_seed, Some(Some(first_seed)));
+    assert_eq!(cover.seed_cache.len(), 1);
+
+    // Overwriting the same path with different artwork (e.g. reused OBEX cache path)
+    // invalidates the content hash and extracts the new seed.
+    let img2 = image::RgbaImage::from_pixel(360, 360, image::Rgba([30, 136, 229, 255]));
+    img2.save(&art_path).unwrap();
+    cover.path = None;
+    let mut update3 = BtSharedUpdate::default();
+    publish_playback_state(
+        Ok(&Some(pb_state)),
+        &mut update3,
+        &mut last_pb,
+        &mut cover,
+        &mut settle,
+    );
+    let second_seed = update3
+        .cover_seed
+        .expect("new cover_seed must be staged")
+        .expect("new vibrant art must yield chromatic seed");
+    assert_ne!(second_seed, first_seed);
+    assert_eq!(cover.seed_cache.len(), 2);
 }
 
 #[cfg(feature = "ui")]
@@ -1265,6 +1366,7 @@ fn bt_monitor_state_commands_settle_and_commit() {
             playback: Some(playback(None, false)),
             pcm: None,
             cover: Some(None),
+            cover_seed: Some(None),
             amp_volume: None,
             brightness: None,
             devices: None,
