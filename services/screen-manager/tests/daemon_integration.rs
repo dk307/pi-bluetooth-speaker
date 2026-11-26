@@ -756,6 +756,31 @@ fn bootstrap_worker_publishes_state_without_touching_the_ui_thread() {
 
 #[cfg(feature = "ui")]
 #[test]
+fn apply_shared_bt_state_propagates_and_clears_cover_seed() {
+    use screen_manager::ui::MainWindow;
+
+    let (fb, _ctrl) = Framebuffer::new_mocked();
+    let _window = fb.init_platform().unwrap();
+    let main_window = MainWindow::new().unwrap();
+    let ShellInit { shell, .. } = init_shell(main_window, false, None, None, 60);
+
+    let shared = Arc::new(Mutex::new(BtSharedUpdate {
+        cover_seed: Some(Some(0xFFE8_7A24)),
+        ..BtSharedUpdate::default()
+    }));
+    screen_manager::daemon::apply_shared_bt_state(&shell, &shared);
+    assert_eq!(shell.active_cover_seed(), Some(0xFFE8_7A24));
+
+    *shared.lock().unwrap() = BtSharedUpdate {
+        cover_seed: Some(None),
+        ..BtSharedUpdate::default()
+    };
+    screen_manager::daemon::apply_shared_bt_state(&shell, &shared);
+    assert_eq!(shell.active_cover_seed(), None);
+}
+
+#[cfg(feature = "ui")]
+#[test]
 fn apply_initial_bt_state_leaves_shell_at_defaults_when_no_playback_snapshot() {
     use screen_manager::ui::MainWindow;
 
