@@ -124,15 +124,15 @@ phase_build() {
   head_rev="$(git rev-parse HEAD)"
   [[ "${head_rev}" == "${RMPD_REV}" ]] || die "Unexpected revision ${head_rev} in ${BUILD_DIR} (expected ${RMPD_REV})"
 
-  # Ensure cpal ALSA opens hw:Loopback with a >=2048-frame buffer (BufferSize::Default
-  # negotiates 512 frames, which is smaller than CamillaDSP's 1024-frame chunksize).
+  # Ensure cpal ALSA opens hw:Loopback with a >=4096-frame period / 8192-frame buffer
+  # (BufferSize::Default negotiates 512 frames, which is below CamillaDSP's 1024-4096 chunksize).
   local cpal_utils="${BUILD_DIR}/rmpd-player/src/cpal_utils.rs"
-  if grep -q 'buffer_size: cpal::BufferSize::Default,' "${cpal_utils}"; then
-    sed -i 's/buffer_size: cpal::BufferSize::Default,/buffer_size: cpal::BufferSize::Fixed(2048),/g' "${cpal_utils}"
-    log "Applied cpal BufferSize::Fixed(2048) patch to rmpd-player/src/cpal_utils.rs."
+  if grep -qE 'buffer_size: cpal::BufferSize::(Default|Fixed\(2048\)),' "${cpal_utils}"; then
+    sed -i -E 's/buffer_size: cpal::BufferSize::(Default|Fixed\(2048\)),/buffer_size: cpal::BufferSize::Fixed(4096),/g' "${cpal_utils}"
+    log "Applied cpal BufferSize::Fixed(4096) patch to rmpd-player/src/cpal_utils.rs."
   fi
-  grep -q 'buffer_size: cpal::BufferSize::Fixed(2048),' "${cpal_utils}" \
-    || die "Expected cpal BufferSize::Fixed(2048) in ${cpal_utils} after patch"
+  grep -q 'buffer_size: cpal::BufferSize::Fixed(4096),' "${cpal_utils}" \
+    || die "Expected cpal BufferSize::Fixed(4096) in ${cpal_utils} after patch"
 
   # Ensure mdns-sd auto-populates host interface IP addresses (without enable_addr_auto(),
   # ServiceInfo::new(..., (), ...) registers 0 addresses and never answers _mpd._tcp queries).
@@ -145,39 +145,26 @@ phase_build() {
   grep -q 'enable_addr_auto()' "${mdns_rs}" \
     || die "Expected enable_addr_auto() in ${mdns_rs} after patch"
 
+  # Pre-inject GLIBC_2.17 log10f symver before the first build (avoids a second LTO link
+  # on Ubuntu GLIBC 2.43 hosts targeting Debian 13 Trixie GLIBC 2.41; mirrors build_camilladsp_pi.sh).
+  local main_rs="${BUILD_DIR}/rmpd/src/main.rs"
+  if ! grep -q 'log10f@GLIBC_2.17' "${main_rs}"; then
+    local tmp_main="${main_rs}.tmp"
+    {
+      printf '#[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]\n'
+      printf 'core::arch::global_asm!(".symver log10f, log10f@GLIBC_2.17");\n'
+      cat "${main_rs}"
+    } > "${tmp_main}"
+    mv "${tmp_main}" "${main_rs}"
+    log "Applied GLIBC_2.17 log10f symver to rmpd/src/main.rs."
+  fi
+  grep -q 'log10f@GLIBC_2.17' "${main_rs}" \
+    || die "Expected log10f@GLIBC_2.17 symver in ${main_rs} after patch"
+
   log "Building rmpd ${RMPD_TAG} (features: ${RMPD_FEATURES}) for aarch64-unknown-linux-gnu..."
   run_cargo_build
 
   [[ -f "${BIN_PATH}" ]] || die "Build artifact not found: ${BIN_PATH}"
-
-  # If host libm headers caused any GLIBC > 2.41 math symbol references, pin them to GLIBC_2.17 and relink.
-  local high_syms
-  high_syms="$(aarch64-linux-gnu-objdump -T "${BIN_PATH}" | grep -E 'GLIBC_2\.(4[2-9]|[5-9][0-9])' || true)"
-  if [[ -n "${high_syms}" ]]; then
-    log "Detected GLIBC > 2.41 symbols; checking if GLIBC_2.17 .symver shim is needed..."
-    local main_rs="${BUILD_DIR}/rmpd/src/main.rs"
-    if ! grep -q 'GLIBC_2.17' "${main_rs}"; then
-      local sym_lines=""
-      local fn
-      for fn in log10f acosf atan2f remainder expf logf powf; do
-        if grep -qw "${fn}" <<<"${high_syms}"; then
-          sym_lines+=".symver ${fn}, ${fn}@GLIBC_2.17\n"
-        fi
-      done
-      if [[ -n "${sym_lines}" ]]; then
-        log "Injecting GLIBC_2.17 .symver directives into rmpd/src/main.rs..."
-        local tmp_main="${main_rs}.tmp"
-        {
-          printf '#[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]\n'
-          printf 'core::arch::global_asm!("%b");\n' "${sym_lines%\\n}"
-          cat "${main_rs}"
-        } > "${tmp_main}"
-        mv "${tmp_main}" "${main_rs}"
-        run_cargo_build
-      fi
-    fi
-  fi
-
   log "Built OK: ${BIN_PATH}"
 }
 

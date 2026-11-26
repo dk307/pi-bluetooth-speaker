@@ -275,12 +275,12 @@ modifies persistent files on the Pi.
 2. **`build`** — Clone `M0Rf30/rmpd` at `0.19.0` into `${BUILD_DIR:-/tmp/rmpd-build}`,
    verify `git rev-parse HEAD == 08ef16eefca450ee49a57432051bb176a383e21a`, patch
    `rmpd-player/src/cpal_utils.rs` from `cpal::BufferSize::Default` to
-   `cpal::BufferSize::Fixed(2048)` (so `hw:Loopback,0,0` opens with a
-   2048-period / 4096-frame buffer above CamillaDSP's 1024-frame `chunksize`),
-   patch `rmpd-integrations/src/mdns.rs` with `.enable_addr_auto()` (so
-   `mdns-sd` advertises `wlan0`'s IPv4 address for `_mpd._tcp.local` and
-   `DietPi.local`), apply GLIBC 2.17 `.symver` shim in `rmpd/src/main.rs` if
-   required by libm symbols, and cross-compile:
+   `cpal::BufferSize::Fixed(4096)` (so `hw:Loopback,0,0` opens with a
+   4096-period / 8192-frame buffer, giving >=2× headroom across CamillaDSP's
+   1024–4096 `chunksize` range up to 192 kHz), patch `rmpd-integrations/src/mdns.rs`
+   with `.enable_addr_auto()` (so `mdns-sd` advertises `wlan0`'s IPv4 address for
+   `_mpd._tcp.local` and `DietPi.local`), pre-inject the `GLIBC_2.17` `log10f`
+   `.symver` directive into `rmpd/src/main.rs`, and cross-compile:
    ```bash
    CARGO_PROFILE_RELEASE_LTO=fat \
    CARGO_PROFILE_RELEASE_STRIP=true \
@@ -359,7 +359,7 @@ modifies persistent files on the Pi.
   - TCP `:6600` responds with `OK MPD 0.24.0` and HTTP `:6680` is listening.
   - `org.mpris.MediaPlayer2.rmpd` is registered on `unix:path=/run/user/1000/bus`.
   - Playing a test radio stream (`Radio Paradise 320k AAC`) outputs through
-    `default` → `hw:Loopback,0,0` (`S32_LE`, `44100 Hz`, `period_size: 2048`,
-    `buffer_size: 4096`) → `camilladsp.service` (`chunksize=1024`) → Merus amp
+    `default` → `hw:Loopback,0,0` (`FLOAT_LE`, `44100 Hz`, `period_size: 4096`,
+    `buffer_size: 8192`) → `camilladsp.service` (`chunksize=1024`) → Merus amp
     with `audio-manager::rate_watch` locking sample rate and `amp_controller`
     unmuting.
