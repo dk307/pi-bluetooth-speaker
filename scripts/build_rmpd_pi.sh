@@ -134,6 +134,17 @@ phase_build() {
   grep -q 'buffer_size: cpal::BufferSize::Fixed(2048),' "${cpal_utils}" \
     || die "Expected cpal BufferSize::Fixed(2048) in ${cpal_utils} after patch"
 
+  # Ensure mdns-sd auto-populates host interface IP addresses (without enable_addr_auto(),
+  # ServiceInfo::new(..., (), ...) registers 0 addresses and never answers _mpd._tcp queries).
+  local mdns_rs="${BUILD_DIR}/rmpd-integrations/src/mdns.rs"
+  if grep -q 'ServiceInfo::new(SERVICE_TYPE, &instance, &host_name, (), self.port, None)' "${mdns_rs}" \
+     && ! grep -q 'enable_addr_auto()' "${mdns_rs}"; then
+    sed -i 's/\.map_err(|e| PluginError::Runtime(format!("mDNS service info: {e}")))?;/.map_err(|e| PluginError::Runtime(format!("mDNS service info: {e}")))?.enable_addr_auto();/' "${mdns_rs}"
+    log "Applied mdns enable_addr_auto() patch to rmpd-integrations/src/mdns.rs."
+  fi
+  grep -q 'enable_addr_auto()' "${mdns_rs}" \
+    || die "Expected enable_addr_auto() in ${mdns_rs} after patch"
+
   log "Building rmpd ${RMPD_TAG} (features: ${RMPD_FEATURES}) for aarch64-unknown-linux-gnu..."
   run_cargo_build
 

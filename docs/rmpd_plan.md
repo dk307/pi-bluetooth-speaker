@@ -277,8 +277,10 @@ modifies persistent files on the Pi.
    `rmpd-player/src/cpal_utils.rs` from `cpal::BufferSize::Default` to
    `cpal::BufferSize::Fixed(2048)` (so `hw:Loopback,0,0` opens with a
    2048-period / 4096-frame buffer above CamillaDSP's 1024-frame `chunksize`),
-   apply GLIBC 2.17 `.symver` shim in `rmpd/src/main.rs` if required by libm
-   symbols, and cross-compile:
+   patch `rmpd-integrations/src/mdns.rs` with `.enable_addr_auto()` (so
+   `mdns-sd` advertises `wlan0`'s IPv4 address for `_mpd._tcp.local` and
+   `DietPi.local`), apply GLIBC 2.17 `.symver` shim in `rmpd/src/main.rs` if
+   required by libm symbols, and cross-compile:
    ```bash
    CARGO_PROFILE_RELEASE_LTO=fat \
    CARGO_PROFILE_RELEASE_STRIP=true \
