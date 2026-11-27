@@ -47,7 +47,7 @@ ui = [
     "dep:swash",
 ]
 simulator = ["ui", "slint/backend-winit"]
-test-util = []
+test-util = ["slint?/renderer-software", "slint?/software-renderer-systemfonts"]
 
 [dev-dependencies]
 screen-manager = { path = ".", features = ["test-util"] }
