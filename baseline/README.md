@@ -98,8 +98,8 @@ cd /root/baseline
 ```
 This performs an automated 25-point check across:
 - Kernel modules (`snd-aloop`, `i2c-dev`, `snd_soc_ma120x0p`)
-- Systemd services (`bluetooth`, `bt-manager` [superseding `bt-agent`], `bluealsa`, `bluealsa-aplay`, `camilladsp`)
-- Listening ports (`1234` for DSP WebSocket, `22` for SSH)
+- Systemd services (`bluetooth`, `bt-manager` [superseding `bt-agent`], `bluealsa`, `bluealsa-aplay`, `camilladsp`, and `mpd` when `/usr/local/bin/mpd` is installed)
+- Listening ports (`1234` for DSP WebSocket, `22` for SSH, and `6600` for MPD when `/usr/local/bin/mpd` is installed)
 - ALSA sound cards (Card 0 Loopback, Card 1 MA12070P Amp)
 - Hardware sensors (I2C address 0x20 amp, 0x23 BH1750 light sensor, 1-Wire DS18B20)
 - Display & Touch (`/dev/fb0`, `raspberrypi-ts` on `/dev/input/event0`)

@@ -44,7 +44,7 @@ Appliance services coordinate over D-Bus and WebSocket:
 - **`audio-manager`** (`org.speaker.AudioManager`): Single hardware owner of the Merus MA12070P amplifier volume/mute over I2C, dynamic sample-rate switching (`rate_watch`), and CamillaDSP state-driven PLL-gated unmute (`dsp_watch`).
 - **`bt-manager`** (`org.speaker.Bluetooth`, `org.speaker.CoverArt`): BlueZ/BlueALSA pairing agent, active-source arbiter, AVRCP volume sync to `audio-manager`, and BIP cover-art fetcher.
 - **`screen-manager`**: Touchscreen console (`800x480` LinuxKMS/DRM + Skia OpenGL), radial FFT & 24-band ERB spectrum visualizer, Material 3 dynamic cover-art auto-theming, EC12 rotary encoder sync, and BH1750 ambient auto-brightness.
-- **`rmpd`** (user service): Headless MPD-compatible streaming engine with MPRIS integration.
+- **`mpd`** (`mpd.service`): Headless Cortex-A53-tuned `MPD v0.25` streaming and internet radio daemon (`/usr/local/bin/mpd`).
 
 ---
 
@@ -67,7 +67,7 @@ pi-bluetooth-speaker/
 │   ├── install.sh            # Automated end-to-end setup script
 │   ├── verify.sh             # 25-point automated hardware/services audit
 │   ├── boot/                 # Firmware config, cmdline, and custom Merus Amp DTBO
-│   ├── etc/                  # ALSA, BlueALSA, CamillaDSP, rmpd, D-Bus, and Systemd unit files
+│   ├── etc/                  # ALSA, BlueALSA, CamillaDSP, MPD, D-Bus, and Systemd unit files
 │   ├── patches/              # BlueZ 5.88 patches (track duration & mediaplayer refresh)
 │   └── scripts/              # Hardware diagnostic and test scripts
 ├── crates/                   # Shared libraries
@@ -86,7 +86,7 @@ pi-bluetooth-speaker/
 │   ├── build_bluez_pi.sh     # Build patched BlueZ 5.88
 │   ├── build_camilladsp_pi.sh# Build CamillaDSP 5.0.0-beta.2
 │   ├── build_mesa_vc4_pi.sh  # Build vc4-only Mesa for VideoCore IV Skia OpenGL
-│   ├── build_rmpd_pi.sh      # Build headless rmpd streaming engine
+│   ├── build_mpd_pi.sh       # Cross-compile MPD v0.25 with Cortex-A53 tuning
 │   ├── deploy_binaries.sh    # Deploy release binaries to Pi /usr/local/bin with sha256 check
 │   └── codecs/               # Audio codec build helpers
 ├── tools/                    # Hardware diagnostic utilities
