@@ -266,6 +266,20 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
                 &source_registry,
                 Some(connection.clone()),
             ));
+        let amp_level_rx = controller.subscribe_level();
+        for def in source_registry.definitions() {
+            if let crate::sources::registry::ControlSpec::MpdTcp { host, port } = &def.control {
+                let mpd = speaker_mpd::MpdDevice::with_endpoint(host.clone(), *port);
+                tokio::spawn(crate::sources::mpd_volume_sync::run_mpd_volume_sync(
+                    def.id.clone(),
+                    mpd,
+                    source_snapshot.clone(),
+                    cmd_tx.clone(),
+                    amp_level_rx.clone(),
+                    Some(connection.clone()),
+                ));
+            }
+        }
         let source_mgr = crate::sources::manager::SourceManager::new(
             source_registry,
             crate::sources::manager::SourceManagerConfig {

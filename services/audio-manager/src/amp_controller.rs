@@ -138,6 +138,8 @@ pub struct AmpController {
     regs_initialized: bool,
     /// Read-only mirror of [`Self::state`] for D-Bus property reads.
     mirror: Arc<tokio::sync::Mutex<AmpState>>,
+    /// Broadcasts logical user volume percentage changes for in-process sync tasks.
+    level_tx: tokio::sync::watch::Sender<u8>,
 }
 
 /// Critical faults that warrant a full `/ENABLE` reset recovery (plan
@@ -167,6 +169,9 @@ impl AmpController {
         state_file: StateFile,
         initial: AmpState,
     ) -> Self {
+        let (level_tx, _) = tokio::sync::watch::channel(
+            initial.level_percent(&speaker_hardware::amp::PERCENT_TO_RAW),
+        );
         Self {
             backend,
             device,
@@ -183,7 +188,14 @@ impl AmpController {
             // completes; the audio path stays muted until then.
             regs_initialized: false,
             mirror: Arc::new(tokio::sync::Mutex::new(initial)),
+            level_tx,
         }
+    }
+
+    /// Subscribes to logical user volume percentage updates.
+    #[must_use]
+    pub fn subscribe_level(&self) -> tokio::sync::watch::Receiver<u8> {
+        self.level_tx.subscribe()
     }
 
     /// Shared state mirror for D-Bus property reads (updated after every
@@ -289,6 +301,14 @@ impl AmpController {
                 self.backend.write_state(&hw_state).await?;
                 self.state = new_state;
                 self.persist(&new_state).await;
+                self.level_tx.send_if_modified(|cur| {
+                    if *cur == percent {
+                        false
+                    } else {
+                        *cur = percent;
+                        true
+                    }
+                });
                 info!(
                     percent,
                     level = new_state.level_raw,

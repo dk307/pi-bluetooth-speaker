@@ -4,5 +4,6 @@ pub mod arbiter;
 pub mod control;
 pub mod dbus_sources;
 pub mod manager;
+pub mod mpd_volume_sync;
 pub mod registry;
 pub mod state_file;

@@ -30,6 +30,9 @@ pub use sources::dbus_sources::{
     AudioSourcesSnapshot, SourceCommand, SourceCommandKind, export_sources_interface,
 };
 pub use sources::manager::{SourceManager, SourceManagerConfig};
+pub use sources::mpd_volume_sync::{
+    FRESH_MPD_SOURCE_SETTLE, MpdVolumeSyncState, run_mpd_volume_sync,
+};
 pub use sources::registry::{
     AutoSwitchPolicy, CaptureSpec, ControlSpec, DEFAULT_SOURCE_RATE_HZ, MAX_LOOPBACK_SUBDEVICES,
     SourceDefinition, SourceId, SourceRegistry,

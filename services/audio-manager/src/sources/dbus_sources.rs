@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, warn};
 use zbus::fdo::Error as ZBusError;
 use zbus::object_server::SignalEmitter;
@@ -50,9 +50,16 @@ impl SourceCommand {
 }
 
 /// Thread-safe read snapshot published by [`crate::sources::SourceManager`] for D-Bus reads.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AudioSourcesSnapshot {
     inner: Arc<Mutex<SnapshotInner>>,
+    active_tx: watch::Sender<Option<SourceId>>,
+}
+
+impl Default for AudioSourcesSnapshot {
+    fn default() -> Self {
+        Self::new(AutoSwitchPolicy::default())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -67,6 +74,7 @@ impl AudioSourcesSnapshot {
     /// Creates an empty snapshot with default policy.
     #[must_use]
     pub fn new(policy: AutoSwitchPolicy) -> Self {
+        let (active_tx, _) = watch::channel(None);
         Self {
             inner: Arc::new(Mutex::new(SnapshotInner {
                 active_source: None,
@@ -74,7 +82,14 @@ impl AudioSourcesSnapshot {
                 policy,
                 sources: Vec::new(),
             })),
+            active_tx,
         }
+    }
+
+    /// Subscribes to `ActiveSource` transitions.
+    #[must_use]
+    pub fn subscribe_active(&self) -> watch::Receiver<Option<SourceId>> {
+        self.active_tx.subscribe()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, SnapshotInner> {
@@ -92,10 +107,19 @@ impl AudioSourcesSnapshot {
         sources: Vec<SourceStatusView>,
     ) {
         let mut g = self.lock();
-        g.active_source = active_source;
+        g.active_source = active_source.clone();
         g.pinned_source = pinned_source;
         g.policy = policy;
         g.sources = sources;
+        drop(g);
+        self.active_tx.send_if_modified(|cur| {
+            if *cur == active_source {
+                false
+            } else {
+                *cur = active_source;
+                true
+            }
+        });
     }
 
     /// Reads the active source wire string (`""` when none).
