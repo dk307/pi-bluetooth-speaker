@@ -3,13 +3,13 @@
 //! Mirrors [`bt_manager::volume_sync`](../../bt-manager/src/volume_sync.rs) for
 //! MPD (`mixer_type = "null"`):
 //! - **MPD → Amp**: when this MPD source is `ActiveSource` (and outside the
-//!   post-switch settle window), `changed: mixer` idle events read `status.volume`
-//!   and forward it to `AmpController` (`SetLevel`) + emit D-Bus `PropertiesChanged`.
+//!   post-switch / post-push settle windows), `changed: mixer` idle events
+//!   coalesce queued notifications, read `status.volume`, and forward it to
+//!   `AmpController` (`SetLevel`) + emit D-Bus `PropertiesChanged`.
 //! - **Amp → MPD**: when this MPD source is `ActiveSource` (and on `false -> true`
-//!   source switch-in), amp level changes push `setvol` to MPD, with bounded echo
-//!   suppression so neither side loops.
+//!   source switch-in), amp level changes push `setvol` to MPD, with `last_synced`
+//!   dedup and short echo settle so neither side bounces or loops.
 
-use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use speaker_mpd::{MpdDevice, MpdEvent, MpdSubsystem};
@@ -26,15 +26,16 @@ use crate::sources::registry::SourceId;
 /// are suppressed while amp → MPD reconciliation settles.
 pub const FRESH_MPD_SOURCE_SETTLE: Duration = Duration::from_secs(2);
 
-const ECHO_QUEUE_CAPACITY: usize = 8;
+/// Short settle window after pushing an amp volume change to MPD so delayed
+/// `changed: mixer` echoes from MPD never bounce the amp backwards.
+pub const AMP_PUSH_ECHO_SETTLE: Duration = Duration::from_millis(350);
 
 /// Pure, host-testable state machine for MPD ↔ Amp volume sync.
 #[derive(Debug)]
 pub struct MpdVolumeSyncState {
     source_active: bool,
     suppressed_until: Option<Instant>,
-    last_pushed_to_amp: Option<u8>,
-    echo_queue: VecDeque<u8>,
+    last_synced: Option<u8>,
 }
 
 impl Default for MpdVolumeSyncState {
@@ -46,12 +47,11 @@ impl Default for MpdVolumeSyncState {
 impl MpdVolumeSyncState {
     /// Creates an inactive sync state.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             source_active: false,
             suppressed_until: None,
-            last_pushed_to_amp: None,
-            echo_queue: VecDeque::with_capacity(ECHO_QUEUE_CAPACITY),
+            last_synced: None,
         }
     }
 
@@ -68,22 +68,24 @@ impl MpdVolumeSyncState {
         self.source_active = active;
         if switched_in {
             self.suppressed_until = Some(now + FRESH_MPD_SOURCE_SETTLE);
-            self.last_pushed_to_amp = None;
-            self.echo_queue.clear();
+            self.last_synced = None;
         } else if !active {
             self.suppressed_until = None;
+            self.last_synced = None;
         }
         switched_in
     }
 
-    /// Records a volume value we are pushing (or about to push) to MPD so its
-    /// `changed: mixer` echo is ignored.
-    pub fn record_pushed_to_mpd(&mut self, percent: u8) {
+    /// Records a volume value pushed to MPD and extends the short echo-settle
+    /// window so duplicate/stale `changed: mixer` events do not bounce back.
+    pub fn record_pushed_to_mpd(&mut self, percent: u8, now: Instant) {
         let clamped = percent.min(100);
-        if self.echo_queue.len() >= ECHO_QUEUE_CAPACITY {
-            self.echo_queue.pop_front();
-        }
-        self.echo_queue.push_back(clamped);
+        self.last_synced = Some(clamped);
+        let until = now + AMP_PUSH_ECHO_SETTLE;
+        self.suppressed_until = Some(match self.suppressed_until {
+            Some(existing) if existing > until => existing,
+            _ => until,
+        });
     }
 
     /// Evaluates an MPD `status.volume` update; returns `true` when it should be
@@ -96,29 +98,24 @@ impl MpdVolumeSyncState {
             return false;
         }
         let clamped = mpd_percent.min(100);
-        if let Some(pos) = self.echo_queue.iter().position(|&v| v == clamped) {
-            self.echo_queue.drain(..=pos);
+        if self.last_synced == Some(clamped) {
             return false;
         }
-        if self.last_pushed_to_amp == Some(clamped) {
-            return false;
-        }
-        self.last_pushed_to_amp = Some(clamped);
+        self.last_synced = Some(clamped);
         true
     }
 
     /// Evaluates an amp `Level` change; returns `true` when it should be pushed
     /// to MPD via `set_volume`.
-    pub fn should_push_to_mpd(&mut self, amp_percent: u8) -> bool {
+    pub fn should_push_to_mpd(&mut self, amp_percent: u8, now: Instant) -> bool {
         if !self.source_active {
             return false;
         }
         let clamped = amp_percent.min(100);
-        if self.last_pushed_to_amp == Some(clamped) {
+        if self.last_synced == Some(clamped) {
             return false;
         }
-        self.last_pushed_to_amp = None;
-        self.record_pushed_to_mpd(clamped);
+        self.record_pushed_to_mpd(clamped, now);
         true
     }
 }
@@ -130,7 +127,7 @@ async fn push_amp_to_mpd(
     amp_percent: u8,
 ) {
     let clamped = amp_percent.min(100);
-    state.record_pushed_to_mpd(clamped);
+    state.record_pushed_to_mpd(clamped, Instant::now());
     if let Err(e) = mpd.set_volume(clamped).await {
         debug!(source = %source_id, percent = clamped, error = %e, "Failed to push amp volume to MPD");
     } else {
@@ -224,7 +221,7 @@ pub async fn run_mpd_volume_sync(
                                 return;
                             }
                             let level = *level_rx.borrow_and_update();
-                            if state.should_push_to_mpd(level) {
+                            if state.should_push_to_mpd(level, Instant::now()) {
                                 if let Err(e) = mpd.set_volume(level.min(100)).await {
                                     debug!(source = %source_id, percent = level, error = %e, "Failed to sync amp -> MPD volume");
                                 } else {
@@ -238,6 +235,14 @@ pub async fn run_mpd_volume_sync(
                             };
                             match evt {
                                 MpdEvent::SubsystemChanged(MpdSubsystem::Mixer) => {
+                                    // Coalesce any burst of queued Mixer events into a single status read.
+                                    let mut disconnected = false;
+                                    while let Ok(next) = events.try_recv() {
+                                        if matches!(next, MpdEvent::Disconnected(_)) {
+                                            disconnected = true;
+                                            break;
+                                        }
+                                    }
                                     if let Ok(status) = mpd.read_status().await
                                         && let Some(vol) = status.volume
                                         && state.should_forward_to_amp(vol, Instant::now())
@@ -249,6 +254,10 @@ pub async fn run_mpd_volume_sync(
                                             vol.min(100),
                                         )
                                         .await;
+                                        let _ = level_rx.borrow_and_update();
+                                    }
+                                    if disconnected {
+                                        break;
                                     }
                                 }
                                 MpdEvent::Disconnected(_) => break,

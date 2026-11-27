@@ -348,6 +348,7 @@ async fn tcp_backend_subscribes_idle_events_and_handles_connect_failures() {
 
     let mpd = MpdDevice::with_endpoint(MpdHost::default(), port);
     let mut stream = mpd.subscribe_events().await.unwrap();
+    stream.try_recv().unwrap_err();
     assert_eq!(
         stream.recv().await,
         Some(MpdEvent::SubsystemChanged(MpdSubsystem::Mixer))

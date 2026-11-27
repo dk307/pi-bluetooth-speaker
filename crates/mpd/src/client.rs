@@ -338,6 +338,14 @@ impl MpdEventStream {
     pub async fn recv(&mut self) -> Option<MpdEvent> {
         self.rx.recv().await
     }
+
+    /// Attempts to receive a queued [`MpdEvent`] without awaiting.
+    ///
+    /// # Errors
+    /// Returns [`mpsc::error::TryRecvError`] when empty or disconnected.
+    pub fn try_recv(&mut self) -> Result<MpdEvent, mpsc::error::TryRecvError> {
+        self.rx.try_recv()
+    }
 }
 
 /// Command recorded by [`MpdDeviceMock`] for test verification.
@@ -615,6 +623,7 @@ enum Backend {
         host: MpdHost,
         port: MpdPort,
         timeout: Duration,
+        client: tokio::sync::Mutex<Option<Client>>,
     },
     Mock(Arc<Mutex<MockState>>),
 }
@@ -646,6 +655,7 @@ impl MpdDevice {
                 host,
                 port,
                 timeout: DEFAULT_MPD_TIMEOUT,
+                client: tokio::sync::Mutex::new(None),
             }),
         }
     }
@@ -659,6 +669,7 @@ impl MpdDevice {
                     host: host.clone(),
                     port: *port,
                     timeout,
+                    client: tokio::sync::Mutex::new(None),
                 }),
             },
             Backend::Mock(mock) => Self {
@@ -840,16 +851,31 @@ impl MpdDevice {
                 host,
                 port,
                 timeout,
+                client: client_slot,
             } => {
-                let (client, _events) = connect_client(host, *port, *timeout).await?;
-                let protocol_version: Box<str> = client.protocol_version().into();
-                let (status, song) = await_timeout(
+                let mut client = cached_client(host, *port, *timeout, client_slot).await?;
+                let res = await_timeout(
                     *timeout,
                     "MPD status",
                     client.command_list((Status, CurrentSong)),
                 )
-                .await?
-                .map_err(|e| map_command_error("status", e))?;
+                .await?;
+                let (status, song) = match res {
+                    Ok(ok) => ok,
+                    Err(mpd_client::client::CommandError::ConnectionClosed) => {
+                        *client_slot.lock().await = None;
+                        client = cached_client(host, *port, *timeout, client_slot).await?;
+                        await_timeout(
+                            *timeout,
+                            "MPD status",
+                            client.command_list((Status, CurrentSong)),
+                        )
+                        .await?
+                        .map_err(|e| map_command_error("status", e))?
+                    }
+                    Err(e) => return Err(map_command_error("status", e)),
+                };
+                let protocol_version: Box<str> = client.protocol_version().into();
 
                 let current_track = song.map(|entry| {
                     let s = entry.song;
@@ -915,6 +941,7 @@ impl MpdDevice {
                 host,
                 port,
                 timeout,
+                ..
             } => {
                 let (client, mut events) = connect_client(host, *port, *timeout).await?;
                 let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
@@ -956,7 +983,7 @@ impl MpdDevice {
         run_tcp: F,
     ) -> Result<(), MpdError>
     where
-        F: FnOnce(Client) -> Fut,
+        F: Fn(Client) -> Fut,
         Fut: std::future::Future<Output = Result<(), mpd_client::client::CommandError>> + 'a,
     {
         match &*self.inner {
@@ -975,14 +1002,39 @@ impl MpdDevice {
                 host,
                 port,
                 timeout,
+                client: client_slot,
             } => {
-                let (client, _events) = connect_client(host, *port, *timeout).await?;
-                await_timeout(*timeout, cmd_name, run_tcp(client))
-                    .await?
-                    .map_err(|e| map_command_error(cmd_name, e))
+                let client = cached_client(host, *port, *timeout, client_slot).await?;
+                match await_timeout(*timeout, cmd_name, run_tcp(client)).await? {
+                    Ok(()) => Ok(()),
+                    Err(mpd_client::client::CommandError::ConnectionClosed) => {
+                        *client_slot.lock().await = None;
+                        let fresh = cached_client(host, *port, *timeout, client_slot).await?;
+                        await_timeout(*timeout, cmd_name, run_tcp(fresh))
+                            .await?
+                            .map_err(|e| map_command_error(cmd_name, e))
+                    }
+                    Err(e) => Err(map_command_error(cmd_name, e)),
+                }
             }
         }
     }
+}
+
+async fn cached_client(
+    host: &MpdHost,
+    port: MpdPort,
+    timeout: Duration,
+    slot: &tokio::sync::Mutex<Option<Client>>,
+) -> Result<Client, MpdError> {
+    let mut guard = slot.lock().await;
+    if let Some(client) = guard.as_ref() {
+        return Ok(client.clone());
+    }
+    let (client, mut events) = connect_client(host, port, timeout).await?;
+    tokio::spawn(async move { while events.next().await.is_some() {} });
+    *guard = Some(client.clone());
+    Ok(client)
 }
 
 async fn await_timeout<F: std::future::Future>(
