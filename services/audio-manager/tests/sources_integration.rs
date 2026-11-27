@@ -697,7 +697,14 @@ async fn source_manager_routes_dsp_persists_state_and_serves_dbus() {
         .unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if snapshot.active_source_str() == "bluetooth" && !ctrl_mock.paused_sources().is_empty()
+            if snapshot.active_source_str() == "bluetooth"
+                && !ctrl_mock.paused_sources().is_empty()
+                && proxy
+                    .get_property::<String>("ActiveSource")
+                    .await
+                    .ok()
+                    .as_deref()
+                    == Some("bluetooth")
             {
                 return;
             }
