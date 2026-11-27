@@ -1192,8 +1192,7 @@ impl AppShell {
     /// apply state themselves to avoid blocking D-Bus/OBEX round-trips on the
     /// render thread.
     pub fn refresh_playback_display(&self, playback: &speaker_bluetooth::BtPlaybackState) {
-        let snapshot = crate::ui::NowPlayingSnapshot::from_bluetooth(playback);
-        Self::apply_now_playing_to_window(&self.window, &snapshot);
+        self.apply_bluetooth_playback(playback);
     }
 
     /// Updates the audio stream inspector pill details.
@@ -1274,6 +1273,18 @@ impl AppShell {
         } else {
             if !w.get_stream_codec().is_empty() {
                 w.set_stream_codec(slint::SharedString::default());
+            }
+            if w.get_stream_sample_rate().as_str() != "—" {
+                w.set_stream_sample_rate("—".into());
+            }
+            if w.get_stream_bit_depth().as_str() != "—" {
+                w.set_stream_bit_depth("—".into());
+            }
+            if w.get_bt_stream_format().as_str() != "—" {
+                w.set_bt_stream_format("—".into());
+            }
+            if w.get_bt_delay_text().as_str() != "—" {
+                w.set_bt_delay_text("—".into());
             }
             if !w.get_stream_url().is_empty() {
                 w.set_stream_url(slint::SharedString::default());
@@ -1832,10 +1843,14 @@ impl AppShell {
                 ..Default::default()
             });
             self.apply_now_playing(&snapshot);
-            if next_source == crate::ui::MediaSourceKind::Bluetooth
-                && let Some(ref bt_info) = *self.bt_stream_info.borrow()
-            {
-                Self::apply_stream_info_to_window(w, Some(bt_info));
+            match next_source {
+                crate::ui::MediaSourceKind::Bluetooth => {
+                    Self::apply_stream_info_to_window(w, self.bt_stream_info.borrow().as_ref());
+                }
+                crate::ui::MediaSourceKind::Mpd => {}
+                crate::ui::MediaSourceKind::Other(_) => {
+                    Self::apply_stream_info_to_window(w, None);
+                }
             }
 
             let (cover_img, cover_seed) = match &next_source {

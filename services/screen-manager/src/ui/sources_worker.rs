@@ -364,23 +364,28 @@ async fn refresh_mpd_cover(
     if *last_art_file == next_file {
         return;
     }
-    last_art_file.clone_from(&next_file);
-    let Some(file) = next_file else {
+    let Some(ref file) = next_file else {
+        *last_art_file = None;
         publish_mpd_cover(shared, None, None);
         return;
     };
     match device.read_album_art(file.as_ref()).await {
         Ok(Some(bytes)) => {
             if let Some((buf, seed)) = decode_cover_bytes(&bytes) {
+                last_art_file.clone_from(&next_file);
                 publish_mpd_cover(shared, Some(buf), seed);
             } else {
-                publish_mpd_cover(shared, None, None);
+                // Corrupt/invalid image keeps prior art without poisoning retry.
+                tracing::debug!(file = %file, "MPD album art decode failed; keeping prior art");
             }
         }
-        Ok(None) => publish_mpd_cover(shared, None, None),
-        Err(e) => {
-            tracing::debug!(error = %e.summary(), file = %file, "MPD album art fetch failed");
+        Ok(None) => {
+            last_art_file.clone_from(&next_file);
             publish_mpd_cover(shared, None, None);
+        }
+        Err(e) => {
+            // Transient MPD fetch error keeps prior art so next tick can retry.
+            tracing::debug!(error = %e.summary(), file = %file, "MPD album art fetch failed");
         }
     }
 }

@@ -233,6 +233,19 @@ fn shell_routes_transport_and_preserves_per_source_state_across_switches() {
     assert_eq!(shell.window().get_track_title().as_str(), "BT Track");
     assert!(shell.window().get_has_cover_art());
     assert!(!shell.window().get_seekable());
+    // Bluetooth's cached stream info is restored and MPD's URL is cleared.
+    assert_eq!(shell.window().get_stream_codec().as_str(), "LDAC");
+    assert_eq!(shell.window().get_stream_url().as_str(), "");
+
+    // Switching to a source with no stream metadata clears all stream fields.
+    shell.apply_audio_sources(&AudioSourcesState {
+        active_source: Some("line-in".into()),
+        pinned_source: None,
+        sources: vec![],
+    });
+    assert_eq!(shell.window().get_stream_codec().as_str(), "");
+    assert_eq!(shell.window().get_stream_url().as_str(), "");
+    assert_eq!(shell.window().get_bt_stream_format().as_str(), "—");
 }
 
 #[test]
