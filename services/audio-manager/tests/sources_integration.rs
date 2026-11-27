@@ -1147,3 +1147,59 @@ async fn mpd_play_watcher_handles_fault_non_player_and_disconnect() {
     drop(cmd_rx);
     watcher.await.unwrap();
 }
+
+#[tokio::test]
+async fn mpd_play_watcher_initial_playing_retry_and_manager_play_intent_cmd() {
+    use audio_manager::sources::manager::run_mpd_play_watcher;
+    use speaker_mpd::{MpdDevice, MpdPlaybackState};
+
+    // 1. Closed cmd_tx exits watcher immediately.
+    let (mpd_closed, _) = MpdDevice::new_mocked();
+    let (tx_closed, rx_closed) = mpsc::channel(1);
+    drop(rx_closed);
+    run_mpd_play_watcher(sid("rmpd"), mpd_closed, tx_closed).await;
+
+    // 2. Initial connect failure backs off, then initial Playing state emits ReportPlayIntent.
+    let (mpd, mpd_mock) = MpdDevice::new_mocked();
+    mpd_mock.set_state(MpdPlaybackState::Playing);
+    mpd_mock.inject_fault("mpd not ready");
+    let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+    let watcher = tokio::spawn(run_mpd_play_watcher(sid("rmpd"), mpd, cmd_tx));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    mpd_mock.clear_fault();
+
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("initial Playing state after retry must emit ReportPlayIntent")
+        .unwrap();
+    assert_eq!(cmd.kind, SourceCommandKind::ReportPlayIntent(sid("rmpd")));
+    drop(cmd_rx);
+    watcher.await.unwrap();
+
+    // 3. SourceManager::handle_command processes ReportPlayIntent directly.
+    let dir = ScopedTempDir::new("src_mgr_play_intent");
+    let dsp_cfg_path = dir.path().join("dsp.yml");
+    let state_path = dir.path().join("source-state.json");
+    std::fs::write(&dsp_cfg_path, SAMPLE_CONFIG_YAML).unwrap();
+
+    let reg = SourceRegistry::default_appliance();
+    let snapshot = AudioSourcesSnapshot::new(AutoSwitchPolicy::LastPlayWins);
+    let (dsp, _dsp_mock) = DspDevice::new_mocked();
+    let (ctrl, _ctrl_mock) = SourceController::new_mocked();
+    let mut mgr = SourceManager::new(
+        reg,
+        SourceManagerConfig {
+            camilladsp_config_path: dsp_cfg_path,
+            source_state_path: state_path,
+            default_policy: AutoSwitchPolicy::LastPlayWins,
+        },
+        dsp,
+        Arc::new(ctrl),
+        snapshot.clone(),
+        None,
+    );
+    mgr.handle_command(SourceCommandKind::ReportPlayIntent(sid("rmpd")))
+        .await
+        .unwrap();
+    assert_eq!(snapshot.active_source_str(), "rmpd");
+}

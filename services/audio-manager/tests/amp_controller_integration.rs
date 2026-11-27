@@ -1448,3 +1448,35 @@ async fn spurious_critical_fault_at_stream_start_does_not_throttle_or_reset() {
     assert_eq!(f.gpio_mock.reset_calls(), 0);
     assert_eq!(f.amp_mock.mock_master_volume_raw(), 60);
 }
+
+#[tokio::test]
+async fn subscribe_level_notifies_on_change_and_deduplicates_same_percent() {
+    let mut f = fixture();
+    let mut level_rx = f.controller.subscribe_level();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    f.controller
+        .handle_command(AmpCommandKind::SetLevel(50))
+        .await
+        .unwrap();
+    assert!(level_rx.has_changed().unwrap());
+    assert_eq!(*level_rx.borrow_and_update(), 50);
+
+    // Repeating the same percent must not mark the watch channel changed.
+    f.controller
+        .handle_command(AmpCommandKind::SetLevel(50))
+        .await
+        .unwrap();
+    assert!(!level_rx.has_changed().unwrap());
+
+    // Changing to a new percent notifies subscribers.
+    f.controller
+        .handle_command(AmpCommandKind::SetLevel(62))
+        .await
+        .unwrap();
+    assert!(level_rx.has_changed().unwrap());
+    assert_eq!(*level_rx.borrow_and_update(), 62);
+}

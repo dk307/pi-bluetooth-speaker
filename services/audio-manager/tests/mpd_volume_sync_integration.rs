@@ -138,3 +138,157 @@ async fn mpd_volume_sync_loop_syncs_bidirectionally_on_active_source() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn mpd_volume_sync_handles_initial_active_faults_and_dbus_signal() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::Arc;
+
+    use audio_manager::{AmpState, AudioManagerInterface, StateFile};
+    use futures_util::StreamExt;
+    use speaker_common::diag::ScopedTempDir;
+    use zbus::{MatchRule, MessageStream};
+
+    struct BusGuard(Child);
+    impl Drop for BusGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let mut child = Command::new("dbus-daemon")
+        .args(["--session", "--nofork", "--print-address=1"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn private dbus-daemon");
+    let mut addr = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut addr)
+        .unwrap();
+    let addr = addr.trim().to_owned();
+    let _bus = BusGuard(child);
+
+    let server_conn = zbus::connection::Builder::address(addr.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let client_conn = zbus::connection::Builder::address(addr.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let (amp_cmd_tx, mut amp_cmd_rx) = mpsc::channel::<AmpCommand>(8);
+    let tmp = ScopedTempDir::new("mpd_vol_sync_dbus");
+    let mirror = Arc::new(tokio::sync::Mutex::new(AmpState::default()));
+    let iface = AudioManagerInterface::with_commands(
+        mirror,
+        StateFile::new(tmp.path().join("amp.json")),
+        amp_cmd_tx.clone(),
+    );
+    server_conn
+        .object_server()
+        .at("/org/speaker/amp", iface)
+        .await
+        .unwrap();
+
+    let rule = MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .interface("org.freedesktop.DBus.Properties")
+        .unwrap()
+        .member("PropertiesChanged")
+        .unwrap()
+        .path("/org/speaker/amp")
+        .unwrap()
+        .build();
+    let mut signals = MessageStream::for_match_rule(rule, &client_conn, Some(8))
+        .await
+        .unwrap();
+
+    // Start with rmpd ALREADY active and an injected MPD fault to exercise
+    // initial push error + subscribe_events backoff retry.
+    let (mpd, mpd_mock) = MpdDevice::new_mocked();
+    mpd_mock.inject_fault("mpd starting up");
+    let snapshot = AudioSourcesSnapshot::new(AutoSwitchPolicy::LastPlayWins);
+    snapshot.update(
+        Some(sid("rmpd")),
+        None,
+        AutoSwitchPolicy::LastPlayWins,
+        Vec::new(),
+    );
+    let (level_tx, level_rx) = watch::channel(40u8);
+
+    let handle = tokio::spawn(run_mpd_volume_sync(
+        sid("rmpd"),
+        mpd,
+        snapshot.clone(),
+        amp_cmd_tx,
+        level_rx,
+        Some(server_conn),
+    ));
+
+    // Wait briefly so initial push + first subscribe attempt fail, then clear fault.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    mpd_mock.clear_fault();
+
+    // Wait past backoff (~500ms) + FRESH_MPD_SOURCE_SETTLE (2s).
+    tokio::time::sleep(FRESH_MPD_SOURCE_SETTLE + Duration::from_millis(200)).await;
+
+    // Non-mixer event is ignored.
+    mpd_mock.emit_event(MpdEvent::SubsystemChanged(MpdSubsystem::Player));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(amp_cmd_rx.try_recv().is_err());
+
+    // Fault during amp -> MPD level push is tolerated.
+    mpd_mock.inject_fault("transient write error");
+    level_tx.send(44).unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    mpd_mock.clear_fault();
+
+    // 1. MPD -> Amp succeeds and emits D-Bus Level PropertiesChanged.
+    mpd_mock.set_volume(Some(68));
+    mpd_mock.emit_event(MpdEvent::SubsystemChanged(MpdSubsystem::Mixer));
+    let cmd = tokio::time::timeout(Duration::from_secs(1), amp_cmd_rx.recv())
+        .await
+        .expect("SetLevel(68) expected")
+        .unwrap();
+    assert_eq!(cmd.kind, AmpCommandKind::SetLevel(68));
+    cmd.reply.unwrap().send(Ok(())).unwrap();
+
+    let sig = tokio::time::timeout(Duration::from_secs(1), signals.next())
+        .await
+        .expect("D-Bus PropertiesChanged expected")
+        .unwrap()
+        .unwrap();
+    assert_eq!(sig.header().member().unwrap().as_str(), "PropertiesChanged");
+
+    // 2. Amp rejects MPD volume update -> logged without exiting.
+    mpd_mock.set_volume(Some(70));
+    mpd_mock.emit_event(MpdEvent::SubsystemChanged(MpdSubsystem::Mixer));
+    let cmd2 = tokio::time::timeout(Duration::from_secs(1), amp_cmd_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    cmd2.reply.unwrap().send(Err("i2c fault".into())).unwrap();
+
+    // 3. Dropped reply channel -> tolerated without exiting.
+    mpd_mock.set_volume(Some(71));
+    mpd_mock.emit_event(MpdEvent::SubsystemChanged(MpdSubsystem::Mixer));
+    let cmd3 = tokio::time::timeout(Duration::from_secs(1), amp_cmd_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    drop(cmd3.reply);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Closing level_tx exits the loop cleanly.
+    drop(level_tx);
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .unwrap()
+        .unwrap();
+}

@@ -394,4 +394,32 @@ async fn route_request_switches_capture_device_and_skips_starting_reconcile() {
     assert!(apply_route_request(&mut ctrl, &dsp, &cfg_path, &req_detach, false).await);
     assert_eq!(ctrl.applied_device(), None);
     assert_eq!(ctrl.applied_rate(), None);
+
+    // Reconcile ignores non-streaming and zero-rate requests
+    assert!(!reconcile_route_with_engine(&mut ctrl, &dsp, &cfg_path, &req_detach).await);
+    let req_zero = DspRouteRequest {
+        capture_device: Box::from("hw:Loopback,1,1"),
+        rate_hz: 0,
+        streaming: true,
+        force_apply: false,
+    };
+    assert!(!reconcile_route_with_engine(&mut ctrl, &dsp, &cfg_path, &req_zero).await);
+
+    // Reconcile skips cleanly when DSP status read fails
+    assert!(apply_route_request(&mut ctrl, &dsp, &cfg_path, &req_rmpd, false).await);
+    mock.inject_fault("dsp offline");
+    assert!(!reconcile_route_with_engine(&mut ctrl, &dsp, &cfg_path, &req_rmpd).await);
+    mock.clear_fault();
+
+    // Missing config file and invalid YAML hit both initial warn and repeat debug branches
+    let missing_path = tmp.path().join("does-not-exist.yml");
+    let mut err_ctrl = RateWatchController::new();
+    assert!(!apply_route_request(&mut err_ctrl, &dsp, &missing_path, &req_rmpd, false).await);
+    assert!(!apply_route_request(&mut err_ctrl, &dsp, &missing_path, &req_rmpd, false).await);
+
+    let bad_yaml_path = tmp.path().join("bad.yml");
+    std::fs::write(&bad_yaml_path, "not: [valid: camilladsp").unwrap();
+    let mut bad_ctrl = RateWatchController::new();
+    assert!(!apply_route_request(&mut bad_ctrl, &dsp, &bad_yaml_path, &req_rmpd, false).await);
+    assert!(!apply_route_request(&mut bad_ctrl, &dsp, &bad_yaml_path, &req_rmpd, false).await);
 }

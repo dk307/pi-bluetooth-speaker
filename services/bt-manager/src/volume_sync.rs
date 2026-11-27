@@ -726,7 +726,15 @@ async fn subscribe_streams_once(
 }
 
 /// Handles one `org.speaker.AudioSources1` `PropertiesChanged` signal.
-async fn handle_sources_signal(
+///
+/// # Errors
+/// Returns `Err(())` when the signal stream closed or yielded a bus error so the
+/// caller reconnects.
+#[expect(
+    clippy::result_unit_err,
+    reason = "internal reconnect signal for volume_sync loop"
+)]
+pub async fn handle_sources_signal(
     signal: Option<Result<zbus::Message, zbus::Error>>,
     amp: &Proxy<'_>,
     bt: &BluetoothDevice,

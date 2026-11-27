@@ -288,3 +288,118 @@ fn active_audio_source_gates_forward_volume_and_rearms_on_switch() {
     let t2 = t1 + FRESH_PCM_SETTLE + Duration::from_millis(1);
     assert!(state.should_forward_pcm(60, t2));
 }
+
+#[tokio::test]
+async fn handle_sources_signal_processes_active_source_and_errors() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Child, Command, Stdio};
+
+    use bt_manager::volume_sync::handle_sources_signal;
+    use speaker_bluetooth::BluetoothDevice;
+    use zbus::Proxy;
+    use zbus::zvariant::Value;
+
+    struct BusGuard(Child);
+    impl Drop for BusGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let mut child = Command::new("dbus-daemon")
+        .args(["--session", "--nofork", "--print-address=1"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn private dbus-daemon");
+    let mut addr = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut addr)
+        .unwrap();
+    let _bus = BusGuard(child);
+
+    let conn = zbus::connection::Builder::address(addr.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let amp = Proxy::new(
+        &conn,
+        "org.speaker.AudioManager",
+        "/org/speaker/amp",
+        "org.speaker.AudioManager1",
+    )
+    .await
+    .unwrap();
+    let (bt, _bt_mock) = BluetoothDevice::new_mocked();
+    let mut state = VolumeSyncState::new();
+
+    // 1. Stream closed (None) or bus error -> Err(()) to trigger reconnect.
+    assert!(
+        handle_sources_signal(None, &amp, &bt, &mut state)
+            .await
+            .is_err()
+    );
+    assert!(
+        handle_sources_signal(
+            Some(Err(zbus::Error::Failure("dropped".into()))),
+            &amp,
+            &bt,
+            &mut state
+        )
+        .await
+        .is_err()
+    );
+
+    // 2. Malformed signal body -> ignored cleanly (Ok(())).
+    let bad_msg = zbus::Message::signal(
+        "/org/speaker/sources",
+        "org.freedesktop.DBus.Properties",
+        "PropertiesChanged",
+    )
+    .unwrap()
+    .build(&("only-one-field",))
+    .unwrap();
+    assert!(
+        handle_sources_signal(Some(Ok(bad_msg)), &amp, &bt, &mut state)
+            .await
+            .is_ok()
+    );
+
+    // 3. ActiveSource = "rmpd" -> disables Bluetooth forward volume sync.
+    let mut props_rmpd: HashMap<&str, Value<'_>> = HashMap::new();
+    props_rmpd.insert("ActiveSource", Value::from("rmpd"));
+    let msg_rmpd = zbus::Message::signal(
+        "/org/speaker/sources",
+        "org.freedesktop.DBus.Properties",
+        "PropertiesChanged",
+    )
+    .unwrap()
+    .build(&("org.speaker.AudioSources1", props_rmpd, Vec::<&str>::new()))
+    .unwrap();
+    assert!(
+        handle_sources_signal(Some(Ok(msg_rmpd)), &amp, &bt, &mut state)
+            .await
+            .is_ok()
+    );
+    assert!(!state.audio_source_active());
+
+    // 4. ActiveSource = "bluetooth" -> re-enables Bluetooth volume sync and runs reconcile_reverse.
+    let mut props_bt: HashMap<&str, Value<'_>> = HashMap::new();
+    props_bt.insert("ActiveSource", Value::from("bluetooth"));
+    let msg_bt = zbus::Message::signal(
+        "/org/speaker/sources",
+        "org.freedesktop.DBus.Properties",
+        "PropertiesChanged",
+    )
+    .unwrap()
+    .build(&("org.speaker.AudioSources1", props_bt, Vec::<&str>::new()))
+    .unwrap();
+    assert!(
+        handle_sources_signal(Some(Ok(msg_bt)), &amp, &bt, &mut state)
+            .await
+            .is_ok()
+    );
+    assert!(state.audio_source_active());
+}

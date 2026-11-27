@@ -157,17 +157,6 @@ impl RateWatchController {
         }
     }
 
-    /// Single-device helper over [`Self::pending_route`] for [`LoopbackState`].
-    pub fn pending_rate(&mut self, state: LoopbackState) -> Option<u32> {
-        let req = DspRouteRequest {
-            capture_device: Box::from(DEFAULT_LOOPBACK_CAPTURE_DEVICE),
-            rate_hz: state.rate_hz,
-            streaming: state.active,
-            force_apply: false,
-        };
-        self.pending_route(&req).map(|(_, rate)| rate)
-    }
-
     /// Records that `(capture_device, rate_hz)` was successfully applied to `CamillaDSP`.
     pub fn confirm_route_applied(&mut self, capture_device: &str, rate_hz: u32) {
         self.applied = Some((Box::from(capture_device), rate_hz));
