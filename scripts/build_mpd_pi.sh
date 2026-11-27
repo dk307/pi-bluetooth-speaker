@@ -100,7 +100,8 @@ phase_preflight() {
   local tool
   for tool in git meson ninja aarch64-linux-gnu-gcc aarch64-linux-gnu-g++ \
               aarch64-linux-gnu-ar aarch64-linux-gnu-strip \
-              aarch64-linux-gnu-objdump pkg-config dpkg-deb curl; do
+              aarch64-linux-gnu-objdump pkg-config dpkg-deb curl \
+              file sha256sum ssh scp; do
     command -v "${tool}" >/dev/null 2>&1 || die "missing host tool: ${tool}"
   done
 
@@ -112,17 +113,25 @@ phase_preflight() {
 
 phase_sysroot() {
   mkdir -p "${SYSROOT}" "${DEB_DIR}"
-  local name version url sha deb
+  local name version url sha deb deb_tmp
   while IFS=$'\t' read -r name version url sha; do
     [[ -z "${name}" || "${name}" == \#* ]] && continue
     deb="${DEB_DIR}/${name}_${version}_arm64.deb"
-    if [[ -f "${deb}" && "${FORCE}" != 1 ]]; then
-      log "deb ${name} ${version}: cached"
+    if [[ -f "${deb}" && "${FORCE}" != 1 ]] && echo "${sha}  ${deb}" | sha256sum -c - >/dev/null 2>&1; then
+      log "deb ${name} ${version}: cached (SHA-256 verified)"
     else
       log "fetching ${name} ${version}"
-      curl -fsSL -o "${deb}" "${url}" || die "download failed: ${url}"
-      echo "${sha}  ${deb}" | sha256sum -c - >/dev/null \
-        || die "SHA-256 mismatch for ${name} ${version}"
+      deb_tmp="${deb}.tmp"
+      rm -f "${deb_tmp}"
+      if ! curl -fsSL -o "${deb_tmp}" "${url}"; then
+        rm -f "${deb_tmp}"
+        die "download failed: ${url}"
+      fi
+      if ! echo "${sha}  ${deb_tmp}" | sha256sum -c - >/dev/null; then
+        rm -f "${deb_tmp}"
+        die "SHA-256 mismatch for ${name} ${version}"
+      fi
+      mv -f "${deb_tmp}" "${deb}"
     fi
     dpkg-deb -x "${deb}" "${SYSROOT}"
   done < "${SYSROOT_LIST}"
@@ -310,22 +319,34 @@ EOF
   log "ABI verification passed (aarch64, GLIBC <= 2.41, GLIBCXX <= 3.4.33)"
 }
 
+REMOTE_STAGE=""
+cleanup_remote_stage() {
+  if [[ -n "${REMOTE_STAGE}" && "${REMOTE_STAGE}" == /tmp/* ]]; then
+    ssh -o BatchMode=yes -o ConnectTimeout=5 "${REMOTE_HOST}" rm -rf "${REMOTE_STAGE}" >/dev/null 2>&1 || true
+    REMOTE_STAGE=""
+  fi
+}
+
 phase_apply() {
   [[ -f "${BIN_PATH}" ]] || die "Binary not found: ${BIN_PATH}"
+  phase_verify
 
-  local remote_stage remote_bin remote_conf remote_unit
-  remote_stage="$(ssh "${REMOTE_HOST}" mktemp -d)"
-  trap 'ssh -o BatchMode=yes -o ConnectTimeout=5 "${REMOTE_HOST}" rm -rf "${remote_stage}" >/dev/null 2>&1 || true' RETURN
-  remote_bin="${remote_stage}/mpd"
-  remote_conf="${remote_stage}/mpd.conf"
-  remote_unit="${remote_stage}/mpd.service"
+  local remote_bin remote_conf remote_unit
+  REMOTE_STAGE="$(ssh "${REMOTE_HOST}" mktemp -d)" \
+    || die "failed to create remote staging directory on ${REMOTE_HOST}"
+  [[ -n "${REMOTE_STAGE}" && "${REMOTE_STAGE}" == /tmp/* ]] \
+    || die "unexpected remote staging path: ${REMOTE_STAGE}"
+  trap cleanup_remote_stage EXIT
+  remote_bin="${REMOTE_STAGE}/mpd"
+  remote_conf="${REMOTE_STAGE}/mpd.conf"
+  remote_unit="${REMOTE_STAGE}/mpd.service"
 
   scp "${BIN_PATH}" "${REMOTE_HOST}:${remote_bin}"
   scp "${CONF_FILE}" "${REMOTE_HOST}:${remote_conf}"
   scp "${UNIT_FILE}" "${REMOTE_HOST}:${remote_unit}"
 
   ssh "${REMOTE_HOST}" bash -s -- \
-    "${remote_stage}" "${remote_bin}" "${remote_conf}" "${remote_unit}" <<'EOF'
+    "${REMOTE_STAGE}" "${remote_bin}" "${remote_conf}" "${remote_unit}" <<'EOF'
 set -euo pipefail
 STAGE="$1"; RBIN="$2"; RCONF="$3"; RUNIT="$4"
 trap 'rm -rf "${STAGE}"' EXIT
@@ -341,7 +362,8 @@ apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y libavformat61 libfaad2 mpc
 
 chmod +x "${RBIN}"
-"${RBIN}" --version | head -n 5
+VER_OUT="$("${RBIN}" --version)"
+printf '%s\n' "${VER_OUT}" | sed -n '1,5p'
 
 # 3. Remove all legacy rmpd traces cleanly (preserving any playlists if present)
 BACKUP_PL="/tmp/rmpd-playlists-backup"
@@ -404,7 +426,8 @@ install -Dm644 "${RUNIT}" /etc/systemd/system/mpd.service
 systemctl daemon-reload
 systemctl enable --now mpd.service
 systemctl restart mpd.service
-systemctl status mpd.service --no-pager -l | head -n 15
+systemctl is-active --quiet mpd.service
+systemctl status mpd.service --no-pager -l --lines=10
 EOF
   log "Deploy complete."
 }
@@ -425,7 +448,6 @@ case "${PHASE}" in
     phase_preflight
     phase_sysroot
     phase_build
-    phase_verify
     phase_apply
     ;;
 esac
