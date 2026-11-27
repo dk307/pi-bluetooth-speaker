@@ -6,9 +6,10 @@
 //!   post-switch / post-push settle windows), `changed: mixer` idle events
 //!   coalesce queued notifications, read `status.volume`, and forward it to
 //!   `AmpController` (`SetLevel`) + emit D-Bus `PropertiesChanged`.
-//! - **Amp → MPD**: when this MPD source is `ActiveSource` (and on `false -> true`
-//!   source switch-in), amp level changes push `setvol` to MPD, with `last_synced`
-//!   dedup and short echo settle so neither side bounces or loops.
+//! - **Amp → MPD**: when this MPD source is `ActiveSource` (on `false -> true`
+//!   switch-in, on MPD reconnect, and on amp level changes), amp level pushes
+//!   `setvol` to MPD. State (`last_synced`, settle window) is mutated **only
+//!   after** the target write succeeds so transient failures remain retryable.
 
 use std::time::{Duration, Instant};
 
@@ -22,8 +23,8 @@ use crate::dbus_api::AudioManagerInterface;
 use crate::sources::dbus_sources::AudioSourcesSnapshot;
 use crate::sources::registry::SourceId;
 
-/// Grace window after switching to an MPD source during which MPD mixer events
-/// are suppressed while amp → MPD reconciliation settles.
+/// Grace window after switching to or reconnecting an MPD source during which
+/// MPD mixer events are suppressed while amp → MPD reconciliation settles.
 pub const FRESH_MPD_SOURCE_SETTLE: Duration = Duration::from_secs(2);
 
 /// Short settle window after pushing an amp volume change to MPD so delayed
@@ -61,14 +62,20 @@ impl MpdVolumeSyncState {
         self.source_active
     }
 
+    /// Arms the fresh-source / reconnect settle window and clears `last_synced`
+    /// so the next amp → MPD reconcile pushes unconditionally.
+    pub fn arm_reconnect(&mut self, now: Instant) {
+        self.last_synced = None;
+        self.suppressed_until = Some(now + FRESH_MPD_SOURCE_SETTLE);
+    }
+
     /// Updates `source_active` and returns `true` when transitioning `false -> true`
     /// (signaling the caller to reconcile current amp volume → MPD).
     pub fn set_source_active(&mut self, active: bool, now: Instant) -> bool {
         let switched_in = !self.source_active && active;
         self.source_active = active;
         if switched_in {
-            self.suppressed_until = Some(now + FRESH_MPD_SOURCE_SETTLE);
-            self.last_synced = None;
+            self.arm_reconnect(now);
         } else if !active {
             self.suppressed_until = None;
             self.last_synced = None;
@@ -76,9 +83,34 @@ impl MpdVolumeSyncState {
         switched_in
     }
 
-    /// Records a volume value pushed to MPD and extends the short echo-settle
-    /// window so duplicate/stale `changed: mixer` events do not bounce back.
-    pub fn record_pushed_to_mpd(&mut self, percent: u8, now: Instant) {
+    /// Returns `true` when `mpd_percent` is a genuine change to forward to the amp.
+    ///
+    /// Pure query: callers must invoke [`Self::record_forward_applied`] only after
+    /// `SetLevel` succeeds.
+    #[must_use]
+    pub fn should_forward_to_amp(&self, mpd_percent: u8, now: Instant) -> bool {
+        self.source_active
+            && !self.suppressed_until.is_some_and(|until| now < until)
+            && self.last_synced != Some(mpd_percent.min(100))
+    }
+
+    /// Records a successfully applied MPD → Amp `SetLevel`.
+    pub fn record_forward_applied(&mut self, percent: u8) {
+        self.last_synced = Some(percent.min(100));
+    }
+
+    /// Returns `true` when `amp_percent` is a genuine change to push to MPD.
+    ///
+    /// Pure query: callers must invoke [`Self::record_reverse_pushed`] only after
+    /// `mpd.set_volume` succeeds.
+    #[must_use]
+    pub fn should_push_to_mpd(&self, amp_percent: u8) -> bool {
+        self.source_active && self.last_synced != Some(amp_percent.min(100))
+    }
+
+    /// Records a successfully pushed Amp → MPD volume and extends the short
+    /// echo-settle window so duplicate/stale `changed: mixer` events do not bounce.
+    pub fn record_reverse_pushed(&mut self, percent: u8, now: Instant) {
         let clamped = percent.min(100);
         self.last_synced = Some(clamped);
         let until = now + AMP_PUSH_ECHO_SETTLE;
@@ -86,37 +118,6 @@ impl MpdVolumeSyncState {
             Some(existing) if existing > until => existing,
             _ => until,
         });
-    }
-
-    /// Evaluates an MPD `status.volume` update; returns `true` when it should be
-    /// forwarded to the amp via `SetLevel`.
-    pub fn should_forward_to_amp(&mut self, mpd_percent: u8, now: Instant) -> bool {
-        if !self.source_active {
-            return false;
-        }
-        if self.suppressed_until.is_some_and(|until| now < until) {
-            return false;
-        }
-        let clamped = mpd_percent.min(100);
-        if self.last_synced == Some(clamped) {
-            return false;
-        }
-        self.last_synced = Some(clamped);
-        true
-    }
-
-    /// Evaluates an amp `Level` change; returns `true` when it should be pushed
-    /// to MPD via `set_volume`.
-    pub fn should_push_to_mpd(&mut self, amp_percent: u8, now: Instant) -> bool {
-        if !self.source_active {
-            return false;
-        }
-        let clamped = amp_percent.min(100);
-        if self.last_synced == Some(clamped) {
-            return false;
-        }
-        self.record_pushed_to_mpd(clamped, now);
-        true
     }
 }
 
@@ -127,10 +128,10 @@ async fn push_amp_to_mpd(
     amp_percent: u8,
 ) {
     let clamped = amp_percent.min(100);
-    state.record_pushed_to_mpd(clamped, Instant::now());
     if let Err(e) = mpd.set_volume(clamped).await {
         debug!(source = %source_id, percent = clamped, error = %e, "Failed to push amp volume to MPD");
     } else {
+        state.record_reverse_pushed(clamped, Instant::now());
         debug!(source = %source_id, percent = clamped, "Synced amp volume -> MPD");
     }
 }
@@ -140,7 +141,7 @@ async fn forward_mpd_to_amp(
     amp_cmd_tx: &mpsc::Sender<AmpCommand>,
     dbus_conn: Option<&Connection>,
     percent: u8,
-) {
+) -> bool {
     let (reply_tx, reply_rx) = oneshot::channel();
     if amp_cmd_tx
         .send(AmpCommand {
@@ -150,7 +151,7 @@ async fn forward_mpd_to_amp(
         .await
         .is_err()
     {
-        return;
+        return false;
     }
     match reply_rx.await {
         Ok(Ok(())) => {
@@ -168,11 +169,13 @@ async fn forward_mpd_to_amp(
             {
                 warn!(error = %e, "Failed to emit D-Bus Level PropertiesChanged after MPD sync");
             }
+            true
         }
         Ok(Err(e)) => {
             warn!(source = %source_id, percent, error = %e, "Amp rejected MPD volume update");
+            false
         }
-        Err(_) => {}
+        Err(_) => false,
     }
 }
 
@@ -191,10 +194,7 @@ pub async fn run_mpd_volume_sync(
     let max_backoff = Duration::from_secs(5);
 
     let initially_active = active_rx.borrow_and_update().as_ref() == Some(&source_id);
-    if state.set_source_active(initially_active, Instant::now()) {
-        let level = *level_rx.borrow_and_update();
-        push_amp_to_mpd(&source_id, &mpd, &mut state, level).await;
-    }
+    let _ = state.set_source_active(initially_active, Instant::now());
 
     loop {
         if amp_cmd_tx.is_closed() {
@@ -203,6 +203,11 @@ pub async fn run_mpd_volume_sync(
         match mpd.subscribe_events().await {
             Ok(mut events) => {
                 backoff = Duration::from_millis(500);
+                if state.source_active() {
+                    state.arm_reconnect(Instant::now());
+                    let level = *level_rx.borrow_and_update();
+                    push_amp_to_mpd(&source_id, &mpd, &mut state, level).await;
+                }
                 loop {
                     tokio::select! {
                         () = amp_cmd_tx.closed() => return,
@@ -221,12 +226,8 @@ pub async fn run_mpd_volume_sync(
                                 return;
                             }
                             let level = *level_rx.borrow_and_update();
-                            if state.should_push_to_mpd(level, Instant::now()) {
-                                if let Err(e) = mpd.set_volume(level.min(100)).await {
-                                    debug!(source = %source_id, percent = level, error = %e, "Failed to sync amp -> MPD volume");
-                                } else {
-                                    debug!(source = %source_id, percent = level, "Synced amp volume -> MPD");
-                                }
+                            if state.should_push_to_mpd(level) {
+                                push_amp_to_mpd(&source_id, &mpd, &mut state, level).await;
                             }
                         }
                         maybe_evt = events.recv() => {
@@ -247,14 +248,18 @@ pub async fn run_mpd_volume_sync(
                                         && let Some(vol) = status.volume
                                         && state.should_forward_to_amp(vol, Instant::now())
                                     {
-                                        forward_mpd_to_amp(
+                                        let clamped = vol.min(100);
+                                        if forward_mpd_to_amp(
                                             &source_id,
                                             &amp_cmd_tx,
                                             dbus_conn.as_ref(),
-                                            vol.min(100),
+                                            clamped,
                                         )
-                                        .await;
-                                        let _ = level_rx.borrow_and_update();
+                                        .await
+                                        {
+                                            state.record_forward_applied(clamped);
+                                            let _ = level_rx.borrow_and_update();
+                                        }
                                     }
                                     if disconnected {
                                         break;

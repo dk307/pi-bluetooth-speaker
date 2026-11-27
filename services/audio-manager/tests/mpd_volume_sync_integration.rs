@@ -20,7 +20,7 @@ fn mpd_volume_sync_state_gates_settle_echo_and_direction() {
     let mut state = MpdVolumeSyncState::default();
     assert!(!state.source_active());
     assert!(!state.should_forward_to_amp(50, t0));
-    assert!(!state.should_push_to_mpd(50, t0));
+    assert!(!state.should_push_to_mpd(50));
 
     // Switch-in arms settle window and requests initial amp -> MPD reconcile.
     assert!(state.set_source_active(true, t0));
@@ -30,28 +30,38 @@ fn mpd_volume_sync_state_gates_settle_echo_and_direction() {
     // Suppressed during FRESH_MPD_SOURCE_SETTLE.
     assert!(!state.should_forward_to_amp(40, t0 + Duration::from_millis(500)));
 
-    // Rapid amp -> MPD pushes (50 -> 54) suppress echoes both during AMP_PUSH_ECHO_SETTLE
-    // and on duplicate `last_synced` values afterward (no backwards bounce).
+    // Uncommitted query does not mutate state (transient I/O failure remains retryable).
     let t1 = t0 + FRESH_MPD_SOURCE_SETTLE + Duration::from_millis(1);
-    assert!(state.should_push_to_mpd(50, t1));
-    assert!(state.should_push_to_mpd(54, t1));
+    assert!(state.should_push_to_mpd(50));
+    assert!(state.should_push_to_mpd(50));
+
+    // Committed rapid amp -> MPD pushes (50 -> 54) suppress echoes both during
+    // AMP_PUSH_ECHO_SETTLE and on duplicate `last_synced` values afterward.
+    state.record_reverse_pushed(50, t1);
+    assert!(state.should_push_to_mpd(54));
+    state.record_reverse_pushed(54, t1);
     assert!(!state.should_forward_to_amp(50, t1 + Duration::from_millis(50)));
     let t2 = t1 + AMP_PUSH_ECHO_SETTLE + Duration::from_millis(1);
     assert!(!state.should_forward_to_amp(54, t2));
 
-    // Genuine MPD mixer change forwards to amp, deduplicates, and suppresses amp echo.
+    // Uncommitted forward query remains retryable; once committed, deduplicates & suppresses echo.
     assert!(state.should_forward_to_amp(72, t2));
+    assert!(state.should_forward_to_amp(72, t2));
+    state.record_forward_applied(72);
     assert!(!state.should_forward_to_amp(72, t2));
-    assert!(!state.should_push_to_mpd(72, t2));
+    assert!(!state.should_push_to_mpd(72));
 
-    // Subsequent amp knob change pushes to MPD.
-    assert!(state.should_push_to_mpd(24, t2));
-    assert!(!state.should_forward_to_amp(24, t2 + AMP_PUSH_ECHO_SETTLE + Duration::from_millis(1)));
+    // arm_reconnect clears last_synced and re-arms FRESH_MPD_SOURCE_SETTLE.
+    state.arm_reconnect(t2);
+    assert!(state.should_push_to_mpd(72));
+    assert!(!state.should_forward_to_amp(80, t2 + Duration::from_millis(500)));
+    let t3 = t2 + FRESH_MPD_SOURCE_SETTLE + Duration::from_millis(1);
+    assert!(state.should_forward_to_amp(80, t3));
 
     // Switching away clears active gate.
-    assert!(!state.set_source_active(false, t2));
-    assert!(!state.should_forward_to_amp(30, t2));
-    assert!(!state.should_push_to_mpd(30, t2));
+    assert!(!state.set_source_active(false, t3));
+    assert!(!state.should_forward_to_amp(30, t3));
+    assert!(!state.should_push_to_mpd(30));
 }
 
 #[tokio::test]
@@ -140,9 +150,20 @@ async fn mpd_volume_sync_loop_syncs_bidirectionally_on_active_source() {
         "burst of queued Mixer events must coalesce into a single SetLevel"
     );
 
-    // Disconnect event triggers clean reconnect; closing amp_cmd_rx exits task.
+    // Disconnect while rmpd is active triggers reconnect and reconciles amp volume (60) -> MPD.
+    mpd_mock.clear_commands();
     mpd_mock.emit_event(MpdEvent::Disconnected("eof".into()));
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if mpd_mock.commands().contains(&MpdMockCommand::SetVolume(60)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("MPD reconnect while active must reconcile amp volume -> MPD");
+
     drop(amp_cmd_rx);
     tokio::time::timeout(Duration::from_secs(1), handle)
         .await
@@ -221,7 +242,7 @@ async fn mpd_volume_sync_handles_initial_active_faults_and_dbus_signal() {
         .unwrap();
 
     // Start with rmpd ALREADY active and an injected MPD fault to exercise
-    // initial push error + subscribe_events backoff retry.
+    // initial subscribe_events backoff retry + post-connect reconcile.
     let (mpd, mpd_mock) = MpdDevice::new_mocked();
     mpd_mock.inject_fault("mpd starting up");
     let snapshot = AudioSourcesSnapshot::new(AutoSwitchPolicy::LastPlayWins);
@@ -242,22 +263,33 @@ async fn mpd_volume_sync_handles_initial_active_faults_and_dbus_signal() {
         Some(server_conn),
     ));
 
-    // Wait briefly so initial push + first subscribe attempt fail, then clear fault.
+    // Wait briefly so first subscribe attempt fails, then clear fault and await SetVolume(40).
     tokio::time::sleep(Duration::from_millis(80)).await;
     mpd_mock.clear_fault();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if mpd_mock.commands().contains(&MpdMockCommand::SetVolume(40)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial connect after fault clear must push SetVolume(40)");
 
-    // Wait past backoff (~500ms) + FRESH_MPD_SOURCE_SETTLE (2s).
-    tokio::time::sleep(FRESH_MPD_SOURCE_SETTLE + Duration::from_millis(200)).await;
+    // Wait past FRESH_MPD_SOURCE_SETTLE (2s).
+    tokio::time::sleep(FRESH_MPD_SOURCE_SETTLE + Duration::from_millis(100)).await;
 
     // Non-mixer event is ignored.
     mpd_mock.emit_event(MpdEvent::SubsystemChanged(MpdSubsystem::Player));
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(amp_cmd_rx.try_recv().is_err());
 
-    // Fault during amp -> MPD level push is tolerated; wait out AMP_PUSH_ECHO_SETTLE.
+    // Fault during amp -> MPD level push is tolerated; since it failed, retrying same
+    // level (44) later succeeds rather than being deduplicated away.
     mpd_mock.inject_fault("transient write error");
     level_tx.send(44).unwrap();
-    tokio::time::sleep(AMP_PUSH_ECHO_SETTLE + Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(40)).await;
     mpd_mock.clear_fault();
 
     // 1. MPD -> Amp succeeds and emits D-Bus Level PropertiesChanged.
@@ -277,23 +309,23 @@ async fn mpd_volume_sync_handles_initial_active_faults_and_dbus_signal() {
         .unwrap();
     assert_eq!(sig.header().member().unwrap().as_str(), "PropertiesChanged");
 
-    // 2. Amp rejects MPD volume update -> logged without exiting.
+    // 2. Amp rejects MPD volume update -> last_synced is NOT updated, so retrying 70 works.
     mpd_mock.set_volume(Some(70));
     mpd_mock.emit_event(MpdEvent::SubsystemChanged(MpdSubsystem::Mixer));
     let cmd2 = tokio::time::timeout(Duration::from_secs(1), amp_cmd_rx.recv())
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(cmd2.kind, AmpCommandKind::SetLevel(70));
     cmd2.reply.unwrap().send(Err("i2c fault".into())).unwrap();
 
-    // 3. Dropped reply channel -> tolerated without exiting.
-    mpd_mock.set_volume(Some(71));
     mpd_mock.emit_event(MpdEvent::SubsystemChanged(MpdSubsystem::Mixer));
-    let cmd3 = tokio::time::timeout(Duration::from_secs(1), amp_cmd_rx.recv())
+    let cmd2_retry = tokio::time::timeout(Duration::from_secs(1), amp_cmd_rx.recv())
         .await
-        .unwrap()
+        .expect("failed SetLevel(70) must remain retryable")
         .unwrap();
-    drop(cmd3.reply);
+    assert_eq!(cmd2_retry.kind, AmpCommandKind::SetLevel(70));
+    drop(cmd2_retry.reply);
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Closing level_tx exits the loop cleanly.
