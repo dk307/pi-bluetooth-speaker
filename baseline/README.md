@@ -33,18 +33,16 @@ baseline/
 │   ├── dbus-1/system.d/
 │   │   ├── org.speaker.Bluetooth.conf # D-Bus policy for active-source arbiter (bt-manager)
 │   │   └── org.speaker.CoverArt.conf  # D-Bus policy for BIP cover-art service (bt-manager)
-│   ├── rmpd/
-│   │   └── rmpd.toml.example      # Streaming-only rmpd config template (ALSA default, mixer_type=none)
+│   ├── mpd.conf                   # Streaming & internet-radio MPD v0.25 config (ALSA src_rmpd, mixer_type=none)
 │   └── systemd/
-│       ├── system/
-│       │   ├── camilladsp.service     # CamillaDSP 5.0 engine daemon (-w wait mode, WS on 127.0.0.1:1234)
-│       │   ├── bluealsa.service       # BlueALSA high-res A2DP audio sink daemon
-│       │   ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA default (-S --volume=none --single-audio)
-│       │   ├── bt-manager.service     # Bluetooth Manager & Cover Art service
-│       │   ├── screen-manager.service # Touchscreen Appliance Console & Screen Manager service
-│       │   └── bt-agent.service       # Legacy standalone agent (superseded by bt-manager.service)
-│       └── user/
-│           └── rmpd.service           # Headless user systemd unit for rmpd (session D-Bus MPRIS)
+│       └── system/
+│           ├── camilladsp.service     # CamillaDSP 5.0 engine daemon (-w wait mode, WS on 127.0.0.1:1234)
+│           ├── bluealsa.service       # BlueALSA high-res A2DP audio sink daemon
+│           ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA default (-S --volume=none --single-audio)
+│           ├── bt-manager.service     # Bluetooth Manager & Cover Art service
+│           ├── mpd.service            # Music Player Daemon v0.25 system service (/usr/local/bin/mpd)
+│           ├── screen-manager.service # Touchscreen Appliance Console & Screen Manager service
+│           └── bt-agent.service       # Legacy standalone agent (superseded by bt-manager.service)
 ├── patches/
 │   ├── bluez-5.88-mediaplayer-refresh-track.patch
 │   └── bluez-5.88-track-duration.patch
@@ -100,8 +98,8 @@ cd /root/baseline
 ```
 This performs an automated 25-point check across:
 - Kernel modules (`snd-aloop`, `i2c-dev`, `snd_soc_ma120x0p`)
-- Systemd services (`bluetooth`, `bt-manager` [superseding `bt-agent`], `bluealsa`, `bluealsa-aplay`, `camilladsp`)
-- Listening ports (`1234` for DSP WebSocket, `22` for SSH)
+- Systemd services (`bluetooth`, `bt-manager` [superseding `bt-agent`], `bluealsa`, `bluealsa-aplay`, `camilladsp`, and `mpd` when `/usr/local/bin/mpd` is installed)
+- Listening ports (`1234` for DSP WebSocket, `22` for SSH, and `6600` for MPD when `/usr/local/bin/mpd` is installed)
 - ALSA sound cards (Card 0 Loopback, Card 1 MA12070P Amp)
 - Hardware sensors (I2C address 0x20 amp, 0x23 BH1750 light sensor, 1-Wire DS18B20)
 - Display & Touch (`/dev/fb0`, `raspberrypi-ts` on `/dev/input/event0`)
