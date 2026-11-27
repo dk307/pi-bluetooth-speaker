@@ -1186,7 +1186,7 @@ async fn mpd_play_watcher_initial_playing_retry_and_manager_play_intent_cmd() {
 
     let reg = SourceRegistry::default_appliance();
     let snapshot = AudioSourcesSnapshot::new(AutoSwitchPolicy::LastPlayWins);
-    let (dsp, _dsp_mock) = DspDevice::new_mocked();
+    let (dsp, dsp_mock) = DspDevice::new_mocked();
     let (ctrl, _ctrl_mock) = SourceController::new_mocked();
     let mut mgr = SourceManager::new(
         reg,
@@ -1204,6 +1204,64 @@ async fn mpd_play_watcher_initial_playing_retry_and_manager_play_intent_cmd() {
         .await
         .unwrap();
     assert_eq!(snapshot.active_source_str(), "rmpd");
+
+    // 4. Failed force_detach to idle source retries on the 500ms reconcile timer.
+    let (cmd_tx2, cmd_rx2) = mpsc::channel(8);
+    let (loop_tx2, loop_rx2) = mpsc::channel(8);
+    let mgr_handle2 = tokio::spawn(async move {
+        mgr.run(cmd_rx2, loop_rx2).await;
+    });
+    loop_tx2
+        .send((
+            0,
+            LoopbackState {
+                active: true,
+                rate_hz: 48_000,
+            },
+            true,
+        ))
+        .await
+        .unwrap();
+    loop_tx2
+        .send((
+            1,
+            LoopbackState {
+                active: false,
+                rate_hz: 44_100,
+            },
+            true,
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    dsp_mock.inject_fault("transient dsp error");
+    let before_detach_uploads = dsp_mock.set_config_json_calls();
+    let (rep_tx, rep_rx) = tokio::sync::oneshot::channel();
+    cmd_tx2
+        .send(SourceCommand {
+            kind: SourceCommandKind::SelectSource(sid("rmpd")),
+            reply: Some(rep_tx),
+        })
+        .await
+        .unwrap();
+    rep_rx.await.unwrap().unwrap();
+    dsp_mock.clear_fault();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if dsp_mock.set_config_json_calls() > before_detach_uploads {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("failed force_detach must retry and upload idle config");
+
+    drop(cmd_tx2);
+    drop(loop_tx2);
+    mgr_handle2.await.unwrap();
 }
 
 #[test]

@@ -454,3 +454,88 @@ async fn mpd_read_volume_mocked_and_tcp() {
     MpdHost::new("music.-local").unwrap_err();
     MpdHost::new("music-.local").unwrap_err();
 }
+
+#[tokio::test]
+async fn tcp_backend_recovers_connection_closed_and_clears_slot_on_timeout() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = MpdPort::new(listener.local_addr().unwrap().port()).unwrap();
+    let conn_num = std::sync::Arc::new(AtomicUsize::new(0));
+    let conn_num_srv = std::sync::Arc::clone(&conn_num);
+
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            let n = conn_num_srv.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let (reader, mut writer) = socket.into_split();
+                if writer.write_all(b"OK MPD 0.24.0\n").await.is_err() {
+                    return;
+                }
+                let mut lines = BufReader::new(reader).lines();
+                let mut in_list = false;
+                let mut list_body = String::new();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let cmd = line.trim();
+                    if cmd == "idle" || cmd == "noidle" {
+                        if cmd == "noidle" {
+                            let _ = writer.write_all(b"OK\n").await;
+                        }
+                        continue;
+                    }
+                    // Connection 0: drop immediately on first command to exercise ConnectionClosed retry.
+                    if n == 0 {
+                        return;
+                    }
+                    // Connection 1: hang on "next" to exercise timeout + client_slot clearing + no-retry.
+                    if n == 1 && cmd == "next" {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        return;
+                    }
+                    if cmd == "command_list_ok_begin" || cmd == "command_list_begin" {
+                        in_list = true;
+                        list_body.clear();
+                        continue;
+                    }
+                    if cmd == "command_list_end" {
+                        in_list = false;
+                        if writer
+                            .write_all(format!("{list_body}OK\n").as_bytes())
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                    let body = match cmd {
+                        "status" => {
+                            "volume: 55\nrepeat: 0\nrandom: 0\nsingle: 0\nconsume: 0\nstate: play\n"
+                        }
+                        _ => "",
+                    };
+                    if in_list {
+                        list_body.push_str(body);
+                        list_body.push_str("list_OK\n");
+                    } else if writer
+                        .write_all(format!("{body}OK\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+
+    let mpd =
+        MpdDevice::with_endpoint(MpdHost::default(), port).with_timeout(Duration::from_millis(80));
+    // First call hits ConnectionClosed on conn 0 and transparently retries on conn 1.
+    assert_eq!(mpd.read_volume().await.unwrap(), Some(55));
+    // Next call times out on conn 1, clearing the cached client_slot.
+    assert!(mpd.next().await.unwrap_err().is_timeout());
+    // Subsequent call reconnects to conn 2 and succeeds cleanly.
+    assert_eq!(mpd.read_status().await.unwrap().volume, Some(55));
+}

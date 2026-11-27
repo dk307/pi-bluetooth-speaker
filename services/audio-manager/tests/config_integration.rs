@@ -64,4 +64,15 @@ fn load_env_overrides_validation_and_rejection() {
     unsafe { std::env::remove_var("AMP_MGR_STATE_PATH") };
     unsafe { std::env::remove_var("AMP_MGR_DSP_POLL_INTERVAL_MS") };
     unsafe { std::env::remove_var("AMP_MGR_AUTO_SWITCH_POLICY") };
+
+    // Identical state_path and source_state_path must be rejected.
+    unsafe { std::env::set_var("AMP_MGR_STATE_PATH", "/tmp/shared-state.json") };
+    unsafe { std::env::set_var("AMP_MGR_SOURCE_STATE_PATH", "/tmp/shared-state.json") };
+    let err = Config::load().unwrap_err();
+    unsafe { std::env::remove_var("AMP_MGR_STATE_PATH") };
+    unsafe { std::env::remove_var("AMP_MGR_SOURCE_STATE_PATH") };
+    assert!(
+        err.to_string().contains("must be distinct"),
+        "unexpected error: {err}"
+    );
 }

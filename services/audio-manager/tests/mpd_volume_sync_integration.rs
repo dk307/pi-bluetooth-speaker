@@ -335,3 +335,79 @@ async fn mpd_volume_sync_handles_initial_active_faults_and_dbus_signal() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn mpd_volume_sync_retries_failed_push_and_reconciles_intervening_amp_change() {
+    let (mpd, mpd_mock) = MpdDevice::new_mocked();
+    let snapshot = AudioSourcesSnapshot::new(AutoSwitchPolicy::LastPlayWins);
+    snapshot.update(
+        Some(sid("rmpd")),
+        None,
+        AutoSwitchPolicy::LastPlayWins,
+        Vec::new(),
+    );
+
+    let (amp_cmd_tx, mut amp_cmd_rx) = mpsc::channel::<AmpCommand>(8);
+    let (level_tx, level_rx) = watch::channel(40u8);
+
+    let handle = tokio::spawn(run_mpd_volume_sync(
+        sid("rmpd"),
+        mpd,
+        snapshot,
+        amp_cmd_tx,
+        level_rx,
+        None,
+    ));
+
+    // Wait past FRESH_MPD_SOURCE_SETTLE (2s) and initial reconcile.
+    tokio::time::sleep(FRESH_MPD_SOURCE_SETTLE + Duration::from_millis(100)).await;
+    mpd_mock.clear_commands();
+
+    // 1. Failed amp -> MPD push is retried automatically after 500ms backoff.
+    mpd_mock.inject_fault("transient mpd write fault");
+    level_tx.send(55).unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    mpd_mock.clear_fault();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if mpd_mock.commands().contains(&MpdMockCommand::SetVolume(55)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("failed amp -> MPD push must retry and succeed");
+
+    // Wait past AMP_PUSH_ECHO_SETTLE before emitting an MPD mixer change.
+    tokio::time::sleep(AMP_PUSH_ECHO_SETTLE + Duration::from_millis(50)).await;
+
+    // 2. Intervening amp SetLevel while forward_mpd_to_amp is awaiting reply is reconciled to MPD.
+    mpd_mock.clear_commands();
+    mpd_mock.set_volume(Some(65));
+    mpd_mock.emit_event(MpdEvent::SubsystemChanged(MpdSubsystem::Mixer));
+    let cmd = tokio::time::timeout(Duration::from_secs(1), amp_cmd_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cmd.kind, AmpCommandKind::SetLevel(65));
+    level_tx.send(78).unwrap();
+    cmd.reply.unwrap().send(Ok(())).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if mpd_mock.commands().contains(&MpdMockCommand::SetVolume(78)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("intervening amp level 78 must be reconciled to MPD");
+
+    drop(level_tx);
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .unwrap()
+        .unwrap();
+}
