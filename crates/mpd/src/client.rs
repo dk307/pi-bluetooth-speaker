@@ -100,7 +100,7 @@ impl MpdHost {
             && trimmed.chars().any(|c| c.is_ascii_alphanumeric())
             && trimmed
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
         {
             return Ok(Self(trimmed.into()));
         }
@@ -174,9 +174,15 @@ impl MpdPort {
     /// Returns a descriptive string error when parsing or range validation fails.
     pub fn parse_str(raw: &str) -> Result<Self, String> {
         let trimmed = raw.trim();
-        let port: u16 = trimmed
-            .parse()
-            .map_err(|e| format!("invalid TCP port '{trimmed}': {e}"))?;
+        let port: u16 = match trimmed.parse() {
+            Ok(p) => p,
+            Err(e) if *e.kind() == std::num::IntErrorKind::PosOverflow => {
+                return Err(format!(
+                    "TCP port must be between {MIN_MPD_PORT} and {MAX_MPD_PORT}"
+                ));
+            }
+            Err(e) => return Err(format!("invalid TCP port '{trimmed}': {e}")),
+        };
         if port < MIN_MPD_PORT {
             return Err(format!(
                 "TCP port must be between {MIN_MPD_PORT} and {MAX_MPD_PORT}"
@@ -994,18 +1000,22 @@ async fn connect_client(
     port: MpdPort,
     timeout: Duration,
 ) -> Result<(Client, mpd_client::client::ConnectionEvents), MpdError> {
-    let addr = format!("{}:{}", host.as_str(), port.get());
+    let addr_label = if host.as_str().contains(':') {
+        format!("[{}]:{}", host.as_str(), port.get())
+    } else {
+        format!("{}:{}", host.as_str(), port.get())
+    };
     let stream = await_timeout(
         timeout,
-        &format!("MPD TCP connect to {addr}"),
-        TcpStream::connect(&addr),
+        &format!("MPD TCP connect to {addr_label}"),
+        TcpStream::connect((host.as_str(), port.get())),
     )
     .await?
     .map_err(|e| MpdError::connection_failed(host.as_str(), port.get(), e))?;
 
     await_timeout(
         timeout,
-        &format!("MPD greeting handshake with {addr}"),
+        &format!("MPD greeting handshake with {addr_label}"),
         Client::connect(stream),
     )
     .await?

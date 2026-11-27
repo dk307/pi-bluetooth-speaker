@@ -227,7 +227,7 @@ impl SourceArbiter {
         let persist = active_changed.is_some() && self.active.is_some();
         let dsp_target = self.active.as_ref().and_then(|id| {
             let rt = &self.runtime[id];
-            rt.streaming.then(|| self.target_for(id, false))
+            rt.streaming.then(|| self.target_for(id, false)).flatten()
         });
 
         ArbiterOutcome {
@@ -261,7 +261,7 @@ impl SourceArbiter {
         if streaming {
             if self.active.as_ref() == Some(id) && (prev_rate != rate_hz || rate_hz > 0) {
                 return ArbiterOutcome {
-                    dsp_target: Some(self.target_for(id, false)),
+                    dsp_target: self.target_for(id, false),
                     ..ArbiterOutcome::default()
                 };
             }
@@ -304,7 +304,7 @@ impl SourceArbiter {
 
         if &current == started {
             return ArbiterOutcome {
-                dsp_target: Some(self.target_for(started, false)),
+                dsp_target: self.target_for(started, false),
                 ..ArbiterOutcome::default()
             };
         }
@@ -334,7 +334,7 @@ impl SourceArbiter {
     fn on_active_stream_stopped(&mut self, stopped: &SourceId) -> ArbiterOutcome {
         if self.pinned.as_ref() == Some(stopped) {
             return ArbiterOutcome {
-                dsp_target: Some(self.target_for(stopped, false)),
+                dsp_target: self.target_for(stopped, false),
                 ..ArbiterOutcome::default()
             };
         }
@@ -345,7 +345,7 @@ impl SourceArbiter {
 
         // Keep `stopped` as the active/last_source when idle so resuming it needs no switch.
         ArbiterOutcome {
-            dsp_target: Some(self.target_for(stopped, false)),
+            dsp_target: self.target_for(stopped, false),
             ..ArbiterOutcome::default()
         }
     }
@@ -491,11 +491,13 @@ impl SourceArbiter {
             return Ok(outcome);
         }
 
-        let dsp_target = (self.active.as_ref() == Some(id)).then(|| {
-            let mut target = self.target_for(id, false);
-            target.streaming = false;
-            target
-        });
+        let dsp_target = (self.active.as_ref() == Some(id))
+            .then(|| self.target_for(id, false))
+            .flatten()
+            .map(|mut target| {
+                target.streaming = false;
+                target
+            });
 
         Ok(ArbiterOutcome {
             pause_sources,
@@ -519,7 +521,7 @@ impl SourceArbiter {
             pinned_changed: None,
             policy_changed: None,
             pause_sources: pause_displaced.into_iter().collect(),
-            dsp_target: Some(self.target_for(id, force_detach)),
+            dsp_target: self.target_for(id, force_detach),
             persist: changed,
         }
     }
@@ -535,17 +537,14 @@ impl SourceArbiter {
         }
     }
 
-    fn target_for(&self, id: &SourceId, force_detach: bool) -> DspTarget {
-        let def = self
-            .registry
-            .get(id)
-            .expect("target_for called with registered source");
-        let rt = &self.runtime[id];
-        DspTarget {
+    fn target_for(&self, id: &SourceId, force_detach: bool) -> Option<DspTarget> {
+        let def = self.registry.get(id)?;
+        let rt = self.runtime.get(id)?;
+        Some(DspTarget {
             capture_device: def.capture.camilladsp_device(),
             rate_hz: self.effective_rate(id),
             streaming: rt.streaming,
             force_detach,
-        }
+        })
     }
 }

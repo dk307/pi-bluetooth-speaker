@@ -30,6 +30,7 @@ fn host_and_port_validation_enforces_domain_invariants() {
         "trailing.",
         "-dash",
         "dash-",
+        "bad_host",
     ] {
         let err = MpdHost::new(invalid).unwrap_err();
         assert!(
@@ -47,6 +48,11 @@ fn host_and_port_validation_enforces_domain_invariants() {
 
     assert!(MpdPort::new(0).unwrap_err().is_invalid_state());
     MpdPort::parse_str("0").unwrap_err();
+    assert!(
+        MpdPort::parse_str("70000")
+            .unwrap_err()
+            .contains("between 1 and 65535")
+    );
     MpdPort::parse_str("not-a-port").unwrap_err();
 }
 
@@ -166,10 +172,10 @@ async fn mocked_device_records_commands_updates_state_and_emits_events() {
     mpd.pause().await.unwrap();
 }
 
-async fn spawn_fake_mpd_server(
+fn spawn_fake_mpd_server_on(
+    listener: TcpListener,
     handler: impl Fn(String) -> String + Send + Sync + 'static,
 ) -> MpdPort {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let handler = std::sync::Arc::new(handler);
 
@@ -232,6 +238,13 @@ async fn spawn_fake_mpd_server(
     });
 
     MpdPort::new(port).unwrap()
+}
+
+async fn spawn_fake_mpd_server(
+    handler: impl Fn(String) -> String + Send + Sync + 'static,
+) -> MpdPort {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    spawn_fake_mpd_server_on(listener, handler)
 }
 
 #[tokio::test]
@@ -367,6 +380,19 @@ async fn tcp_backend_subscribes_idle_events_and_handles_connect_failures() {
         .with_timeout(Duration::from_millis(50));
     let timeout_err = slow.pause().await.unwrap_err();
     assert!(timeout_err.is_timeout());
+
+    // 4. IPv6 loopback connects cleanly via tuple ToSocketAddrs.
+    if let Ok(v6_listener) = TcpListener::bind("[::1]:0").await {
+        let v6_port = spawn_fake_mpd_server_on(v6_listener, |cmd| match cmd.as_str() {
+            "status" => "repeat: 0\nrandom: 0\nsingle: 0\nconsume: 0\nstate: pause\n".to_string(),
+            _ => String::new(),
+        });
+        let v6_mpd = MpdDevice::with_endpoint(MpdHost::new("::1").unwrap(), v6_port);
+        assert_eq!(
+            v6_mpd.read_status().await.unwrap().state,
+            MpdPlaybackState::Paused
+        );
+    }
 }
 
 #[test]

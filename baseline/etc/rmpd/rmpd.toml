@@ -13,6 +13,8 @@ auto_update = false
 filesystem_watch = false
 
 [network]
+# Intentional trusted home-LAN binding for mDNS/LAN MPD clients;
+# use "127.0.0.1" or configure authentication on untrusted networks.
 bind_address = "0.0.0.0"
 port = 6600
 zeroconf_name = "rmpd@%h"
