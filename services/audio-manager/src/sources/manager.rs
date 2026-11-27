@@ -149,14 +149,18 @@ impl SourceManager {
 
         loop {
             let needs_retry = self.desired_route.as_ref().is_some_and(|req| {
-                req.streaming && !self.rate_ctrl.matches(&req.capture_device, req.rate_hz)
+                (req.streaming && !self.rate_ctrl.matches(&req.capture_device, req.rate_hz))
+                    || (!req.streaming && req.force_apply)
             });
             let reconcile_interval = if needs_retry {
                 Duration::from_millis(500)
             } else {
                 Duration::from_secs(2)
             };
-            let active_stream = self.desired_route.as_ref().is_some_and(|r| r.streaming);
+            let active_stream = self
+                .desired_route
+                .as_ref()
+                .is_some_and(|r| r.streaming || r.force_apply);
 
             tokio::select! {
                 maybe_cmd = cmd_rx.recv() => {
@@ -202,13 +206,27 @@ impl SourceManager {
                 }
                 () = tokio::time::sleep(reconcile_interval), if active_stream => {
                     if let Some(req) = self.desired_route.clone() {
-                        reconcile_route_with_engine(
-                            &mut self.rate_ctrl,
-                            &self.dsp,
-                            &self.dsp_config_path,
-                            &req,
-                        )
-                        .await;
+                        if req.streaming {
+                            reconcile_route_with_engine(
+                                &mut self.rate_ctrl,
+                                &self.dsp,
+                                &self.dsp_config_path,
+                                &req,
+                            )
+                            .await;
+                        } else if req.force_apply
+                            && apply_route_request(
+                                &mut self.rate_ctrl,
+                                &self.dsp,
+                                &self.dsp_config_path,
+                                &req,
+                                false,
+                            )
+                            .await
+                            && let Some(desired) = self.desired_route.as_mut()
+                        {
+                            desired.force_apply = false;
+                        }
                     }
                 }
             }
@@ -233,9 +251,8 @@ impl SourceManager {
 
     async fn apply_outcome(&mut self, outcome: ArbiterOutcome, from_event: bool) {
         if let Some(target) = outcome.dsp_target {
-            let req = route_request_from_target(target);
-            self.desired_route = Some(req.clone());
-            apply_route_request(
+            let mut req = route_request_from_target(target);
+            let applied = apply_route_request(
                 &mut self.rate_ctrl,
                 &self.dsp,
                 &self.dsp_config_path,
@@ -243,6 +260,10 @@ impl SourceManager {
                 from_event,
             )
             .await;
+            if applied && !req.streaming {
+                req.force_apply = false;
+            }
+            self.desired_route = Some(req);
         }
 
         for id in outcome.pause_sources {
@@ -328,43 +349,42 @@ pub async fn run_mpd_play_watcher(
         match mpd.subscribe_events().await {
             Ok(mut events) => {
                 backoff = Duration::from_millis(500);
-                if let Ok(status) = mpd.read_status().await {
-                    let playing = status.state == MpdPlaybackState::Playing;
-                    if playing && !was_playing {
-                        let _ = cmd_tx
-                            .send(SourceCommand::fire_and_forget(
-                                SourceCommandKind::ReportPlayIntent(source_id.clone()),
-                            ))
-                            .await;
-                    }
-                    was_playing = playing;
-                }
+                let mut status_backoff = Duration::from_millis(500);
+                let mut needs_status_sync = true;
 
                 loop {
+                    if needs_status_sync && let Ok(status) = mpd.read_status().await {
+                        needs_status_sync = false;
+                        status_backoff = Duration::from_millis(500);
+                        let playing = status.state == MpdPlaybackState::Playing;
+                        if playing && !was_playing {
+                            info!(source = %source_id, "MPD player resumed; reporting play intent");
+                            if cmd_tx
+                                .send(SourceCommand::fire_and_forget(
+                                    SourceCommandKind::ReportPlayIntent(source_id.clone()),
+                                ))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        was_playing = playing;
+                    }
+
                     tokio::select! {
                         () = cmd_tx.closed() => return,
+                        () = tokio::time::sleep(status_backoff), if needs_status_sync => {
+                            status_backoff = (status_backoff * 2).min(max_backoff);
+                        }
                         maybe_evt = events.recv() => {
                             let Some(evt) = maybe_evt else {
                                 break;
                             };
                             match evt {
                                 MpdEvent::SubsystemChanged(MpdSubsystem::Player) => {
-                                    if let Ok(status) = mpd.read_status().await {
-                                        let playing = status.state == MpdPlaybackState::Playing;
-                                        if playing && !was_playing {
-                                            info!(source = %source_id, "MPD player resumed; reporting play intent");
-                                            if cmd_tx
-                                                .send(SourceCommand::fire_and_forget(
-                                                    SourceCommandKind::ReportPlayIntent(source_id.clone()),
-                                                ))
-                                                .await
-                                                .is_err()
-                                            {
-                                                return;
-                                            }
-                                        }
-                                        was_playing = playing;
-                                    }
+                                    needs_status_sync = true;
+                                    status_backoff = Duration::from_millis(500);
                                 }
                                 MpdEvent::Disconnected(_) => break,
                                 MpdEvent::SubsystemChanged(_) => {}

@@ -166,6 +166,12 @@ impl Config {
         if config.camilladsp_config_path.as_os_str().is_empty() {
             config.camilladsp_config_path = default_camilladsp_config_path();
         }
+        if config.source_state_path == config.state_path {
+            anyhow::bail!(
+                "source_state_path and state_path must be distinct ('{}')",
+                config.state_path.display()
+            );
+        }
 
         SourceRegistry::from_definitions(config.sources.clone())
             .map_err(|e| anyhow::anyhow!("Invalid sources configuration: {e}"))?;

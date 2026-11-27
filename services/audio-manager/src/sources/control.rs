@@ -193,7 +193,13 @@ impl SourceControl for SourceController {
                 match adapter {
                     EndpointAdapter::Noop => Ok(()),
                     EndpointAdapter::Mpd(mpd) => {
-                        mpd.pause().await?;
+                        tokio::time::timeout(*timeout, mpd.pause()).await.map_err(
+                            |elapsed| {
+                                SourceControlError::Timeout(
+                                    format!("MPD pause timed out: {elapsed}").into(),
+                                )
+                            },
+                        )??;
                         Ok(())
                     }
                     EndpointAdapter::BluetoothDbus => {
@@ -214,8 +220,9 @@ async fn pause_bluetooth_dbus(
     conn: &Connection,
     timeout: Duration,
 ) -> Result<(), SourceControlError> {
-    let proxy = tokio::time::timeout(
-        timeout,
+    let deadline = tokio::time::Instant::now() + timeout;
+    let proxy = tokio::time::timeout_at(
+        deadline,
         Proxy::new(
             conn,
             BLUETOOTH_DBUS_DEST,
@@ -228,7 +235,7 @@ async fn pause_bluetooth_dbus(
         SourceControlError::Timeout(format!("Bluetooth proxy build timed out: {elapsed}").into())
     })??;
 
-    tokio::time::timeout(timeout, proxy.call_method("PauseActive", &()))
+    tokio::time::timeout_at(deadline, proxy.call_method("PauseActive", &()))
         .await
         .map_err(|elapsed| {
             SourceControlError::Timeout(

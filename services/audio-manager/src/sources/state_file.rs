@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -45,12 +46,16 @@ impl SourceStateFile {
         Ok(state)
     }
 
-    /// Saves source state atomically (`NamedTempFile` + `fsync` + `rename`).
+    /// Saves source state atomically (`NamedTempFile` + `fsync` + `rename`) on a blocking thread.
     ///
     /// # Errors
-    /// Returns [`crate::AmpError`] on serialization or filesystem failure.
+    /// Returns [`crate::AmpError`] on serialization, filesystem, or blocking-task failure.
     pub async fn save(&self, state: &PersistedSourceState) -> AmpResult<()> {
-        save_json_atomic(&self.path, state)?;
+        let path = self.path.clone();
+        let state_copy = state.clone();
+        tokio::task::spawn_blocking(move || save_json_atomic(&path, &state_copy))
+            .await
+            .context("Source state file save task panicked")??;
         debug!(path = %self.path.display(), ?state, "Saved source state");
         Ok(())
     }

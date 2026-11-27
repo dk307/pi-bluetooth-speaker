@@ -438,4 +438,19 @@ async fn mpd_read_volume_mocked_and_tcp() {
     .await;
     let tcp_mpd = MpdDevice::with_endpoint(MpdHost::default(), port);
     assert_eq!(tcp_mpd.read_volume().await.unwrap(), Some(63));
+
+    // Absent volume field (mixer_type = "none") must yield None, not Some(0).
+    let no_mixer_port = spawn_fake_mpd_server(|cmd| match cmd.as_str() {
+        "status" => "repeat: 0\nrandom: 0\nsingle: 0\nconsume: 0\nstate: play\n".into(),
+        _ => String::new(),
+    })
+    .await;
+    let no_mixer_mpd = MpdDevice::with_endpoint(MpdHost::default(), no_mixer_port);
+    assert_eq!(no_mixer_mpd.read_volume().await.unwrap(), None);
+    assert_eq!(no_mixer_mpd.read_status().await.unwrap().volume, None);
+
+    // Invalid hostname labels (empty / leading hyphen in label) must be rejected.
+    MpdHost::new("music..local").unwrap_err();
+    MpdHost::new("music.-local").unwrap_err();
+    MpdHost::new("music-.local").unwrap_err();
 }

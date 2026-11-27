@@ -126,13 +126,15 @@ async fn push_amp_to_mpd(
     mpd: &MpdDevice,
     state: &mut MpdVolumeSyncState,
     amp_percent: u8,
-) {
+) -> bool {
     let clamped = amp_percent.min(100);
     if let Err(e) = mpd.set_volume(clamped).await {
         debug!(source = %source_id, percent = clamped, error = %e, "Failed to push amp volume to MPD");
+        false
     } else {
         state.record_reverse_pushed(clamped, Instant::now());
         debug!(source = %source_id, percent = clamped, "Synced amp volume -> MPD");
+        true
     }
 }
 
@@ -203,14 +205,33 @@ pub async fn run_mpd_volume_sync(
         match mpd.subscribe_events().await {
             Ok(mut events) => {
                 backoff = Duration::from_millis(500);
+                let mut push_backoff = Duration::from_millis(500);
+                let mut pending_push: Option<u8> = None;
                 if state.source_active() {
                     state.arm_reconnect(Instant::now());
                     let level = *level_rx.borrow_and_update();
-                    push_amp_to_mpd(&source_id, &mpd, &mut state, level).await;
+                    if !push_amp_to_mpd(&source_id, &mpd, &mut state, level).await {
+                        pending_push = Some(level.min(100));
+                    }
                 }
                 loop {
                     tokio::select! {
                         () = amp_cmd_tx.closed() => return,
+                        () = tokio::time::sleep(push_backoff), if pending_push.is_some() => {
+                            if let Some(level) = pending_push {
+                                if state.source_active() && state.should_push_to_mpd(level) {
+                                    if push_amp_to_mpd(&source_id, &mpd, &mut state, level).await {
+                                        pending_push = None;
+                                        push_backoff = Duration::from_millis(500);
+                                    } else {
+                                        push_backoff = (push_backoff * 2).min(max_backoff);
+                                    }
+                                } else {
+                                    pending_push = None;
+                                    push_backoff = Duration::from_millis(500);
+                                }
+                            }
+                        }
                         res = active_rx.changed() => {
                             if res.is_err() {
                                 return;
@@ -218,7 +239,16 @@ pub async fn run_mpd_volume_sync(
                             let is_active = active_rx.borrow_and_update().as_ref() == Some(&source_id);
                             if state.set_source_active(is_active, Instant::now()) {
                                 let level = *level_rx.borrow_and_update();
-                                push_amp_to_mpd(&source_id, &mpd, &mut state, level).await;
+                                if push_amp_to_mpd(&source_id, &mpd, &mut state, level).await {
+                                    pending_push = None;
+                                    push_backoff = Duration::from_millis(500);
+                                } else {
+                                    pending_push = Some(level.min(100));
+                                    push_backoff = Duration::from_millis(500);
+                                }
+                            } else if !is_active {
+                                pending_push = None;
+                                push_backoff = Duration::from_millis(500);
                             }
                         }
                         res = level_rx.changed() => {
@@ -227,7 +257,13 @@ pub async fn run_mpd_volume_sync(
                             }
                             let level = *level_rx.borrow_and_update();
                             if state.should_push_to_mpd(level) {
-                                push_amp_to_mpd(&source_id, &mpd, &mut state, level).await;
+                                if push_amp_to_mpd(&source_id, &mpd, &mut state, level).await {
+                                    pending_push = None;
+                                    push_backoff = Duration::from_millis(500);
+                                } else {
+                                    pending_push = Some(level.min(100));
+                                    push_backoff = Duration::from_millis(500);
+                                }
                             }
                         }
                         maybe_evt = events.recv() => {
@@ -244,20 +280,58 @@ pub async fn run_mpd_volume_sync(
                                             break;
                                         }
                                     }
-                                    if let Ok(Some(vol)) = mpd.read_volume().await
-                                        && state.should_forward_to_amp(vol, Instant::now())
-                                    {
-                                        let clamped = vol.min(100);
-                                        if forward_mpd_to_amp(
-                                            &source_id,
-                                            &amp_cmd_tx,
-                                            dbus_conn.as_ref(),
-                                            clamped,
-                                        )
-                                        .await
-                                        {
-                                            state.record_forward_applied(clamped);
-                                            let _ = level_rx.borrow_and_update();
+                                    if let Ok(Some(vol)) = mpd.read_volume().await {
+                                        // Re-check active source after the async read so a concurrent
+                                        // handover cannot leak an MPD volume change to the amp.
+                                        let still_active = active_rx.borrow_and_update().as_ref() == Some(&source_id);
+                                        if state.set_source_active(still_active, Instant::now()) {
+                                            let level = *level_rx.borrow_and_update();
+                                            if push_amp_to_mpd(&source_id, &mpd, &mut state, level).await {
+                                                pending_push = None;
+                                                push_backoff = Duration::from_millis(500);
+                                            } else {
+                                                pending_push = Some(level.min(100));
+                                                push_backoff = Duration::from_millis(500);
+                                            }
+                                        } else if !still_active {
+                                            pending_push = None;
+                                            push_backoff = Duration::from_millis(500);
+                                        } else if state.should_forward_to_amp(vol, Instant::now()) {
+                                            let clamped = vol.min(100);
+                                            if forward_mpd_to_amp(
+                                                &source_id,
+                                                &amp_cmd_tx,
+                                                dbus_conn.as_ref(),
+                                                clamped,
+                                            )
+                                            .await
+                                            {
+                                                state.record_forward_applied(clamped);
+                                                if level_rx.has_changed().unwrap_or(false) {
+                                                    let current_amp =
+                                                        level_rx.borrow_and_update().min(100);
+                                                    if current_amp != clamped
+                                                        && state.should_push_to_mpd(current_amp)
+                                                    {
+                                                        if push_amp_to_mpd(
+                                                            &source_id,
+                                                            &mpd,
+                                                            &mut state,
+                                                            current_amp,
+                                                        )
+                                                        .await
+                                                        {
+                                                            pending_push = None;
+                                                            push_backoff =
+                                                                Duration::from_millis(500);
+                                                        } else {
+                                                            pending_push = Some(current_amp);
+                                                            push_backoff =
+                                                                Duration::from_millis(500);
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                     if disconnected {

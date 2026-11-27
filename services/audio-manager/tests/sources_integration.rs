@@ -916,6 +916,7 @@ async fn source_manager_handles_corrupt_state_pause_errors_and_reconcile_timer()
     .unwrap();
 
     // Simulate CamillaDSP restarting onto wrong capture_device and let the 2s reconcile timer fire
+    let before_uploads = dsp_mock.set_config_json_calls();
     tokio::time::pause();
     dsp_mock.set_config(Some(DspConfigInfo {
         capture_device: Some("hw:Loopback,1,1".into()),
@@ -928,7 +929,8 @@ async fn source_manager_handles_corrupt_state_pause_errors_and_reconcile_timer()
 
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Some(j) = dsp_mock.last_set_config_json()
+            if dsp_mock.set_config_json_calls() > before_uploads
+                && let Some(j) = dsp_mock.last_set_config_json()
                 && j.contains("hw:Loopback,1,0")
                 && j.contains("48000")
             {

@@ -49,6 +49,16 @@ pub(crate) fn save_json_atomic<T: Serialize>(path: &Path, state: &T) -> AmpResul
     temp.as_file().sync_all().context("fsync temp file")?;
 
     temp.persist(path).context("rename temp to state file")?;
+    if let Some(parent) = path.parent() {
+        let dir = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        File::open(dir)
+            .and_then(|d| d.sync_all())
+            .context("fsync state directory")?;
+    }
     Ok(())
 }
 

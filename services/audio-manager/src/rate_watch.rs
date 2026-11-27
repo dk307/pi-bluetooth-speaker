@@ -210,6 +210,17 @@ pub async fn apply_route_request(
     req: &DspRouteRequest,
     force_if_inactive: bool,
 ) -> bool {
+    apply_route_request_inner(ctrl, dsp, config_path, req, force_if_inactive, true).await
+}
+
+async fn apply_route_request_inner(
+    ctrl: &mut RateWatchController,
+    dsp: &DspDevice,
+    config_path: &Path,
+    req: &DspRouteRequest,
+    force_if_inactive: bool,
+    override_capture_device: bool,
+) -> bool {
     if force_if_inactive
         && req.streaming
         && ctrl.matches(&req.capture_device, req.rate_hz)
@@ -235,9 +246,10 @@ pub async fn apply_route_request(
     };
 
     let chunksize = chunksize_for_rate(rate_hz);
+    let device_override = override_capture_device.then_some(target_device.as_ref());
     let config_json = match build_reconfigured_config_json_for(
         &raw_yaml,
-        Some(&target_device),
+        device_override,
         rate_hz,
         chunksize,
     ) {
@@ -291,7 +303,7 @@ pub async fn apply_route_request(
     }
 }
 
-/// Applies a [`LoopbackState`] update to `dsp` on default subdevice 0.
+/// Applies a [`LoopbackState`] update to `dsp`, preserving the YAML's `devices.capture.device`.
 pub async fn apply_loopback_state(
     ctrl: &mut RateWatchController,
     dsp: &DspDevice,
@@ -304,7 +316,7 @@ pub async fn apply_loopback_state(
         streaming: state.active,
         force_apply: false,
     };
-    apply_route_request(ctrl, dsp, config_path, &req, false).await
+    apply_route_request_inner(ctrl, dsp, config_path, &req, false, false).await
 }
 
 /// Reconciles `ctrl` against `CamillaDSP`'s live status when a stream is active,
@@ -317,6 +329,16 @@ pub async fn reconcile_route_with_engine(
     dsp: &DspDevice,
     config_path: &Path,
     req: &DspRouteRequest,
+) -> bool {
+    reconcile_route_with_engine_inner(ctrl, dsp, config_path, req, true).await
+}
+
+async fn reconcile_route_with_engine_inner(
+    ctrl: &mut RateWatchController,
+    dsp: &DspDevice,
+    config_path: &Path,
+    req: &DspRouteRequest,
+    override_capture_device: bool,
 ) -> bool {
     if !req.streaming || req.rate_hz == 0 {
         return false;
@@ -339,7 +361,8 @@ pub async fn reconcile_route_with_engine(
             .as_ref()
             .and_then(|c| c.capture_device.as_deref());
         let rate_mismatch = live_rate.is_some_and(|r| r != req.rate_hz);
-        let device_mismatch = live_device.is_some_and(|d| d != req.capture_device.as_ref());
+        let device_mismatch = override_capture_device
+            && live_device.is_some_and(|d| d != req.capture_device.as_ref());
         if status.state != ProcessingState::Inactive && !rate_mismatch && !device_mismatch {
             return false;
         }
@@ -353,7 +376,7 @@ pub async fn reconcile_route_with_engine(
         );
         ctrl.invalidate();
     }
-    apply_route_request(ctrl, dsp, config_path, req, false).await
+    apply_route_request_inner(ctrl, dsp, config_path, req, false, override_capture_device).await
 }
 
 /// Legacy single-subdevice reconciliation wrapper over [`reconcile_route_with_engine`].
@@ -369,7 +392,7 @@ pub async fn reconcile_with_engine(
         streaming: state.active,
         force_apply: false,
     };
-    reconcile_route_with_engine(ctrl, dsp, config_path, &req).await
+    reconcile_route_with_engine_inner(ctrl, dsp, config_path, &req, false).await
 }
 
 /// Spawns the `hw:Loopback` ALSA ctl thread monitoring `subdevices` and returns its receiver + join handle.
@@ -415,7 +438,8 @@ pub async fn run_with_rx(
                     streaming: state.active,
                     force_apply: false,
                 };
-                apply_route_request(&mut ctrl, &dsp, config_path, &req, from_event).await;
+                apply_route_request_inner(&mut ctrl, &dsp, config_path, &req, from_event, false)
+                    .await;
             }
             () = tokio::time::sleep(reconcile_interval), if last_state.is_some_and(|s| s.active) => {
                 if let Some(state) = last_state {

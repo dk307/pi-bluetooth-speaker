@@ -92,15 +92,14 @@ impl MpdHost {
         if trimmed.parse::<IpAddr>().is_ok() {
             return Ok(Self(trimmed.into()));
         }
-        if !trimmed.starts_with('.')
-            && !trimmed.starts_with('-')
-            && !trimmed.ends_with('.')
-            && !trimmed.ends_with('-')
-            && trimmed.len() <= 253
-            && trimmed.chars().any(|c| c.is_ascii_alphanumeric())
-            && trimmed
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        if trimmed.len() <= 253
+            && trimmed.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            })
         {
             return Ok(Self(trimmed.into()));
         }
@@ -730,6 +729,7 @@ impl MpdDevice {
     pub async fn pause(&self) -> Result<(), MpdError> {
         self.exec_simple(
             "pause",
+            true,
             MpdMockCommand::Pause,
             |g| g.state = MpdPlaybackState::Paused,
             |client| Box::pin(async move { client.command(SetPause(true)).await }),
@@ -744,6 +744,7 @@ impl MpdDevice {
     pub async fn resume(&self) -> Result<(), MpdError> {
         self.exec_simple(
             "resume",
+            true,
             MpdMockCommand::Resume,
             |g| g.state = MpdPlaybackState::Playing,
             |client| Box::pin(async move { client.command(SetPause(false)).await }),
@@ -758,6 +759,7 @@ impl MpdDevice {
     pub async fn play(&self) -> Result<(), MpdError> {
         self.exec_simple(
             "play",
+            true,
             MpdMockCommand::Play,
             |g| g.state = MpdPlaybackState::Playing,
             |client| Box::pin(async move { client.command(Play::current()).await }),
@@ -772,6 +774,7 @@ impl MpdDevice {
     pub async fn stop(&self) -> Result<(), MpdError> {
         self.exec_simple(
             "stop",
+            true,
             MpdMockCommand::Stop,
             |g| g.state = MpdPlaybackState::Stopped,
             |client| Box::pin(async move { client.command(Stop).await }),
@@ -786,6 +789,7 @@ impl MpdDevice {
     pub async fn next(&self) -> Result<(), MpdError> {
         self.exec_simple(
             "next",
+            false,
             MpdMockCommand::Next,
             |_| {},
             |client| Box::pin(async move { client.command(Next).await }),
@@ -800,6 +804,7 @@ impl MpdDevice {
     pub async fn previous(&self) -> Result<(), MpdError> {
         self.exec_simple(
             "previous",
+            false,
             MpdMockCommand::Previous,
             |_| {},
             |client| Box::pin(async move { client.command(Previous).await }),
@@ -819,6 +824,7 @@ impl MpdDevice {
         }
         self.exec_simple(
             "setvol",
+            true,
             MpdMockCommand::SetVolume(percent),
             |g| g.volume = Some(percent),
             |client| Box::pin(async move { client.command(SetVolume(percent)).await }),
@@ -849,19 +855,31 @@ impl MpdDevice {
                 client: client_slot,
             } => {
                 let client = cached_client(host, *port, *timeout, client_slot).await?;
-                let res = await_timeout(*timeout, "MPD status", client.command(Status)).await?;
-                let status = match res {
+                let res =
+                    match await_timeout(*timeout, "MPD status", client.command(RawStatus)).await {
+                        Ok(res) => res,
+                        Err(e) => {
+                            *client_slot.lock().await = None;
+                            return Err(e);
+                        }
+                    };
+                let (_status, volume) = match res {
                     Ok(ok) => ok,
                     Err(mpd_client::client::CommandError::ConnectionClosed) => {
                         *client_slot.lock().await = None;
                         let fresh = cached_client(host, *port, *timeout, client_slot).await?;
-                        await_timeout(*timeout, "MPD status", fresh.command(Status))
-                            .await?
-                            .map_err(|e| map_command_error("status", e))?
+                        match await_timeout(*timeout, "MPD status", fresh.command(RawStatus)).await
+                        {
+                            Ok(res) => res.map_err(|e| map_command_error("status", e))?,
+                            Err(e) => {
+                                *client_slot.lock().await = None;
+                                return Err(e);
+                            }
+                        }
                     }
                     Err(e) => return Err(map_command_error("status", e)),
                 };
-                Ok(Some(status.volume).filter(|&v| v <= 100))
+                Ok(volume)
             }
         }
     }
@@ -897,24 +915,37 @@ impl MpdDevice {
                 client: client_slot,
             } => {
                 let mut client = cached_client(host, *port, *timeout, client_slot).await?;
-                let res = await_timeout(
+                let res = match await_timeout(
                     *timeout,
                     "MPD status",
-                    client.command_list((Status, CurrentSong)),
+                    client.command_list((RawStatus, CurrentSong)),
                 )
-                .await?;
-                let (status, song) = match res {
+                .await
+                {
+                    Ok(res) => res,
+                    Err(e) => {
+                        *client_slot.lock().await = None;
+                        return Err(e);
+                    }
+                };
+                let ((status, volume), song) = match res {
                     Ok(ok) => ok,
                     Err(mpd_client::client::CommandError::ConnectionClosed) => {
                         *client_slot.lock().await = None;
                         client = cached_client(host, *port, *timeout, client_slot).await?;
-                        await_timeout(
+                        match await_timeout(
                             *timeout,
                             "MPD status",
-                            client.command_list((Status, CurrentSong)),
+                            client.command_list((RawStatus, CurrentSong)),
                         )
-                        .await?
-                        .map_err(|e| map_command_error("status", e))?
+                        .await
+                        {
+                            Ok(res) => res.map_err(|e| map_command_error("status", e))?,
+                            Err(e) => {
+                                *client_slot.lock().await = None;
+                                return Err(e);
+                            }
+                        }
                     }
                     Err(e) => return Err(map_command_error("status", e)),
                 };
@@ -936,7 +967,7 @@ impl MpdDevice {
                     port: *port,
                     protocol_version,
                     state: status.state.into(),
-                    volume: Some(status.volume).filter(|&v| v <= 100),
+                    volume,
                     elapsed: status.elapsed,
                     duration: status.duration,
                     current_track,
@@ -993,18 +1024,26 @@ impl MpdDevice {
                     // underlying TCP connection stays open for `ConnectionEvents`.
                     let _keep_client_alive = client;
                     let mut sent_disconnect = false;
-                    while let Some(evt) = events.next().await {
-                        let mapped = match evt {
-                            ConnectionEvent::SubsystemChange(sub) => {
-                                MpdEvent::SubsystemChanged(sub.into())
+                    loop {
+                        tokio::select! {
+                            () = tx.closed() => return,
+                            maybe_evt = events.next() => {
+                                let Some(evt) = maybe_evt else {
+                                    break;
+                                };
+                                let mapped = match evt {
+                                    ConnectionEvent::SubsystemChange(sub) => {
+                                        MpdEvent::SubsystemChanged(sub.into())
+                                    }
+                                    ConnectionEvent::ConnectionClosed(err) => {
+                                        sent_disconnect = true;
+                                        MpdEvent::Disconnected(err.to_string().into())
+                                    }
+                                };
+                                if tx.send(mapped).await.is_err() || sent_disconnect {
+                                    return;
+                                }
                             }
-                            ConnectionEvent::ConnectionClosed(err) => {
-                                sent_disconnect = true;
-                                MpdEvent::Disconnected(err.to_string().into())
-                            }
-                        };
-                        if tx.send(mapped).await.is_err() || sent_disconnect {
-                            break;
                         }
                     }
                     if !sent_disconnect {
@@ -1021,6 +1060,7 @@ impl MpdDevice {
     async fn exec_simple<'a, F, Fut>(
         &'a self,
         cmd_name: &'static str,
+        retry_on_close: bool,
         mock_cmd: MpdMockCommand,
         apply_mock: impl FnOnce(&mut MockState),
         run_tcp: F,
@@ -1048,19 +1088,60 @@ impl MpdDevice {
                 client: client_slot,
             } => {
                 let client = cached_client(host, *port, *timeout, client_slot).await?;
-                match await_timeout(*timeout, cmd_name, run_tcp(client)).await? {
+                let res = match await_timeout(*timeout, cmd_name, run_tcp(client)).await {
+                    Ok(res) => res,
+                    Err(e) => {
+                        *client_slot.lock().await = None;
+                        return Err(e);
+                    }
+                };
+                match res {
                     Ok(()) => Ok(()),
                     Err(mpd_client::client::CommandError::ConnectionClosed) => {
                         *client_slot.lock().await = None;
+                        if !retry_on_close {
+                            return Err(map_command_error(
+                                cmd_name,
+                                mpd_client::client::CommandError::ConnectionClosed,
+                            ));
+                        }
                         let fresh = cached_client(host, *port, *timeout, client_slot).await?;
-                        await_timeout(*timeout, cmd_name, run_tcp(fresh))
-                            .await?
-                            .map_err(|e| map_command_error(cmd_name, e))
+                        match await_timeout(*timeout, cmd_name, run_tcp(fresh)).await {
+                            Ok(res) => res.map_err(|e| map_command_error(cmd_name, e)),
+                            Err(e) => {
+                                *client_slot.lock().await = None;
+                                Err(e)
+                            }
+                        }
                     }
                     Err(e) => Err(map_command_error(cmd_name, e)),
                 }
             }
         }
+    }
+}
+
+struct RawStatus;
+
+impl mpd_client::commands::Command for RawStatus {
+    type Response = (mpd_client::responses::Status, Option<u8>);
+
+    fn command(&self) -> mpd_client::protocol::command::Command {
+        Status.command()
+    }
+
+    fn response(
+        self,
+        frame: mpd_client::protocol::response::Frame,
+    ) -> Result<Self::Response, mpd_client::responses::TypedResponseError> {
+        let vol_present = frame.find("volume").is_some();
+        let status = Status.response(frame)?;
+        let volume = if vol_present {
+            Some(status.volume).filter(|&v| v <= 100)
+        } else {
+            None
+        };
+        Ok((status, volume))
     }
 }
 
