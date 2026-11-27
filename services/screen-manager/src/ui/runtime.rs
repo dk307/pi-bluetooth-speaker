@@ -101,11 +101,16 @@ pub fn run(opts: RuntimeOptions<'_>) {
 /// quit flag when the platform exposes no event-loop proxy.
 fn request_quit() {
     if let Err(err) = slint::quit_event_loop() {
-        tracing::debug!(
-            error = %err,
-            "quit_event_loop unavailable; signalling test loop directly"
-        );
-        super::framebuffer::signal_test_loop_quit();
+        #[cfg(feature = "test-util")]
+        {
+            tracing::debug!(
+                error = %err,
+                "quit_event_loop unavailable; signalling test loop directly"
+            );
+            super::framebuffer::signal_test_loop_quit();
+        }
+        #[cfg(not(feature = "test-util"))]
+        tracing::debug!(error = %err, "quit_event_loop unavailable");
     }
 }
 
