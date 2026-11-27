@@ -1060,7 +1060,16 @@ async fn run_loop_replies_edge_close_errors_and_shutdown() {
             .is_ok()
     );
     let raw80 = speaker_hardware::amp::PERCENT_TO_RAW[80];
-    assert_eq!(f.state_file.load().unwrap().level_raw, raw80);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if f.state_file.load().is_ok_and(|s| s.level_raw == raw80) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("debounced SetLevel(80) must persist");
 
     // 2. Failing command: reply carries the error summary and the loop
     //    keeps running (prior state preserved).
@@ -1099,14 +1108,89 @@ async fn run_loop_replies_edge_close_errors_and_shutdown() {
             .is_ok()
     );
     let raw70 = speaker_hardware::amp::PERCENT_TO_RAW[70];
-    assert_eq!(f.state_file.load().unwrap().level_raw, raw70);
-
-    // 4. Shutdown signal ends the loop promptly.
+    // Shutdown must flush pending debounced state immediately without waiting
+    // for PERSIST_DEBOUNCE.
     shutdown_tx.send(()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), task)
         .await
         .expect("run loop must exit on shutdown")
         .unwrap();
+    assert_eq!(f.state_file.load().unwrap().level_raw, raw70);
+}
+
+#[tokio::test]
+async fn run_loop_skips_redundant_raw_writes_and_debounces_persistence() {
+    let mut f = fixture();
+    let initial = AmpState::new(60, false).unwrap();
+    f.controller.boot_init(initial).await.unwrap();
+    let mirror = f.controller.mirror();
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<AmpCommand>(16);
+    let (_edge_tx, edge_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let task = tokio::spawn(f.controller.run(cmd_rx, Some(edge_rx), shutdown_rx, false));
+
+    // Rapid burst of SetLevel commands: mirror & hardware update immediately.
+    for pct in [40u8, 50, 55] {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        cmd_tx
+            .send(AmpCommand {
+                kind: AmpCommandKind::SetLevel(pct),
+                reply: Some(reply_tx),
+            })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+    }
+    let raw55 = speaker_hardware::amp::PERCENT_TO_RAW[55];
+    assert_eq!(mirror.lock().await.level_raw, raw55);
+    assert_eq!(f.amp_mock.mock_master_volume_raw(), raw55);
+
+    // Debounced write lands on disk after PERSIST_DEBOUNCE.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if f.state_file.load().is_ok_and(|s| s.level_raw == raw55) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("debounced burst should persist final raw55");
+
+    // Adjacent percents sharing the same raw step (32% and 33% both map to 103)
+    // must succeed without failing even if a fault is injected on the second write.
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(AmpCommand {
+            kind: AmpCommandKind::SetLevel(32),
+            reply: Some(reply_tx),
+        })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap().unwrap();
+
+    f.amp_mock.set_fault(Some("should not be reached".into()));
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(AmpCommand {
+            kind: AmpCommandKind::SetLevel(33),
+            reply: Some(reply_tx),
+        })
+        .await
+        .unwrap();
+    reply_rx
+        .await
+        .unwrap()
+        .expect("same-raw SetLevel(33) must skip redundant I2C write");
+    f.amp_mock.set_fault(None);
+
+    shutdown_tx.send(()).await.unwrap();
+    task.await.unwrap();
+    assert_eq!(
+        f.state_file.load().unwrap().level_raw,
+        speaker_hardware::amp::PERCENT_TO_RAW[32]
+    );
 }
 
 #[tokio::test]
@@ -1447,4 +1531,36 @@ async fn spurious_critical_fault_at_stream_start_does_not_throttle_or_reset() {
     assert_eq!(f.controller.ctrl_state(), CtrlState::Playing);
     assert_eq!(f.gpio_mock.reset_calls(), 0);
     assert_eq!(f.amp_mock.mock_master_volume_raw(), 60);
+}
+
+#[tokio::test]
+async fn subscribe_level_notifies_on_change_and_deduplicates_same_percent() {
+    let mut f = fixture();
+    let mut level_rx = f.controller.subscribe_level();
+    f.controller
+        .boot_init(AmpState::new(60, false).unwrap())
+        .await
+        .unwrap();
+
+    f.controller
+        .handle_command(AmpCommandKind::SetLevel(50))
+        .await
+        .unwrap();
+    assert!(level_rx.has_changed().unwrap());
+    assert_eq!(*level_rx.borrow_and_update(), 50);
+
+    // Repeating the same percent must not mark the watch channel changed.
+    f.controller
+        .handle_command(AmpCommandKind::SetLevel(50))
+        .await
+        .unwrap();
+    assert!(!level_rx.has_changed().unwrap());
+
+    // Changing to a new percent notifies subscribers.
+    f.controller
+        .handle_command(AmpCommandKind::SetLevel(62))
+        .await
+        .unwrap();
+    assert!(level_rx.has_changed().unwrap());
+    assert_eq!(*level_rx.borrow_and_update(), 62);
 }

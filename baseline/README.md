@@ -33,7 +33,7 @@ baseline/
 │   ├── dbus-1/system.d/
 │   │   ├── org.speaker.Bluetooth.conf # D-Bus policy for active-source arbiter (bt-manager)
 │   │   └── org.speaker.CoverArt.conf  # D-Bus policy for BIP cover-art service (bt-manager)
-│   ├── mpd.conf                   # Streaming & internet-radio MPD v0.25 config (ALSA src_rmpd, mixer_type=none)
+│   ├── mpd.conf                   # Streaming & internet-radio MPD v0.25 config (ALSA src_rmpd, mixer_type=null)
 │   └── systemd/
 │       └── system/
 │           ├── camilladsp.service     # CamillaDSP 5.0 engine daemon (-w wait mode, WS on 127.0.0.1:1234)

@@ -272,6 +272,9 @@ async fn dbus_active_device_property_round_trips_on_private_bus() {
     let prop: String = proxy.get_property(ACTIVE_DEVICE_PROPERTY).await.unwrap();
     assert_eq!(parse_active_device(&prop), Some(addr_a()));
 
+    // PauseActive() completes cleanly even when org.bluez is absent on the private bus.
+    proxy.call_method("PauseActive", &()).await.unwrap();
+
     // Blocking client reads the same property.
     let read_back = tokio::task::spawn_blocking(move || {
         let blocking = zbus::blocking::connection::Builder::address(addr.as_str())
@@ -284,4 +287,8 @@ async fn dbus_active_device_property_round_trips_on_private_bus() {
     .await
     .unwrap();
     assert_eq!(read_back, Some(addr_a()));
+
+    // ActiveSourceIface::new constructs a standalone interface without a control connection.
+    let standalone = bt_manager::active_source::ActiveSourceIface::new(SharedActiveSource::new());
+    let _ = format!("{standalone:?}");
 }

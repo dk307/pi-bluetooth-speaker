@@ -337,17 +337,30 @@ impl SharedActiveSource {
     }
 }
 
-/// D-Bus interface serving `org.speaker.Bluetooth1` (`ActiveDevice`).
+/// D-Bus interface serving `org.speaker.Bluetooth1` (`ActiveDevice`, `PauseActive`).
 #[derive(Debug)]
 pub struct ActiveSourceIface {
     shared: SharedActiveSource,
+    control_conn: Option<Connection>,
 }
 
 impl ActiveSourceIface {
-    /// Creates an interface backed by `shared`.
+    /// Creates an interface backed by `shared` (without remote `BlueZ` pause control).
     #[must_use]
     pub fn new(shared: SharedActiveSource) -> Self {
-        Self { shared }
+        Self {
+            shared,
+            control_conn: None,
+        }
+    }
+
+    /// Creates an interface backed by `shared` and `control_conn` for `PauseActive`.
+    #[must_use]
+    pub fn with_connection(shared: SharedActiveSource, control_conn: Connection) -> Self {
+        Self {
+            shared,
+            control_conn: Some(control_conn),
+        }
     }
 }
 
@@ -357,6 +370,16 @@ impl ActiveSourceIface {
     #[zbus(property)]
     fn active_device(&self) -> String {
         format_active_device(self.shared.get())
+    }
+
+    /// Pauses the currently active Bluetooth player when another audio source takes over.
+    async fn pause_active(&self) {
+        let Some(conn) = self.control_conn.as_ref() else {
+            return;
+        };
+        if let Some(device) = self.shared.get() {
+            pause_remote_player(conn, device).await;
+        }
     }
 }
 
@@ -370,7 +393,10 @@ pub async fn serve_active_source_on(
 ) -> Result<SignalEmitter<'static>, zbus::Error> {
     connection
         .object_server()
-        .at(ACTIVE_SOURCE_OBJECT_PATH, ActiveSourceIface::new(shared))
+        .at(
+            ACTIVE_SOURCE_OBJECT_PATH,
+            ActiveSourceIface::with_connection(shared, connection.clone()),
+        )
         .await?;
     connection.request_name(ACTIVE_SOURCE_DBUS_NAME).await?;
     let emitter = SignalEmitter::new(connection, ACTIVE_SOURCE_OBJECT_PATH)?.to_owned();

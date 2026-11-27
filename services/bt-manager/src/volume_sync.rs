@@ -37,6 +37,8 @@ use zbus::{Connection, MatchRule, MessageStream, Proxy};
 const BLUEALSA_PROPS_QUEUE: usize = 512;
 /// Number of queued audio-manager `PropertiesChanged` messages.
 const AUDIO_MANAGER_QUEUE: usize = 256;
+/// Number of queued audio-sources `PropertiesChanged` messages.
+const AUDIO_SOURCES_QUEUE: usize = 64;
 /// Number of queued `BlueALSA` `InterfacesAdded` messages.
 const BLUEALSA_IFACE_QUEUE: usize = 32;
 
@@ -120,6 +122,8 @@ pub struct VolumeSyncState {
     known_pcm_paths: HashSet<Box<str>>,
     /// Arbitrated active device MAC, when multiple devices may be connected.
     active_device: Option<BtAddress>,
+    /// `true` when `audio-manager` has Bluetooth (or no source) active.
+    audio_source_active: bool,
 }
 
 impl Default for VolumeSyncState {
@@ -132,6 +136,7 @@ impl Default for VolumeSyncState {
             forward_suppress_until: None,
             known_pcm_paths: HashSet::new(),
             active_device: None,
+            audio_source_active: true,
         }
     }
 }
@@ -184,7 +189,29 @@ impl VolumeSyncState {
     /// Returns `true` when `pcm_vol` is a genuine forward change to apply.
     #[must_use]
     pub fn should_forward_pcm(&self, pcm_vol: u8, now: Instant) -> bool {
-        !self.suppression_active(now) && self.last_pcm_vol != Some(pcm_vol)
+        self.audio_source_active
+            && !self.suppression_active(now)
+            && self.last_pcm_vol != Some(pcm_vol)
+    }
+
+    /// Returns `true` when `audio-manager` has Bluetooth (or no source) active.
+    #[must_use]
+    pub const fn audio_source_active(&self) -> bool {
+        self.audio_source_active
+    }
+
+    /// Updates whether Bluetooth is the appliance's active audio source.
+    ///
+    /// Returns `true` when transitioning `false -> true` (and arms the
+    /// fresh-PCM settle window so a stale phone volume cannot override the amp).
+    pub fn set_audio_source_active(&mut self, active: bool, now: Instant) -> bool {
+        let prev = self.audio_source_active;
+        self.audio_source_active = active;
+        if active && !prev {
+            self.arm_fresh_pcm(now);
+            return true;
+        }
+        false
     }
 
     /// Records a PCM volume that was successfully applied to audio-manager
@@ -309,6 +336,29 @@ pub fn is_bluealsa_volume_signal<'a>(
     path.is_some_and(speaker_bluetooth::transport::is_a2dp_pcm_path)
         && interface == "org.bluealsa.PCM1"
         && changed_keys.any(|k| k == "Volume")
+}
+
+/// Predicate: does an `org.speaker.AudioSources1.ActiveSource` value allow
+/// Bluetooth forward volume sync (`""` or `"bluetooth"`)?
+#[must_use]
+pub fn is_bluetooth_audio_source(active_source: &str) -> bool {
+    active_source.is_empty() || active_source == "bluetooth"
+}
+
+/// Extracts whether Bluetooth is the active audio source from an
+/// `org.speaker.AudioSources1` `PropertiesChanged` payload.
+#[must_use]
+pub fn parse_active_source_changed<S: std::hash::BuildHasher>(
+    interface: &str,
+    props: &HashMap<String, Value<'_>, S>,
+) -> Option<bool> {
+    if interface != "org.speaker.AudioSources1" {
+        return None;
+    }
+    let active = props
+        .get("ActiveSource")
+        .and_then(|v| <&str>::try_from(v).ok())?;
+    Some(is_bluetooth_audio_source(active))
 }
 
 /// Predicate: does this D-Bus `PropertiesChanged` signal announce an
@@ -526,11 +576,18 @@ async fn build_amp_proxy(control_conn: &Connection) -> Result<Proxy<'_>, zbus::E
         .await
 }
 
-/// Builds the three volume-sync signal match rules (`BlueALSA` property
-/// changes, `BlueALSA` interface additions, `audio-manager` property changes).
+struct MatchRules {
+    props: MatchRule<'static>,
+    interfaces: MatchRule<'static>,
+    amp: MatchRule<'static>,
+    sources: MatchRule<'static>,
+}
+
+/// Builds the volume-sync signal match rules (`BlueALSA` property changes,
+/// `BlueALSA` interface additions, `audio-manager` amp & source property changes).
 ///
 /// Returns `None` (with an `error!` log) when any rule cannot be built.
-fn build_match_rules() -> Option<(MatchRule<'static>, MatchRule<'static>, MatchRule<'static>)> {
+fn build_match_rules() -> Option<MatchRules> {
     let props_rule = MatchRule::builder()
         .sender("org.bluealsa")
         .and_then(|b| b.interface("org.freedesktop.DBus.Properties"))
@@ -547,33 +604,52 @@ fn build_match_rules() -> Option<(MatchRule<'static>, MatchRule<'static>, MatchR
         .and_then(|b| b.interface("org.freedesktop.DBus.Properties"))
         .and_then(|b| b.member("PropertiesChanged"))
         .map(zbus::match_rule::Builder::build);
-    let (props_rule, interfaces_rule, amp_rule) = match (props_rule, interfaces_rule, amp_rule) {
-        (Ok(props), Ok(interfaces), Ok(amp)) => (props, interfaces, amp),
-        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-            tracing::error!(error = %e, "Failed to build signal match rule");
-            return None;
-        }
-    };
-    Some((props_rule, interfaces_rule, amp_rule))
+    let sources_rule = MatchRule::builder()
+        .sender("org.speaker.AudioManager")
+        .and_then(|b| b.path("/org/speaker/sources"))
+        .and_then(|b| b.interface("org.freedesktop.DBus.Properties"))
+        .and_then(|b| b.member("PropertiesChanged"))
+        .map(zbus::match_rule::Builder::build);
+    let (props, interfaces, amp, sources) =
+        match (props_rule, interfaces_rule, amp_rule, sources_rule) {
+            (Ok(props), Ok(interfaces), Ok(amp), Ok(sources)) => (props, interfaces, amp, sources),
+            (Err(e), _, _, _) | (_, Err(e), _, _) | (_, _, Err(e), _) | (_, _, _, Err(e)) => {
+                tracing::error!(error = %e, "Failed to build signal match rule");
+                return None;
+            }
+        };
+    Some(MatchRules {
+        props,
+        interfaces,
+        amp,
+        sources,
+    })
 }
 
-/// Subscribes all three signal streams in a single attempt.
-///
-/// Failure is reported to the caller, which owns the reconnect policy —
-/// including tearing down and rebuilding the connection itself (zbus
-/// connections do not auto-reconnect after a bus restart).
-///
-/// # Errors
-/// Returns the first subscription error; note the earlier streams of a
-/// partially successful attempt are dropped (harmless — the whole connection
-/// is rebuilt on the next cycle).
-/// Drives the three live signal streams (plus the watchdog) until one of
-/// them errors or closes, then returns so the caller can rebuild the
-/// connections.
+/// Queries `org.speaker.AudioSources1.ActiveSource` on startup/reconnect.
+/// Falls back to `true` (Bluetooth active) if `/org/speaker/sources` is unavailable.
+async fn read_initial_audio_source(control_conn: &Connection) -> bool {
+    let Ok(proxy) = zbus::proxy::Builder::<Proxy<'_>>::new(control_conn)
+        .destination("org.speaker.AudioManager")
+        .and_then(|b| b.path("/org/speaker/sources"))
+        .and_then(|b| b.interface("org.speaker.AudioSources1"))
+    else {
+        return true;
+    };
+    let Ok(proxy) = proxy.cache_properties(CacheProperties::No).build().await else {
+        return true;
+    };
+    match proxy.get_property::<String>("ActiveSource").await {
+        Ok(src) => is_bluetooth_audio_source(&src),
+        Err(_) => true,
+    }
+}
+
 struct SignalStreams {
     props: MessageStream,
     iface: MessageStream,
     amp: MessageStream,
+    sources: MessageStream,
 }
 
 async fn run_signal_streams(
@@ -585,9 +661,9 @@ async fn run_signal_streams(
     mut streams: SignalStreams,
 ) {
     loop {
-        // Biased polling: `InterfacesAdded` and active-source switches are
-        // prioritized so path tracking / suppression arming is processed
-        // before any queued `PropertiesChanged` volume signals.
+        // Biased polling: `InterfacesAdded`, active-source switches, and
+        // appliance source switches are prioritized before `PropertiesChanged`
+        // volume signals.
         tokio::select! {
             biased;
             Ok(()) = active_rx.changed() => {
@@ -595,6 +671,11 @@ async fn run_signal_streams(
                 if state.set_active_device(next, Instant::now()) {
                     tracing::info!(device = ?next, "Volume sync switched active device; reconciling amp -> phone");
                     reconcile_reverse(amp, bt, state).await;
+                }
+            }
+            signal = streams.sources.next() => {
+                if handle_sources_signal(signal, amp, bt, state).await.is_err() {
+                    return;
                 }
             }
             signal = streams.iface.next() => {
@@ -619,19 +700,65 @@ async fn run_signal_streams(
     }
 }
 
-/// Subscribes all three signal streams in a single attempt.
+/// Subscribes all signal streams in a single attempt.
 async fn subscribe_streams_once(
     signal_conn: &Connection,
-    rules: (MatchRule<'static>, MatchRule<'static>, MatchRule<'static>),
-) -> Result<(MessageStream, MessageStream, MessageStream), zbus::Error> {
+    rules: &MatchRules,
+) -> Result<(MessageStream, MessageStream, MessageStream, MessageStream), zbus::Error> {
     Ok((
-        MessageStream::for_match_rule(rules.0.clone(), signal_conn, Some(BLUEALSA_PROPS_QUEUE))
+        MessageStream::for_match_rule(rules.props.clone(), signal_conn, Some(BLUEALSA_PROPS_QUEUE))
             .await?,
-        MessageStream::for_match_rule(rules.1.clone(), signal_conn, Some(BLUEALSA_IFACE_QUEUE))
+        MessageStream::for_match_rule(
+            rules.interfaces.clone(),
+            signal_conn,
+            Some(BLUEALSA_IFACE_QUEUE),
+        )
+        .await?,
+        MessageStream::for_match_rule(rules.amp.clone(), signal_conn, Some(AUDIO_MANAGER_QUEUE))
             .await?,
-        MessageStream::for_match_rule(rules.2.clone(), signal_conn, Some(AUDIO_MANAGER_QUEUE))
-            .await?,
+        MessageStream::for_match_rule(
+            rules.sources.clone(),
+            signal_conn,
+            Some(AUDIO_SOURCES_QUEUE),
+        )
+        .await?,
     ))
+}
+
+/// Handles one `org.speaker.AudioSources1` `PropertiesChanged` signal.
+///
+/// # Errors
+/// Returns `Err(())` when the signal stream closed or yielded a bus error so the
+/// caller reconnects.
+#[expect(
+    clippy::result_unit_err,
+    reason = "internal reconnect signal for volume_sync loop"
+)]
+pub async fn handle_sources_signal(
+    signal: Option<Result<zbus::Message, zbus::Error>>,
+    amp: &Proxy<'_>,
+    bt: &BluetoothDevice,
+    state: &mut VolumeSyncState,
+) -> Result<(), ()> {
+    let Some(Ok(signal)) = signal else {
+        tracing::warn!("audio-sources signal stream closed; reconnecting");
+        return Err(());
+    };
+    let body = signal.body();
+    let Ok((interface, props, _invalidated)) =
+        body.deserialize::<(Box<str>, HashMap<String, Value<'_>>, Vec<String>)>()
+    else {
+        return Ok(());
+    };
+    if let Some(bt_active) = parse_active_source_changed(&interface, &props) {
+        if state.set_audio_source_active(bt_active, Instant::now()) {
+            tracing::info!("Appliance switched to Bluetooth; reconciling amp -> phone");
+            reconcile_reverse(amp, bt, state).await;
+        } else {
+            tracing::debug!(bt_active, "Appliance ActiveSource updated for volume sync");
+        }
+    }
+    Ok(())
 }
 
 /// Handles one `BlueALSA` `PropertiesChanged` signal: parses the PCM volume and
@@ -799,7 +926,7 @@ pub(crate) async fn run_task(
     seed_pcm_state(&bt, &mut state).await;
     reconcile_reverse(&amp, &bt, &mut state).await;
 
-    let Some((props_rule, interfaces_rule, amp_rule)) = build_match_rules() else {
+    let Some(rules) = build_match_rules() else {
         tracing::error!("Failed to build signal match rules; volume sync disabled");
         return;
     };
@@ -858,17 +985,14 @@ pub(crate) async fn run_task(
             tracing::info!("Volume sync state re-armed after D-Bus reconnect");
         }
 
-        match subscribe_streams_once(
-            &signal_conn,
-            (
-                props_rule.clone(),
-                interfaces_rule.clone(),
-                amp_rule.clone(),
-            ),
-        )
-        .await
-        {
-            Ok((props_stream, iface_stream, amp_stream)) => {
+        match subscribe_streams_once(&signal_conn, &rules).await {
+            Ok((props_stream, iface_stream, amp_stream, sources_stream)) => {
+                // Subscribe-then-snapshot: read `ActiveSource` AFTER
+                // subscribing to `sources_stream` so no transition is missed.
+                let bt_active = read_initial_audio_source(&control_conn).await;
+                if state.set_audio_source_active(bt_active, Instant::now()) {
+                    reconcile_reverse(&amp, &bt, &mut state).await;
+                }
                 backoff = RECONNECT_BACKOFF_BASE;
                 run_signal_streams(
                     &amp,
@@ -880,6 +1004,7 @@ pub(crate) async fn run_task(
                         props: props_stream,
                         iface: iface_stream,
                         amp: amp_stream,
+                        sources: sources_stream,
                     },
                 )
                 .await;

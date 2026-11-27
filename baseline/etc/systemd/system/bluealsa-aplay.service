@@ -17,7 +17,7 @@ User=root
 # (first-play-wins). Note: bluealsa-aplay's built-in AVRCP Pause targets
 # `.../dev_XX/player0`, which fails on BlueZ 5.88 (`.../avrcp/player0`), so
 # `bt-manager` sends the real AVRCP Pause and publishes `ActiveDevice` on D-Bus.
-ExecStart=/usr/local/bin/bluealsa-aplay -S -D default --volume=none --single-audio
+ExecStart=/usr/local/bin/bluealsa-aplay -S -D src_bluetooth --volume=none --single-audio
 Restart=always
 RestartSec=2
 

@@ -1,10 +1,11 @@
 //! Integration tests for `audio_manager::rate_watch` dynamic sample-rate switching.
 
 use audio_manager::rate_watch::{
-    LoopbackState, RateWatchController, apply_loopback_state, build_reconfigured_config_json,
-    chunksize_for_rate, reconcile_with_engine, run_with_rx,
+    DspRouteRequest, LoopbackState, RateWatchController, apply_loopback_state, apply_route_request,
+    build_reconfigured_config_json, build_reconfigured_config_json_for, chunksize_for_rate,
+    reconcile_route_with_engine, reconcile_with_engine, run_with_rx,
 };
-use camilladsp_schema::config::Configuration;
+use camilladsp_schema::config::{CaptureDevice, Configuration};
 use speaker_common::diag::ScopedTempDir;
 use speaker_dsp::{DspConfigInfo, DspDevice, ProcessingState};
 
@@ -332,4 +333,93 @@ async fn reconcile_with_engine_recovers_after_dsp_restart() {
     let pushed: Configuration =
         serde_json::from_str(&mock.last_set_config_json().unwrap()).unwrap();
     assert_eq!(pushed.devices.samplerate.get(), 44_100);
+}
+
+#[tokio::test]
+async fn route_request_switches_capture_device_and_skips_starting_reconcile() {
+    let tmp = ScopedTempDir::new("rate_watch_multi");
+    let cfg_path = tmp.path().join("crossover.yml");
+    std::fs::write(&cfg_path, SAMPLE_CONFIG_YAML).unwrap();
+
+    // Non-ALSA capture device rejected cleanly when capture_device override is passed
+    let pipewire_yaml = SAMPLE_CONFIG_YAML.replace(
+        "type: Alsa\n    channels: 2\n    device: \"hw:Loopback,1,0\"",
+        "type: PipeWire\n    channels: 2",
+    );
+    assert!(
+        build_reconfigured_config_json_for(&pipewire_yaml, Some("hw:Loopback,1,1"), 48_000, 1024)
+            .is_err()
+    );
+
+    let (dsp, mock) = DspDevice::new_mocked();
+    let mut ctrl = RateWatchController::new();
+    let req_rmpd = DspRouteRequest {
+        capture_device: Box::from("hw:Loopback,1,1"),
+        rate_hz: 96_000,
+        streaming: true,
+        force_apply: false,
+    };
+
+    assert!(apply_route_request(&mut ctrl, &dsp, &cfg_path, &req_rmpd, false).await);
+    assert_eq!(ctrl.applied_device(), Some("hw:Loopback,1,1"));
+    assert_eq!(ctrl.applied_rate(), Some(96_000));
+
+    let pushed: Configuration =
+        serde_json::from_str(&mock.last_set_config_json().unwrap()).unwrap();
+    match pushed.devices.capture {
+        CaptureDevice::Alsa { device, .. } => assert_eq!(device, "hw:Loopback,1,1"),
+        other => panic!("expected ALSA capture device, got {other:?}"),
+    }
+
+    // While CamillaDSP is Starting, reconcile must NOT treat stale config as divergence
+    mock.set_state(ProcessingState::Starting);
+    mock.set_config(Some(DspConfigInfo {
+        capture_device: Some("hw:Loopback,1,0".into()),
+        samplerate: Some(48_000),
+        ..DspConfigInfo::default()
+    }));
+    assert!(!reconcile_route_with_engine(&mut ctrl, &dsp, &cfg_path, &req_rmpd).await);
+
+    // Once Running, capture_device mismatch triggers immediate re-push
+    mock.set_state(ProcessingState::Running);
+    assert!(reconcile_route_with_engine(&mut ctrl, &dsp, &cfg_path, &req_rmpd).await);
+
+    // force_apply on an idle target detaches CamillaDSP and invalidates applied cache
+    let req_detach = DspRouteRequest {
+        capture_device: Box::from("hw:Loopback,1,0"),
+        rate_hz: 48_000,
+        streaming: false,
+        force_apply: true,
+    };
+    assert!(apply_route_request(&mut ctrl, &dsp, &cfg_path, &req_detach, false).await);
+    assert_eq!(ctrl.applied_device(), None);
+    assert_eq!(ctrl.applied_rate(), None);
+
+    // Reconcile ignores non-streaming and zero-rate requests
+    assert!(!reconcile_route_with_engine(&mut ctrl, &dsp, &cfg_path, &req_detach).await);
+    let req_zero = DspRouteRequest {
+        capture_device: Box::from("hw:Loopback,1,1"),
+        rate_hz: 0,
+        streaming: true,
+        force_apply: false,
+    };
+    assert!(!reconcile_route_with_engine(&mut ctrl, &dsp, &cfg_path, &req_zero).await);
+
+    // Reconcile skips cleanly when DSP status read fails
+    assert!(apply_route_request(&mut ctrl, &dsp, &cfg_path, &req_rmpd, false).await);
+    mock.inject_fault("dsp offline");
+    assert!(!reconcile_route_with_engine(&mut ctrl, &dsp, &cfg_path, &req_rmpd).await);
+    mock.clear_fault();
+
+    // Missing config file and invalid YAML hit both initial warn and repeat debug branches
+    let missing_path = tmp.path().join("does-not-exist.yml");
+    let mut err_ctrl = RateWatchController::new();
+    assert!(!apply_route_request(&mut err_ctrl, &dsp, &missing_path, &req_rmpd, false).await);
+    assert!(!apply_route_request(&mut err_ctrl, &dsp, &missing_path, &req_rmpd, false).await);
+
+    let bad_yaml_path = tmp.path().join("bad.yml");
+    std::fs::write(&bad_yaml_path, "not: [valid: camilladsp").unwrap();
+    let mut bad_ctrl = RateWatchController::new();
+    assert!(!apply_route_request(&mut bad_ctrl, &dsp, &bad_yaml_path, &req_rmpd, false).await);
+    assert!(!apply_route_request(&mut bad_ctrl, &dsp, &bad_yaml_path, &req_rmpd, false).await);
 }

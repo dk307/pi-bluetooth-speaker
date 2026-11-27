@@ -11,6 +11,17 @@ fn default_config() {
         cfg.state_path,
         PathBuf::from("/var/lib/speaker/amp-state.json")
     );
+    assert_eq!(
+        cfg.source_state_path,
+        PathBuf::from("/var/lib/speaker/source-state.json")
+    );
+    assert_eq!(
+        cfg.camilladsp_config_path,
+        PathBuf::from("/etc/camilladsp/crossover.yml")
+    );
+    assert_eq!(cfg.sources.len(), 2);
+    assert_eq!(cfg.sources[0].id.as_str(), "bluetooth");
+    assert_eq!(cfg.sources[1].id.as_str(), "rmpd");
     assert_eq!(cfg.log_level, None);
 }
 
@@ -27,12 +38,14 @@ fn load_env_overrides_validation_and_rejection() {
     unsafe { std::env::set_var("AMP_MGR_ALSA_CARD", "customcard") };
     unsafe { std::env::set_var("AMP_MGR_STATE_PATH", "/tmp/amp-state-test.json") };
     unsafe { std::env::set_var("AMP_MGR_DSP_POLL_INTERVAL_MS", "700") };
+    unsafe { std::env::set_var("AMP_MGR_AUTO_SWITCH_POLICY", "priority") };
 
     let cfg = Config::load().expect("valid overrides must load");
     assert_eq!(cfg.control_mode, "alsa");
     assert_eq!(cfg.alsa_card, "customcard");
     assert_eq!(cfg.state_path, PathBuf::from("/tmp/amp-state-test.json"));
     assert_eq!(cfg.dsp_poll_interval_ms, 700);
+    assert_eq!(cfg.auto_switch_policy.as_str(), "priority");
     // Defaults for untouched fields.
     assert_eq!(cfg.enable_gpio_pin, 14);
     assert_eq!(cfg.mute_gpio_pin, 15);
@@ -50,4 +63,16 @@ fn load_env_overrides_validation_and_rejection() {
     unsafe { std::env::remove_var("AMP_MGR_ALSA_CARD") };
     unsafe { std::env::remove_var("AMP_MGR_STATE_PATH") };
     unsafe { std::env::remove_var("AMP_MGR_DSP_POLL_INTERVAL_MS") };
+    unsafe { std::env::remove_var("AMP_MGR_AUTO_SWITCH_POLICY") };
+
+    // Identical state_path and source_state_path must be rejected.
+    unsafe { std::env::set_var("AMP_MGR_STATE_PATH", "/tmp/shared-state.json") };
+    unsafe { std::env::set_var("AMP_MGR_SOURCE_STATE_PATH", "/tmp/shared-state.json") };
+    let err = Config::load().unwrap_err();
+    unsafe { std::env::remove_var("AMP_MGR_STATE_PATH") };
+    unsafe { std::env::remove_var("AMP_MGR_SOURCE_STATE_PATH") };
+    assert!(
+        err.to_string().contains("must be distinct"),
+        "unexpected error: {err}"
+    );
 }

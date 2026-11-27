@@ -1,0 +1,25 @@
+[package]
+name = "speaker-mpd"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MPD / rmpd async peripheral client, domain models, and mock controller"
+
+[dependencies]
+speaker-common = { workspace = true }
+mpd_client = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = []
+test-util = []
+
+[dev-dependencies]
+speaker-mpd = { path = ".", features = ["test-util"] }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

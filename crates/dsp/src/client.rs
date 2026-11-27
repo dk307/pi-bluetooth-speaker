@@ -721,6 +721,7 @@ struct MockState {
     playback_rms: Vec<f32>,
     last_set_config: Option<String>,
     last_set_config_json: Option<String>,
+    set_config_json_calls: usize,
     injected_fault: Option<String>,
     state_events: tokio::sync::broadcast::Sender<Option<ProcessingState>>,
 }
@@ -770,6 +771,7 @@ impl DspDeviceMock {
                 playback_rms: vec![-23.4, -23.1],
                 last_set_config: None,
                 last_set_config_json: None,
+                set_config_json_calls: 0,
                 injected_fault: None,
                 state_events: tokio::sync::broadcast::channel(32).0,
             })),
@@ -1008,6 +1010,15 @@ impl DspDeviceMock {
             .and_then(|g| g.last_set_config_json.clone())
     }
 
+    /// Returns the total number of `set_config_json` uploads recorded on this mock.
+    #[must_use]
+    pub fn set_config_json_calls(&self) -> usize {
+        self.inner
+            .lock()
+            .ok()
+            .map_or(0, |g| g.set_config_json_calls)
+    }
+
     fn reset_clipped(&self) -> Result<(), DspError> {
         let mut g = self.inner.lock().expect("dsp mock mutex poisoned");
         if let Some(ref fault) = g.injected_fault {
@@ -1023,6 +1034,7 @@ impl DspDeviceMock {
             return Err(DspError::protocol_error(fault.clone()));
         }
         let slot = if is_json {
+            g.set_config_json_calls += 1;
             &mut g.last_set_config_json
         } else {
             &mut g.last_set_config
