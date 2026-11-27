@@ -29,7 +29,7 @@ enabled = true
 # audio-manager owns the Merus MA12070P hardware mixer exclusively; keep "none"
 # so rmpd never applies software PCM attenuation on top of amp volume.
 # (Bidirectional MPD volume sync requires C-based `mpd` with `mixer_type "null"`,
-# see baseline/etc/mpd/mpd.conf; rmpd 0.19.0 only supports software|hardware|none.)
+# see baseline/etc/mpd.conf; rmpd 0.19.0 only supports software|hardware|none.)
 mixer_type = "none"
 
 [[integration]]
