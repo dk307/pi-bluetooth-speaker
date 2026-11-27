@@ -412,3 +412,27 @@ fn mpd_subsystem_from_maps_all_variants() {
         MpdSubsystem::Other("database".into())
     );
 }
+
+#[tokio::test]
+async fn mpd_read_volume_mocked_and_tcp() {
+    let (mock_mpd, mock_ctrl) = MpdDevice::new_mocked();
+    assert_eq!(mock_mpd.read_volume().await.unwrap(), None);
+    mock_ctrl.set_volume(Some(42));
+    assert_eq!(mock_mpd.read_volume().await.unwrap(), Some(42));
+    mock_ctrl.inject_fault("boom");
+    assert!(
+        mock_mpd
+            .read_volume()
+            .await
+            .unwrap_err()
+            .is_protocol_error()
+    );
+
+    let port = spawn_fake_mpd_server(|cmd| match cmd.as_str() {
+        "status" => "volume: 63\nrepeat: 0\nrandom: 0\nsingle: 0\nconsume: 0\nstate: play\n".into(),
+        _ => String::new(),
+    })
+    .await;
+    let tcp_mpd = MpdDevice::with_endpoint(MpdHost::default(), port);
+    assert_eq!(tcp_mpd.read_volume().await.unwrap(), Some(63));
+}

@@ -244,8 +244,7 @@ pub async fn run_mpd_volume_sync(
                                             break;
                                         }
                                     }
-                                    if let Ok(status) = mpd.read_status().await
-                                        && let Some(vol) = status.volume
+                                    if let Ok(Some(vol)) = mpd.read_volume().await
                                         && state.should_forward_to_amp(vol, Instant::now())
                                     {
                                         let clamped = vol.min(100);

@@ -51,6 +51,12 @@ const PLL_POLL_STEP: Duration = Duration::from_millis(10);
 /// Safety-tick interval default (low-frequency diagnostics tick).
 pub const SAFETY_TICK_INTERVAL: Duration = Duration::from_millis(1000);
 
+/// Debounce delay before flushing `SetLevel` state to `amp-state.json` (`fsync`).
+///
+/// Rapid volume drags update hardware + D-Bus mirror immediately and coalesce
+/// disk persistence into a single atomic write once the drag settles.
+pub const PERSIST_DEBOUNCE: Duration = Duration::from_millis(250);
+
 /// Controller state machine states (plan §3.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CtrlState {
@@ -140,6 +146,8 @@ pub struct AmpController {
     mirror: Arc<tokio::sync::Mutex<AmpState>>,
     /// Broadcasts logical user volume percentage changes for in-process sync tasks.
     level_tx: tokio::sync::watch::Sender<u8>,
+    /// Pending debounced disk persistence deadline (`Some` when `state` is dirty).
+    persist_deadline: Option<tokio::time::Instant>,
 }
 
 /// Critical faults that warrant a full `/ENABLE` reset recovery (plan
@@ -189,6 +197,7 @@ impl AmpController {
             regs_initialized: false,
             mirror: Arc::new(tokio::sync::Mutex::new(initial)),
             level_tx,
+            persist_deadline: None,
         }
     }
 
@@ -286,31 +295,55 @@ impl AmpController {
 
     /// Handle one command (also drives the state machine in tests).
     ///
+    /// Persists state immediately; the event loop ([`Self::run`]) calls
+    /// [`Self::handle_command_inner`] with `persist_immediately = false` so
+    /// rapid `SetLevel` drags coalesce disk `fsync`s.
+    ///
     /// # Errors
     /// Returns [`AmpError`] on hardware faults (the command is logged and
     /// the prior state preserved per §4.5 transient-error rules).
     pub async fn handle_command(&mut self, cmd: AmpCommandKind) -> AmpResult<()> {
+        self.handle_command_inner(cmd, true).await
+    }
+
+    async fn handle_command_inner(
+        &mut self,
+        cmd: AmpCommandKind,
+        persist_immediately: bool,
+    ) -> AmpResult<()> {
         match cmd {
             AmpCommandKind::SetLevel(percent) => {
-                let new_state = self.state.with_percent(percent, &PERCENT_TO_RAW);
-                // Hardware receives the thermally effective level and the
-                // ACTUAL hardware mute (transient mutes are separate from
-                // the persisted user intent).
-                let effective = new_state.level_raw.saturating_sub(self.thermal_offset_raw);
-                let hw_state = AmpState::new(effective, self.hardware_muted)?;
-                self.backend.write_state(&hw_state).await?;
+                let clamped = percent.min(100);
+                let new_state = self.state.with_percent(clamped, &PERCENT_TO_RAW);
+                let raw_changed = new_state.level_raw != self.state.level_raw;
+                if raw_changed || !self.regs_initialized {
+                    // Hardware receives the thermally effective level and the
+                    // ACTUAL hardware mute (transient mutes are separate from
+                    // the persisted user intent).
+                    let effective = new_state.level_raw.saturating_sub(self.thermal_offset_raw);
+                    let hw_state = AmpState::new(effective, self.hardware_muted)?;
+                    self.backend.write_state(&hw_state).await?;
+                }
                 self.state = new_state;
-                self.persist(&new_state).await;
+                *self.mirror.lock().await = new_state;
+                if raw_changed {
+                    if persist_immediately {
+                        self.persist_file(&new_state).await;
+                    } else {
+                        self.persist_deadline =
+                            Some(tokio::time::Instant::now() + PERSIST_DEBOUNCE);
+                    }
+                }
                 self.level_tx.send_if_modified(|cur| {
-                    if *cur == percent {
+                    if *cur == clamped {
                         false
                     } else {
-                        *cur = percent;
+                        *cur = clamped;
                         true
                     }
                 });
                 info!(
-                    percent,
+                    percent = clamped,
                     level = new_state.level_raw,
                     muted = new_state.muted,
                     "SetLevel applied"
@@ -810,11 +843,25 @@ impl AmpController {
         Ok(())
     }
 
-    async fn persist(&self, state: &AmpState) {
+    async fn persist_file(&mut self, state: &AmpState) {
+        self.persist_deadline = None;
         if let Err(e) = self.state_file.save(state).await {
             warn!(error = %e, "Failed to persist state file");
         }
+    }
+
+    async fn persist(&mut self, state: &AmpState) {
+        self.persist_file(state).await;
         *self.mirror.lock().await = *state;
+    }
+
+    async fn flush_persist(&mut self) {
+        if self.persist_deadline.take().is_some() {
+            let state = self.state;
+            if let Err(e) = self.state_file.save(&state).await {
+                warn!(error = %e, "Failed to flush debounced state file");
+            }
+        }
     }
 
     /// Run the event loop: `tokio::select!` over commands, error edges, and
@@ -837,14 +884,16 @@ impl AmpController {
             tokio::select! {
                 _ = shutdown.recv() => {
                     info!("Controller shutdown signal; exiting event loop");
+                    self.flush_persist().await;
                     break;
                 }
                 cmd = commands.recv() => {
                     let Some(cmd) = cmd else {
                         info!("Command channel closed; controller exiting");
+                        self.flush_persist().await;
                         break;
                     };
-                    let result = self.handle_command(cmd.kind).await;
+                    let result = self.handle_command_inner(cmd.kind, false).await;
                     if let Some(reply) = cmd.reply {
                         let _ = reply
                             .send(
@@ -857,6 +906,13 @@ impl AmpController {
                     if let Err(e) = result {
                         warn!(error = %e, "Command handling failed; prior state preserved");
                     }
+                }
+                () = async {
+                    if let Some(deadline) = self.persist_deadline {
+                        tokio::time::sleep_until(deadline).await;
+                    }
+                }, if self.persist_deadline.is_some() => {
+                    self.flush_persist().await;
                 }
                 // `if error_edges.is_some()` disables the arm once the watch
                 // task exits (recv() would otherwise return None immediately

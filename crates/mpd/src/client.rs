@@ -823,6 +823,46 @@ impl MpdDevice {
         .await
     }
 
+    /// Queries only the MPD mixer volume (`status` without `currentsong`) for
+    /// low-overhead volume sync loops.
+    ///
+    /// # Errors
+    /// Returns [`MpdError`] on TCP/timeout/protocol failure.
+    pub async fn read_volume(&self) -> Result<Option<u8>, MpdError> {
+        match &*self.inner {
+            Backend::Mock(mock) => {
+                let g = mock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(ref fault) = g.injected_fault {
+                    return Err(MpdError::protocol_error(fault.clone()));
+                }
+                Ok(g.volume)
+            }
+            Backend::Tcp {
+                host,
+                port,
+                timeout,
+                client: client_slot,
+            } => {
+                let client = cached_client(host, *port, *timeout, client_slot).await?;
+                let res = await_timeout(*timeout, "MPD status", client.command(Status)).await?;
+                let status = match res {
+                    Ok(ok) => ok,
+                    Err(mpd_client::client::CommandError::ConnectionClosed) => {
+                        *client_slot.lock().await = None;
+                        let fresh = cached_client(host, *port, *timeout, client_slot).await?;
+                        await_timeout(*timeout, "MPD status", fresh.command(Status))
+                            .await?
+                            .map_err(|e| map_command_error("status", e))?
+                    }
+                    Err(e) => return Err(map_command_error("status", e)),
+                };
+                Ok(Some(status.volume).filter(|&v| v <= 100))
+            }
+        }
+    }
+
     /// Queries the current playback status and loaded track metadata.
     ///
     /// # Errors

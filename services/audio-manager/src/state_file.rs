@@ -74,12 +74,16 @@ impl StateFile {
         Ok(state)
     }
 
-    /// Save state to file atomically (temp file + rename).
+    /// Save state to file atomically (temp file + rename) on a blocking thread.
     ///
     /// # Errors
-    /// Returns [`AmpError`] on serialization or I/O failure.
+    /// Returns [`AmpError`] on serialization, I/O, or blocking-task failure.
     pub async fn save(&self, state: &AmpState) -> AmpResult<()> {
-        save_json_atomic(&self.path, state)?;
+        let path = self.path.clone();
+        let state_copy = *state;
+        tokio::task::spawn_blocking(move || save_json_atomic(&path, &state_copy))
+            .await
+            .context("State file save task panicked")??;
         debug!(path = %self.path.display(), ?state, "Saved amp state");
         Ok(())
     }
