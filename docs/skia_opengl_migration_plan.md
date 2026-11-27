@@ -6,13 +6,13 @@
 **Display & Input:** Freenove 4.3" MIPI DSI 800×480 @ 60.06 Hz (`vc4-kms-dsi-7inch`, `card0-DSI-1`), `libinput` (udev `seat0`) + EC12 rotary encoder (`rppal` GPIO)  
 **GUI Framework:** Slint `=1.19.0` — **`backend-linuxkms` + `backend-linuxkms-libinput` + `renderer-skia-opengl` (Ganesh GLES 2.0)**  
 **Status:** **Plan — awaiting user review & design choices**  
-**Follows up on:** [`docs/kms_femtovg_migration_plan.md`](kms_femtovg_migration_plan.md) (§10) and [`docs/cpu_optimization_options.md`](cpu_optimization_options.md)
+**Follows up on:** [`docs/cpu_optimization_options.md`](cpu_optimization_options.md)
 
 ---
 
 ## 1. Executive Summary & Architectural Motivation
 
-In PR #69 ([`docs/kms_femtovg_migration_plan.md`](kms_femtovg_migration_plan.md)), `screen-manager` migrated from legacy `/dev/fb0` software scanout to Slint's DRM/KMS backend (`backend-linuxkms` + `backend-linuxkms-libinput`) with the `FemtoVG` OpenGL ES 2.0 renderer, and PR #90 (`b86f544`) added `swash`-based marquee `SharedPixelBuffer` pre-rasterization, pre-rendered `AmbientWaveIndicator` sprites, and static button `cache-rendering-hint`s.
+In PR #69, `screen-manager` migrated from legacy `/dev/fb0` software scanout to Slint's DRM/KMS backend (`backend-linuxkms` + `backend-linuxkms-libinput`) with the `FemtoVG` OpenGL ES 2.0 renderer, and PR #90 (`b86f544`) added `swash`-based marquee `SharedPixelBuffer` pre-rasterization, pre-rendered `AmbientWaveIndicator` sprites, and static button `cache-rendering-hint`s.
 
 However, auditing the vendored Slint `=1.19.0` crates (`i-slint-backend-linuxkms-1.19.0`, `i-slint-renderer-skia-1.19.0`, `skia-safe-0.157.0`) reveals four structural advantages of migrating to **Skia on OpenGL (`renderer-skia-opengl`)** on the Raspberry Pi 3's VideoCore IV GPU:
 
@@ -34,7 +34,7 @@ However, auditing the vendored Slint `=1.19.0` crates (`i-slint-backend-linuxkms
 ## 2. Verified Technical Findings (Slint 1.19.0 & `skia-bindings` 0.157.0 Audit)
 
 ### 2.1 Prebuilt `skia-bindings` Binary Cache Verification (Zero Source-Build Overhead)
-A major risk flagged in [`docs/kms_femtovg_migration_plan.md`](kms_femtovg_migration_plan.md) §10 was whether `skia-bindings =0.157.0` has matching prebuilt binaries for both `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`.
+A major risk flagged during the KMS migration was whether `skia-bindings =0.157.0` has matching prebuilt binaries for both `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`.
 
 We audited `/root/.cargo/registry/src/.../skia-bindings-0.157.0/` and verified against `github.com/rust-skia/skia-binaries`:
 * **VCS Hash:** `30669978c3f39a73e8a7` (`.cargo_vcs_info.json` `30669978c3f39a73e8a7ac74eead8d414eb1891d`)

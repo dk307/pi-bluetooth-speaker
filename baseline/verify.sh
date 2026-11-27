@@ -41,16 +41,15 @@ check "Service 'bt-agent.service' active" "systemctl is-active --quiet bt-agent"
 check "Service 'bluealsa.service' active" "systemctl is-active --quiet bluealsa"
 check "Service 'bluealsa-aplay.service' active" "systemctl is-active --quiet bluealsa-aplay"
 check "Service 'camilladsp.service' active" "systemctl is-active --quiet camilladsp"
-if [ -x /usr/local/bin/rmpd ]; then
-    check "User service 'rmpd.service' (dietpi) active" "sudo -u dietpi XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemctl --user is-active --quiet rmpd"
+if [ -x /usr/local/bin/mpd ]; then
+    check "Service 'mpd.service' active" "systemctl is-active --quiet mpd"
 fi
 
 echo ""
 echo "--- 3. Network Ports & Sockets ---"
 check "CamillaDSP WebSocket listening on 127.0.0.1:1234" "ss -tlpn | grep -q ':1234 '"
-if [ -x /usr/local/bin/rmpd ]; then
-    check "rmpd MPD protocol listening on port 6600" "ss -tlpn | grep -q ':6600 '"
-    check "rmpd HTTP API listening on port 6680" "ss -tlpn | grep -q ':6680 '"
+if [ -x /usr/local/bin/mpd ]; then
+    check "MPD protocol listening on port 6600" "ss -tlpn | grep -q ':6600 '"
 fi
 check "OpenSSH listening on port 22" "ss -tlpn | grep -q ':22 '"
 
