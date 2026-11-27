@@ -8,8 +8,9 @@ This directory contains the modular microservices that power the **Raspberry Pi 
 
 | Service | Language / Stack | Status | Description |
 | :--- | :--- | :--- | :--- |
-| [`screen-manager`](screen-manager) | Rust 2024 / Slint / Tokio | **Production** | Audiophile touchscreen console (800x480 DSI `/dev/fb0`), dual PeppyMeter VU visualizers, rotary encoder volume sync, and ambient auto-brightness — the BH1750 lux → backlight policy loop runs as a background thread inside `screen-manager` with the pure policy owned by `screen-manager` and only the `LightSensor` / `Backlight` adapters coming from `speaker-hardware`, with no separate daemon or D-Bus service (`screen-manager.service`). |
-| [`bt-manager`](bt-manager) | Rust 2024 / Bluer / Tokio / zbus | **Production** | Dedicated Bluetooth manager daemon, BlueZ & BlueALSA status monitoring, native `org.bluez.Agent1` auto-trust pairing agent, single-active-source arbiter (`org.speaker.Bluetooth`), volume sync, and BIP cover art D-Bus service (`bt-manager.service`, replaces legacy `bt-agent.service`). |
+| [`audio-manager`](audio-manager) | Rust 2024 / Tokio / zbus | **Production** | Single hardware owner of the Merus MA12070P amplifier volume and mute over I2C (`org.speaker.AudioManager` D-Bus service), dynamic ALSA loopback sample-rate switching (`rate_watch` -> CamillaDSP `SetConfigJson`), and CamillaDSP `SubscribeState` PLL-gated unmute (`dsp_watch`). |
+| [`screen-manager`](screen-manager) | Rust 2024 / Slint (Skia OpenGL) / Tokio | **Production** | Audiophile touchscreen console (800x480 LinuxKMS/DRM + libinput + Skia OpenGL on VideoCore IV), radial FFT & 24-band ERB spectrum visualizer, Material 3 dynamic cover-art auto-theming, EC12 rotary encoder volume sync, and BH1750 ambient auto-brightness loop (`screen-manager.service`). |
+| [`bt-manager`](bt-manager) | Rust 2024 / Bluer / Tokio / zbus | **Production** | Dedicated Bluetooth manager daemon, BlueZ & BlueALSA status monitoring, native `org.bluez.Agent1` auto-trust pairing agent, single-active-source arbiter (`org.speaker.Bluetooth`), AVRCP volume sync to `audio-manager`, and BIP cover art D-Bus service (`bt-manager.service`, replaces legacy `bt-agent.service`). |
 
 ---
 

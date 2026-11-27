@@ -39,10 +39,15 @@ baseline/
 │       ├── system/
 │       │   ├── camilladsp.service     # CamillaDSP 5.0 engine daemon (-w wait mode, WS on 127.0.0.1:1234)
 │       │   ├── bluealsa.service       # BlueALSA high-res A2DP audio sink daemon
-│       │   ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA default (--volume=none --single-audio)
+│       │   ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA default (-S --volume=none --single-audio)
+│       │   ├── bt-manager.service     # Bluetooth Manager & Cover Art service
+│       │   ├── screen-manager.service # Touchscreen Appliance Console & Screen Manager service
 │       │   └── bt-agent.service       # Legacy standalone agent (superseded by bt-manager.service)
 │       └── user/
 │           └── rmpd.service           # Headless user systemd unit for rmpd (session D-Bus MPRIS)
+├── patches/
+│   ├── bluez-5.88-mediaplayer-refresh-track.patch
+│   └── bluez-5.88-track-duration.patch
 ├── alsa/
 │   └── asound.state               # Persisted MA12070P hardware mixer gains & limiter states
 ├── bin/

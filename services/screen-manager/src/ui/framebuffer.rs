@@ -1,7 +1,7 @@
 //! Offscreen software-rendering framebuffer harness for hermetic UI testing.
 //!
 //! This module is **not** a display driver. Production rendering goes through
-//! Slint's `backend-linuxkms` (DRM scanout, see `docs/kms_femtovg_migration_plan.md`);
+//! Slint's `backend-linuxkms` (DRM scanout);
 //! this module only provides an in-memory 800x480 BGRX surface plus a custom
 //! [`FramebufferPlatform`] so integration tests can render Slint scenes with the
 //! software renderer and inspect the resulting pixels (`capture_region`, `pixels`)
