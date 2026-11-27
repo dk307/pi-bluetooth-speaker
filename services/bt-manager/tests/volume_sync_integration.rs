@@ -246,3 +246,45 @@ fn active_device_scoping_ignores_shutout_pcm_and_rearms_on_switch() {
     assert_eq!(a2dp_volume_for(&pcms, Some(addr_a)), Some(77));
     assert_eq!(a2dp_volume_for(&pcms, Some(addr_b)), Some(33));
 }
+
+#[test]
+fn active_audio_source_gates_forward_volume_and_rearms_on_switch() {
+    use bt_manager::volume_sync::{is_bluetooth_audio_source, parse_active_source_changed};
+    use zbus::zvariant::Value;
+
+    assert!(is_bluetooth_audio_source(""));
+    assert!(is_bluetooth_audio_source("bluetooth"));
+    assert!(!is_bluetooth_audio_source("rmpd"));
+
+    let mut props = HashMap::new();
+    props.insert("ActiveSource".to_owned(), Value::from("rmpd"));
+    assert_eq!(
+        parse_active_source_changed("org.speaker.AudioSources1", &props),
+        Some(false)
+    );
+    assert_eq!(
+        parse_active_source_changed("org.speaker.AudioManager1", &props),
+        None
+    );
+
+    let t0 = Instant::now();
+    let mut state = VolumeSyncState::new();
+    assert!(state.audio_source_active());
+    assert!(state.should_forward_pcm(60, t0));
+
+    // Switching to rmpd disables forward BT volume sync.
+    assert!(!state.set_audio_source_active(false, t0));
+    assert!(!state.audio_source_active());
+    assert!(!state.should_forward_pcm(60, t0));
+
+    // Switching back to bluetooth arms FRESH_PCM_SETTLE and requests reverse reconcile.
+    let t1 = t0 + Duration::from_secs(5);
+    assert!(state.set_audio_source_active(true, t1));
+    assert!(state.audio_source_active());
+    assert!(state.suppression_active(t1));
+    assert!(!state.should_forward_pcm(60, t1));
+
+    // After settle window expires, forward sync resumes.
+    let t2 = t1 + FRESH_PCM_SETTLE + Duration::from_millis(1);
+    assert!(state.should_forward_pcm(60, t2));
+}

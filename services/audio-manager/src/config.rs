@@ -6,6 +6,9 @@ use config::{Config as LayeredConfig, Environment, File, FileFormat};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
+use crate::rate_watch::DEFAULT_CAMILLADSP_CONFIG_PATH;
+use crate::sources::registry::{AutoSwitchPolicy, SourceDefinition, SourceRegistry};
+
 /// Configuration loaded from `/etc/audio-manager/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -41,28 +44,34 @@ pub struct Config {
     pub safety_tick: bool,
 
     /// Enable the DSP stream-lifecycle watcher (plan §11.3): polls the
-    /// CamillaDSP engine state and emits `StreamStarting`/`StreamStopping`
+    /// `CamillaDSP` engine state and emits `StreamStarting`/`StreamStopping`
     /// edges to the controller.
-    ///
-    /// The watcher is the ONLY source that can open the audio path while
-    /// the amp is idle: an idle unmute intentionally stays hardware-muted
-    /// until the next `StreamStarting` runs the pop-free PLL handshake.
-    /// Disabling it therefore keeps the amp muted while no stream runs
-    /// (D-Bus `SetMute(false)` records the intent only); use it only when
-    /// an external lifecycle source is provided. Logged with its
-    /// consequence at boot.
     #[serde(default = "default_dsp_watch")]
     pub dsp_watch_enabled: bool,
 
-    /// Idle poll interval for the DSP watcher (ms). While the engine is
-    /// Running the watcher polls at half this interval (adaptive, plan
-    /// §11.3: 250 ms playing / 500 ms idle at the default).
+    /// Idle poll interval for the DSP watcher (ms).
     #[serde(default = "default_dsp_poll_interval_ms")]
     pub dsp_poll_interval_ms: u64,
 
-    /// Path to the runtime state file.
+    /// Path to the runtime amp state file.
     #[serde(default = "default_state_path")]
     pub state_path: PathBuf,
+
+    /// Path to the runtime multi-source routing state file.
+    #[serde(default = "default_source_state_path")]
+    pub source_state_path: PathBuf,
+
+    /// Path to the `CamillaDSP` base YAML configuration template.
+    #[serde(default = "default_camilladsp_config_path")]
+    pub camilladsp_config_path: PathBuf,
+
+    /// Default multi-source auto-switch policy (`"last-play"`, `"first-play"`, or `"priority"`).
+    #[serde(default)]
+    pub auto_switch_policy: AutoSwitchPolicy,
+
+    /// Registered audio sources (`bluetooth`, `rmpd`, and future inputs).
+    #[serde(default = "SourceRegistry::default_definitions")]
+    pub sources: Vec<SourceDefinition>,
 
     /// Log level override (optional).
     #[serde(default)]
@@ -70,8 +79,6 @@ pub struct Config {
 }
 
 fn default_alsa_card() -> String {
-    // hifiberry-dac (PCM5102A) card — the merus overlay card was removed
-    // in the dtoverlay migration (verified live: card 1 sndrpihifiberry).
     "sndrpihifiberry".to_string()
 }
 
@@ -79,31 +86,31 @@ fn default_control_mode() -> String {
     "i2c".to_string()
 }
 
-fn default_enable_pin() -> u8 {
+const fn default_enable_pin() -> u8 {
     14
 }
 
-fn default_mute_pin() -> u8 {
+const fn default_mute_pin() -> u8 {
     15
 }
 
-fn default_error_pin() -> u8 {
+const fn default_error_pin() -> u8 {
     23
 }
 
-fn default_booster_pin() -> u8 {
+const fn default_booster_pin() -> u8 {
     17
 }
 
-fn default_safety_tick() -> bool {
+const fn default_safety_tick() -> bool {
     true
 }
 
-fn default_dsp_watch() -> bool {
+const fn default_dsp_watch() -> bool {
     true
 }
 
-fn default_dsp_poll_interval_ms() -> u64 {
+const fn default_dsp_poll_interval_ms() -> u64 {
     500
 }
 
@@ -111,10 +118,20 @@ fn default_state_path() -> PathBuf {
     PathBuf::from("/var/lib/speaker/amp-state.json")
 }
 
+fn default_source_state_path() -> PathBuf {
+    PathBuf::from("/var/lib/speaker/source-state.json")
+}
+
+fn default_camilladsp_config_path() -> PathBuf {
+    PathBuf::from(DEFAULT_CAMILLADSP_CONFIG_PATH)
+}
+
 impl Config {
     /// Load configuration from file, with environment variable overrides.
+    ///
+    /// # Errors
+    /// Returns an error if config deserialization or field validation fails.
     pub fn load() -> anyhow::Result<Self> {
-        // 2. Config file (optional, missing is OK)
         let config_path = "/etc/audio-manager/config.json";
         let mut builder = LayeredConfig::builder();
 
@@ -125,20 +142,12 @@ impl Config {
             info!("No config file at {}, using defaults", config_path);
         }
 
-        // 3. Environment variables with prefix AMP_MGR_. NOTE: no
-        // `.separator("_")` — with a separator the crate nests the key
-        // (`AMP_MGR_CONTROL_MODE` → table `control.mode`), which serde then
-        // cannot map onto the flat `control_mode` field, silently dropping
-        // every override. Without a separator the suffix lowercases to the
-        // exact field name (`AMP_MGR_DSP_POLL_INTERVAL_MS` →
-        // `dsp_poll_interval_ms`).
+        // Environment variables with prefix AMP_MGR_ (flat keys, no separator).
         builder = builder.add_source(Environment::with_prefix("AMP_MGR"));
 
         let settings = builder.build()?;
         let mut config: Config = settings.try_deserialize()?;
 
-        // Apply defaults for any missing fields (serde default handles this during deserialize,
-        // but we can also manually fill in)
         if config.alsa_card.is_empty() {
             config.alsa_card = default_alsa_card();
         }
@@ -151,6 +160,15 @@ impl Config {
         if config.state_path.as_os_str().is_empty() {
             config.state_path = default_state_path();
         }
+        if config.source_state_path.as_os_str().is_empty() {
+            config.source_state_path = default_source_state_path();
+        }
+        if config.camilladsp_config_path.as_os_str().is_empty() {
+            config.camilladsp_config_path = default_camilladsp_config_path();
+        }
+
+        SourceRegistry::from_definitions(config.sources.clone())
+            .map_err(|e| anyhow::anyhow!("Invalid sources configuration: {e}"))?;
 
         info!(?config, "Resolved configuration");
         Ok(config)
@@ -170,6 +188,10 @@ impl Default for Config {
             dsp_watch_enabled: default_dsp_watch(),
             dsp_poll_interval_ms: default_dsp_poll_interval_ms(),
             state_path: default_state_path(),
+            source_state_path: default_source_state_path(),
+            camilladsp_config_path: default_camilladsp_config_path(),
+            auto_switch_policy: AutoSwitchPolicy::default(),
+            sources: SourceRegistry::default_definitions(),
             log_level: None,
         }
     }

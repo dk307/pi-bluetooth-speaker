@@ -1,0 +1,48 @@
+# rmpd configuration template for Raspberry Pi 3 Audio Appliance (rmpd 0.19.0)
+#
+# Copy to ~/.config/rmpd/rmpd.toml (mode 0600) and replace placeholder secrets.
+# Omitting `music_directory` and disabling [database] auto_update/filesystem_watch
+# configures rmpd as a streaming-only player.
+
+[general]
+playlist_directory = "~/.config/rmpd/playlists"
+log_level = "info"
+
+[database]
+auto_update = false
+filesystem_watch = false
+
+[network]
+bind_address = "0.0.0.0"
+port = 6600
+zeroconf_name = "rmpd@%h"
+
+[[output]]
+name = "ALSA"
+type = "default"
+# Dedicated snd-aloop subdevice 1 (defined in /etc/asound.conf) so rmpd and
+# bluealsa-aplay never collide with EBUSY on hw:Loopback,0,0.
+device = "src_rmpd"
+enabled = true
+# audio-manager owns the Merus MA12070P hardware mixer exclusively; keep "none"
+# so rmpd never applies software PCM attenuation on top of amp volume.
+mixer_type = "none"
+
+[[integration]]
+name = "desktop"
+type = "mpris"
+
+[[integration]]
+name = "zeroconf"
+type = "mdns"
+port = 6600
+
+[[integration]]
+name = "web"
+type = "http"
+bind = "0.0.0.0:6680"
+token = "replace-with-strong-random-token"
+
+[[source]]
+name = "radio"
+type = "radio"

@@ -1,49 +1,59 @@
-//! ALSA Loopback sample-rate watcher for dynamic `CamillaDSP` reconfiguration.
+//! ALSA Loopback sample-rate and capture-device watcher for dynamic `CamillaDSP` routing.
 //!
-//! Monitors `hw:Loopback` (`PCM Slave Active` and `PCM Slave Rate` on device 1,
-//! subdevice 0 — the capture-side controls that reflect the playback writer on
-//! `hw:Loopback,0,0` in `snd-aloop`). Also enables `PCM Notify` on device 1,
-//! subdevice 0 so kernel control events fire immediately when a player opens,
-//! closes, or changes sample rate.
+//! Monitors `hw:Loopback` (`PCM Slave Active` and `PCM Slave Rate` on device 1
+//! across all configured subdevices) and enables `PCM Notify` so kernel events
+//! fire immediately when any source opens, closes, or changes sample rate.
 //!
-//! Whenever a player opens `hw:Loopback,0,0` at any sample rate (e.g. 44.1,
-//! 48, 88.2, 96, 176.4, or 192 kHz), `rate_watch` parses and validates the
-//! active `CamillaDSP` YAML config file using `camilladsp-schema`, updates
-//! `devices.samplerate` and `devices.chunksize` (preserving all filters,
-//! mixers, processors, and pipeline stages), and uploads the validated JSON
-//! via `SetConfigJson`.
+//! Whenever the active source changes or changes sample rate, `rate_watch`
+//! parses and validates the base `CamillaDSP` YAML config via `camilladsp-schema`,
+//! updates `devices.capture.device` (when specified), `devices.samplerate`, and
+//! `devices.chunksize`, and uploads the validated JSON via `SetConfigJson`.
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::time::Duration;
 
 use alsa::ctl::{Ctl, ElemId, ElemIface, ElemType, ElemValue};
-use camilladsp_schema::config::{parse_config, validate_config};
+use camilladsp_schema::config::{CaptureDevice, parse_config, validate_config};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use speaker_dsp::DspDevice;
+use speaker_dsp::{DspDevice, ProcessingState};
 
 /// Default `CamillaDSP` YAML configuration file read as the base template.
 pub const DEFAULT_CAMILLADSP_CONFIG_PATH: &str = "/etc/camilladsp/crossover.yml";
 
-/// Capture-side ALSA Loopback device index (`hw:Loopback,1,0`).
+/// Default capture device for single-source `rate_watch` callers.
+const DEFAULT_LOOPBACK_CAPTURE_DEVICE: &str = "hw:Loopback,1,0";
+
+/// Capture-side ALSA Loopback device index (`hw:Loopback,1,*`).
 ///
 /// In `snd-aloop`, the `PCM Slave *` controls on device `1` reflect the state
-/// of the playback writer on device `0` (`hw:Loopback,0,0`).
+/// of the playback writer on device `0` (`hw:Loopback,0,*`).
 const LOOPBACK_CAPTURE_DEVICE: u32 = 1;
 
-/// ALSA Loopback subdevice index (`0`).
-const LOOPBACK_SUBDEVICE: u32 = 0;
-
-/// Snapshot of `hw:Loopback` playback-writer state read from device 1 controls.
+/// Snapshot of one `hw:Loopback` subdevice playback-writer state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoopbackState {
-    /// `true` when `PCM Slave Active` is non-zero (a player holds `hw:Loopback,0,0`).
+    /// `true` when `PCM Slave Active` is non-zero (a player holds `hw:Loopback,0,{N}`).
     pub active: bool,
     /// Current `PCM Slave Rate` in Hz reported by `snd-aloop`.
     pub rate_hz: u32,
+}
+
+/// Desired `CamillaDSP` capture device and sample-rate routing target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DspRouteRequest {
+    /// Target ALSA capture device string (e.g., `hw:Loopback,1,1`).
+    pub capture_device: Box<str>,
+    /// Target sample rate in Hz (`> 0`).
+    pub rate_hz: u32,
+    /// `true` when the active source is currently streaming.
+    pub streaming: bool,
+    /// `true` to push config even when `streaming == false` (detach from prior source).
+    pub force_apply: bool,
 }
 
 /// Returns the `CamillaDSP` chunksize for the given sample rate.
@@ -61,16 +71,17 @@ pub const fn chunksize_for_rate(rate_hz: u32) -> u32 {
     }
 }
 
-/// Parses a `CamillaDSP` YAML config via `camilladsp-schema`, updates
-/// `devices.samplerate` and `devices.chunksize`, validates the resulting
-/// `Configuration` against CamillaDSP 5.0 schema rules, and returns the
-/// serialized JSON string for `SetConfigJson`.
+/// Parses a `CamillaDSP` YAML config via `camilladsp-schema`, optionally updates
+/// `devices.capture.device`, updates `devices.samplerate` and `devices.chunksize`,
+/// validates against `CamillaDSP` 5.0 schema rules, and returns JSON for `SetConfigJson`.
 ///
 /// # Errors
-/// Returns an error string if the YAML fails schema parsing, if `rate_hz` or
-/// `chunksize` is zero, or if `camilladsp-schema` validation fails.
-pub fn build_reconfigured_config_json(
+/// Returns an error string if the YAML fails schema parsing, if `capture_device`
+/// is provided when `devices.capture` is not ALSA, if `rate_hz` or `chunksize` is
+/// zero, or if `camilladsp-schema` validation fails.
+pub fn build_reconfigured_config_json_for(
     yaml: &str,
+    capture_device: Option<&str>,
     rate_hz: u32,
     chunksize: u32,
 ) -> Result<String, String> {
@@ -80,6 +91,12 @@ pub fn build_reconfigured_config_json(
         .ok_or_else(|| "chunksize must be non-zero".to_owned())?;
 
     let mut cfg = parse_config(yaml).map_err(|e| format!("schema parse error: {e}"))?;
+    if let Some(target_dev) = capture_device {
+        let CaptureDevice::Alsa { device, .. } = &mut cfg.devices.capture else {
+            return Err("CamillaDSP capture device is not ALSA".to_owned());
+        };
+        *device = target_dev.to_owned();
+    }
     cfg.devices.samplerate = rate;
     cfg.devices.chunksize = chunk;
 
@@ -88,45 +105,103 @@ pub fn build_reconfigured_config_json(
     serde_json::to_string(&cfg).map_err(|e| format!("JSON serialization error: {e}"))
 }
 
-/// Pure state machine deciding when to push a new sample-rate config to `CamillaDSP`.
+/// Legacy single-device wrapper over [`build_reconfigured_config_json_for`].
+///
+/// # Errors
+/// Propagates [`build_reconfigured_config_json_for`] errors.
+pub fn build_reconfigured_config_json(
+    yaml: &str,
+    rate_hz: u32,
+    chunksize: u32,
+) -> Result<String, String> {
+    build_reconfigured_config_json_for(yaml, None, rate_hz, chunksize)
+}
+
+/// Pure state machine deciding when to push a new `(capture_device, rate_hz)` config to `CamillaDSP`.
 #[derive(Debug, Default)]
 pub struct RateWatchController {
-    applied_rate: Option<u32>,
+    applied: Option<(Box<str>, u32)>,
     warned_failure: bool,
 }
 
 impl RateWatchController {
-    /// Creates a new controller with no applied rate yet.
+    /// Creates a new controller with no applied route yet.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            applied_rate: None,
+            applied: None,
             warned_failure: false,
         }
     }
 
-    /// Evaluates a new [`LoopbackState`] and returns `Some(rate_hz)` if `CamillaDSP`
-    /// should be configured for `rate_hz`.
-    ///
-    /// Call [`Self::confirm_applied`] only after `SetConfigJson` succeeds so failed
-    /// writes are retried on the next update.
-    pub fn pending_rate(&mut self, state: LoopbackState) -> Option<u32> {
-        if !state.active || state.rate_hz == 0 {
-            self.applied_rate = None;
+    /// Evaluates a [`DspRouteRequest`] and returns `Some((device, rate_hz))` when
+    /// `CamillaDSP` should be configured.
+    pub fn pending_route(&mut self, req: &DspRouteRequest) -> Option<(Box<str>, u32)> {
+        if req.rate_hz == 0 {
+            self.applied = None;
             self.warned_failure = false;
             return None;
         }
-        if self.applied_rate == Some(state.rate_hz) {
+        if !req.streaming {
+            self.applied = None;
+            self.warned_failure = false;
+            if req.force_apply {
+                return Some((req.capture_device.clone(), req.rate_hz));
+            }
+            return None;
+        }
+        if self.matches(&req.capture_device, req.rate_hz) {
             None
         } else {
-            Some(state.rate_hz)
+            Some((req.capture_device.clone(), req.rate_hz))
         }
     }
 
-    /// Records that `rate_hz` was successfully applied to `CamillaDSP`.
-    pub fn confirm_applied(&mut self, rate_hz: u32) {
-        self.applied_rate = Some(rate_hz);
+    /// Single-device helper over [`Self::pending_route`] for [`LoopbackState`].
+    pub fn pending_rate(&mut self, state: LoopbackState) -> Option<u32> {
+        let req = DspRouteRequest {
+            capture_device: Box::from(DEFAULT_LOOPBACK_CAPTURE_DEVICE),
+            rate_hz: state.rate_hz,
+            streaming: state.active,
+            force_apply: false,
+        };
+        self.pending_route(&req).map(|(_, rate)| rate)
+    }
+
+    /// Records that `(capture_device, rate_hz)` was successfully applied to `CamillaDSP`.
+    pub fn confirm_route_applied(&mut self, capture_device: &str, rate_hz: u32) {
+        self.applied = Some((Box::from(capture_device), rate_hz));
         self.warned_failure = false;
+    }
+
+    /// Legacy single-device helper recording `rate_hz` applied on `hw:Loopback,1,0`.
+    pub fn confirm_applied(&mut self, rate_hz: u32) {
+        self.confirm_route_applied(DEFAULT_LOOPBACK_CAPTURE_DEVICE, rate_hz);
+    }
+
+    /// Clears the cached applied route so the next check forces a re-push.
+    pub fn invalidate(&mut self) {
+        self.applied = None;
+    }
+
+    /// Returns `true` when `applied` matches `(capture_device, rate_hz)`.
+    #[must_use]
+    pub fn matches(&self, capture_device: &str, rate_hz: u32) -> bool {
+        self.applied
+            .as_ref()
+            .is_some_and(|(dev, r)| dev.as_ref() == capture_device && *r == rate_hz)
+    }
+
+    /// Returns the currently applied sample rate, if any.
+    #[must_use]
+    pub fn applied_rate(&self) -> Option<u32> {
+        self.applied.as_ref().map(|(_, rate)| *rate)
+    }
+
+    /// Returns the currently applied capture device, if any.
+    #[must_use]
+    pub fn applied_device(&self) -> Option<&str> {
+        self.applied.as_ref().map(|(dev, _)| dev.as_ref())
     }
 
     /// Returns `true` on the first failure in a streak (for `warn!`), then `false` (`debug!`).
@@ -138,51 +213,31 @@ impl RateWatchController {
             true
         }
     }
-
-    /// Returns the currently applied sample rate, if any.
-    #[must_use]
-    pub const fn applied_rate(&self) -> Option<u32> {
-        self.applied_rate
-    }
 }
 
-/// Applies a [`LoopbackState`] update to `dsp` using `config_path` as the base
-/// YAML template if a rate change is needed.
+/// Applies a [`DspRouteRequest`] to `dsp` using `config_path` as the base YAML template.
 ///
-/// When `force_if_inactive` is `true` and `ctrl` believes `state.rate_hz` is
-/// already applied, this checks `CamillaDSP`'s live state and re-applies the
-/// config if the engine went `Inactive` (e.g. a fast `1 -> 0 -> 1` bounce on
-/// `PCM Slave Active` at the same sample rate).
-pub async fn apply_loopback_state(
+/// When `force_if_inactive` is `true` and `ctrl` believes the target is already applied,
+/// checks `CamillaDSP`'s live state and re-applies if the engine went `Inactive`.
+pub async fn apply_route_request(
     ctrl: &mut RateWatchController,
     dsp: &DspDevice,
     config_path: &Path,
-    state: LoopbackState,
-) -> bool {
-    apply_loopback_state_ext(ctrl, dsp, config_path, state, false).await
-}
-
-async fn apply_loopback_state_ext(
-    ctrl: &mut RateWatchController,
-    dsp: &DspDevice,
-    config_path: &Path,
-    state: LoopbackState,
+    req: &DspRouteRequest,
     force_if_inactive: bool,
 ) -> bool {
     if force_if_inactive
-        && state.active
-        && ctrl.applied_rate() == Some(state.rate_hz)
-        && matches!(
-            dsp.read_state_async().await,
-            Ok(speaker_dsp::ProcessingState::Inactive)
-        )
+        && req.streaming
+        && ctrl.matches(&req.capture_device, req.rate_hz)
+        && matches!(dsp.read_state_async().await, Ok(ProcessingState::Inactive))
     {
-        // Engine stopped (e.g. stop_on_inactive during a fast close/reopen at the same rate).
-        ctrl.applied_rate = None;
+        ctrl.invalidate();
     }
-    let Some(rate_hz) = ctrl.pending_rate(state) else {
+
+    let Some((target_device, rate_hz)) = ctrl.pending_route(req) else {
         return false;
     };
+
     let raw_yaml = match tokio::fs::read_to_string(config_path).await {
         Ok(contents) => contents,
         Err(e) => {
@@ -194,8 +249,14 @@ async fn apply_loopback_state_ext(
             return false;
         }
     };
+
     let chunksize = chunksize_for_rate(rate_hz);
-    let config_json = match build_reconfigured_config_json(&raw_yaml, rate_hz, chunksize) {
+    let config_json = match build_reconfigured_config_json_for(
+        &raw_yaml,
+        Some(&target_device),
+        rate_hz,
+        chunksize,
+    ) {
         Ok(json) => json,
         Err(e) => {
             if ctrl.should_warn_failure() {
@@ -209,67 +270,151 @@ async fn apply_loopback_state_ext(
 
     match dsp.set_config_json_async(&config_json).await {
         Ok(()) => {
-            ctrl.confirm_applied(rate_hz);
+            if req.streaming {
+                ctrl.confirm_route_applied(&target_device, rate_hz);
+            } else {
+                // Detached onto an idle source; clear applied so the next active stream re-arms cleanly.
+                ctrl.invalidate();
+            }
             info!(
+                capture_device = %target_device,
                 rate_hz,
                 chunksize,
+                streaming = req.streaming,
                 path = %config_path.display(),
-                "Configured CamillaDSP for Loopback sample rate"
+                "Configured CamillaDSP capture route and sample rate"
             );
             true
         }
         Err(e) => {
             if ctrl.should_warn_failure() {
-                warn!(rate_hz, error = %e, "Failed to configure CamillaDSP sample rate; will retry");
+                warn!(
+                    capture_device = %target_device,
+                    rate_hz,
+                    error = %e,
+                    "Failed to configure CamillaDSP route/rate; will retry"
+                );
             } else {
-                debug!(rate_hz, error = %e, "Failed to configure CamillaDSP sample rate; retrying");
+                debug!(
+                    capture_device = %target_device,
+                    rate_hz,
+                    error = %e,
+                    "Failed to configure CamillaDSP route/rate; retrying"
+                );
             }
             false
         }
     }
 }
 
-/// Reconciles `ctrl` against `CamillaDSP`'s live status when a loopback stream is
-/// active, recovering if `camilladsp.service` restarted with its static config.
+/// Applies a [`LoopbackState`] update to `dsp` on default subdevice 0.
+pub async fn apply_loopback_state(
+    ctrl: &mut RateWatchController,
+    dsp: &DspDevice,
+    config_path: &Path,
+    state: LoopbackState,
+) -> bool {
+    let req = DspRouteRequest {
+        capture_device: Box::from(DEFAULT_LOOPBACK_CAPTURE_DEVICE),
+        rate_hz: state.rate_hz,
+        streaming: state.active,
+        force_apply: false,
+    };
+    apply_route_request(ctrl, dsp, config_path, &req, false).await
+}
+
+/// Reconciles `ctrl` against `CamillaDSP`'s live status when a stream is active,
+/// recovering if `camilladsp.service` restarted with its static config.
+///
+/// Skips divergence checks while `status.state == ProcessingState::Starting` because
+/// `SetConfigJson` applies asynchronously in `CamillaDSP` 5.0.
+pub async fn reconcile_route_with_engine(
+    ctrl: &mut RateWatchController,
+    dsp: &DspDevice,
+    config_path: &Path,
+    req: &DspRouteRequest,
+) -> bool {
+    if !req.streaming || req.rate_hz == 0 {
+        return false;
+    }
+    if ctrl.matches(&req.capture_device, req.rate_hz) {
+        let status = match dsp.read_status_async().await {
+            Ok(s) => s,
+            Err(e) => {
+                debug!(error = %e, "Skipping engine route reconcile; DSP status unavailable");
+                return false;
+            }
+        };
+        if status.state == ProcessingState::Starting {
+            debug!("Skipping engine route reconcile while CamillaDSP is Starting");
+            return false;
+        }
+        let live_rate = status.config.as_ref().and_then(|c| c.samplerate);
+        let live_device = status
+            .config
+            .as_ref()
+            .and_then(|c| c.capture_device.as_deref());
+        let rate_mismatch = live_rate.is_some_and(|r| r != req.rate_hz);
+        let device_mismatch = live_device.is_some_and(|d| d != req.capture_device.as_ref());
+        if status.state != ProcessingState::Inactive && !rate_mismatch && !device_mismatch {
+            return false;
+        }
+        warn!(
+            expected_device = %req.capture_device,
+            expected_rate = req.rate_hz,
+            ?live_device,
+            ?live_rate,
+            engine_state = %status.state,
+            "CamillaDSP diverged from active route; reconfiguring"
+        );
+        ctrl.invalidate();
+    }
+    apply_route_request(ctrl, dsp, config_path, req, false).await
+}
+
+/// Legacy single-subdevice reconciliation wrapper over [`reconcile_route_with_engine`].
 pub async fn reconcile_with_engine(
     ctrl: &mut RateWatchController,
     dsp: &DspDevice,
     config_path: &Path,
     state: LoopbackState,
 ) -> bool {
-    if !state.active || state.rate_hz == 0 {
-        return false;
-    }
-    if ctrl.applied_rate() == Some(state.rate_hz) {
-        let status = match dsp.read_status_async().await {
-            Ok(s) => s,
-            Err(e) => {
-                debug!(error = %e, "Skipping engine rate reconcile; DSP status unavailable");
-                return false;
-            }
-        };
-        let live_rate = status.config.as_ref().and_then(|c| c.samplerate);
-        let rate_mismatch = live_rate.is_some_and(|r| r != state.rate_hz);
-        if status.state != speaker_dsp::ProcessingState::Inactive && !rate_mismatch {
-            return false;
-        }
-        warn!(
-            expected_rate = state.rate_hz,
-            ?live_rate,
-            engine_state = %status.state,
-            "CamillaDSP diverged from active Loopback rate; reconfiguring"
-        );
-        ctrl.applied_rate = None;
-    }
-    apply_loopback_state(ctrl, dsp, config_path, state).await
+    let req = DspRouteRequest {
+        capture_device: Box::from(DEFAULT_LOOPBACK_CAPTURE_DEVICE),
+        rate_hz: state.rate_hz,
+        streaming: state.active,
+        force_apply: false,
+    };
+    reconcile_route_with_engine(ctrl, dsp, config_path, &req).await
 }
 
-/// Runs the ALSA `hw:Loopback` rate-watcher task until the process shuts down.
+/// Spawns the `hw:Loopback` ALSA ctl thread monitoring `subdevices` and returns its receiver + join handle.
+#[must_use]
+pub fn spawn_subdevice_watcher(
+    subdevices: Vec<u32>,
+) -> (
+    mpsc::Receiver<(u32, LoopbackState, bool)>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (tx, rx) = mpsc::channel::<(u32, LoopbackState, bool)>(32);
+    let handle = tokio::task::spawn_blocking(move || loopback_ctl_thread(&subdevices, &tx));
+    (rx, handle)
+}
+
+/// Runs the legacy single-subdevice ALSA `hw:Loopback` rate-watcher task.
 pub async fn run(dsp: DspDevice) {
     let config_path = Path::new(DEFAULT_CAMILLADSP_CONFIG_PATH);
+    let (mut multi_rx, ctl_handle) = spawn_subdevice_watcher(vec![0]);
     let (tx, rx) = mpsc::channel::<(LoopbackState, bool)>(8);
-    let ctl_handle = tokio::task::spawn_blocking(move || loopback_ctl_thread(&tx));
+    let forward = tokio::spawn(async move {
+        while let Some((_sub, state, from_event)) = multi_rx.recv().await {
+            if tx.send((state, from_event)).await.is_err() {
+                break;
+            }
+        }
+    });
     run_with_rx(dsp, config_path, rx).await;
+    forward.abort();
     if let Err(join_err) = ctl_handle.await
         && join_err.is_panic()
     {
@@ -301,7 +446,13 @@ pub async fn run_with_rx(
                     break;
                 };
                 last_state = Some(state);
-                apply_loopback_state_ext(&mut ctrl, &dsp, config_path, state, from_event).await;
+                let req = DspRouteRequest {
+                    capture_device: Box::from(DEFAULT_LOOPBACK_CAPTURE_DEVICE),
+                    rate_hz: state.rate_hz,
+                    streaming: state.active,
+                    force_apply: false,
+                };
+                apply_route_request(&mut ctrl, &dsp, config_path, &req, from_event).await;
             }
             () = tokio::time::sleep(reconcile_interval), if last_state.is_some_and(|s| s.active) => {
                 if let Some(state) = last_state {
@@ -312,22 +463,24 @@ pub async fn run_with_rx(
     }
 }
 
-fn loopback_ctl_thread(tx: &mpsc::Sender<(LoopbackState, bool)>) {
+fn loopback_ctl_thread(subdevices: &[u32], tx: &mpsc::Sender<(u32, LoopbackState, bool)>) {
     while !tx.is_closed() {
-        let Some(ctl) = open_loopback_ctl() else {
+        let Some(ctl) = open_loopback_ctl(subdevices) else {
             std::thread::sleep(Duration::from_secs(1));
             continue;
         };
-        poll_loopback_ctl(&ctl, tx);
+        poll_loopback_ctl(&ctl, subdevices, tx);
     }
 }
 
-fn open_loopback_ctl() -> Option<Ctl> {
+fn open_loopback_ctl(subdevices: &[u32]) -> Option<Ctl> {
     // Open non-blocking so draining events with `ctl.read()` returns `Ok(None)`.
     let ctl = Ctl::new("hw:Loopback", true)
         .inspect_err(|e| warn!(error = %e, "Failed to open hw:Loopback ALSA ctl; retrying"))
         .ok()?;
-    enable_pcm_notify(&ctl);
+    for &sub in subdevices {
+        enable_pcm_notify(&ctl, sub);
+    }
     if let Err(e) = ctl.subscribe_events(true) {
         warn!(error = %e, "Failed to subscribe to hw:Loopback ALSA ctl events");
         return None;
@@ -335,17 +488,19 @@ fn open_loopback_ctl() -> Option<Ctl> {
     Some(ctl)
 }
 
-fn poll_loopback_ctl(ctl: &Ctl, tx: &mpsc::Sender<(LoopbackState, bool)>) {
-    let mut prev: Option<LoopbackState> = None;
+fn poll_loopback_ctl(ctl: &Ctl, subdevices: &[u32], tx: &mpsc::Sender<(u32, LoopbackState, bool)>) {
+    let mut prev: HashMap<u32, LoopbackState> = HashMap::with_capacity(subdevices.len());
     let mut from_event = false;
     while !tx.is_closed() {
-        if let Some(state) = read_loopback_state(ctl)
-            && (prev != Some(state) || from_event)
-        {
-            if tx.blocking_send((state, from_event)).is_err() {
-                return;
+        for &sub in subdevices {
+            if let Some(state) = read_loopback_state(ctl, sub)
+                && (prev.get(&sub) != Some(&state) || from_event)
+            {
+                if tx.blocking_send((sub, state, from_event)).is_err() {
+                    return;
+                }
+                prev.insert(sub, state);
             }
-            prev = Some(state);
         }
         from_event = match ctl.wait(Some(500)) {
             Ok(true) => {
@@ -361,17 +516,17 @@ fn poll_loopback_ctl(ctl: &Ctl, tx: &mpsc::Sender<(LoopbackState, bool)>) {
     }
 }
 
-fn make_pcm_elem_id(name: &str) -> Option<ElemId> {
+fn make_pcm_elem_id(name: &str, subdevice: u32) -> Option<ElemId> {
     let c_name = CString::new(name).ok()?;
     let mut id = ElemId::new(ElemIface::PCM);
     id.set_device(LOOPBACK_CAPTURE_DEVICE);
-    id.set_subdevice(LOOPBACK_SUBDEVICE);
+    id.set_subdevice(subdevice);
     id.set_name(&c_name);
     Some(id)
 }
 
-fn enable_pcm_notify(ctl: &Ctl) {
-    let Some(notify_id) = make_pcm_elem_id("PCM Notify") else {
+fn enable_pcm_notify(ctl: &Ctl, subdevice: u32) {
+    let Some(notify_id) = make_pcm_elem_id("PCM Notify", subdevice) else {
         return;
     };
     let Ok(mut val) = ElemValue::new(ElemType::Boolean) else {
@@ -381,13 +536,13 @@ fn enable_pcm_notify(ctl: &Ctl) {
     if val.set_boolean(0, true).is_some()
         && let Err(e) = ctl.elem_write(&val)
     {
-        warn!(error = %e, "Failed to enable PCM Notify on hw:Loopback device 1");
+        warn!(subdevice, error = %e, "Failed to enable PCM Notify on hw:Loopback device 1");
     }
 }
 
-fn read_loopback_state(ctl: &Ctl) -> Option<LoopbackState> {
-    let active_id = make_pcm_elem_id("PCM Slave Active")?;
-    let rate_id = make_pcm_elem_id("PCM Slave Rate")?;
+fn read_loopback_state(ctl: &Ctl, subdevice: u32) -> Option<LoopbackState> {
+    let active_id = make_pcm_elem_id("PCM Slave Active", subdevice)?;
+    let rate_id = make_pcm_elem_id("PCM Slave Rate", subdevice)?;
 
     let mut active_val = ElemValue::new(ElemType::Boolean).ok()?;
     active_val.set_id(&active_id);

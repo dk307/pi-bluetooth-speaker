@@ -11,7 +11,9 @@ publish = false
 speaker-common = { path = "../../crates/common" }
 speaker-hardware = { path = "../../crates/hardware" }
 speaker-dsp = { path = "../../crates/dsp" }
+speaker-mpd = { path = "../../crates/mpd" }
 camilladsp-schema = { workspace = true }
+async-trait = { workspace = true }
 rppal = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 zbus = { workspace = true, features = ["tokio", "blocking-api"] }
@@ -21,7 +23,6 @@ tempfile = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-async-trait = { workspace = true }
 libc = { workspace = true }
 ctrlc = { workspace = true }
 alsa = { workspace = true }

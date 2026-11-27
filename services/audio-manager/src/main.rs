@@ -58,7 +58,16 @@ mod dsp_watch;
     reason = "bin-only compilation leaves mock/test helpers unused"
 )]
 mod error;
+#[expect(
+    dead_code,
+    reason = "bin-only compilation leaves single-device test helpers unused"
+)]
 mod rate_watch;
+#[expect(
+    dead_code,
+    reason = "bin-only compilation leaves test-only source manager helpers unused"
+)]
+mod sources;
 mod state_file;
 
 use std::path::Path;
@@ -216,31 +225,6 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<AmpCommand>(32);
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
 
-    // 6b. DSP stream-lifecycle watcher (plan §11.3): polls the CamillaDSP
-    //     engine state and emits StreamStarting/Stopping edges onto the
-    //     command channel. Exits when the channel closes with the
-    //     controller loop.
-    if config.dsp_watch_enabled {
-        let dsp_device = speaker_dsp::DspDevice::new();
-        let watcher_cmd_tx = cmd_tx.clone();
-        tokio::spawn(dsp_watch::run(
-            dsp_device.clone(),
-            watcher_cmd_tx,
-            Duration::from_millis(config.dsp_poll_interval_ms),
-        ));
-        tokio::spawn(rate_watch::run(dsp_device));
-        info!(
-            poll_interval_ms = config.dsp_poll_interval_ms,
-            "DSP stream-lifecycle and loopback rate watchers enabled"
-        );
-    } else {
-        warn!(
-            "DSP stream-lifecycle watcher disabled by configuration: no lifecycle \
-             source can emit StreamStarting, so the amp stays hardware-muted while \
-             no stream runs (idle SetMute(false) records intent only)"
-        );
-    }
-
     let mirror = controller.mirror();
     let interface =
         AudioManagerInterface::with_commands(mirror.clone(), state_file.clone(), cmd_tx.clone());
@@ -249,6 +233,65 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
         .at("/org/speaker/amp", interface)
         .await
         .context("Failed to export D-Bus object")?;
+
+    // 6b. Multi-source arbiter + CamillaDSP input router (/org/speaker/sources).
+    // Exported BEFORE sd_notify(READY=1) so Type=dbus consumers never race registration.
+    let source_registry =
+        crate::sources::registry::SourceRegistry::from_definitions(config.sources.clone())
+            .map_err(|e| anyhow::anyhow!("Invalid sources configuration: {e}"))?;
+    let source_snapshot =
+        crate::sources::dbus_sources::AudioSourcesSnapshot::new(config.auto_switch_policy);
+    let (source_cmd_tx, source_cmd_rx) = mpsc::channel(32);
+    let sources_iface = crate::sources::dbus_sources::AudioSourcesInterface::new(
+        source_snapshot.clone(),
+        source_cmd_tx.clone(),
+    );
+    let sources_emitter =
+        crate::sources::dbus_sources::export_sources_interface(&connection, sources_iface)
+            .await
+            .context("Failed to export /org/speaker/sources D-Bus object")?;
+
+    // 6c. DSP stream-lifecycle watcher + multi-source router (plan §11.3):
+    //     subscribes to CamillaDSP engine state and drives StreamStarting/Stopping
+    //     edges onto the amp controller, while SourceManager owns SetConfigJson.
+    if config.dsp_watch_enabled {
+        let dsp_device = speaker_dsp::DspDevice::new();
+        let watcher_cmd_tx = cmd_tx.clone();
+        tokio::spawn(dsp_watch::run(
+            dsp_device.clone(),
+            watcher_cmd_tx,
+            Duration::from_millis(config.dsp_poll_interval_ms),
+        ));
+        let source_control: Arc<dyn crate::sources::control::SourceControl> =
+            Arc::new(crate::sources::control::SourceController::from_registry(
+                &source_registry,
+                Some(connection.clone()),
+            ));
+        let source_mgr = crate::sources::manager::SourceManager::new(
+            source_registry,
+            crate::sources::manager::SourceManagerConfig {
+                camilladsp_config_path: config.camilladsp_config_path.clone(),
+                source_state_path: config.source_state_path.clone(),
+                default_policy: config.auto_switch_policy,
+            },
+            dsp_device,
+            source_control,
+            source_snapshot,
+            Some((connection.clone(), sources_emitter)),
+        );
+        tokio::spawn(source_mgr.run_with_alsa_loopback(source_cmd_tx, source_cmd_rx));
+        info!(
+            poll_interval_ms = config.dsp_poll_interval_ms,
+            "DSP stream-lifecycle and multi-source loopback watchers enabled"
+        );
+    } else {
+        drop(source_cmd_rx);
+        warn!(
+            "DSP stream-lifecycle watcher disabled by configuration: no lifecycle \
+             source can emit StreamStarting, so the amp stays hardware-muted while \
+             no stream runs (idle SetMute(false) records intent only)"
+        );
+    }
 
     sd_notify::notify(true, &[sd_notify::NotifyState::Ready])
         .context("Failed to notify systemd READY=1")?;
