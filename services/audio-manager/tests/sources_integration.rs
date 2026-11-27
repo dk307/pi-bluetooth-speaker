@@ -1203,3 +1203,30 @@ async fn mpd_play_watcher_initial_playing_retry_and_manager_play_intent_cmd() {
         .unwrap();
     assert_eq!(snapshot.active_source_str(), "rmpd");
 }
+
+#[test]
+fn source_manager_honors_default_policy_when_state_file_missing() {
+    let dir = ScopedTempDir::new("src_mgr_default_policy");
+    let dsp_cfg_path = dir.path().join("dsp.yml");
+    let missing_state_path = dir.path().join("missing-source-state.json");
+    std::fs::write(&dsp_cfg_path, SAMPLE_CONFIG_YAML).unwrap();
+
+    let reg = SourceRegistry::default_appliance();
+    let snapshot = AudioSourcesSnapshot::new(AutoSwitchPolicy::LastPlayWins);
+    let (dsp, _dsp_mock) = DspDevice::new_mocked();
+    let (ctrl, _ctrl_mock) = SourceController::new_mocked();
+    let mgr = SourceManager::new(
+        reg,
+        SourceManagerConfig {
+            camilladsp_config_path: dsp_cfg_path,
+            source_state_path: missing_state_path,
+            default_policy: AutoSwitchPolicy::Priority,
+        },
+        dsp,
+        Arc::new(ctrl),
+        snapshot.clone(),
+        None,
+    );
+    assert_eq!(mgr.arbiter().policy(), AutoSwitchPolicy::Priority);
+    assert_eq!(snapshot.policy_str(), "priority");
+}

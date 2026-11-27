@@ -60,13 +60,20 @@ impl SourceManager {
         dbus: Option<(Connection, SignalEmitter<'static>)>,
     ) -> Self {
         let state_file = SourceStateFile::new(&cfg.source_state_path);
-        let persisted = state_file.load().unwrap_or_else(|e| {
-            warn!(error = %e, "Failed to load source state file, using defaults");
+        let persisted = if cfg.source_state_path.exists() {
+            state_file.load().unwrap_or_else(|e| {
+                warn!(error = %e, "Failed to load source state file, using defaults");
+                PersistedSourceState {
+                    auto_switch_policy: cfg.default_policy,
+                    ..PersistedSourceState::default()
+                }
+            })
+        } else {
             PersistedSourceState {
                 auto_switch_policy: cfg.default_policy,
                 ..PersistedSourceState::default()
             }
-        });
+        };
         let arbiter = SourceArbiter::new(registry, persisted);
         let initial_views = arbiter.status_views();
         snapshot.update(
@@ -135,6 +142,10 @@ impl SourceManager {
         let mut seeded = expected_loopbacks == 0;
         let mut pending_seed: Vec<(SourceId, bool, u32)> = Vec::new();
         let seed_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+
+        if let Some((conn, emitter)) = self.dbus.as_ref() {
+            emit_property_changes(conn, emitter, true, true, true, true).await;
+        }
 
         loop {
             let needs_retry = self.desired_route.as_ref().is_some_and(|req| {
