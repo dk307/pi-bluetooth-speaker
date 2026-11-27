@@ -3,7 +3,7 @@
 //! Exposes ahead-of-time (AOT) compiled Slint UI components including
 //! [`MainWindow`] and [`SplashScreen`], the offscreen framebuffer test
 //! harness, and the unified theme system. Production rendering goes through
-//! Slint's `backend-linuxkms` (see `docs/kms_femtovg_migration_plan.md`).
+//! Slint's `backend-linuxkms`.
 
 #[expect(
     clippy::all,

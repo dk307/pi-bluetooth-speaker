@@ -1,7 +1,7 @@
 //! Single-window, single-event-loop application runtime (KMS backend).
 //!
 //! The DRM/KMS backend allows exactly ONE window and ONE `run_event_loop()`
-//! call for the process lifetime (see `docs/kms_femtovg_migration_plan.md`),
+//! call for the process lifetime,
 //! so all screen targets are expressed as phases driven by [`slint::Timer`]s
 //! inside one event loop instead of the former sequential render loops:
 //!
