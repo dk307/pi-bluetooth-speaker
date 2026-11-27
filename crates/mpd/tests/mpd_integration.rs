@@ -54,6 +54,9 @@ fn host_and_port_validation_enforces_domain_invariants() {
             .contains("between 1 and 65535")
     );
     MpdPort::parse_str("not-a-port").unwrap_err();
+    MpdPort::parse_str("+6600").unwrap_err();
+    MpdPort::parse_str("-1").unwrap_err();
+    MpdPort::parse_str("").unwrap_err();
 }
 
 #[test]

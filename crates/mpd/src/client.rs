@@ -174,6 +174,9 @@ impl MpdPort {
     /// Returns a descriptive string error when parsing or range validation fails.
     pub fn parse_str(raw: &str) -> Result<Self, String> {
         let trimmed = raw.trim();
+        if trimmed.is_empty() || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("invalid TCP port '{trimmed}'"));
+        }
         let port: u16 = match trimmed.parse() {
             Ok(p) => p,
             Err(e) if *e.kind() == std::num::IntErrorKind::PosOverflow => {
