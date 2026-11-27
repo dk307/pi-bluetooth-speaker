@@ -391,9 +391,9 @@ fn arbiter_handles_last_play_first_play_priority_pinning_and_release() {
     arb3.on_activity(&bt, false, 0);
     let restart_same = arb3.on_activity(&bt, true, 48_000);
     assert!(restart_same.dsp_target.as_ref().unwrap().streaming);
-    // Release active streaming `bt` when nothing else is streaming -> dispatches pause without redundant DSP reload
+    // Release active streaming `bt` when nothing else is streaming -> dispatches pause and marks desired_route non-streaming without DSP reload
     let rel_detach = arb3.release_source(&bt).unwrap();
-    assert!(rel_detach.dsp_target.is_none());
+    assert!(rel_detach.dsp_target.as_ref().is_some_and(|t| !t.streaming));
     assert_eq!(rel_detach.pause_sources, vec![bt.clone()]);
     // Release idle `rmpd` -> still dispatches pause without DSP target
     let rel_idle = arb3.release_source(&rmpd).unwrap();
@@ -1070,6 +1070,31 @@ fn arbiter_on_play_intent_handles_unknown_last_play_and_pin() {
     let blocked = arbiter.on_play_intent(&sid("rmpd"));
     assert!(blocked.dsp_target.is_none());
     assert_eq!(blocked.pause_sources, vec![sid("rmpd")]);
+
+    // Releasing the active source when no fallback is streaming clears dsp_target.streaming.
+    let released = arbiter.release_source(&sid("bluetooth")).unwrap();
+    assert_eq!(released.pause_sources, vec![sid("bluetooth")]);
+    assert!(
+        released
+            .dsp_target
+            .as_ref()
+            .is_some_and(|t| !t.streaming && t.capture_device.as_ref() == "hw:Loopback,1,0")
+    );
+}
+
+#[test]
+fn mpd_host_and_port_serde_enforces_invariants() {
+    assert!(serde_json::from_str::<MpdHost>("\"\"").is_err());
+    assert!(serde_json::from_str::<MpdHost>("\"bad host\"").is_err());
+    assert_eq!(
+        serde_json::from_str::<MpdHost>("\"127.0.0.1\"").unwrap(),
+        MpdHost::default()
+    );
+    assert!(serde_json::from_str::<MpdPort>("0").is_err());
+    assert_eq!(
+        serde_json::from_str::<MpdPort>("6600").unwrap(),
+        MpdPort::default()
+    );
 }
 
 #[tokio::test]

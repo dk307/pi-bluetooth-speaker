@@ -235,26 +235,25 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
         .context("Failed to export D-Bus object")?;
 
     // 6b. Multi-source arbiter + CamillaDSP input router (/org/speaker/sources).
-    // Exported BEFORE sd_notify(READY=1) so Type=dbus consumers never race registration.
-    let source_registry =
-        crate::sources::registry::SourceRegistry::from_definitions(config.sources.clone())
-            .map_err(|e| anyhow::anyhow!("Invalid sources configuration: {e}"))?;
-    let source_snapshot =
-        crate::sources::dbus_sources::AudioSourcesSnapshot::new(config.auto_switch_policy);
-    let (source_cmd_tx, source_cmd_rx) = mpsc::channel(32);
-    let sources_iface = crate::sources::dbus_sources::AudioSourcesInterface::new(
-        source_snapshot.clone(),
-        source_cmd_tx.clone(),
-    );
-    let sources_emitter =
-        crate::sources::dbus_sources::export_sources_interface(&connection, sources_iface)
-            .await
-            .context("Failed to export /org/speaker/sources D-Bus object")?;
-
-    // 6c. DSP stream-lifecycle watcher + multi-source router (plan §11.3):
-    //     subscribes to CamillaDSP engine state and drives StreamStarting/Stopping
-    //     edges onto the amp controller, while SourceManager owns SetConfigJson.
+    // 6b & 6c. DSP stream-lifecycle watcher + multi-source router (plan §11.3):
+    //     only export /org/speaker/sources when the watcher/manager loop is enabled,
+    //     so D-Bus clients never observe a dead interface with a dropped receiver.
     if config.dsp_watch_enabled {
+        let source_registry =
+            crate::sources::registry::SourceRegistry::from_definitions(config.sources.clone())
+                .map_err(|e| anyhow::anyhow!("Invalid sources configuration: {e}"))?;
+        let source_snapshot =
+            crate::sources::dbus_sources::AudioSourcesSnapshot::new(config.auto_switch_policy);
+        let (source_cmd_tx, source_cmd_rx) = mpsc::channel(32);
+        let sources_iface = crate::sources::dbus_sources::AudioSourcesInterface::new(
+            source_snapshot.clone(),
+            source_cmd_tx.clone(),
+        );
+        let sources_emitter =
+            crate::sources::dbus_sources::export_sources_interface(&connection, sources_iface)
+                .await
+                .context("Failed to export /org/speaker/sources D-Bus object")?;
+
         let dsp_device = speaker_dsp::DspDevice::new();
         let watcher_cmd_tx = cmd_tx.clone();
         tokio::spawn(dsp_watch::run(
@@ -285,11 +284,10 @@ async fn run_i2c_mode(config: Config) -> anyhow::Result<()> {
             "DSP stream-lifecycle and multi-source loopback watchers enabled"
         );
     } else {
-        drop(source_cmd_rx);
         warn!(
-            "DSP stream-lifecycle watcher disabled by configuration: no lifecycle \
-             source can emit StreamStarting, so the amp stays hardware-muted while \
-             no stream runs (idle SetMute(false) records intent only)"
+            "DSP stream-lifecycle watcher disabled by configuration: /org/speaker/sources \
+             is not exported and no lifecycle source can emit StreamStarting (amp stays \
+             hardware-muted while no stream runs; idle SetMute(false) records intent only)"
         );
     }
 

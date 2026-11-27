@@ -491,8 +491,15 @@ impl SourceArbiter {
             return Ok(outcome);
         }
 
+        let dsp_target = (self.active.as_ref() == Some(id)).then(|| {
+            let mut target = self.target_for(id, false);
+            target.streaming = false;
+            target
+        });
+
         Ok(ArbiterOutcome {
             pause_sources,
+            dsp_target,
             ..ArbiterOutcome::default()
         })
     }

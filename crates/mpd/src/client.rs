@@ -43,9 +43,16 @@ pub const DEFAULT_MPD_TIMEOUT: Duration = Duration::from_secs(2);
 const EVENT_CHANNEL_CAPACITY: usize = 32;
 
 /// Strong newtype wrapping a validated MPD host address.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct MpdHost(Box<str>);
+
+impl<'de> Deserialize<'de> for MpdHost {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse_str(&raw).map_err(serde::de::Error::custom)
+    }
+}
 
 impl Default for MpdHost {
     fn default() -> Self {
@@ -124,9 +131,16 @@ impl TryFrom<&str> for MpdHost {
 }
 
 /// Strong newtype wrapping a validated non-zero MPD TCP port (`1..=65535`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct MpdPort(u16);
+
+impl<'de> Deserialize<'de> for MpdPort {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = u16::deserialize(deserializer)?;
+        Self::new(raw).map_err(serde::de::Error::custom)
+    }
+}
 
 impl Default for MpdPort {
     fn default() -> Self {
