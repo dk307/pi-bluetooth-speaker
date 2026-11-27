@@ -1,0 +1,29 @@
+[Unit]
+Description=Music Player Daemon (Cortex-A53 v0.25)
+Documentation=https://www.musicpd.org/doc/
+After=network-online.target sound.target camilladsp.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=mpd
+Group=audio
+SupplementaryGroups=audio
+StateDirectory=mpd
+ExecStart=/usr/local/bin/mpd --systemd /etc/mpd.conf
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

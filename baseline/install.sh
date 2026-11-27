@@ -31,6 +31,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libglib2.0-dev libsbc-dev libdbus-1-dev \
     libfreeaptx-dev libfdk-aac-dev libopus-dev libmp3lame-dev libmpg123-dev \
     libspandsp-dev liblc3-dev systemd-dev \
+    libavformat61 libfaad2 mpc \
     python3-pip python3-dbus python3-gi python3-pil python3-spidev python3-rpi.gpio python3-smbus2
 
 # Install pycamilladsp Python API client
@@ -209,31 +210,21 @@ systemctl restart camilladsp.service || true
 systemctl restart bluealsa-aplay.service || true
 
 # ------------------------------------------------------------------------------
-# 11. rmpd User Service & Streaming Config (optional binary via build_rmpd_pi.sh)
+# 11. MPD System Service & Streaming Config (binary built via scripts/build_mpd_pi.sh)
 # ------------------------------------------------------------------------------
-if id -u dietpi >/dev/null 2>&1; then
-    echo "==> [11/11] Configuring rmpd user service & template for dietpi..."
-    usermod -aG audio dietpi || true
-    systemctl unmask systemd-logind.service || true
-    systemctl start systemd-logind.service || true
-    loginctl enable-linger dietpi || true
-    systemctl start user@1000.service || true
-    install -d -o dietpi -g dietpi -m 755 \
-        /home/dietpi/.config \
-        /home/dietpi/.config/systemd \
-        /home/dietpi/.config/systemd/user \
-        /home/dietpi/.config/rmpd \
-        /home/dietpi/.config/rmpd/playlists
-    install -m 644 -o dietpi -g dietpi "${SCRIPT_DIR}/etc/systemd/user/rmpd.service" /home/dietpi/.config/systemd/user/rmpd.service
-    if [ ! -f /home/dietpi/.config/rmpd/rmpd.toml ]; then
-        install -m 600 -o dietpi -g dietpi "${SCRIPT_DIR}/etc/rmpd/rmpd.toml.example" /home/dietpi/.config/rmpd/rmpd.toml
-        RAND_TOKEN="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
-        sed -i "s/replace-with-strong-random-token/${RAND_TOKEN}/" /home/dietpi/.config/rmpd/rmpd.toml
-    fi
-    if [ -x /usr/local/bin/rmpd ] && [ -S /run/user/1000/bus ]; then
-        sudo -u dietpi XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemctl --user daemon-reload || true
-        sudo -u dietpi XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemctl --user enable --now rmpd.service || true
-    fi
+echo "==> [11/11] Configuring MPD system service & streaming config..."
+if ! id -u mpd >/dev/null 2>&1; then
+    useradd --system --home-dir /var/lib/mpd --groups audio --shell /usr/sbin/nologin mpd
+fi
+if ! id -nG mpd | grep -qw audio; then
+    usermod -aG audio mpd
+fi
+install -d -o mpd -g audio -m 755 /var/lib/mpd /var/lib/mpd/playlists
+install -Dm644 "${SCRIPT_DIR}/etc/mpd.conf" /etc/mpd.conf
+install -Dm644 "${SCRIPT_DIR}/etc/systemd/system/mpd.service" /etc/systemd/system/mpd.service
+systemctl daemon-reload
+if [ -x /usr/local/bin/mpd ]; then
+    systemctl enable --now mpd.service || true
 fi
 
 echo "================================================================================"

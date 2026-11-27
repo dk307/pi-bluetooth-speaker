@@ -33,18 +33,16 @@ baseline/
 │   ├── dbus-1/system.d/
 │   │   ├── org.speaker.Bluetooth.conf # D-Bus policy for active-source arbiter (bt-manager)
 │   │   └── org.speaker.CoverArt.conf  # D-Bus policy for BIP cover-art service (bt-manager)
-│   ├── rmpd/
-│   │   └── rmpd.toml.example      # Streaming-only rmpd config template (ALSA default, mixer_type=none)
+│   ├── mpd.conf                   # Streaming & internet-radio MPD v0.25 config (ALSA src_rmpd, mixer_type=none)
 │   └── systemd/
-│       ├── system/
-│       │   ├── camilladsp.service     # CamillaDSP 5.0 engine daemon (-w wait mode, WS on 127.0.0.1:1234)
-│       │   ├── bluealsa.service       # BlueALSA high-res A2DP audio sink daemon
-│       │   ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA default (-S --volume=none --single-audio)
-│       │   ├── bt-manager.service     # Bluetooth Manager & Cover Art service
-│       │   ├── screen-manager.service # Touchscreen Appliance Console & Screen Manager service
-│       │   └── bt-agent.service       # Legacy standalone agent (superseded by bt-manager.service)
-│       └── user/
-│           └── rmpd.service           # Headless user systemd unit for rmpd (session D-Bus MPRIS)
+│       └── system/
+│           ├── camilladsp.service     # CamillaDSP 5.0 engine daemon (-w wait mode, WS on 127.0.0.1:1234)
+│           ├── bluealsa.service       # BlueALSA high-res A2DP audio sink daemon
+│           ├── bluealsa-aplay.service # Forwarder feeding BlueALSA audio into ALSA default (-S --volume=none --single-audio)
+│           ├── bt-manager.service     # Bluetooth Manager & Cover Art service
+│           ├── mpd.service            # Music Player Daemon v0.25 system service (/usr/local/bin/mpd)
+│           ├── screen-manager.service # Touchscreen Appliance Console & Screen Manager service
+│           └── bt-agent.service       # Legacy standalone agent (superseded by bt-manager.service)
 ├── patches/
 │   ├── bluez-5.88-mediaplayer-refresh-track.patch
 │   └── bluez-5.88-track-duration.patch
