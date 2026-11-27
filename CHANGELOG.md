@@ -7,6 +7,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [2.4.0](https://github.com/dk307/pi-bluetooth-speaker/compare/v2.3.0...v2.4.0) - 2026-11-27
+
+### Added
+
+- *(screen-manager)* Material 3 dynamic cover-art auto-theming ([#106](https://github.com/dk307/pi-bluetooth-speaker/pull/106))
+- *(bt-manager)* negotiate higher-resolution cover art via BIP descriptors ([#57](https://github.com/dk307/pi-bluetooth-speaker/pull/57))
+- *(screen-manager)* theme-driven visualizer colors and radial FFT polish ([#105](https://github.com/dk307/pi-bluetooth-speaker/pull/105))
+- *(screen-manager)* use theme-colored vector placeholder for missing cover ([#104](https://github.com/dk307/pi-bluetooth-speaker/pull/104))
+- *(visualizer)* add radial FFT, 24-band ERB spectrum, and visualizer settings ([#100](https://github.com/dk307/pi-bluetooth-speaker/pull/100))
+- *(screen-manager)* migrate Slint to Skia OpenGL and optimize Pi 3 rendering ([#96](https://github.com/dk307/pi-bluetooth-speaker/pull/96))
+
+### Fixed
+
+- *(amp)* use atomic I2C_RDWR reads and confirm critical faults before reset ([#101](https://github.com/dk307/pi-bluetooth-speaker/pull/101))
+
+### Other
+
+- update README and documentation indexes to match current architecture ([#109](https://github.com/dk307/pi-bluetooth-speaker/pull/109))
+- *(screen-manager)* reduce memory usage by ~48% via Slint feature trimming and vc4-only Mesa ([#108](https://github.com/dk307/pi-bluetooth-speaker/pull/108))
+- *(bluetooth)* eliminate dbus-daemon CPU storm on Pi 3 ([#99](https://github.com/dk307/pi-bluetooth-speaker/pull/99))
+
 ## [2.3.0](https://github.com/dk307/pi-bluetooth-speaker/compare/v2.2.0...v2.3.0) - 2026-11-21
 
 ### Added
