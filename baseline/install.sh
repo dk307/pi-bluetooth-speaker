@@ -208,6 +208,34 @@ systemctl restart bluealsa.service || true
 systemctl restart camilladsp.service || true
 systemctl restart bluealsa-aplay.service || true
 
+# ------------------------------------------------------------------------------
+# 11. rmpd User Service & Streaming Config (optional binary via build_rmpd_pi.sh)
+# ------------------------------------------------------------------------------
+if id -u dietpi >/dev/null 2>&1; then
+    echo "==> [11/11] Configuring rmpd user service & template for dietpi..."
+    usermod -aG audio dietpi || true
+    systemctl unmask systemd-logind.service || true
+    systemctl start systemd-logind.service || true
+    loginctl enable-linger dietpi || true
+    systemctl start user@1000.service || true
+    install -d -o dietpi -g dietpi -m 755 \
+        /home/dietpi/.config \
+        /home/dietpi/.config/systemd \
+        /home/dietpi/.config/systemd/user \
+        /home/dietpi/.config/rmpd \
+        /home/dietpi/.config/rmpd/playlists
+    install -m 644 -o dietpi -g dietpi "${SCRIPT_DIR}/etc/systemd/user/rmpd.service" /home/dietpi/.config/systemd/user/rmpd.service
+    if [ ! -f /home/dietpi/.config/rmpd/rmpd.toml ]; then
+        install -m 600 -o dietpi -g dietpi "${SCRIPT_DIR}/etc/rmpd/rmpd.toml.example" /home/dietpi/.config/rmpd/rmpd.toml
+        RAND_TOKEN="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+        sed -i "s/replace-with-strong-random-token/${RAND_TOKEN}/" /home/dietpi/.config/rmpd/rmpd.toml
+    fi
+    if [ -x /usr/local/bin/rmpd ] && [ -S /run/user/1000/bus ]; then
+        sudo -u dietpi XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemctl --user daemon-reload || true
+        sudo -u dietpi XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemctl --user enable --now rmpd.service || true
+    fi
+fi
+
 echo "================================================================================"
 echo " [SUCCESS] Baseline installation and provisioning completed successfully!"
 echo " A reboot is recommended to apply device tree overlays and boot parameters."
