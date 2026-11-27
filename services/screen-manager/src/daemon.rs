@@ -650,6 +650,15 @@ pub struct BtSharedUpdate {
     /// Bluetooth Devices screen delta (rows/discovery/pairing/toast), if any
     /// screen-visible state changed since the last publish.
     pub devices: Option<crate::ui::BtDevicesUpdate>,
+    /// Latest MPD playback status, if it changed since the last publish.
+    pub mpd_playback: Option<speaker_mpd::MpdStatus>,
+    /// MPD cover art delta: outer `Some` = cover state changed; inner `Some` =
+    /// decoded pixel buffer, inner `None` = clear MPD cover art.
+    pub mpd_cover: Option<Option<CoverPixelBuffer>>,
+    /// MPD cover-art dynamic theme seed delta.
+    pub mpd_cover_seed: Option<Option<u32>>,
+    /// Latest multi-source routing state from `org.speaker.AudioSources1`.
+    pub audio_sources: Option<crate::ui::AudioSourcesState>,
 }
 
 /// Alias for the cross-thread pixel buffer backing cover art.
@@ -2351,6 +2360,27 @@ pub fn spawn_amp_volume_worker(
         })
 }
 
+/// Decodes raw image bytes (e.g. from MPD `albumart` / `readpicture`), resizes to
+/// [`TARGET_COVER_SIZE`] if smaller, and extracts the Material 3 theme seed.
+#[cfg(feature = "ui")]
+#[must_use]
+pub fn decode_cover_bytes(bytes: &[u8]) -> Option<(CoverPixelBuffer, Option<u32>)> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let sized = if img.width() >= TARGET_COVER_SIZE || img.height() >= TARGET_COVER_SIZE {
+        img
+    } else {
+        img.resize_exact(
+            TARGET_COVER_SIZE,
+            TARGET_COVER_SIZE,
+            image::imageops::FilterType::Lanczos3,
+        )
+    };
+    let rgba = sized.to_rgba8();
+    let buffer = CoverPixelBuffer::clone_from_slice(rgba.as_raw(), rgba.width(), rgba.height());
+    let seed = crate::ui::extract_cover_seed_rgba8(rgba.as_raw(), rgba.width(), rgba.height());
+    Some((buffer, seed))
+}
+
 /// Applies queued Bluetooth playback/PCM/cover updates from the worker to the shell.
 #[cfg(feature = "ui")]
 pub fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtSharedUpdate>>) {
@@ -2365,6 +2395,9 @@ pub fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtShared
         Err(std::sync::TryLockError::WouldBlock) => None,
     };
     if let Some(mut lock) = lock {
+        if let Some(sources) = lock.audio_sources.take() {
+            shell.apply_audio_sources(&sources);
+        }
         if let Some(pb) = lock.playback.take() {
             shell.apply_bluetooth_playback(&pb);
         }
@@ -2384,6 +2417,21 @@ pub fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtShared
         }
         if let Some(seed) = lock.cover_seed.take() {
             shell.set_cover_seed(seed);
+        }
+        if let Some(mpd) = lock.mpd_playback.take() {
+            shell.apply_mpd_playback(&mpd);
+        }
+        if let Some(cover) = lock.mpd_cover.take() {
+            match cover {
+                Some(buffer) => shell.set_source_cover_image(
+                    &crate::ui::MediaSourceKind::Mpd,
+                    slint::Image::from_rgba8(buffer),
+                ),
+                None => shell.set_source_has_cover_art(&crate::ui::MediaSourceKind::Mpd, false),
+            }
+        }
+        if let Some(seed) = lock.mpd_cover_seed.take() {
+            shell.set_source_cover_seed(&crate::ui::MediaSourceKind::Mpd, seed);
         }
         if let Some(amp) = lock.amp_volume.take() {
             shell.apply_amp_volume(&amp);

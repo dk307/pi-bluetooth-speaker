@@ -13,6 +13,7 @@ import { ScreenAppBar } from "screen_app_bar.slint";
 import { VolumeHudOverlay } from "volume_hud.slint";
 import { CodecHudOverlay } from "codec_hud.slint";
 import { BrightnessHudOverlay } from "brightness_hud.slint";
+import { SourceRowItem, SourceSwitcherOverlay } from "source_switcher.slint";
 import { BluetoothDevicesScreen, BtDeviceRow } from "bluetooth_devices.slint";
 import { VirtualKeyboardSheet } from "touch_scale_widgets.slint";
 import { SettingControlKind, SettingRowItem } from "settings_view.slint";
@@ -30,7 +31,7 @@ import "../../../assets/fonts/Inter-SemiBold.ttf";
 import "../../../assets/fonts/Inter-Bold.ttf";
 import "../../../assets/fonts/Inter-ExtraBold.ttf";
 
-export { BootCheckLine, SplashScreen, MaterialPalette, MaterialStyleMetrics, AppTheme, BtDeviceRow, SettingControlKind, SettingRowItem, SpectrumBandItem }
+export { BootCheckLine, SplashScreen, MaterialPalette, MaterialStyleMetrics, AppTheme, BtDeviceRow, SettingControlKind, SettingRowItem, SpectrumBandItem, SourceRowItem }
 
 export component MainWindow inherits Window {
     title: "DietPi Audiophile Console";
@@ -41,6 +42,16 @@ export component MainWindow inherits Window {
 
     in-out property <int> active_tab: 0;
     in-out property <string> active_source: "Bluetooth";
+    in-out property <string> active_source_id: "bluetooth";
+    in-out property <[SourceRowItem]> source_rows: [];
+    in-out property <bool> source_switcher_visible: false;
+    out property <float> source_switcher_opacity: root.source_switcher_visible ? 1.0 : 0.0;
+    animate source_switcher_opacity { duration: root.volume_hud_fade_ms * 1ms; easing: ease-out; }
+    property <bool> default_transport_available: root.duration_ms > 0 || root.is_playing || (root.track_title != "" && root.track_title != "Waiting for Bluetooth Connection..." && root.track_title != "Music Player Idle" && root.track_title != "Waiting for Audio Source...");
+    in-out property <bool> can_play_pause: root.default_transport_available;
+    in-out property <bool> can_next: root.default_transport_available;
+    in-out property <bool> can_previous: root.default_transport_available;
+    in-out property <bool> seekable: false;
     in-out property <string> track_or_device: "Waiting for Connection...";
     in-out property <string> stream_codec: "aptX-HD";
     in-out property <string> stream_sample_rate: "48 kHz";
@@ -92,8 +103,11 @@ export component MainWindow inherits Window {
     in-out property <int> brightness_hud_fade_ms: 200;
     out property <float> brightness_hud_opacity: root.brightness_hud_visible ? 1.0 : 0.0;
     animate brightness_hud_opacity { duration: root.brightness_hud_fade_ms * 1ms; easing: ease-out; }
-    // Peak opacity of the three mutually-exclusive HUDs, shared by backdrop and scrim.
-    property <float> max_hud_opacity: Math.max(root.volume_hud_opacity, Math.max(root.codec_hud_opacity, root.brightness_hud_opacity));
+    // Peak opacity of the mutually-exclusive HUDs, shared by backdrop and scrim.
+    property <float> max_hud_opacity: Math.max(
+        Math.max(root.volume_hud_opacity, root.codec_hud_opacity),
+        Math.max(root.brightness_hud_opacity, root.source_switcher_opacity)
+    );
     in-out property <bool> has_cover_art: false;
     in-out property <image> cover_image;
 
@@ -122,7 +136,7 @@ export component MainWindow inherits Window {
     in-out property <bool> viz_spectrum_led_mask: true;
     in-out property <bool> viz_force_60fps: false;
     in-out property <bool> cd_enabled: false;
-    out property <bool> is_animating: (root.active_tab == 0 && !root.visualizer_active && !root.bt_devices_open && !root.boot_splash_visible) || root.visualizer_active || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01 || root.brightness_hud_visible || root.brightness_hud_opacity > 0.01
+    out property <bool> is_animating: (root.active_tab == 0 && !root.visualizer_active && !root.bt_devices_open && !root.boot_splash_visible) || root.visualizer_active || root.volume_hud_visible || root.volume_hud_opacity > 0.01 || root.codec_hud_visible || root.codec_hud_opacity > 0.01 || root.brightness_hud_visible || root.brightness_hud_opacity > 0.01 || root.source_switcher_visible || root.source_switcher_opacity > 0.01
         // The devices screen keeps frames coming only while a live animation
         // source runs: the pairing ring (mode 2 + spinning), the Add-Device
         // scanning spinner (mode 1 + scanning), a pending row action, or a
@@ -167,7 +181,8 @@ export component MainWindow inherits Window {
     function all_huds_closed() -> bool {
         return !root.volume_hud_visible && root.volume_hud_opacity <= 0.01
             && !root.codec_hud_visible && root.codec_hud_opacity <= 0.01
-            && !root.brightness_hud_visible && root.brightness_hud_opacity <= 0.01;
+            && !root.brightness_hud_visible && root.brightness_hud_opacity <= 0.01
+            && !root.source_switcher_visible && root.source_switcher_opacity <= 0.01;
     }
 
     public function show_volume_hud() {
@@ -178,6 +193,7 @@ export component MainWindow inherits Window {
         root.volume_hud_visible = true;
         root.codec_hud_visible = false;
         root.brightness_hud_visible = false;
+        root.source_switcher_visible = false;
         root_stack.focus_volume_hud();
     }
 
@@ -197,6 +213,7 @@ export component MainWindow inherits Window {
         root.codec_hud_visible = true;
         root.volume_hud_visible = false;
         root.brightness_hud_visible = false;
+        root.source_switcher_visible = false;
         root_stack.focus_codec_hud();
     }
 
@@ -215,6 +232,7 @@ export component MainWindow inherits Window {
         root.brightness_hud_visible = true;
         root.volume_hud_visible = false;
         root.codec_hud_visible = false;
+        root.source_switcher_visible = false;
         root_stack.focus_brightness_hud();
     }
 
@@ -222,6 +240,20 @@ export component MainWindow inherits Window {
         root.brightness_hud_visible = false;
         root.brightness_hud_elapsed_ms = 0;
         root_stack.unfocus_brightness_hud();
+    }
+
+    public function show_source_switcher() {
+        if (root.all_huds_closed()) {
+            root.prepare_overlay_backdrop();
+        }
+        root.source_switcher_visible = true;
+        root.volume_hud_visible = false;
+        root.codec_hud_visible = false;
+        root.brightness_hud_visible = false;
+    }
+
+    public function dismiss_source_switcher() {
+        root.source_switcher_visible = false;
     }
 
     // True while the Volume HUD overlay owns the keyboard focus.
@@ -267,6 +299,7 @@ export component MainWindow inherits Window {
     // delta by `apply_pcm_stream` (plan A19: values follow the active stream).
     in-out property <string> bt_stream_format: "—";
     in-out property <string> bt_delay_text: "—";
+    in-out property <string> stream_url: "";
     // Tab to return to when the Bluetooth devices screen is dismissed.
     in-out property <int> previous_tab: 0;
 
@@ -301,6 +334,8 @@ export component MainWindow inherits Window {
     callback toggle_play_pause();
     callback next_track();
     callback previous_track();
+    callback seek_to(float);
+    callback select_audio_source(string);
     callback toggle_mute();
     callback volume_clicked();
     callback stream_pill_clicked();
@@ -398,6 +433,7 @@ export component MainWindow inherits Window {
                     width: 100%;
                     height: 100%;
                     active_source: root.active_source;
+                    active_source_id: root.active_source_id;
                     track_or_device: root.track_or_device;
                     stream_codec: root.stream_codec;
                     stream_sample_rate: root.stream_sample_rate;
@@ -406,10 +442,16 @@ export component MainWindow inherits Window {
                     is_muted: root.is_muted;
                     bt_connected: root.bt_connected;
                     source_clicked => {
-                        root.open_bt_devices();
+                        root.show_source_switcher();
                         root.source_clicked();
                     }
-                    device_clicked => { root.open_bt_devices(); }
+                    device_clicked => {
+                        if (root.active_source_id == "bluetooth") {
+                            root.open_bt_devices();
+                        } else {
+                            root.show_source_switcher();
+                        }
+                    }
                     // The codec badge keeps its codec-information overlay from
                     // the KMS mainline (#62): the HUD reports the negotiated
                     // stream (format/delay now fed by `apply_pcm_stream`),
@@ -460,6 +502,11 @@ export component MainWindow inherits Window {
                 volume_hud_opacity: root.volume_hud_opacity;
                 has_cover_art: root.has_cover_art;
                 cover_image: root.cover_image;
+                active_source_id: root.active_source_id;
+                can_play_pause: root.can_play_pause;
+                can_next: root.can_next;
+                can_previous: root.can_previous;
+                seekable: root.seekable;
                 track_or_device: root.track_or_device;
                 stream_codec: root.stream_codec;
                 artist_marquee_text: root.artist_marquee_text;
@@ -475,6 +522,7 @@ export component MainWindow inherits Window {
                 toggle_play_pause => { root.toggle_play_pause(); }
                 next_track => { root.next_track(); }
                 previous_track => { root.previous_track(); }
+                seek_to(ratio) => { root.seek_to(ratio); }
                 toggle_mute => { root.toggle_mute(); }
                 stream_pill_clicked => { root.stream_pill_clicked(); }
                 settings_clicked => {
@@ -623,7 +671,9 @@ export component MainWindow inherits Window {
                 bit_depth: root.stream_bit_depth;
                 stream_format: root.bt_stream_format;
                 delay_text: root.bt_delay_text;
-                connected: root.bt_connected;
+                detail_label: root.active_source_id == "rmpd" ? "Bitrate" : "Latency";
+                stream_url: root.active_source_id == "rmpd" ? root.stream_url : "";
+                connected: root.bt_connected || (root.active_source_id != "bluetooth" && root.stream_codec != "");
                 dismiss_requested => { root.dismiss_codec_hud(); }
             }
 
@@ -643,6 +693,25 @@ export component MainWindow inherits Window {
                 auto_toggled(on) => { root.auto_brightness_toggled(on); }
                 dismiss_requested => { root.dismiss_brightness_hud(); }
                 interaction_activity => { root.show_brightness_hud(); }
+            }
+
+            // Source switcher overlay (top layer) — same below-the-top-bar geometry.
+            source_switcher := SourceSwitcherOverlay {
+                y: root.hud_top_inset;
+                width: 100%;
+                height: parent.height - root.hud_top_inset;
+                sources: root.source_rows;
+                active_source_id: root.active_source_id;
+                overlay_opacity: root.source_switcher_opacity;
+                select_source(id) => {
+                    root.select_audio_source(id);
+                    root.dismiss_source_switcher();
+                }
+                open_bluetooth_devices => {
+                    root.dismiss_source_switcher();
+                    root.open_bt_devices();
+                }
+                dismiss => { root.dismiss_source_switcher(); }
             }
 
             // Bottom-sheet virtual keyboard overlay: pops up whenever a `TextField`

@@ -283,6 +283,16 @@ pub struct AppShell {
     persist_tx: Rc<RefCell<Option<std::sync::mpsc::Sender<CoreConfig>>>>,
     last_amp_volume: Cell<Option<crate::volume::AmpVolumeState>>,
     transport_commands: Rc<RefCell<Option<speaker_bluetooth::TransportCommandQueue>>>,
+    mpd_commands: Rc<RefCell<Option<crate::ui::MpdCommandQueue>>>,
+    source_commands: Rc<RefCell<Option<crate::ui::SourceCommandQueue>>>,
+    active_source: Rc<RefCell<crate::ui::MediaSourceKind>>,
+    bt_snapshot: Rc<RefCell<Option<crate::ui::NowPlayingSnapshot>>>,
+    bt_stream_info: Rc<RefCell<Option<crate::ui::StreamMetadata>>>,
+    mpd_snapshot: Rc<RefCell<Option<crate::ui::NowPlayingSnapshot>>>,
+    bt_cover_image: Rc<RefCell<Option<slint::Image>>>,
+    bt_cover_seed: Rc<Cell<Option<u32>>>,
+    mpd_cover_image: Rc<RefCell<Option<slint::Image>>>,
+    mpd_cover_seed: Rc<Cell<Option<u32>>>,
     amp_commands: Rc<RefCell<Option<crate::volume::AmpVolumeCommandQueue>>>,
     brightness_commands: Rc<RefCell<Option<BrightnessCommandQueue>>>,
     /// Set when the overlay last issued an optimistic brightness command. Each
@@ -362,6 +372,16 @@ impl AppShell {
             persist_tx: Rc::new(RefCell::new(None)),
             last_amp_volume: Cell::new(None),
             transport_commands: Rc::new(RefCell::new(None)),
+            mpd_commands: Rc::new(RefCell::new(None)),
+            source_commands: Rc::new(RefCell::new(None)),
+            active_source: Rc::new(RefCell::new(crate::ui::MediaSourceKind::Bluetooth)),
+            bt_snapshot: Rc::new(RefCell::new(None)),
+            bt_stream_info: Rc::new(RefCell::new(None)),
+            mpd_snapshot: Rc::new(RefCell::new(None)),
+            bt_cover_image: Rc::new(RefCell::new(None)),
+            bt_cover_seed: Rc::new(Cell::new(None)),
+            mpd_cover_image: Rc::new(RefCell::new(None)),
+            mpd_cover_seed: Rc::new(Cell::new(None)),
             amp_commands: Rc::new(RefCell::new(None)),
             brightness_commands: Rc::new(RefCell::new(None)),
             last_brightness_command: Rc::new(Cell::new(None)),
@@ -610,6 +630,13 @@ impl AppShell {
     #[must_use]
     pub fn is_volume_hud_active(&self) -> bool {
         self.is_volume_hud_visible() || self.volume_hud_opacity() > 0.01
+    }
+
+    /// Returns `true` while the Source Switcher overlay is visible or fading out.
+    #[must_use]
+    pub fn is_source_switcher_active(&self) -> bool {
+        self.window.get_source_switcher_visible()
+            || self.window.get_source_switcher_opacity() > 0.01
     }
 
     /// Opens the Volume HUD overlay and resets its auto-dismiss countdown timer.
@@ -1165,7 +1192,8 @@ impl AppShell {
     /// apply state themselves to avoid blocking D-Bus/OBEX round-trips on the
     /// render thread.
     pub fn refresh_playback_display(&self, playback: &speaker_bluetooth::BtPlaybackState) {
-        Self::apply_playback_to_window(&self.window, playback);
+        let snapshot = crate::ui::NowPlayingSnapshot::from_bluetooth(playback);
+        Self::apply_now_playing_to_window(&self.window, &snapshot);
     }
 
     /// Updates the audio stream inspector pill details.
@@ -1185,28 +1213,12 @@ impl AppShell {
 
     /// Applies audio stream metrics from an active [`speaker_bluetooth::BlueAlsaPcm`].
     pub fn apply_pcm_stream(&self, pcm: &speaker_bluetooth::BlueAlsaPcm) {
-        // Guarded setters: repeated identical property sets still notify Slint bindings
-        // and force repeated partial invalidations on every 250 ms worker push.
-        if !pcm.selected_codec.is_empty()
-            && self.window.get_stream_codec().as_str() != pcm.selected_codec.as_ref()
-        {
-            self.set_stream_codec(pcm.selected_codec.as_ref());
-        }
         let rate_khz = if pcm.sampling_rate > 0 {
             format!("{} kHz", pcm.sampling_rate / 1000)
         } else {
             "48 kHz".to_string()
         };
-        if self.window.get_stream_sample_rate().as_str() != rate_khz.as_str() {
-            self.set_stream_sample_rate(rate_khz);
-        }
-
         let bit_depth = pcm_bit_depth(pcm.format.as_ref());
-        if self.window.get_stream_bit_depth().as_str() != bit_depth {
-            self.set_stream_bit_depth(bit_depth);
-        }
-        // Codec-HUD summary line and codec delay follow the active stream
-        // (they used to come from the retired tab-2 details screen).
         let rate = if pcm.sampling_rate.is_multiple_of(1000) {
             format!("{} kHz", pcm.sampling_rate / 1000)
         } else {
@@ -1217,17 +1229,56 @@ impl AppShell {
             2 => "Stereo".to_string(),
             n => format!("{n} ch"),
         };
-        let format_text = format!("{rate} • {bit_depth} • {channels}");
-        if self.window.get_bt_stream_format().as_str() != format_text {
-            self.window.set_bt_stream_format(format_text.into());
-        }
-        let delay_text = pcm.delay.as_deref().unwrap_or("—");
-        if self.window.get_bt_delay_text().as_str() != delay_text {
-            self.window.set_bt_delay_text(delay_text.into());
+        let codec: Box<str> = if pcm.selected_codec.is_empty() {
+            self.window.get_stream_codec().as_str().into()
+        } else {
+            pcm.selected_codec.clone()
+        };
+        let info = crate::ui::StreamMetadata {
+            codec,
+            sample_rate: rate_khz.into_boxed_str(),
+            bit_depth: Box::from(bit_depth),
+            format: format!("{rate} • {bit_depth} • {channels}").into_boxed_str(),
+            detail: Box::from(pcm.delay.as_deref().unwrap_or("—")),
+            url: Box::from(""),
+        };
+        *self.bt_stream_info.borrow_mut() = Some(info.clone());
+        if *self.active_source.borrow() == crate::ui::MediaSourceKind::Bluetooth {
+            Self::apply_stream_info_to_window(&self.window, Some(&info));
         }
         // PCM volume/mute are stream metadata owned by the phone (BlueALSA);
         // the on-screen level and mute indicator exclusively reflect the amp
         // via `apply_amp_volume`, so they are intentionally not applied here.
+    }
+
+    fn apply_stream_info_to_window(w: &MainWindow, info: Option<&crate::ui::StreamMetadata>) {
+        if let Some(info) = info {
+            if !info.codec.is_empty() && w.get_stream_codec().as_str() != info.codec.as_ref() {
+                w.set_stream_codec(info.codec.as_ref().into());
+            }
+            if w.get_stream_sample_rate().as_str() != info.sample_rate.as_ref() {
+                w.set_stream_sample_rate(info.sample_rate.as_ref().into());
+            }
+            if w.get_stream_bit_depth().as_str() != info.bit_depth.as_ref() {
+                w.set_stream_bit_depth(info.bit_depth.as_ref().into());
+            }
+            if w.get_bt_stream_format().as_str() != info.format.as_ref() {
+                w.set_bt_stream_format(info.format.as_ref().into());
+            }
+            if w.get_bt_delay_text().as_str() != info.detail.as_ref() {
+                w.set_bt_delay_text(info.detail.as_ref().into());
+            }
+            if w.get_stream_url().as_str() != info.url.as_ref() {
+                w.set_stream_url(info.url.as_ref().into());
+            }
+        } else {
+            if !w.get_stream_codec().is_empty() {
+                w.set_stream_codec(slint::SharedString::default());
+            }
+            if !w.get_stream_url().is_empty() {
+                w.set_stream_url(slint::SharedString::default());
+            }
+        }
     }
 
     /// Applies the authoritative amp level/mute snapshot published by the
@@ -1450,23 +1501,73 @@ impl AppShell {
         }
     }
 
-    /// Sets whether cover art is present.
+    /// Sets whether Bluetooth cover art is present.
     ///
     /// Cover art path tracking (dedup) lives on the `bt-monitor` worker; the shell
-    /// only mirrors the presence flag and the decoded image pushed by the worker.
-    /// Clearing cover art (`false`) also clears any active cover-art theme seed
-    /// and reverts to the active [`ThemePreset`].
+    /// caches the per-source image and mirrors it onto the window when Bluetooth
+    /// is the active source. Clearing cover art (`false`) clears any active
+    /// cover-art theme seed and reverts to the active [`ThemePreset`].
     pub fn set_has_cover_art(&self, has_art: bool) {
-        self.window.set_has_cover_art(has_art);
+        self.set_source_has_cover_art(&crate::ui::MediaSourceKind::Bluetooth, has_art);
+    }
+
+    /// Updates the Bluetooth cover art image.
+    pub fn set_cover_image(&self, image: slint::Image) {
+        self.set_source_cover_image(&crate::ui::MediaSourceKind::Bluetooth, image);
+    }
+
+    /// Sets whether cover art is present for `source`, updating the window if active.
+    pub fn set_source_has_cover_art(&self, source: &crate::ui::MediaSourceKind, has_art: bool) {
         if !has_art {
-            self.set_cover_seed(None);
+            match source {
+                crate::ui::MediaSourceKind::Bluetooth => {
+                    *self.bt_cover_image.borrow_mut() = None;
+                    self.bt_cover_seed.set(None);
+                }
+                crate::ui::MediaSourceKind::Mpd => {
+                    *self.mpd_cover_image.borrow_mut() = None;
+                    self.mpd_cover_seed.set(None);
+                }
+                crate::ui::MediaSourceKind::Other(_) => {}
+            }
+        }
+        if &*self.active_source.borrow() == source {
+            self.window.set_has_cover_art(has_art);
+            if !has_art {
+                self.window.set_cover_image(slint::Image::default());
+                self.apply_active_cover_seed(None);
+            }
         }
     }
 
-    /// Updates the cover art image.
-    pub fn set_cover_image(&self, image: slint::Image) {
-        self.window.set_cover_image(image);
-        self.window.set_has_cover_art(true);
+    /// Updates the cover art image for `source`, updating the window if active.
+    pub fn set_source_cover_image(&self, source: &crate::ui::MediaSourceKind, image: slint::Image) {
+        match source {
+            crate::ui::MediaSourceKind::Bluetooth => {
+                *self.bt_cover_image.borrow_mut() = Some(image.clone());
+            }
+            crate::ui::MediaSourceKind::Mpd => {
+                *self.mpd_cover_image.borrow_mut() = Some(image.clone());
+            }
+            crate::ui::MediaSourceKind::Other(_) => {}
+        }
+        if &*self.active_source.borrow() == source {
+            self.window.set_cover_image(image);
+            self.window.set_has_cover_art(true);
+        }
+    }
+
+    /// Updates the extracted cover-art ARGB seed for `source` and re-resolves
+    /// the active palette when `source` is currently active.
+    pub fn set_source_cover_seed(&self, source: &crate::ui::MediaSourceKind, seed: Option<u32>) {
+        match source {
+            crate::ui::MediaSourceKind::Bluetooth => self.bt_cover_seed.set(seed),
+            crate::ui::MediaSourceKind::Mpd => self.mpd_cover_seed.set(seed),
+            crate::ui::MediaSourceKind::Other(_) => {}
+        }
+        if &*self.active_source.borrow() == source {
+            self.apply_active_cover_seed(seed);
+        }
     }
 
     /// Returns the currently active cover-art dynamic theming mode.
@@ -1496,9 +1597,14 @@ impl AppShell {
         self.active_cover_seed.get()
     }
 
-    /// Updates the extracted cover-art ARGB seed and re-resolves the active palette
-    /// when the seed changed (skipping Slint palette updates when [`CoverThemeMode::Off`]).
+    /// Updates the extracted cover-art ARGB seed for Bluetooth and re-resolves
+    /// the active palette when the seed changed (skipping Slint palette updates
+    /// when [`CoverThemeMode::Off`]).
     pub fn set_cover_seed(&self, seed: Option<u32>) {
+        self.set_source_cover_seed(&crate::ui::MediaSourceKind::Bluetooth, seed);
+    }
+
+    fn apply_active_cover_seed(&self, seed: Option<u32>) {
         if self.active_cover_seed.replace(seed) != seed {
             let mode = self.cover_theme_mode();
             if mode != CoverThemeMode::Off {
@@ -1515,8 +1621,26 @@ impl AppShell {
 
     /// Applies state from a [`speaker_bluetooth::BtPlaybackState`] point-in-time snapshot.
     pub fn apply_bluetooth_playback(&self, playback: &speaker_bluetooth::BtPlaybackState) {
-        Self::apply_playback_to_window(&self.window, playback);
-        let is_playing = playback.is_playing();
+        let snapshot = crate::ui::NowPlayingSnapshot::from_bluetooth(playback);
+        *self.bt_snapshot.borrow_mut() = Some(snapshot.clone());
+        if *self.active_source.borrow() == crate::ui::MediaSourceKind::Bluetooth {
+            self.apply_now_playing(&snapshot);
+        }
+    }
+
+    /// Applies state from an MPD [`speaker_mpd::MpdStatus`] snapshot.
+    pub fn apply_mpd_playback(&self, status: &speaker_mpd::MpdStatus) {
+        let snapshot = crate::ui::NowPlayingSnapshot::from_mpd(status);
+        *self.mpd_snapshot.borrow_mut() = Some(snapshot.clone());
+        if *self.active_source.borrow() == crate::ui::MediaSourceKind::Mpd {
+            self.apply_now_playing(&snapshot);
+        }
+    }
+
+    /// Applies a source-agnostic [`crate::ui::NowPlayingSnapshot`] to [`MainWindow`].
+    pub fn apply_now_playing(&self, snapshot: &crate::ui::NowPlayingSnapshot) {
+        Self::apply_now_playing_to_window(&self.window, snapshot);
+        let is_playing = snapshot.is_playing;
         let was_playing = self.was_playing.replace(is_playing);
         if was_playing && !is_playing {
             self.visualizer_autostart_timer.stop();
@@ -1630,32 +1754,110 @@ impl AppShell {
         }
     }
 
-    fn apply_playback_to_window(w: &MainWindow, playback: &speaker_bluetooth::BtPlaybackState) {
-        Self::apply_track_title(w, playback.title.as_ref());
-        if w.get_track_artist().as_str() != playback.artist.as_ref() {
-            w.set_track_artist(playback.artist.as_ref().into());
+    fn apply_now_playing_to_window(w: &MainWindow, snapshot: &crate::ui::NowPlayingSnapshot) {
+        Self::apply_track_title(w, snapshot.title.as_ref());
+        if w.get_track_artist().as_str() != snapshot.artist.as_ref() {
+            w.set_track_artist(snapshot.artist.as_ref().into());
         }
-        if w.get_track_album().as_str() != playback.album.as_ref() {
-            w.set_track_album(playback.album.as_ref().into());
+        if w.get_track_album().as_str() != snapshot.album.as_ref() {
+            w.set_track_album(snapshot.album.as_ref().into());
         }
         Self::apply_playback_timing(
             w,
-            playback.is_playing(),
-            playback.position_ms,
-            playback.duration_ms,
+            snapshot.is_playing,
+            snapshot.position_ms,
+            snapshot.duration_ms,
         );
-        if !playback.device_name.is_empty()
-            && w.get_track_or_device().as_str() != playback.device_name.as_ref()
-        {
-            w.set_track_or_device(playback.device_name.as_ref().into());
+        if w.get_track_or_device().as_str() != snapshot.source_label.as_ref() {
+            w.set_track_or_device(snapshot.source_label.as_ref().into());
         }
 
-        // Cover art is loaded and upscaled by the `bt-monitor` worker (off the render
-        // thread) and pushed through the shared worker update channel; playback
-        // snapshots never clear it. A snapshot carrying no cached path means a
-        // handle-less track or a fetch pending on the cover-fetch worker — blanking
-        // here would drop working art on every 250 ms position tick. Only an
-        // explicit device-disconnect delta clears the displayed cover.
+        let caps = snapshot.capabilities;
+        if w.get_can_play_pause() != caps.can_play_pause {
+            w.set_can_play_pause(caps.can_play_pause);
+        }
+        if w.get_can_next() != caps.can_next {
+            w.set_can_next(caps.can_next);
+        }
+        if w.get_can_previous() != caps.can_previous {
+            w.set_can_previous(caps.can_previous);
+        }
+        if w.get_seekable() != caps.can_seek {
+            w.set_seekable(caps.can_seek);
+        }
+        if snapshot.source == crate::ui::MediaSourceKind::Mpd {
+            Self::apply_stream_info_to_window(w, snapshot.stream_info.as_ref());
+        }
+    }
+
+    /// Applies a multi-source routing snapshot from `org.speaker.AudioSources1`.
+    pub fn apply_audio_sources(&self, state: &crate::ui::AudioSourcesState) {
+        let w = &self.window;
+        let rows: Vec<crate::ui::SourceRowItem> = state
+            .sources
+            .iter()
+            .map(|s| crate::ui::SourceRowItem {
+                id: s.id.as_ref().into(),
+                display_name: s.display_name.as_ref().into(),
+                state: s.state.as_ref().into(),
+                sample_rate_hz: i32::try_from(s.sample_rate_hz).unwrap_or(i32::MAX),
+                is_active: s.is_active,
+            })
+            .collect();
+        w.set_source_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+
+        let next_source = state.active_source.as_deref().map_or(
+            crate::ui::MediaSourceKind::Bluetooth,
+            crate::ui::MediaSourceKind::from_source_id,
+        );
+        let changed = *self.active_source.borrow() != next_source;
+        if changed {
+            *self.active_source.borrow_mut() = next_source.clone();
+            w.set_active_source(next_source.display_name().into());
+            w.set_active_source_id(next_source.id_str().into());
+
+            let snapshot = match &next_source {
+                crate::ui::MediaSourceKind::Bluetooth => self.bt_snapshot.borrow().clone(),
+                crate::ui::MediaSourceKind::Mpd => self.mpd_snapshot.borrow().clone(),
+                crate::ui::MediaSourceKind::Other(_) => None,
+            }
+            .unwrap_or_else(|| crate::ui::NowPlayingSnapshot {
+                source: next_source.clone(),
+                source_label: if next_source == crate::ui::MediaSourceKind::Bluetooth {
+                    "Waiting for Connection...".into()
+                } else {
+                    Box::from("")
+                },
+                title: next_source.idle_title().into(),
+                ..Default::default()
+            });
+            self.apply_now_playing(&snapshot);
+            if next_source == crate::ui::MediaSourceKind::Bluetooth
+                && let Some(ref bt_info) = *self.bt_stream_info.borrow()
+            {
+                Self::apply_stream_info_to_window(w, Some(bt_info));
+            }
+
+            let (cover_img, cover_seed) = match &next_source {
+                crate::ui::MediaSourceKind::Bluetooth => (
+                    self.bt_cover_image.borrow().clone(),
+                    self.bt_cover_seed.get(),
+                ),
+                crate::ui::MediaSourceKind::Mpd => (
+                    self.mpd_cover_image.borrow().clone(),
+                    self.mpd_cover_seed.get(),
+                ),
+                crate::ui::MediaSourceKind::Other(_) => (None, None),
+            };
+            if let Some(img) = cover_img {
+                w.set_cover_image(img);
+                w.set_has_cover_art(true);
+            } else {
+                w.set_cover_image(slint::Image::default());
+                w.set_has_cover_art(false);
+            }
+            self.apply_active_cover_seed(cover_seed);
+        }
     }
 
     /// Applies a Bluetooth devices screen update pushed by the `bt-monitor`
@@ -1864,6 +2066,16 @@ impl AppShell {
     /// device command queue (pairing, discovery, connect/disconnect/remove).
     pub fn wire_bluetooth_devices(&self, commands: &speaker_bluetooth::DeviceCommandQueue) {
         *self.device_commands.borrow_mut() = Some(commands.clone());
+    }
+
+    /// Wires the MPD transport command queue for Now Playing playback, seek, and mode controls.
+    pub fn wire_mpd_transport(&self, commands: &crate::ui::MpdCommandQueue) {
+        *self.mpd_commands.borrow_mut() = Some(commands.clone());
+    }
+
+    /// Wires the `org.speaker.AudioSources1` command queue for source switching.
+    pub fn wire_source_commands(&self, commands: &crate::ui::SourceCommandQueue) {
+        *self.source_commands.borrow_mut() = Some(commands.clone());
     }
 
     fn setup_callbacks(&self) {
@@ -2319,9 +2531,58 @@ impl AppShell {
         });
     }
 
+    fn setup_mpd_and_source_callbacks(&self) {
+        let mpd_seek = Rc::clone(&self.mpd_commands);
+        let active_seek = Rc::clone(&self.active_source);
+        let win_seek = self.window.as_weak();
+        self.window.on_seek_to(move |ratio| {
+            if *active_seek.borrow() != crate::ui::MediaSourceKind::Mpd {
+                return;
+            }
+            let Some(w) = win_seek.upgrade() else {
+                return;
+            };
+            let dur_ms = w.get_duration_ms();
+            if dur_ms <= 0 || !ratio.is_finite() {
+                return;
+            }
+            let clamped = ratio.clamp(0.0, 1.0);
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "clamped ratio in 0.0..=1.0 times positive duration_ms fits in u32"
+            )]
+            let target_ms = (f64::from(dur_ms) * f64::from(clamped)).round() as u32;
+            w.set_progress_ratio(clamped);
+            w.set_position_text(
+                speaker_bluetooth::format_duration_ms_ui(
+                    target_ms,
+                    u32::try_from(dur_ms).unwrap_or(0),
+                )
+                .into(),
+            );
+            if let Some(cmds) = mpd_seek.borrow().as_ref() {
+                cmds.push(crate::ui::MpdCommand::Seek(
+                    std::time::Duration::from_millis(u64::from(target_ms)),
+                ));
+            }
+        });
+
+        let source_cmds = Rc::clone(&self.source_commands);
+        self.window.on_select_audio_source(move |id| {
+            if let Some(cmds) = source_cmds.borrow().as_ref() {
+                cmds.push(crate::ui::SourceCommand::SelectSource(id.as_str().into()));
+            } else {
+                tracing::debug!(source_id = %id, "Audio source selection dropped (no source queue wired)");
+            }
+        });
+    }
+
     fn setup_transport_callbacks(&self) {
         let last_toggle = Rc::clone(&self.last_toggle);
         let transport_play = Rc::clone(&self.transport_commands);
+        let mpd_play = Rc::clone(&self.mpd_commands);
+        let active_play = Rc::clone(&self.active_source);
         let win = self.window.as_weak();
         self.window.on_toggle_play_pause(move || {
             let now = std::time::Instant::now();
@@ -2330,11 +2591,26 @@ impl AppShell {
             }
             last_toggle.set(now);
             if let Some(w) = win.upgrade() {
-                if let Some(cmds) = transport_play.borrow().as_ref() {
-                    cmds.push(speaker_bluetooth::TransportCommand::TogglePlayPause);
-                    w.set_is_playing(!w.get_is_playing());
-                } else {
-                    tracing::debug!("Play/Pause requested (no audio transport wired)");
+                match *active_play.borrow() {
+                    crate::ui::MediaSourceKind::Bluetooth => {
+                        if let Some(cmds) = transport_play.borrow().as_ref() {
+                            cmds.push(speaker_bluetooth::TransportCommand::TogglePlayPause);
+                            w.set_is_playing(!w.get_is_playing());
+                        } else {
+                            tracing::debug!("Play/Pause requested (no Bluetooth transport wired)");
+                        }
+                    }
+                    crate::ui::MediaSourceKind::Mpd => {
+                        if let Some(cmds) = mpd_play.borrow().as_ref() {
+                            cmds.push(crate::ui::MpdCommand::TogglePlayPause);
+                            w.set_is_playing(!w.get_is_playing());
+                        } else {
+                            tracing::debug!("Play/Pause requested (no MPD transport wired)");
+                        }
+                    }
+                    crate::ui::MediaSourceKind::Other(_) => {
+                        tracing::debug!("Play/Pause requested on passive source");
+                    }
                 }
             }
         });
@@ -2354,23 +2630,50 @@ impl AppShell {
         });
 
         let transport_next = Rc::clone(&self.transport_commands);
-        self.window.on_next_track(move || {
-            if let Some(cmds) = transport_next.borrow().as_ref() {
-                cmds.push(speaker_bluetooth::TransportCommand::NextTrack);
-            } else {
-                tracing::info!("Next track requested");
-            }
-        });
+        let mpd_next = Rc::clone(&self.mpd_commands);
+        let active_next = Rc::clone(&self.active_source);
+        self.window
+            .on_next_track(move || match *active_next.borrow() {
+                crate::ui::MediaSourceKind::Bluetooth => {
+                    if let Some(cmds) = transport_next.borrow().as_ref() {
+                        cmds.push(speaker_bluetooth::TransportCommand::NextTrack);
+                    } else {
+                        tracing::info!("Next track requested");
+                    }
+                }
+                crate::ui::MediaSourceKind::Mpd => {
+                    if let Some(cmds) = mpd_next.borrow().as_ref() {
+                        cmds.push(crate::ui::MpdCommand::Next);
+                    }
+                }
+                crate::ui::MediaSourceKind::Other(_) => {}
+            });
 
         let transport_prev = Rc::clone(&self.transport_commands);
-        self.window.on_previous_track(move || {
-            if let Some(cmds) = transport_prev.borrow().as_ref() {
-                cmds.push(speaker_bluetooth::TransportCommand::PreviousTrack);
-            } else {
-                tracing::info!("Previous track requested");
-            }
-        });
+        let mpd_prev = Rc::clone(&self.mpd_commands);
+        let active_prev = Rc::clone(&self.active_source);
+        self.window
+            .on_previous_track(move || match *active_prev.borrow() {
+                crate::ui::MediaSourceKind::Bluetooth => {
+                    if let Some(cmds) = transport_prev.borrow().as_ref() {
+                        cmds.push(speaker_bluetooth::TransportCommand::PreviousTrack);
+                    } else {
+                        tracing::info!("Previous track requested");
+                    }
+                }
+                crate::ui::MediaSourceKind::Mpd => {
+                    if let Some(cmds) = mpd_prev.borrow().as_ref() {
+                        cmds.push(crate::ui::MpdCommand::Previous);
+                    }
+                }
+                crate::ui::MediaSourceKind::Other(_) => {}
+            });
 
+        self.setup_mpd_and_source_callbacks();
+        self.setup_amp_volume_callbacks();
+    }
+
+    fn setup_amp_volume_callbacks(&self) {
         let transport_vol = Rc::clone(&self.amp_commands);
         let win = self.window.as_weak();
         self.window.on_volume_changed(move |val| {

@@ -1,0 +1,161 @@
+import {
+    FilledButton,
+    MaterialPalette,
+    MaterialStyleMetrics,
+    OutlineButton,
+    StateLayerArea,
+    TouchScale,
+} from "@material/material.slint";
+
+export struct SourceRowItem {
+    id: string,
+    display_name: string,
+    state: string,
+    sample_rate_hz: int,
+    is_active: bool,
+}
+
+export component SourceSwitcherOverlay inherits Rectangle {
+    in property <[SourceRowItem]> sources: [];
+    in property <string> active_source_id: "bluetooth";
+    in property <float> overlay_opacity: 0.0;
+
+    callback select_source(string);
+    callback open_bluetooth_devices();
+    callback dismiss();
+
+    background: transparent;
+    opacity: root.overlay_opacity;
+    visible: root.overlay_opacity > 0.01;
+
+    // Catch taps outside the card to dismiss
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.dismiss(); }
+    }
+
+    // Centered Material 3 card
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 440px * TouchScale.widget_scale;
+        height: card_layout.preferred-height;
+        background: MaterialPalette.surface_container_high;
+        border-radius: MaterialStyleMetrics.border_radius_16;
+        border-width: 1px;
+        border-color: MaterialPalette.outline_variant;
+
+        // Absorb taps on the card background so they don't dismiss
+        TouchArea {
+            width: 100%;
+            height: 100%;
+        }
+
+        card_layout := VerticalLayout {
+            padding: MaterialStyleMetrics.padding_24;
+            spacing: MaterialStyleMetrics.spacing_16;
+
+            Text {
+                text: "Audio Source";
+                color: MaterialPalette.on_surface;
+                font-size: 22px * TouchScale.clamped_font_scale;
+                font-weight: 800;
+            }
+
+            VerticalLayout {
+                spacing: 10px;
+
+                for src in root.sources : Rectangle {
+                    height: 64px * TouchScale.widget_scale;
+                    border-radius: MaterialStyleMetrics.border_radius_16;
+                    background: src.is_active ? MaterialPalette.secondary_container : MaterialPalette.surface;
+                    border-width: 1px;
+                    border-color: src.is_active ? MaterialPalette.primary : MaterialPalette.outline_variant;
+
+                    HorizontalLayout {
+                        padding-left: MaterialStyleMetrics.padding_16;
+                        padding-right: MaterialStyleMetrics.padding_16;
+                        spacing: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 12px;
+                            alignment: start;
+
+                            VerticalLayout {
+                                alignment: center;
+                                Image {
+                                    width: 24px * TouchScale.widget_scale;
+                                    height: 24px * TouchScale.widget_scale;
+                                    source: src.id == "bluetooth"
+                                        ? @image-url("../../../assets/icons/bluetooth.svg")
+                                        : @image-url("../../../assets/icons/music-note.svg");
+                                    colorize: src.is_active ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
+                                    image-fit: contain;
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 2px;
+
+                                Text {
+                                    text: src.display_name;
+                                    color: src.is_active ? MaterialPalette.on_secondary_container : MaterialPalette.on_surface;
+                                    font-size: 18px * TouchScale.clamped_font_scale;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: src.state == "streaming" && src.sample_rate_hz > 0
+                                        ? "Streaming • " + Math.round(src.sample_rate_hz / 1000) + " kHz"
+                                        : (src.state == "streaming" ? "Streaming" : "Idle");
+                                    color: src.is_active ? MaterialPalette.primary : MaterialPalette.on_surface_variant;
+                                    font-size: 13px * TouchScale.clamped_font_scale;
+                                    font-weight: 600;
+                                }
+                            }
+                        }
+
+                        if src.is_active : VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 10px;
+                                height: 10px;
+                                border-radius: 5px;
+                                background: MaterialPalette.primary;
+                            }
+                        }
+                    }
+
+                    StateLayerArea {
+                        color: MaterialPalette.primary;
+                        border_radius: MaterialStyleMetrics.border_radius_16;
+                        clicked => {
+                            root.select_source(src.id);
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: space-between;
+
+                OutlineButton {
+                    text: "Bluetooth Devices";
+                    clicked => {
+                        root.dismiss();
+                        root.open_bluetooth_devices();
+                    }
+                }
+
+                FilledButton {
+                    text: "Close";
+                    clicked => { root.dismiss(); }
+                }
+            }
+        }
+    }
+}

@@ -258,6 +258,8 @@ struct Session {
     bg_running: Arc<AtomicBool>,
     amp_worker: std::io::Result<std::thread::JoinHandle<()>>,
     brightness_worker: std::io::Result<std::thread::JoinHandle<()>>,
+    audio_sources_worker: std::io::Result<std::thread::JoinHandle<()>>,
+    mpd_worker: std::io::Result<std::thread::JoinHandle<()>>,
     bt_worker: Option<std::io::Result<std::thread::JoinHandle<()>>>,
     shell: Rc<crate::ui::AppShell>,
     _sync_timer: Timer,
@@ -291,6 +293,10 @@ impl Session {
             speaker_dsp::DspDevice::new()
         };
         shell.wire_visualizer(dsp);
+        let mpd_commands = crate::ui::MpdCommandQueue::new();
+        let source_commands = crate::ui::SourceCommandQueue::new();
+        shell.wire_mpd_transport(&mpd_commands);
+        shell.wire_source_commands(&source_commands);
         let bg_running = Arc::new(AtomicBool::new(true));
         let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
 
@@ -303,6 +309,18 @@ impl Session {
             mocked,
             brightness_auto_enabled,
             brightness_manual_percent,
+        );
+        let audio_sources_worker = crate::ui::sources_worker::spawn_audio_sources_worker(
+            &shared,
+            &bg_running,
+            &source_commands,
+            mocked,
+        );
+        let mpd_worker = crate::ui::sources_worker::spawn_mpd_monitor_worker(
+            &shared,
+            &bg_running,
+            &mpd_commands,
+            mocked,
         );
         // Raised by the bootstrap worker once the `BlueZ` connect succeeded.
         // The transport callbacks are wired on the render thread (the shell is
@@ -352,45 +370,53 @@ impl Session {
             }
         };
 
-        // Periodic reconciliation of worker-published Bluetooth/amp state and
-        // interrupt-accumulated rotary-encoder detents.
-        let sync_timer = Timer::default();
-        let shell_sync = Rc::clone(&shell);
-        let commands_sync = commands.clone();
-        let connected_sync = Arc::clone(&bt_connected);
-        let transport_wired = Cell::new(false);
-        let mut tracker = crate::ui::EncoderVolumeTracker::new();
-        let mut warned = false;
-        sync_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
-            daemon::poll_encoder_input(encoder.as_ref(), &mut tracker, &shell_sync, &mut warned);
-            // Wire the transport once the live connect succeeded: before that
-            // a transport tap has no worker to execute it, so it must stay a
-            // no-op instead of flipping the optimistic UI state.
-            if !transport_wired.get() && connected_sync.load(Ordering::Acquire) {
-                transport_wired.set(true);
-                shell_sync.wire_bluetooth_transport(&commands_sync);
-            }
-            daemon::apply_shared_bt_state(&shell_sync, &shared);
-            // Release the frozen backdrop once both overlays (and their fade-out)
-            // have finished closing so the next open captures a fresh snapshot.
-            if shell_sync.window().get_overlay_backdrop_available()
-                && !shell_sync.is_volume_hud_active()
-                && !shell_sync.is_codec_hud_active()
-                && !shell_sync.is_brightness_hud_active()
-            {
-                shell_sync.set_overlay_backdrop(slint::Image::default());
-                tracing::debug!("Cleared overlay backdrop");
-            }
-        });
+        let sync_timer = Self::spawn_sync_timer(&shell, &shared, &commands, &bt_connected, encoder);
 
         Self {
             bg_running,
             amp_worker,
             brightness_worker,
+            audio_sources_worker,
+            mpd_worker,
             bt_worker,
             shell,
             _sync_timer: sync_timer,
         }
+    }
+
+    fn spawn_sync_timer(
+        shell: &Rc<crate::ui::AppShell>,
+        shared: &Arc<Mutex<BtSharedUpdate>>,
+        commands: &speaker_bluetooth::TransportCommandQueue,
+        bt_connected: &Arc<AtomicBool>,
+        encoder: Option<speaker_hardware::EncoderDevice>,
+    ) -> Timer {
+        let sync_timer = Timer::default();
+        let shell_sync = Rc::clone(shell);
+        let shared = Arc::clone(shared);
+        let commands_sync = commands.clone();
+        let connected_sync = Arc::clone(bt_connected);
+        let transport_wired = Cell::new(false);
+        let mut tracker = crate::ui::EncoderVolumeTracker::new();
+        let mut warned = false;
+        sync_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
+            daemon::poll_encoder_input(encoder.as_ref(), &mut tracker, &shell_sync, &mut warned);
+            if !transport_wired.get() && connected_sync.load(Ordering::Acquire) {
+                transport_wired.set(true);
+                shell_sync.wire_bluetooth_transport(&commands_sync);
+            }
+            daemon::apply_shared_bt_state(&shell_sync, &shared);
+            if shell_sync.window().get_overlay_backdrop_available()
+                && !shell_sync.is_volume_hud_active()
+                && !shell_sync.is_codec_hud_active()
+                && !shell_sync.is_brightness_hud_active()
+                && !shell_sync.is_source_switcher_active()
+            {
+                shell_sync.set_overlay_backdrop(slint::Image::default());
+                tracing::debug!("Cleared overlay backdrop");
+            }
+        });
+        sync_timer
     }
 
     /// Stops the background workers after the event loop returned, re-raising
@@ -400,6 +426,8 @@ impl Session {
         self.shell.shutdown_visualizer();
         daemon::join_amp_volume_worker(self.amp_worker);
         daemon::join_brightness_worker(self.brightness_worker);
+        crate::ui::sources_worker::join_worker(self.audio_sources_worker, "audio-sources");
+        crate::ui::sources_worker::join_worker(self.mpd_worker, "mpd-monitor");
         match self.bt_worker {
             Some(Ok(handle)) => {
                 if let Err(panic) = handle.join() {

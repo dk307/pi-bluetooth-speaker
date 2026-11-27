@@ -1370,6 +1370,7 @@ fn bt_monitor_state_commands_settle_and_commit() {
             amp_volume: None,
             brightness: None,
             devices: None,
+            ..BtSharedUpdate::default()
         },
     );
     let recovered = poisoned

@@ -13,8 +13,9 @@ import { OverlayAppBar } from "screen_app_bar.slint";
 component CodecRow inherits Rectangle {
     in property <string> label;
     in property <string> value;
+    in property <bool> wrap_value: false;
 
-    min-height: max(36px * TouchScale.widget_scale, row_layout.min-height);
+    min-height: max(36px * TouchScale.widget_scale, row_layout.preferred-height);
 
     row_layout := HorizontalLayout {
         padding-left: MaterialStyleMetrics.padding_16;
@@ -27,7 +28,7 @@ component CodecRow inherits Rectangle {
             text: root.label;
             style: MaterialTypography.label_large;
             color: MaterialPalette.on_surface_variant;
-            vertical-alignment: center;
+            vertical-alignment: root.wrap_value ? top : center;
             overflow: elide;
             wrap: no-wrap;
             width: 140px * TouchScale.widget_scale;
@@ -39,8 +40,8 @@ component CodecRow inherits Rectangle {
             color: MaterialPalette.on_surface;
             vertical-alignment: center;
             horizontal-alignment: right;
-            overflow: elide;
-            wrap: no-wrap;
+            overflow: root.wrap_value ? clip : elide;
+            wrap: root.wrap_value ? word-wrap : no-wrap;
             horizontal-stretch: 1;
         }
     }
@@ -72,7 +73,9 @@ export component CodecHudOverlay inherits Rectangle {
     in property <string> bit_depth: "";
     in property <string> stream_format: "";
     in property <string> delay_text: "";
-    // False while no Bluetooth device is connected (no stream to report).
+    in property <string> detail_label: "Latency";
+    in property <string> stream_url: "";
+    // False while no Bluetooth device or active stream is present.
     in property <bool> connected: false;
     // Mirrors `MainWindow.overlay_backdrop_available`; keys the panel
     // translucency off the same signal as the window-level scrim.
@@ -168,8 +171,14 @@ export component CodecHudOverlay inherits Rectangle {
                         }
                         HorizontalDivider {}
                         CodecRow {
-                            label: "Latency";
+                            label: root.detail_label;
                             value: root.connected ? root.delay_text : root.unknown;
+                        }
+                        if root.connected && root.stream_url != "" : HorizontalDivider {}
+                        if root.connected && root.stream_url != "" : CodecRow {
+                            label: "Source";
+                            value: root.stream_url;
+                            wrap_value: true;
                         }
                     }
                 }
