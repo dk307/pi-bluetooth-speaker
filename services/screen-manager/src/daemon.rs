@@ -2366,20 +2366,17 @@ pub fn spawn_amp_volume_worker(
 #[cfg(feature = "ui")]
 #[must_use]
 pub fn decode_cover_bytes(bytes: &[u8]) -> Option<(CoverPixelBuffer, Option<u32>)> {
-    const MAX_COVER_DIMENSION: u32 = 8192;
-    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+    const MAX_COVER_DIMENSION: u32 = 2048;
+    const MAX_DECODE_ALLOC_BYTES: u64 = 32 * 1024 * 1024;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
-    let (w, h) = reader.into_dimensions().ok()?;
-    if w == 0 || h == 0 || w > MAX_COVER_DIMENSION || h > MAX_COVER_DIMENSION {
-        tracing::warn!(
-            width = w,
-            height = h,
-            "Rejecting oversized or empty cover art"
-        );
-        return None;
-    }
-    let img = image::load_from_memory(bytes).ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_COVER_DIMENSION);
+    limits.max_image_height = Some(MAX_COVER_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
+    reader.limits(limits);
+    let img = reader.decode().ok()?;
     let sized = if img.width() == TARGET_COVER_SIZE && img.height() == TARGET_COVER_SIZE {
         img
     } else {

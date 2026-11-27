@@ -6,13 +6,13 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use speaker_mpd::{MpdDevice, MpdPlaybackState, MpdStatus};
 use zbus::{Connection, Proxy};
 
-use crate::daemon::{BtSharedUpdate, decode_cover_bytes};
+use crate::daemon::{BtSharedUpdate, COVER_DECODE_RETRY, decode_cover_bytes};
 use crate::ui::now_playing::{
     AudioSourceEntry, AudioSourcesState, MpdCommand, MpdCommandQueue, SOURCE_ID_BLUETOOTH,
     SOURCE_ID_MPD, SourceCommand, SourceCommandQueue,
@@ -214,10 +214,17 @@ async fn run_live_audio_sources(
             }
         };
 
-        if let Ok(initial) = read_sources_snapshot(&proxy).await {
-            publish_audio_sources(shared, initial);
-            backoff = Duration::from_secs(1);
-        }
+        let mut has_initial_snapshot = match read_sources_snapshot(&proxy).await {
+            Ok(initial) => {
+                publish_audio_sources(shared, initial);
+                backoff = Duration::from_secs(1);
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Initial AudioSources1 snapshot failed; will retry");
+                false
+            }
+        };
 
         let props_proxy = match zbus::fdo::PropertiesProxy::builder(&conn)
             .destination(AUDIO_MANAGER_DEST)
@@ -248,20 +255,7 @@ async fn run_live_audio_sources(
             tokio::select! {
                 _ = cmd_tick.tick() => {
                     for cmd in commands.drain() {
-                        let res = match cmd {
-                            SourceCommand::SelectSource(id) => {
-                                proxy.call_method("SelectSource", &(id.as_ref(),)).await.map(|_| ())
-                            }
-                            SourceCommand::PinSource(pin) => {
-                                let arg = pin.as_deref().unwrap_or("");
-                                proxy.call_method("PinSource", &(arg,)).await.map(|_| ())
-                            }
-                        };
-                        if let Err(e) = res {
-                            tracing::warn!(error = %e, "AudioSources1 command failed");
-                        } else if let Ok(snap) = read_sources_snapshot(&proxy).await {
-                            publish_audio_sources(shared, snap);
-                        }
+                        execute_source_command(&proxy, shared, cmd, &mut has_initial_snapshot).await;
                     }
                 }
                 maybe_sig = async {
@@ -275,15 +269,43 @@ async fn run_live_audio_sources(
                     }
                     if let Ok(snap) = read_sources_snapshot(&proxy).await {
                         publish_audio_sources(shared, snap);
+                        has_initial_snapshot = true;
                     }
                 }
                 _ = fallback_poll.tick() => {
-                    if changes.is_none() && let Ok(snap) = read_sources_snapshot(&proxy).await {
+                    if (!has_initial_snapshot || changes.is_none())
+                        && let Ok(snap) = read_sources_snapshot(&proxy).await
+                    {
                         publish_audio_sources(shared, snap);
+                        has_initial_snapshot = true;
                     }
                 }
             }
         }
+    }
+}
+
+async fn execute_source_command(
+    proxy: &Proxy<'_>,
+    shared: &Arc<Mutex<BtSharedUpdate>>,
+    cmd: SourceCommand,
+    has_initial_snapshot: &mut bool,
+) {
+    let res = match cmd {
+        SourceCommand::SelectSource(id) => proxy
+            .call_method("SelectSource", &(id.as_ref(),))
+            .await
+            .map(|_| ()),
+        SourceCommand::PinSource(pin) => {
+            let arg = pin.as_deref().unwrap_or("");
+            proxy.call_method("PinSource", &(arg,)).await.map(|_| ())
+        }
+    };
+    if let Err(e) = res {
+        tracing::warn!(error = %e, "AudioSources1 command failed");
+    } else if let Ok(snap) = read_sources_snapshot(proxy).await {
+        publish_audio_sources(shared, snap);
+        *has_initial_snapshot = true;
     }
 }
 
@@ -354,6 +376,7 @@ async fn refresh_mpd_cover(
     device: &MpdDevice,
     shared: &Arc<Mutex<BtSharedUpdate>>,
     last_art_file: &mut Option<Box<str>>,
+    last_failed_art: &mut Option<(Box<str>, Instant)>,
     status: &MpdStatus,
 ) {
     let next_file: Option<Box<str>> = status
@@ -366,25 +389,34 @@ async fn refresh_mpd_cover(
     }
     let Some(ref file) = next_file else {
         *last_art_file = None;
+        *last_failed_art = None;
         publish_mpd_cover(shared, None, None);
         return;
     };
+    if let Some((failed_file, at)) = last_failed_art
+        && failed_file == file
+        && at.elapsed() < COVER_DECODE_RETRY
+    {
+        return;
+    }
     match device.read_album_art(file.as_ref()).await {
         Ok(Some(bytes)) => {
             if let Some((buf, seed)) = decode_cover_bytes(&bytes) {
                 last_art_file.clone_from(&next_file);
+                *last_failed_art = None;
                 publish_mpd_cover(shared, Some(buf), seed);
             } else {
-                // Corrupt/invalid image keeps prior art without poisoning retry.
+                *last_failed_art = Some((file.clone(), Instant::now()));
                 tracing::debug!(file = %file, "MPD album art decode failed; keeping prior art");
             }
         }
         Ok(None) => {
             last_art_file.clone_from(&next_file);
+            *last_failed_art = None;
             publish_mpd_cover(shared, None, None);
         }
         Err(e) => {
-            // Transient MPD fetch error keeps prior art so next tick can retry.
+            *last_failed_art = Some((file.clone(), Instant::now()));
             tracing::debug!(error = %e.summary(), file = %file, "MPD album art fetch failed");
         }
     }
@@ -399,6 +431,7 @@ async fn run_mpd_worker(
     let mut backoff = Duration::from_secs(1);
     let mut last_status: Option<MpdStatus> = None;
     let mut last_art_file: Option<Box<str>> = None;
+    let mut last_failed_art: Option<(Box<str>, Instant)> = None;
 
     while running.load(Ordering::Relaxed) {
         let mut events = match device.subscribe_events().await {
@@ -425,7 +458,14 @@ async fn run_mpd_worker(
         }
 
         if let Ok(st) = device.read_status().await {
-            refresh_mpd_cover(device, shared, &mut last_art_file, &st).await;
+            refresh_mpd_cover(
+                device,
+                shared,
+                &mut last_art_file,
+                &mut last_failed_art,
+                &st,
+            )
+            .await;
             publish_mpd_status(shared, st.clone());
             last_status = Some(st);
         }
@@ -445,7 +485,7 @@ async fn run_mpd_worker(
                             execute_mpd_command(device, cmd, cur_state).await;
                         }
                         if let Ok(st) = device.read_status().await {
-                            refresh_mpd_cover(device, shared, &mut last_art_file, &st).await;
+                            refresh_mpd_cover(device, shared, &mut last_art_file, &mut last_failed_art, &st).await;
                             publish_mpd_status(shared, st.clone());
                             last_status = Some(st);
                         }
@@ -459,7 +499,7 @@ async fn run_mpd_worker(
                         && let Ok(st) = device.read_status().await
                         && last_status.as_ref() != Some(&st)
                     {
-                        refresh_mpd_cover(device, shared, &mut last_art_file, &st).await;
+                        refresh_mpd_cover(device, shared, &mut last_art_file, &mut last_failed_art, &st).await;
                         publish_mpd_status(shared, st.clone());
                         last_status = Some(st);
                     }
@@ -473,16 +513,20 @@ async fn run_mpd_worker(
                     match ev {
                         Some(speaker_mpd::MpdEvent::Disconnected(reason)) => {
                             tracing::debug!(reason = %reason, "MPD event stream disconnected");
+                            tokio::time::sleep(Duration::from_secs(1)).await;
                             break;
                         }
                         Some(speaker_mpd::MpdEvent::SubsystemChanged(_)) => {
                             if let Ok(st) = device.read_status().await {
-                                refresh_mpd_cover(device, shared, &mut last_art_file, &st).await;
+                                refresh_mpd_cover(device, shared, &mut last_art_file, &mut last_failed_art, &st).await;
                                 publish_mpd_status(shared, st.clone());
                                 last_status = Some(st);
                             }
                         }
-                        None => break,
+                        None => {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            break;
+                        }
                     }
                 }
             }
