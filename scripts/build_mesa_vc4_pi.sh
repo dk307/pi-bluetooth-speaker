@@ -164,8 +164,8 @@ systemctl restart screen-manager.service"
   log "OK: screen-manager.service restarted with vc4-only Mesa."
 }
 
-do_verify() {
-  log "Verifying VC4 GLES renderer and smaps on ${REMOTE_HOST}"
+do_verify_libs() {
+  log "Verifying deployed VC4 GLES libraries on ${REMOTE_HOST}"
   ssh "${REMOTE_HOST}" "
     set -euo pipefail
     info=\$(LD_LIBRARY_PATH=${REMOTE_LIB_DIR} GBM_BACKENDS_PATH=${REMOTE_LIB_DIR}/gbm eglinfo -B 2>&1)
@@ -174,14 +174,24 @@ do_verify() {
       echo 'ERROR: VC4 V3D hardware renderer not detected!' >&2
       exit 1
     fi
+  "
+}
+
+do_verify() {
+  do_verify_libs
+  log "Verifying running screen-manager process on ${REMOTE_HOST}"
+  ssh "${REMOTE_HOST}" "
+    set -euo pipefail
     pid=\$(pgrep -x screen-manager || true)
-    if [[ -n \"\${pid}\" ]]; then
-      if grep -q LLVM \"/proc/\${pid}/maps\"; then
-        echo 'ERROR: libLLVM is still mapped in screen-manager!' >&2
-        exit 1
-      fi
-      grep -E '^(Rss|Pss|Pss_Anon|Pss_File):' \"/proc/\${pid}/smaps_rollup\"
+    if [[ -z \"\${pid}\" ]]; then
+      echo 'ERROR: screen-manager is not running!' >&2
+      exit 1
     fi
+    if grep -q LLVM \"/proc/\${pid}/maps\"; then
+      echo 'ERROR: libLLVM is still mapped in screen-manager!' >&2
+      exit 1
+    fi
+    grep -E '^(Rss|Pss|Pss_Anon|Pss_File):' \"/proc/\${pid}/smaps_rollup\"
   "
 }
 
@@ -190,6 +200,6 @@ case "${PHASE}" in
   deploy) do_deploy ;;
   apply) do_apply ;;
   verify) do_verify ;;
-  all) do_build; do_deploy; do_apply; do_verify ;;
+  all) do_build; do_deploy; do_verify_libs; do_apply; do_verify ;;
   *) die "Unknown phase: ${PHASE}" ;;
 esac

@@ -21,7 +21,7 @@ mod generated {
 pub(crate) mod backdrop;
 pub mod boot;
 pub(crate) mod bt_devices;
-#[cfg(feature = "test-util")]
+#[cfg(all(feature = "ui", feature = "test-util"))]
 pub(crate) mod framebuffer;
 pub mod marquee;
 pub mod runtime;
@@ -43,7 +43,7 @@ pub use bt_devices::{
     BtDevicesController, BtDevicesUpdate, device_row, icon_slug, pairing_code_text, status_text,
     subtitle_text,
 };
-#[cfg(feature = "test-util")]
+#[cfg(all(feature = "ui", feature = "test-util"))]
 #[doc(inline)]
 pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError, FramebufferMockCtrl};
 #[doc(inline)]
