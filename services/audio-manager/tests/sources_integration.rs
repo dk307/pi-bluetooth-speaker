@@ -971,3 +971,147 @@ async fn mpd_play_watcher_reports_play_intent_on_resume_edge() {
     drop(cmd_rx);
     watcher.await.unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn source_manager_seed_deadline_unblocks_partial_loopbacks() {
+    let reg = SourceRegistry::default_appliance();
+    let dir = ScopedTempDir::new("src_mgr_seed_deadline");
+    let dsp_cfg_path = dir.path().join("dsp.yml");
+    let source_state_path = dir.path().join("source-state.json");
+    std::fs::write(&dsp_cfg_path, SAMPLE_CONFIG_YAML).unwrap();
+
+    let snapshot = AudioSourcesSnapshot::new(AutoSwitchPolicy::LastPlayWins);
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (dsp, dsp_mock) = DspDevice::new_mocked();
+    let (ctrl, _ctrl_mock) = SourceController::new_mocked();
+
+    let mut mgr = SourceManager::new(
+        reg,
+        SourceManagerConfig {
+            camilladsp_config_path: dsp_cfg_path,
+            source_state_path,
+            default_policy: AutoSwitchPolicy::LastPlayWins,
+        },
+        dsp,
+        Arc::new(ctrl),
+        snapshot.clone(),
+        None,
+    );
+
+    let (loop_tx, loop_rx) = mpsc::channel(8);
+    let mgr_handle = tokio::spawn(async move {
+        mgr.run(cmd_rx, loop_rx).await;
+    });
+
+    // Only subdevice 0 reports; subdevice 1 never reports.
+    loop_tx
+        .send((
+            0,
+            LoopbackState {
+                active: true,
+                rate_hz: 48_000,
+            },
+            false,
+        ))
+        .await
+        .unwrap();
+
+    tokio::task::yield_now().await;
+    assert!(dsp_mock.last_set_config_json().is_none());
+
+    // Advance past the 2s seed deadline so partial seed activates bluetooth.
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::time::resume();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if dsp_mock.last_set_config_json().is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("seed deadline should push route for observed subdevice");
+
+    drop(loop_tx);
+    mgr_handle.await.unwrap();
+}
+
+#[test]
+fn arbiter_on_play_intent_handles_unknown_last_play_and_pin() {
+    let reg = SourceRegistry::default_appliance();
+    let mut arbiter = SourceArbiter::new(reg, PersistedSourceState::default());
+    let seeded = arbiter.seed([
+        (sid("bluetooth"), true, 48_000),
+        (sid("rmpd"), false, 44_100),
+    ]);
+    assert_eq!(seeded.active_changed, Some(Some(sid("bluetooth"))));
+
+    // Unknown source ID is ignored.
+    let unknown = arbiter.on_play_intent(&sid("unknown"));
+    assert!(unknown.dsp_target.is_none());
+    assert!(unknown.pause_sources.is_empty());
+
+    // Play intent from rmpd under LastPlayWins switches active source and pauses bluetooth.
+    let take_over = arbiter.on_play_intent(&sid("rmpd"));
+    assert_eq!(take_over.active_changed, Some(Some(sid("rmpd"))));
+    assert_eq!(
+        take_over
+            .dsp_target
+            .as_ref()
+            .map(|r| r.capture_device.as_ref()),
+        Some("hw:Loopback,1,1")
+    );
+    assert_eq!(take_over.pause_sources, vec![sid("bluetooth")]);
+
+    // Pin bluetooth, then play intent on rmpd is rejected with pause_sources: [rmpd].
+    let _ = arbiter.pin_source(Some(&sid("bluetooth"))).unwrap();
+    let blocked = arbiter.on_play_intent(&sid("rmpd"));
+    assert!(blocked.dsp_target.is_none());
+    assert_eq!(blocked.pause_sources, vec![sid("rmpd")]);
+}
+
+#[tokio::test]
+async fn mpd_play_watcher_handles_fault_non_player_and_disconnect() {
+    use audio_manager::sources::manager::run_mpd_play_watcher;
+    use speaker_mpd::{MpdDevice, MpdEvent, MpdPlaybackState, MpdSubsystem};
+
+    let (mpd, mpd_mock) = MpdDevice::new_mocked();
+    mpd_mock.set_state(MpdPlaybackState::Paused);
+    let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+
+    let watcher = tokio::spawn(run_mpd_play_watcher(sid("rmpd"), mpd, cmd_tx));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Non-player subsystem event does not emit play intent.
+    mpd_mock.emit_event(MpdEvent::SubsystemChanged(MpdSubsystem::Mixer));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(cmd_rx.try_recv().is_err());
+
+    // Fault during status check holds state without crashing, then clears.
+    mpd_mock.inject_fault("transient mpd glitch");
+    mpd_mock.emit_event(MpdEvent::SubsystemChanged(MpdSubsystem::Player));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    mpd_mock.clear_fault();
+
+    // Stopped -> Playing transition emits ReportPlayIntent.
+    mpd_mock.set_state(MpdPlaybackState::Stopped);
+    mpd_mock.emit_event(MpdEvent::SubsystemChanged(MpdSubsystem::Player));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    mpd_mock.set_state(MpdPlaybackState::Playing);
+    mpd_mock.emit_event(MpdEvent::SubsystemChanged(MpdSubsystem::Player));
+
+    let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+        .await
+        .expect("ReportPlayIntent must arrive after Stopped -> Playing")
+        .unwrap();
+    assert_eq!(cmd.kind, SourceCommandKind::ReportPlayIntent(sid("rmpd")));
+
+    // Disconnected event is logged and tolerated without panicking.
+    mpd_mock.emit_event(MpdEvent::Disconnected("eof".into()));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    drop(cmd_rx);
+    watcher.await.unwrap();
+}

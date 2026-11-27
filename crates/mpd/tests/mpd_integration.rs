@@ -352,6 +352,7 @@ async fn tcp_backend_subscribes_idle_events_and_handles_connect_failures() {
     let unreachable = MpdDevice::with_endpoint(MpdHost::default(), closed_port);
     let err = unreachable.pause().await.unwrap_err();
     assert!(err.is_connection_failed());
+    assert!(std::error::Error::source(&err).is_some());
     assert_ne!(err.summary(), "");
 
     // 3. Greeting timeout -> Timeout
@@ -366,4 +367,21 @@ async fn tcp_backend_subscribes_idle_events_and_handles_connect_failures() {
         .with_timeout(Duration::from_millis(50));
     let timeout_err = slow.pause().await.unwrap_err();
     assert!(timeout_err.is_timeout());
+}
+
+#[test]
+fn mpd_subsystem_from_maps_all_variants() {
+    use mpd_client::client::Subsystem;
+    assert_eq!(MpdSubsystem::from(Subsystem::Player), MpdSubsystem::Player);
+    assert_eq!(MpdSubsystem::from(Subsystem::Mixer), MpdSubsystem::Mixer);
+    assert_eq!(MpdSubsystem::from(Subsystem::Queue), MpdSubsystem::Queue);
+    assert_eq!(
+        MpdSubsystem::from(Subsystem::Options),
+        MpdSubsystem::Options
+    );
+    assert_eq!(MpdSubsystem::from(Subsystem::Output), MpdSubsystem::Output);
+    assert_eq!(
+        MpdSubsystem::from(Subsystem::Database),
+        MpdSubsystem::Other("database".into())
+    );
 }

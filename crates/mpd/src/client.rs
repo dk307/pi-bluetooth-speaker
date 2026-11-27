@@ -345,7 +345,7 @@ pub(crate) enum MpdErrorKind {
     ConnectionFailed {
         host: Box<str>,
         port: u16,
-        message: Box<str>,
+        source: std::io::Error,
     },
     ProtocolError {
         message: Box<str>,
@@ -373,13 +373,13 @@ impl MpdError {
     pub(crate) fn connection_failed(
         host: impl Into<Box<str>>,
         port: u16,
-        message: impl Into<Box<str>>,
+        source: std::io::Error,
     ) -> Self {
         Self {
             kind: MpdErrorKind::ConnectionFailed {
                 host: host.into(),
                 port,
-                message: message.into(),
+                source,
             },
             backtrace: Backtrace::capture(),
         }
@@ -457,11 +457,9 @@ impl MpdError {
 
     fn fmt_kind(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            MpdErrorKind::ConnectionFailed {
-                host,
-                port,
-                message,
-            } => write!(f, "MPD connection to {host}:{port} failed: {message}"),
+            MpdErrorKind::ConnectionFailed { host, port, source } => {
+                write!(f, "MPD connection to {host}:{port} failed: {source}")
+            }
             MpdErrorKind::ProtocolError { message } => write!(f, "MPD protocol error: {message}"),
             MpdErrorKind::Timeout { message } => write!(f, "MPD timeout: {message}"),
             MpdErrorKind::CommandFailed { command, message } => {
@@ -474,7 +472,17 @@ impl MpdError {
 
 speaker_common::impl_canonical_error_display!(MpdError);
 
-impl std::error::Error for MpdError {}
+impl std::error::Error for MpdError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.kind {
+            MpdErrorKind::ConnectionFailed { source, .. } => Some(source),
+            MpdErrorKind::ProtocolError { .. }
+            | MpdErrorKind::Timeout { .. }
+            | MpdErrorKind::CommandFailed { .. }
+            | MpdErrorKind::InvalidState { .. } => None,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct MockState {
@@ -599,15 +607,13 @@ pub struct MpdDevice {
     inner: Arc<Backend>,
 }
 
-impl Default for MpdDevice {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl MpdDevice {
     /// Creates an MPD client targeting the default appliance endpoint (`127.0.0.1:6600`).
     #[must_use]
+    #[expect(
+        clippy::new_without_default,
+        reason = "external I/O client must be constructed explicitly via new/with_endpoint/new_mocked"
+    )]
     pub fn new() -> Self {
         Self::with_endpoint(MpdHost::default(), MpdPort::default())
     }
@@ -981,7 +987,7 @@ async fn connect_client(
         TcpStream::connect(&addr),
     )
     .await?
-    .map_err(|e| MpdError::connection_failed(host.as_str(), port.get(), e.to_string()))?;
+    .map_err(|e| MpdError::connection_failed(host.as_str(), port.get(), e))?;
 
     await_timeout(
         timeout,

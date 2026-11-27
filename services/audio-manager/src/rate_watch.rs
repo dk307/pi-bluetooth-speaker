@@ -174,11 +174,6 @@ impl RateWatchController {
         self.warned_failure = false;
     }
 
-    /// Legacy single-device helper recording `rate_hz` applied on `hw:Loopback,1,0`.
-    pub fn confirm_applied(&mut self, rate_hz: u32) {
-        self.confirm_route_applied(DEFAULT_LOOPBACK_CAPTURE_DEVICE, rate_hz);
-    }
-
     /// Clears the cached applied route so the next check forces a re-push.
     pub fn invalidate(&mut self) {
         self.applied = None;
@@ -399,27 +394,6 @@ pub fn spawn_subdevice_watcher(
     let (tx, rx) = mpsc::channel::<(u32, LoopbackState, bool)>(32);
     let handle = tokio::task::spawn_blocking(move || loopback_ctl_thread(&subdevices, &tx));
     (rx, handle)
-}
-
-/// Runs the legacy single-subdevice ALSA `hw:Loopback` rate-watcher task.
-pub async fn run(dsp: DspDevice) {
-    let config_path = Path::new(DEFAULT_CAMILLADSP_CONFIG_PATH);
-    let (mut multi_rx, ctl_handle) = spawn_subdevice_watcher(vec![0]);
-    let (tx, rx) = mpsc::channel::<(LoopbackState, bool)>(8);
-    let forward = tokio::spawn(async move {
-        while let Some((_sub, state, from_event)) = multi_rx.recv().await {
-            if tx.send((state, from_event)).await.is_err() {
-                break;
-            }
-        }
-    });
-    run_with_rx(dsp, config_path, rx).await;
-    forward.abort();
-    if let Err(join_err) = ctl_handle.await
-        && join_err.is_panic()
-    {
-        std::panic::resume_unwind(join_err.into_panic());
-    }
 }
 
 /// Drives the rate-watcher state machine from an injected `LoopbackState` receiver.

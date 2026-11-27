@@ -40,7 +40,8 @@ port = 6600
 [[integration]]
 name = "web"
 type = "http"
-bind = "0.0.0.0:6680"
+# Bind loopback-only by default so the placeholder token is never exposed on LAN.
+bind = "127.0.0.1:6680"
 token = "replace-with-strong-random-token"
 
 [[source]]

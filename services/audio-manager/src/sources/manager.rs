@@ -134,6 +134,7 @@ impl SourceManager {
         let expected_loopbacks = self.arbiter.registry().loopback_subdevices().len();
         let mut seeded = expected_loopbacks == 0;
         let mut pending_seed: Vec<(SourceId, bool, u32)> = Vec::new();
+        let seed_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
 
         loop {
             let needs_retry = self.desired_route.as_ref().is_some_and(|req| {
@@ -177,6 +178,16 @@ impl SourceManager {
                         let outcome = self.arbiter.on_activity(&source_id, state.active, state.rate_hz);
                         self.apply_outcome(outcome, from_event).await;
                     }
+                }
+                () = tokio::time::sleep_until(seed_deadline), if !seeded => {
+                    warn!(
+                        observed = pending_seed.len(),
+                        expected = expected_loopbacks,
+                        "Seed deadline elapsed before all loopback subdevices reported; seeding with observed state"
+                    );
+                    let outcome = self.arbiter.seed(pending_seed.drain(..));
+                    seeded = true;
+                    self.apply_outcome(outcome, false).await;
                 }
                 () = tokio::time::sleep(reconcile_interval), if active_stream => {
                     if let Some(req) = self.desired_route.clone() {

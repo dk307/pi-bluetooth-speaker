@@ -287,4 +287,8 @@ async fn dbus_active_device_property_round_trips_on_private_bus() {
     .await
     .unwrap();
     assert_eq!(read_back, Some(addr_a()));
+
+    // ActiveSourceIface::new constructs a standalone interface without a control connection.
+    let standalone = bt_manager::active_source::ActiveSourceIface::new(SharedActiveSource::new());
+    let _ = format!("{standalone:?}");
 }
