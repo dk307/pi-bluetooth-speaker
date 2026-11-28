@@ -86,6 +86,15 @@ fn sleep_interruptible(duration: Duration, running: &AtomicBool) {
     }
 }
 
+async fn sleep_async_interruptible(duration: Duration, running: &AtomicBool) {
+    let mut remaining = duration;
+    while !remaining.is_zero() && running.load(Ordering::Relaxed) {
+        let slice = remaining.min(Duration::from_millis(200));
+        tokio::time::sleep(slice).await;
+        remaining = remaining.saturating_sub(slice);
+    }
+}
+
 /// Spawns the `audio-sources` D-Bus worker thread.
 ///
 /// # Errors
@@ -518,7 +527,7 @@ async fn run_mpd_worker(
             }
             // Drain any stale queued commands while disconnected, then wait.
             let _ = commands.drain();
-            tokio::time::sleep(backoff.min(Duration::from_secs(2))).await;
+            sleep_async_interruptible(backoff, running).await;
             backoff = (backoff * 2).min(Duration::from_secs(30));
             continue;
         }

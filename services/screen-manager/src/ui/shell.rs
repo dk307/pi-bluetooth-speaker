@@ -1229,7 +1229,10 @@ impl AppShell {
             n => format!("{n} ch"),
         };
         let codec: Box<str> = if pcm.selected_codec.is_empty() {
-            self.window.get_stream_codec().as_str().into()
+            self.bt_stream_info
+                .borrow()
+                .as_ref()
+                .map_or_else(|| Box::from(""), |b| b.codec.clone())
         } else {
             pcm.selected_codec.clone()
         };

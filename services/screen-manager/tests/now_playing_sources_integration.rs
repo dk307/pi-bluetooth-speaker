@@ -58,6 +58,7 @@ fn now_playing_snapshot_maps_bluetooth_and_mpd_capabilities() {
     mock.set_state(MpdPlaybackState::Playing);
     mock.set_repeat(true);
     mock.set_random(true);
+    mock.set_audio_format(Some((44_100, 16, 2)));
     mock.set_track(
         Some(MpdTrack {
             file: "jazz/autumn.flac".into(),
@@ -130,6 +131,7 @@ fn shell_routes_transport_and_preserves_per_source_state_across_switches() {
     let (mpd, mock) = MpdDevice::new_mocked();
     mock.set_state(MpdPlaybackState::Paused);
     mock.set_repeat(true);
+    mock.set_audio_format(Some((44_100, 16, 2)));
     mock.set_track(
         Some(MpdTrack {
             file: "rock/song.flac".into(),

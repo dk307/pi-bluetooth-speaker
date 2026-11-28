@@ -575,6 +575,7 @@ struct MockState {
     current_track: Option<MpdTrack>,
     repeat: bool,
     random: bool,
+    audio_format: Option<(u32, u8, u8)>,
     album_art: HashMap<Box<str>, Vec<u8>>,
     commands: Vec<MpdMockCommand>,
     injected_fault: Option<Box<str>>,
@@ -604,6 +605,7 @@ impl MpdDeviceMock {
                 current_track: None,
                 repeat: false,
                 random: false,
+                audio_format: None,
                 album_art: HashMap::new(),
                 commands: Vec::new(),
                 injected_fault: None,
@@ -649,6 +651,11 @@ impl MpdDeviceMock {
     /// Sets the mock random (shuffle) flag.
     pub fn set_random(&self, enabled: bool) {
         self.lock().random = enabled;
+    }
+
+    /// Sets the mock decoded PCM audio format `(sample_rate_hz, bit_depth, channels)`.
+    pub fn set_audio_format(&self, format: Option<(u32, u8, u8)>) {
+        self.lock().audio_format = format;
     }
 
     /// Sets or clears mock album art bytes for `file`.
@@ -1072,9 +1079,9 @@ impl MpdDevice {
                     repeat: g.repeat,
                     random: g.random,
                     bitrate_kbps: None,
-                    sample_rate_hz: Some(44_100),
-                    bit_depth: Some(16),
-                    channels: Some(2),
+                    sample_rate_hz: g.audio_format.map(|a| a.0),
+                    bit_depth: g.audio_format.map(|a| a.1),
+                    channels: g.audio_format.map(|a| a.2),
                 })
             }
             Backend::Tcp {

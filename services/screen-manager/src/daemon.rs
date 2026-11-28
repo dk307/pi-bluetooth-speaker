@@ -2366,14 +2366,11 @@ pub fn spawn_amp_volume_worker(
 #[cfg(feature = "ui")]
 #[must_use]
 pub fn decode_cover_bytes(bytes: &[u8]) -> Option<(CoverPixelBuffer, Option<u32>)> {
-    const MAX_COVER_DIMENSION: u32 = 2048;
-    const MAX_DECODE_ALLOC_BYTES: u64 = 32 * 1024 * 1024;
+    const MAX_DECODE_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_COVER_DIMENSION);
-    limits.max_image_height = Some(MAX_COVER_DIMENSION);
     limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
     reader.limits(limits);
     let img = reader.decode().ok()?;
