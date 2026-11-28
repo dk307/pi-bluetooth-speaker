@@ -12,6 +12,7 @@
 //! - Canonical error struct [`MpdError`] with query predicates and single-line `summary()`
 
 use std::backtrace::Backtrace;
+use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -19,7 +20,10 @@ use std::time::Duration;
 
 use mpd_client::Client;
 use mpd_client::client::{ConnectionEvent, Subsystem};
-use mpd_client::commands::{CurrentSong, Next, Play, Previous, SetPause, SetVolume, Status, Stop};
+use mpd_client::commands::{
+    AlbumArt, AlbumArtEmbedded, CurrentSong, Next, Play, Previous, Seek, SeekMode, SetPause,
+    SetRandom, SetRepeat, SetVolume, Status, Stop,
+};
 use mpd_client::responses::PlayState;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
@@ -269,6 +273,33 @@ pub struct MpdTrack {
     pub duration: Option<Duration>,
 }
 
+impl MpdTrack {
+    /// Infers a short codec/container badge label from the track URI or file extension.
+    #[must_use]
+    pub fn codec_label(&self) -> &'static str {
+        let path_part = self.file.split(['?', '#']).next().unwrap_or(&self.file);
+        let ext = path_part
+            .rsplit('/')
+            .next()
+            .and_then(|name| name.rsplit_once('.'))
+            .map(|(_, ext)| ext.to_ascii_lowercase())
+            .unwrap_or_default();
+        match ext.as_str() {
+            "flac" => "FLAC",
+            "mp3" => "MP3",
+            "opus" => "OPUS",
+            "ogg" | "oga" => "OGG",
+            "aac" | "aacp" | "m4a" | "mp4" => "AAC",
+            "alac" => "ALAC",
+            "wav" => "WAV",
+            "aiff" | "aif" => "AIFF",
+            "dsf" | "dff" => "DSD",
+            "wv" => "WV",
+            _ => "PCM",
+        }
+    }
+}
+
 /// Snapshot of MPD daemon playback and queue status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MpdStatus {
@@ -288,6 +319,18 @@ pub struct MpdStatus {
     pub duration: Option<Duration>,
     /// Metadata for the current track, if one is loaded.
     pub current_track: Option<MpdTrack>,
+    /// Whether repeat mode is enabled.
+    pub repeat: bool,
+    /// Whether random (shuffle) mode is enabled.
+    pub random: bool,
+    /// Instantaneous stream bitrate in kbps, if reported.
+    pub bitrate_kbps: Option<u32>,
+    /// Decoded PCM sample rate in Hz (`audio` line), if reported.
+    pub sample_rate_hz: Option<u32>,
+    /// Decoded PCM bit depth (`audio` line), if reported.
+    pub bit_depth: Option<u8>,
+    /// Decoded PCM channel count (`audio` line), if reported.
+    pub channels: Option<u8>,
 }
 
 /// MPD subsystem identifier emitted on state changes (`idle`).
@@ -367,6 +410,12 @@ pub enum MpdMockCommand {
     Previous,
     /// `setvol <percent>`
     SetVolume(u8),
+    /// `seekcur <seconds>`
+    Seek(Duration),
+    /// `repeat <0|1>`
+    SetRepeat(bool),
+    /// `random <0|1>`
+    SetRandom(bool),
 }
 
 /// Internal error cause for MPD client operations.
@@ -524,6 +573,10 @@ struct MockState {
     elapsed: Option<Duration>,
     duration: Option<Duration>,
     current_track: Option<MpdTrack>,
+    repeat: bool,
+    random: bool,
+    audio_format: Option<(u32, u8, u8)>,
+    album_art: HashMap<Box<str>, Vec<u8>>,
     commands: Vec<MpdMockCommand>,
     injected_fault: Option<Box<str>>,
     events: broadcast::Sender<MpdEvent>,
@@ -550,6 +603,10 @@ impl MpdDeviceMock {
                 elapsed: None,
                 duration: None,
                 current_track: None,
+                repeat: false,
+                random: false,
+                audio_format: None,
+                album_art: HashMap::new(),
                 commands: Vec::new(),
                 injected_fault: None,
                 events: tx,
@@ -584,6 +641,31 @@ impl MpdDeviceMock {
         g.current_track = track;
         g.elapsed = elapsed;
         g.duration = duration;
+    }
+
+    /// Sets the mock repeat flag.
+    pub fn set_repeat(&self, enabled: bool) {
+        self.lock().repeat = enabled;
+    }
+
+    /// Sets the mock random (shuffle) flag.
+    pub fn set_random(&self, enabled: bool) {
+        self.lock().random = enabled;
+    }
+
+    /// Sets the mock decoded PCM audio format `(sample_rate_hz, bit_depth, channels)`.
+    pub fn set_audio_format(&self, format: Option<(u32, u8, u8)>) {
+        self.lock().audio_format = format;
+    }
+
+    /// Sets or clears mock album art bytes for `file`.
+    pub fn set_album_art(&self, file: &str, bytes: Option<Vec<u8>>) {
+        let mut g = self.lock();
+        if let Some(data) = bytes {
+            g.album_art.insert(Box::from(file), data);
+        } else {
+            g.album_art.remove(file);
+        }
     }
 
     /// Injects a fault message returned by subsequent [`MpdDevice`] operations.
@@ -812,6 +894,94 @@ impl MpdDevice {
         .await
     }
 
+    /// Seeks within the currently playing track (`seekcur <seconds>`).
+    ///
+    /// # Errors
+    /// Returns [`MpdError`] if connecting fails, the command times out, or MPD rejects it.
+    pub async fn seek(&self, position: Duration) -> Result<(), MpdError> {
+        self.exec_simple(
+            "seekcur",
+            true,
+            MpdMockCommand::Seek(position),
+            |g| {
+                let clamped = g.duration.map_or(position, |dur| position.min(dur));
+                g.elapsed = Some(clamped);
+            },
+            |client| {
+                Box::pin(async move { client.command(Seek(SeekMode::Absolute(position))).await })
+            },
+        )
+        .await
+    }
+
+    /// Enables or disables MPD repeat mode (`repeat <0|1>`).
+    ///
+    /// # Errors
+    /// Returns [`MpdError`] if connecting fails, the command times out, or MPD rejects it.
+    pub async fn set_repeat(&self, enabled: bool) -> Result<(), MpdError> {
+        self.exec_simple(
+            "repeat",
+            true,
+            MpdMockCommand::SetRepeat(enabled),
+            |g| g.repeat = enabled,
+            |client| Box::pin(async move { client.command(SetRepeat(enabled)).await }),
+        )
+        .await
+    }
+
+    /// Enables or disables MPD random (shuffle) mode (`random <0|1>`).
+    ///
+    /// # Errors
+    /// Returns [`MpdError`] if connecting fails, the command times out, or MPD rejects it.
+    pub async fn set_random(&self, enabled: bool) -> Result<(), MpdError> {
+        self.exec_simple(
+            "random",
+            true,
+            MpdMockCommand::SetRandom(enabled),
+            |g| g.random = enabled,
+            |client| Box::pin(async move { client.command(SetRandom(enabled)).await }),
+        )
+        .await
+    }
+
+    /// Reads album art bytes for `file`, trying `albumart` first and falling back to `readpicture`.
+    ///
+    /// Returns `Ok(None)` when neither external cover art nor embedded track art is available.
+    ///
+    /// # Errors
+    /// Returns [`MpdError`] on TCP/timeout/protocol failure or if the image exceeds 16 MiB.
+    pub async fn read_album_art(&self, file: &str) -> Result<Option<Vec<u8>>, MpdError> {
+        const MAX_ALBUM_ART_BYTES: usize = 16 * 1024 * 1024;
+        if file.is_empty() {
+            return Ok(None);
+        }
+        match &*self.inner {
+            Backend::Mock(mock) => {
+                let g = mock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(ref fault) = g.injected_fault {
+                    return Err(MpdError::protocol_error(fault.clone()));
+                }
+                Ok(g.album_art.get(file).cloned())
+            }
+            Backend::Tcp {
+                host,
+                port,
+                timeout,
+                client: client_slot,
+            } => {
+                let client = cached_client(host, *port, *timeout, client_slot).await?;
+                if let Some(bytes) =
+                    fetch_art_chunks(&client, *timeout, MAX_ALBUM_ART_BYTES, file, false).await?
+                {
+                    return Ok(Some(bytes));
+                }
+                fetch_art_chunks(&client, *timeout, MAX_ALBUM_ART_BYTES, file, true).await
+            }
+        }
+    }
+
     /// Sets the MPD mixer volume (`0..=100`).
     ///
     /// # Errors
@@ -863,7 +1033,7 @@ impl MpdDevice {
                             return Err(e);
                         }
                     };
-                let (_status, volume) = match res {
+                let (_status, volume, _audio) = match res {
                     Ok(ok) => ok,
                     Err(mpd_client::client::CommandError::ConnectionClosed) => {
                         *client_slot.lock().await = None;
@@ -906,6 +1076,12 @@ impl MpdDevice {
                     elapsed: g.elapsed,
                     duration: g.duration,
                     current_track: g.current_track.clone(),
+                    repeat: g.repeat,
+                    random: g.random,
+                    bitrate_kbps: None,
+                    sample_rate_hz: g.audio_format.map(|a| a.0),
+                    bit_depth: g.audio_format.map(|a| a.1),
+                    channels: g.audio_format.map(|a| a.2),
                 })
             }
             Backend::Tcp {
@@ -928,7 +1104,7 @@ impl MpdDevice {
                         return Err(e);
                     }
                 };
-                let ((status, volume), song) = match res {
+                let ((status, volume, audio), song) = match res {
                     Ok(ok) => ok,
                     Err(mpd_client::client::CommandError::ConnectionClosed) => {
                         *client_slot.lock().await = None;
@@ -971,6 +1147,12 @@ impl MpdDevice {
                     elapsed: status.elapsed,
                     duration: status.duration,
                     current_track,
+                    repeat: status.repeat,
+                    random: status.random,
+                    bitrate_kbps: status.bitrate.and_then(|b| u32::try_from(b).ok()),
+                    sample_rate_hz: audio.0,
+                    bit_depth: audio.1,
+                    channels: audio.2,
                 })
             }
         }
@@ -1124,7 +1306,11 @@ impl MpdDevice {
 struct RawStatus;
 
 impl mpd_client::commands::Command for RawStatus {
-    type Response = (mpd_client::responses::Status, Option<u8>);
+    type Response = (
+        mpd_client::responses::Status,
+        Option<u8>,
+        (Option<u32>, Option<u8>, Option<u8>),
+    );
 
     fn command(&self) -> mpd_client::protocol::command::Command {
         Status.command()
@@ -1135,14 +1321,31 @@ impl mpd_client::commands::Command for RawStatus {
         frame: mpd_client::protocol::response::Frame,
     ) -> Result<Self::Response, mpd_client::responses::TypedResponseError> {
         let vol_present = frame.find("volume").is_some();
+        let audio = frame
+            .find("audio")
+            .map_or((None, None, None), parse_mpd_audio_format);
         let status = Status.response(frame)?;
         let volume = if vol_present {
             Some(status.volume).filter(|&v| v <= 100)
         } else {
             None
         };
-        Ok((status, volume))
+        Ok((status, volume, audio))
     }
+}
+
+fn parse_mpd_audio_format(raw: &str) -> (Option<u32>, Option<u8>, Option<u8>) {
+    let mut parts = raw.split(':');
+    let rate = parts.next().and_then(|s| s.parse::<u32>().ok());
+    let bits = parts.next().and_then(|s| {
+        if s == "f" {
+            Some(32)
+        } else {
+            s.parse::<u8>().ok()
+        }
+    });
+    let ch = parts.next().and_then(|s| s.parse::<u8>().ok());
+    (rate, bits, ch)
 }
 
 async fn cached_client(
@@ -1196,6 +1399,60 @@ async fn connect_client(
     )
     .await?
     .map_err(|e| MpdError::protocol_error(e.to_string()))
+}
+
+async fn fetch_art_chunks(
+    client: &Client,
+    timeout: Duration,
+    max_bytes: usize,
+    file: &str,
+    embedded: bool,
+) -> Result<Option<Vec<u8>>, MpdError> {
+    let op = if embedded { "readpicture" } else { "albumart" };
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let resp = if embedded {
+            await_timeout(
+                timeout,
+                op,
+                client.command(AlbumArtEmbedded::new(file).offset(offset)),
+            )
+            .await?
+        } else {
+            await_timeout(
+                timeout,
+                op,
+                client.command(AlbumArt::new(file).offset(offset)),
+            )
+            .await?
+        };
+        let chunk = match resp {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => return Ok(if out.is_empty() { None } else { Some(out) }),
+            Err(mpd_client::client::CommandError::ErrorResponse { .. }) => {
+                // MPD returns ACK (e.g. NoExist / unknown command) when no art exists
+                return Ok(None);
+            }
+            Err(e) => return Err(map_command_error(op, e)),
+        };
+        if chunk.size > max_bytes || out.len().saturating_add(chunk.data.len()) > max_bytes {
+            return Err(MpdError::protocol_error(format!(
+                "{op} size exceeds {max_bytes} byte limit"
+            )));
+        }
+        if chunk.data.is_empty() {
+            return Ok(if out.is_empty() { None } else { Some(out) });
+        }
+        if out.is_empty() && chunk.size > 0 {
+            out.reserve(chunk.size.min(max_bytes));
+        }
+        out.extend_from_slice(&chunk.data);
+        offset = out.len();
+        if offset >= chunk.size {
+            return Ok(Some(out));
+        }
+    }
 }
 
 fn map_command_error(cmd: &str, err: mpd_client::client::CommandError) -> MpdError {

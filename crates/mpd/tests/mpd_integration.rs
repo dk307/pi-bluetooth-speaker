@@ -539,3 +539,70 @@ async fn tcp_backend_recovers_connection_closed_and_clears_slot_on_timeout() {
     // Subsequent call reconnects to conn 2 and succeeds cleanly.
     assert_eq!(mpd.read_status().await.unwrap().volume, Some(55));
 }
+
+#[tokio::test]
+async fn mpd_mock_seek_repeat_random_and_album_art() {
+    let (mpd, mock) = MpdDevice::new_mocked();
+    mock.set_track(
+        Some(MpdTrack {
+            file: "flac/track01.flac".into(),
+            title: Some("Track One".into()),
+            artist: Some("Artist".into()),
+            album: Some("Album".into()),
+            duration: Some(Duration::from_secs(200)),
+        }),
+        Some(Duration::from_secs(10)),
+        Some(Duration::from_secs(200)),
+    );
+
+    // Seek within bounds and clamped beyond duration.
+    mpd.seek(Duration::from_secs(75)).await.unwrap();
+    let st = mpd.read_status().await.unwrap();
+    assert_eq!(st.elapsed, Some(Duration::from_secs(75)));
+
+    mpd.seek(Duration::from_secs(300)).await.unwrap();
+    assert_eq!(
+        mpd.read_status().await.unwrap().elapsed,
+        Some(Duration::from_secs(200))
+    );
+
+    // Repeat & random toggles.
+    assert!(!mpd.read_status().await.unwrap().repeat);
+    assert!(!mpd.read_status().await.unwrap().random);
+    mpd.set_repeat(true).await.unwrap();
+    mpd.set_random(true).await.unwrap();
+    let st = mpd.read_status().await.unwrap();
+    assert!(st.repeat);
+    assert!(st.random);
+    mock.set_repeat(false);
+    mock.set_random(false);
+    let st = mpd.read_status().await.unwrap();
+    assert!(!st.repeat);
+    assert!(!st.random);
+
+    // Album art: empty URI, missing art, present art, cleared art, and fault.
+    assert_eq!(mpd.read_album_art("").await.unwrap(), None);
+    assert_eq!(mpd.read_album_art("flac/track01.flac").await.unwrap(), None);
+    let png_stub = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A];
+    mock.set_album_art("flac/track01.flac", Some(png_stub.clone()));
+    assert_eq!(
+        mpd.read_album_art("flac/track01.flac").await.unwrap(),
+        Some(png_stub)
+    );
+    mock.set_album_art("flac/track01.flac", None);
+    assert_eq!(mpd.read_album_art("flac/track01.flac").await.unwrap(), None);
+
+    mock.inject_fault("art fault");
+    let _ = mpd.read_album_art("flac/track01.flac").await.unwrap_err();
+    mock.clear_fault();
+
+    assert_eq!(
+        mock.commands(),
+        vec![
+            MpdMockCommand::Seek(Duration::from_secs(75)),
+            MpdMockCommand::Seek(Duration::from_secs(300)),
+            MpdMockCommand::SetRepeat(true),
+            MpdMockCommand::SetRandom(true),
+        ]
+    );
+}

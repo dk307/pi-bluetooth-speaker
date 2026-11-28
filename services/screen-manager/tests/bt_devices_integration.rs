@@ -975,14 +975,13 @@ fn open_bt_devices_captures_originating_tab_and_closes() {
 fn status_bar_taps_open_the_devices_screen() {
     let (shell, window) = shell_with_window();
 
-    // Bluetooth logo (left).
+    // Source logo (left) opens the Source Switcher overlay.
     click(&window, 100.0, 30.0);
     assert!(
-        shell.window().get_bt_devices_open(),
-        "logo tap opens the screen"
+        shell.window().get_source_switcher_visible(),
+        "logo tap opens the source switcher"
     );
-    assert_eq!(shell.window().get_previous_tab(), 0);
-    shell.window().invoke_close_bt_devices();
+    shell.window().invoke_dismiss_source_switcher();
     window.draw_if_needed(|_| {});
 
     // Device name (center) from the player tab.

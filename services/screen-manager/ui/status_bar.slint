@@ -34,15 +34,17 @@ export component TopStatusBar inherits Rectangle {
     cache-rendering-hint: true;
 
     in property <string> active_source: "Bluetooth";
+    in property <string> active_source_id: "bluetooth";
     in property <string> track_or_device: "Waiting for Connection...";
     in property <string> stream_codec: "aptX-HD";
     in property <string> stream_sample_rate: "48 kHz";
     in property <string> stream_bit_depth: "16-bit";
     in property <float> volume_value: 75.0;
     in property <bool> is_muted: false;
-    // Bluetooth link state. The codec badge describes the negotiated A2DP stream, so it
-    // is only rendered while a device is actually connected.
+    // Stream badge visibility: shown when Bluetooth is connected OR when another
+    // active source (e.g. MPD) has a stream codec/format to display.
     in property <bool> bt_connected: false;
+    in property <bool> show_codec_badge: root.bt_connected || (root.active_source_id != "bluetooth" && root.stream_codec != "");
 
     // Display stream specs (sample rate & bit depth) only for codecs where specifications can vary
     in property <bool> show_stream_specs: !CodecSpecs.is-fixed-spec(root.stream_codec);
@@ -79,7 +81,7 @@ export component TopStatusBar inherits Rectangle {
         padding-right: MaterialStyleMetrics.padding_24;
         alignment: space-between;
 
-        // Left: Bluetooth Source (icon + label, no pill badge; vertically centered)
+        // Left: Active Source (Bluetooth wordmark or Music Player / custom source pill)
         VerticalLayout {
             alignment: center;
             StateLayerArea {
@@ -89,17 +91,41 @@ export component TopStatusBar inherits Rectangle {
                     root.source_clicked();
                 }
 
-                HorizontalLayout {
+                logo_image := HorizontalLayout {
                     spacing: 8px;
 
-                    // Bluetooth Source Logo (icon + wordmark; full bar height,
-                    // width pinned to the SVG's 370:100 aspect at bar scale)
-                    logo_image := Image {
+                    if root.active_source_id == "bluetooth" : Image {
                         source: @image-url("../../../assets/icons/bluetooth-logo-word.svg");
                         colorize: MaterialPalette.primary;
                         height: root.height;
                         width: root.height * 3.45;
                         image-fit: fill;
+                    }
+
+                    if root.active_source_id != "bluetooth" : HorizontalLayout {
+                        spacing: 8px;
+                        padding-left: 2px;
+                        padding-right: 12px;
+                        height: root.height;
+
+                        VerticalLayout {
+                            alignment: center;
+                            Image {
+                                source: @image-url("../../../assets/icons/music-note.svg");
+                                colorize: MaterialPalette.primary;
+                                width: 26px * TouchScale.widget_scale;
+                                height: 26px * TouchScale.widget_scale;
+                                image-fit: contain;
+                            }
+                        }
+
+                        Text {
+                            text: root.active_source;
+                            color: MaterialPalette.primary;
+                            font-size: 20px * TouchScale.clamped_font_scale;
+                            font-weight: 800;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }
@@ -111,11 +137,8 @@ export component TopStatusBar inherits Rectangle {
             HorizontalLayout {
                 spacing: 10px;
 
-                // 1. Codec Badge (aptX-HD / AAC / SBC / LDAC) - original style with Material colors.
-                // Rendered only while a Bluetooth device is connected: without a link there is
-                // no negotiated codec to report. The conditional removes the badge from the
-                // layout entirely, so the volume and DIM controls move inwards.
-                if root.bt_connected : VerticalLayout {
+                // 1. Codec Badge (aptX-HD / AAC / FLAC / MP3 / Radio) - original style with Material colors.
+                if root.show_codec_badge : VerticalLayout {
                     alignment: center;
                     Rectangle {
                         // Fixed size so codec name changes never shift neighbors.

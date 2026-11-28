@@ -24,8 +24,10 @@ pub(crate) mod bt_devices;
 #[cfg(all(feature = "ui", feature = "test-util"))]
 pub(crate) mod framebuffer;
 pub mod marquee;
+pub mod now_playing;
 pub mod runtime;
 pub(crate) mod shell;
+pub mod sources_worker;
 pub(crate) mod theme;
 pub(crate) mod theme_engine;
 pub(crate) mod visualizer_bridge;
@@ -49,8 +51,15 @@ pub use framebuffer::{Bgrx8888Pixel, Framebuffer, FramebufferError, FramebufferM
 #[doc(inline)]
 pub use generated::{
     AmbientWaveSprites, AppTheme, BootCheckLine, BtDeviceRow, MainWindow, MarqueeCompose,
-    MaterialPalette, MaterialStyleMetrics, SettingControlKind, SettingRowItem, SpectrumBandItem,
-    SplashScreen, TouchScale, VirtualKeyboard,
+    MaterialPalette, MaterialStyleMetrics, SettingControlKind, SettingRowItem, SourceRowItem,
+    SpectrumBandItem, SplashScreen, TouchScale, VirtualKeyboard,
+};
+#[doc(inline)]
+pub use now_playing::{
+    AudioSourceEntry, AudioSourcesState, MediaSourceKind, MpdCommand, MpdCommandQueue,
+    NowPlayingSnapshot, PlaybackModeState, SOURCE_ID_BLUETOOTH, SOURCE_ID_MPD, SourceCommand,
+    SourceCommandQueue, StreamMetadata, TransportAction, TransportCapabilities,
+    UNKNOWN_TIMELINE_MS,
 };
 #[doc(inline)]
 pub use shell::{AppShell, BtLinkDetails, EncoderVolumeTracker};
