@@ -222,6 +222,16 @@ fi
 install -d -o mpd -g audio -m 755 /var/lib/mpd /var/lib/mpd/playlists
 install -Dm644 "${SCRIPT_DIR}/etc/mpd.conf" /etc/mpd.conf
 install -Dm644 "${SCRIPT_DIR}/etc/systemd/system/mpd.service" /etc/systemd/system/mpd.service
+if [ -f "${SCRIPT_DIR}/var/lib/mpd/playlists/stream_art_test.m3u" ]; then
+    install -o mpd -g audio -m 644 "${SCRIPT_DIR}/var/lib/mpd/playlists/stream_art_test.m3u" /var/lib/mpd/playlists/stream_art_test.m3u
+fi
+if [ -f "${SCRIPT_DIR}/etc/speaker/stations.toml" ]; then
+    install -Dm644 "${SCRIPT_DIR}/etc/speaker/stations.toml" /etc/speaker/stations.toml
+fi
+if [ -d "${SCRIPT_DIR}/var/lib/speaker/station-logos" ]; then
+    install -d -m 755 /var/lib/speaker/station-logos
+    install -m 644 "${SCRIPT_DIR}/var/lib/speaker/station-logos/"*.jpg /var/lib/speaker/station-logos/
+fi
 systemctl daemon-reload
 if [ -x /usr/local/bin/mpd ]; then
     systemctl enable --now mpd.service || true
