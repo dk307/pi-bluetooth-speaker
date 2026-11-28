@@ -280,10 +280,13 @@ impl MpdTrack {
     /// Returns `true` when `file` is an HTTP or HTTPS stream URI.
     #[must_use]
     pub fn is_stream_url(&self) -> bool {
-        let lower = self.file.trim_start();
-        lower.len() >= 7
-            && (lower[..7].eq_ignore_ascii_case("http://")
-                || (lower.len() >= 8 && lower[..8].eq_ignore_ascii_case("https://")))
+        let trimmed = self.file.trim_start();
+        trimmed
+            .get(..7)
+            .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
+            || trimmed
+                .get(..8)
+                .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
     }
 
     /// Resolves `(artist, title)`, splitting ICY `"Artist - Title"` strings when
@@ -351,7 +354,9 @@ impl MpdTrack {
     }
 }
 
-fn codec_from_mime(content_type: &str) -> Option<&'static str> {
+/// Maps an HTTP `Content-Type` header value to a short codec badge label.
+#[must_use]
+pub fn codec_from_mime(content_type: &str) -> Option<&'static str> {
     let mime = content_type
         .split(';')
         .next()

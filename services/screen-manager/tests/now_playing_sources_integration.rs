@@ -340,6 +340,7 @@ fn mpd_stream_reconciles_station_name_icy_title_probed_codec_and_cover_changes()
             image_bytes: None,
             probed_codec: Some("AAC"),
             source: ArtSource::None,
+            ..StreamArtResult::default()
         },
     );
     art_mock.set_track_lookup("Boards of Canada", "Roygbiv", minimal_png_bytes());

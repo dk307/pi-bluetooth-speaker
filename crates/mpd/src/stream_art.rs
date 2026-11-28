@@ -24,7 +24,7 @@ use m3u8_rs::Playlist;
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
-use crate::client::{MpdDevice, MpdError, MpdTrack};
+use crate::client::{MpdDevice, MpdError, MpdTrack, codec_from_mime};
 
 /// Default path for the station logo manifest.
 pub const DEFAULT_STATIONS_MANIFEST_PATH: &str = "/etc/speaker/stations.toml";
@@ -72,7 +72,7 @@ impl MpdArtKey {
 }
 
 /// Identifies which waterfall tier supplied the resolved artwork.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum ArtSource {
     /// MPD `albumart` or `readpicture` for local files.
     MpdNative,
@@ -93,11 +93,12 @@ pub enum ArtSource {
     /// Configured `default_logo` in `/etc/speaker/stations.toml`.
     DefaultLogo,
     /// No artwork could be resolved.
+    #[default]
     None,
 }
 
 /// Outcome of resolving artwork and stream codec metadata for an [`MpdTrack`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamArtResult {
     /// Raw encoded image bytes (JPEG/PNG/WebP), if resolved.
     pub image_bytes: Option<Vec<u8>>,
@@ -105,16 +106,8 @@ pub struct StreamArtResult {
     pub probed_codec: Option<&'static str>,
     /// Waterfall tier that produced `image_bytes`.
     pub source: ArtSource,
-}
-
-impl Default for StreamArtResult {
-    fn default() -> Self {
-        Self {
-            image_bytes: None,
-            probed_codec: None,
-            source: ArtSource::None,
-        }
-    }
+    /// `true` if a transient network/MPD fault occurred so callers can retry.
+    pub transient_error: bool,
 }
 
 /// Raw TOML configuration for a single station logo rule.
@@ -546,14 +539,25 @@ impl StreamArtResolver {
         }
         // Tier 1: Local / non-HTTP files via MPD native `albumart` / `readpicture`.
         if !track.is_stream_url() {
-            if let Ok(Some(bytes)) = mpd.read_album_art(track.file.as_ref()).await {
-                return StreamArtResult {
-                    image_bytes: Some(bytes),
-                    probed_codec: Some(track.codec_label()),
-                    source: ArtSource::MpdNative,
-                };
+            match mpd.read_album_art(track.file.as_ref()).await {
+                Ok(Some(bytes)) => {
+                    return StreamArtResult {
+                        image_bytes: Some(bytes),
+                        probed_codec: Some(track.codec_label()),
+                        source: ArtSource::MpdNative,
+                        transient_error: false,
+                    };
+                }
+                Ok(None) => return self.resolve_manifest_fallback(track),
+                Err(e) => {
+                    tracing::debug!(error = %e.summary(), file = %track.file, "MPD native albumart failed");
+                    let mut fallback = self.resolve_manifest_fallback(track);
+                    if fallback.image_bytes.is_none() {
+                        fallback.transient_error = true;
+                    }
+                    return fallback;
+                }
             }
-            return self.resolve_manifest_fallback(track);
         }
 
         // Tier 2: Source broadcast extraction (ICY / HLS / Ogg-Opus-FLAC).
@@ -604,6 +608,7 @@ impl StreamArtResolver {
                 image_bytes: Some(bytes),
                 probed_codec,
                 source: ArtSource::TrackLookup,
+                transient_error: false,
             };
         }
 
@@ -621,9 +626,13 @@ impl StreamArtResolver {
                 image_bytes: Some(bytes),
                 probed_codec,
                 source: ArtSource::RadioBrowser,
+                transient_error: false,
             };
         }
         fallback.probed_codec = probed_codec;
+        if fallback.image_bytes.is_none() && broadcast.transient_error {
+            fallback.transient_error = true;
+        }
         fallback
     }
 
@@ -710,6 +719,7 @@ impl StreamArtResolver {
                 image_bytes: Some(bytes),
                 probed_codec: None,
                 source: ArtSource::StationManifest,
+                transient_error: false,
             };
         }
         if let Some(path) = default_logo
@@ -719,6 +729,7 @@ impl StreamArtResolver {
                 image_bytes: Some(bytes),
                 probed_codec: None,
                 source: ArtSource::DefaultLogo,
+                transient_error: false,
             };
         }
         StreamArtResult::default()
@@ -756,13 +767,20 @@ fn probe_live_stream(
         return probe_hls_stream(agent, art_cache, stream_url);
     }
 
-    let Ok(mut resp) = agent
+    let mut resp = match agent
         .get(stream_url)
         .header("Icy-MetaData", "1")
         .header("User-Agent", "pi-bluetooth-speaker/2.3")
         .call()
-    else {
-        return StreamArtResult::default();
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!(error = %e, url = %stream_url, "HTTP stream probe failed");
+            return StreamArtResult {
+                transient_error: true,
+                ..StreamArtResult::default()
+            };
+        }
     };
 
     let content_type = resp
@@ -770,7 +788,7 @@ fn probe_live_stream(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
-    let probed_codec = content_type.as_deref().and_then(codec_from_content_type);
+    let probed_codec = content_type.as_deref().and_then(codec_from_mime);
 
     if let Some(logo_url) = resp
         .headers()
@@ -784,6 +802,7 @@ fn probe_live_stream(
             image_bytes: Some(bytes),
             probed_codec,
             source: ArtSource::BroadcastIcyHeader,
+            transient_error: false,
         };
     }
 
@@ -808,6 +827,7 @@ fn probe_live_stream(
                 image_bytes: Some(bytes),
                 probed_codec,
                 source: ArtSource::BroadcastStreamUrl,
+                transient_error: false,
             };
         }
     } else if matches!(probed_codec, Some("OGG" | "OPUS" | "FLAC")) {
@@ -823,6 +843,7 @@ fn probe_live_stream(
                 image_bytes: Some(bytes),
                 probed_codec,
                 source: ArtSource::BroadcastContainerTag,
+                transient_error: false,
             };
         }
     }
@@ -831,6 +852,7 @@ fn probe_live_stream(
         image_bytes: None,
         probed_codec,
         source: ArtSource::None,
+        transient_error: false,
     }
 }
 
@@ -884,6 +906,7 @@ fn probe_hls_stream(
                     image_bytes: Some(bytes),
                     probed_codec: Some("HLS"),
                     source: ArtSource::BroadcastHlsId3,
+                    transient_error: false,
                 };
             }
             if let Some(url) = art.artwork_url
@@ -893,6 +916,7 @@ fn probe_hls_stream(
                     image_bytes: Some(bytes),
                     probed_codec: Some("HLS"),
                     source: ArtSource::BroadcastHlsId3,
+                    transient_error: false,
                 };
             }
         }
@@ -902,6 +926,7 @@ fn probe_hls_stream(
         image_bytes: None,
         probed_codec: Some("HLS"),
         source: ArtSource::None,
+        transient_error: false,
     }
 }
 
@@ -1017,25 +1042,6 @@ fn fetch_radio_browser_favicon(agent: &ureq::Agent, station_name: &str) -> Optio
         }
     }
     None
-}
-
-fn codec_from_content_type(content_type: &str) -> Option<&'static str> {
-    let mime = content_type
-        .split(';')
-        .next()
-        .unwrap_or(content_type)
-        .trim()
-        .to_ascii_lowercase();
-    match mime.as_str() {
-        "audio/mpeg" | "audio/mp3" => Some("MP3"),
-        "audio/aac" | "audio/aacp" | "audio/mp4" | "audio/x-aac" => Some("AAC"),
-        "audio/flac" | "audio/x-flac" => Some("FLAC"),
-        "audio/opus" => Some("OPUS"),
-        "application/ogg" | "audio/ogg" | "audio/vorbis" => Some("OGG"),
-        "application/vnd.apple.mpegurl" | "application/x-mpegurl" => Some("HLS"),
-        "audio/wav" | "audio/x-wav" | "audio/wave" => Some("WAV"),
-        _ => None,
-    }
 }
 
 /// Compile-time proof that [`StreamArtResolver`] and [`StreamArtResolverMock`] are `Send + Sync`.

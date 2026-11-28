@@ -98,6 +98,14 @@ fn mpd_track_stream_metadata_and_codec_inference() {
     assert_eq!(local.resolved_artist_title(), (None, Some("Artist - Song")));
     assert_eq!(local.codec_label(), "PCM");
 
+    // Multi-byte UTF-8 paths must never panic in is_stream_url()
+    let utf8_track = MpdTrack {
+        file: "日本語の曲/トラック.flac".into(),
+        ..MpdTrack::default()
+    };
+    assert!(!utf8_track.is_stream_url());
+    assert_eq!(utf8_track.codec_label(), "FLAC");
+
     for (url, expected) in [
         ("http://example.com/live.m3u8", "HLS"),
         ("http://example.com/live/aacp", "AAC"),
@@ -277,6 +285,7 @@ logo = "/logos/somafm.png"
             image_bytes: Some(b"BROADCAST_ART".to_vec()),
             probed_codec: Some("MP3"),
             source: ArtSource::BroadcastStreamUrl,
+            ..StreamArtResult::default()
         },
     );
     let track_stream = MpdTrack {
@@ -300,6 +309,7 @@ logo = "/logos/somafm.png"
             image_bytes: None,
             probed_codec: Some("MP3"),
             source: ArtSource::None,
+            ..StreamArtResult::default()
         },
     );
     let res3 = resolver.resolve_for_track(&track_stream, &mpd).await;
@@ -386,5 +396,141 @@ async fn live_http_icy_stream_and_image_fetch_over_loopback() {
         Some(b"\x89PNG\r\n\x1a\nFAKEPNG".as_slice())
     );
 
+    server.join().expect("server thread");
+}
+
+#[tokio::test]
+async fn live_http_hls_m3u8_segment_id3_apic_over_loopback() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    let fake_jpeg = vec![
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0xFF, 0xD9,
+    ];
+    let seg_bytes = build_id3v2_apic("image/jpeg", &fake_jpeg);
+
+    let server = thread::spawn(move || {
+        // 1) master.m3u8 -> 2) media.m3u8 -> 3) seg0.mp3
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut req_buf = [0u8; 1024];
+            let n = stream.read(&mut req_buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&req_buf[..n]);
+            if req.starts_with("GET /master.m3u8") {
+                let body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=128000\nmedia.m3u8\n";
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            } else if req.starts_with("GET /media.m3u8") {
+                let body = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg0.mp3\n";
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            } else {
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    seg_bytes.len()
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+                let _ = stream.write_all(&seg_bytes);
+            }
+        }
+    });
+
+    let resolver = StreamArtResolver::new(StationManifest::default());
+    let (mpd, _) = MpdDevice::new_mocked();
+    let track = MpdTrack {
+        file: format!("http://{addr}/master.m3u8").into(),
+        ..MpdTrack::default()
+    };
+
+    let res = resolver.resolve_for_track(&track, &mpd).await;
+    assert_eq!(res.source, ArtSource::BroadcastHlsId3);
+    assert_eq!(res.probed_codec, Some("HLS"));
+    assert_eq!(res.image_bytes, Some(fake_jpeg));
+
+    server.join().expect("server thread");
+}
+
+#[tokio::test]
+async fn live_http_icy_logo_header_and_cache_and_disk_manifest() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    let base_url = format!("http://{addr}");
+
+    let server = thread::spawn(move || {
+        // Serve /icy-logo-stream (twice, art.png once due to LRU cache!)
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut req_buf = [0u8; 1024];
+            let n = stream.read(&mut req_buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&req_buf[..n]);
+            if req.starts_with("GET /icy-logo-stream") {
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nicy-logo: {base_url}/logo.png\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+            } else {
+                let body = b"\x89PNG\r\n\x1a\nLOGO";
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        }
+    });
+
+    // Real disk-backed manifest & logo file
+    let tmp_dir = std::env::temp_dir().join(format!("mpd_art_test_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let logo_path = tmp_dir.join("station.png");
+    std::fs::write(&logo_path, b"\x89PNG\r\n\x1a\nDISK").unwrap();
+    let manifest_path = tmp_dir.join("stations.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            "enable_track_art_lookup = false\n[[station]]\nurl_match = \"disk-station\"\nlogo = \"{}\"\n",
+            logo_path.display()
+        ),
+    )
+    .unwrap();
+
+    let manifest = StationManifest::load_or_default(&manifest_path);
+    let resolver = StreamArtResolver::new(manifest);
+    let (mpd, _) = MpdDevice::new_mocked();
+
+    let track = MpdTrack {
+        file: format!("http://{addr}/icy-logo-stream").into(),
+        ..MpdTrack::default()
+    };
+    let r1 = resolver.resolve_for_track(&track, &mpd).await;
+    assert_eq!(r1.source, ArtSource::BroadcastIcyHeader);
+    assert_eq!(r1.probed_codec, Some("MP3"));
+    // Second request hits LRU cache for logo.png
+    let r2 = resolver.resolve_for_track(&track, &mpd).await;
+    assert_eq!(r2.source, ArtSource::BroadcastIcyHeader);
+
+    // Local disk manifest fallback on non-HTTP file when MPD has no native art
+    let disk_track = MpdTrack {
+        file: "disk-station/track.flac".into(),
+        ..MpdTrack::default()
+    };
+    let r3 = resolver.resolve_for_track(&disk_track, &mpd).await;
+    assert_eq!(r3.source, ArtSource::StationManifest);
+    assert_eq!(
+        r3.image_bytes.as_deref(),
+        Some(b"\x89PNG\r\n\x1a\nDISK".as_slice())
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
     server.join().expect("server thread");
 }
