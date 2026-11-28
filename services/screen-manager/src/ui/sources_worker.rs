@@ -4,12 +4,16 @@
 //! render thread, per `M-NO-DBUS-ON-RENDER-THREAD`), publishing deltas into
 //! [`crate::daemon::BtSharedUpdate`].
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use speaker_mpd::{MpdDevice, MpdPlaybackState, MpdStatus};
+use speaker_mpd::{
+    DEFAULT_STATIONS_MANIFEST_PATH, MpdArtKey, MpdDevice, MpdPlaybackState, MpdStatus,
+    StationManifest, StreamArtResolver,
+};
 use zbus::{Connection, Proxy};
 
 use crate::daemon::{BtSharedUpdate, COVER_DECODE_RETRY, decode_cover_bytes};
@@ -75,6 +79,13 @@ fn publish_mpd_cover(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     g.mpd_cover = Some(cover);
     g.mpd_cover_seed = Some(seed);
+}
+
+fn publish_mpd_probed_codec(shared: &Arc<Mutex<BtSharedUpdate>>, codec: Option<&'static str>) {
+    let mut g = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    g.mpd_probed_codec = Some(codec);
 }
 
 fn sleep_interruptible(duration: Duration, running: &AtomicBool) {
@@ -384,7 +395,7 @@ async fn execute_source_command(
     }
 }
 
-/// Spawns the MPD (`rmpd`) monitor and transport worker thread.
+/// Spawns the MPD monitor and transport worker thread.
 ///
 /// # Errors
 /// Returns an [`std::io::Error`] if spawning the OS thread fails.
@@ -394,12 +405,16 @@ pub fn spawn_mpd_monitor_worker(
     commands: &MpdCommandQueue,
     mocked: bool,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    let device = if mocked {
-        MpdDevice::new_mocked().0
+    let (device, resolver) = if mocked {
+        (
+            MpdDevice::new_mocked().0,
+            StreamArtResolver::new_mocked(StationManifest::default()).0,
+        )
     } else {
-        MpdDevice::new()
+        let manifest = StationManifest::load_or_default(Path::new(DEFAULT_STATIONS_MANIFEST_PATH));
+        (MpdDevice::new(), StreamArtResolver::new(manifest))
     };
-    spawn_mpd_monitor_with_device(shared, running, commands, device)
+    spawn_mpd_monitor_with_resolver(shared, running, commands, device, resolver)
 }
 
 /// Spawns the MPD monitor worker against an explicit [`MpdDevice`] (useful for tests).
@@ -411,6 +426,21 @@ pub fn spawn_mpd_monitor_with_device(
     running: &Arc<AtomicBool>,
     commands: &MpdCommandQueue,
     device: MpdDevice,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let resolver = StreamArtResolver::new_mocked(StationManifest::default()).0;
+    spawn_mpd_monitor_with_resolver(shared, running, commands, device, resolver)
+}
+
+/// Spawns the MPD monitor worker with explicit [`MpdDevice`] and [`StreamArtResolver`].
+///
+/// # Errors
+/// Returns an [`std::io::Error`] if spawning the OS thread fails.
+pub fn spawn_mpd_monitor_with_resolver(
+    shared: &Arc<Mutex<BtSharedUpdate>>,
+    running: &Arc<AtomicBool>,
+    commands: &MpdCommandQueue,
+    device: MpdDevice,
+    resolver: StreamArtResolver,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let shared = Arc::clone(shared);
     let running = Arc::clone(running);
@@ -425,7 +455,9 @@ pub fn spawn_mpd_monitor_with_device(
                 tracing::error!("Failed to build tokio runtime for mpd-monitor worker");
                 return;
             };
-            rt.block_on(run_mpd_worker(&device, &shared, &running, &commands));
+            rt.block_on(run_mpd_worker(
+                &device, &resolver, &shared, &running, &commands,
+            ));
         })
 }
 
@@ -454,60 +486,139 @@ async fn execute_mpd_command(
     }
 }
 
-async fn refresh_mpd_cover(
-    device: &MpdDevice,
-    shared: &Arc<Mutex<BtSharedUpdate>>,
-    last_art_file: &mut Option<Box<str>>,
-    last_failed_art: &mut Option<(Box<str>, Instant)>,
-    status: &MpdStatus,
-) {
-    let next_file: Option<Box<str>> = status
-        .current_track
-        .as_ref()
-        .map(|t| t.file.clone())
-        .filter(|f| !f.is_empty());
-    if *last_art_file == next_file {
-        return;
+struct ArtTaskOutcome {
+    key: MpdArtKey,
+    file: Box<str>,
+    title: Option<Box<str>>,
+    station_name: Option<Box<str>>,
+    probed_codec: Option<&'static str>,
+    source: speaker_mpd::ArtSource,
+    transient_error: bool,
+    decoded: Option<(crate::daemon::CoverPixelBuffer, Option<u32>)>,
+    decode_failed: bool,
+}
+
+struct ArtTracker {
+    last_key: Option<MpdArtKey>,
+    last_failed: Option<(MpdArtKey, Instant)>,
+    in_flight: Option<(MpdArtKey, tokio::task::JoinHandle<ArtTaskOutcome>)>,
+}
+
+impl ArtTracker {
+    fn new() -> Self {
+        Self {
+            last_key: None,
+            last_failed: None,
+            in_flight: None,
+        }
     }
-    let Some(ref file) = next_file else {
-        *last_art_file = None;
-        *last_failed_art = None;
+
+    fn cancel_in_flight(&mut self) {
+        if let Some((_, handle)) = self.in_flight.take() {
+            handle.abort();
+        }
+    }
+
+    fn reset(&mut self, shared: &Arc<Mutex<BtSharedUpdate>>) {
+        self.cancel_in_flight();
+        self.last_key = None;
+        self.last_failed = None;
+        publish_mpd_probed_codec(shared, None);
         publish_mpd_cover(shared, None, None);
-        return;
-    };
-    if let Some((failed_file, at)) = last_failed_art
-        && failed_file == file
-        && at.elapsed() < COVER_DECODE_RETRY
-    {
-        return;
     }
-    match device.read_album_art(file.as_ref()).await {
-        Ok(Some(bytes)) => {
-            let decoded = tokio::task::spawn_blocking(move || decode_cover_bytes(&bytes)).await;
-            match decoded {
-                Ok(Some((buf, seed))) => {
-                    last_art_file.clone_from(&next_file);
-                    *last_failed_art = None;
-                    publish_mpd_cover(shared, Some(buf), seed);
-                }
-                Ok(None) => {
-                    *last_failed_art = Some((file.clone(), Instant::now()));
-                    tracing::debug!(file = %file, "MPD album art decode failed; keeping prior art");
-                }
-                Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
-                Err(_) => {
-                    *last_failed_art = Some((file.clone(), Instant::now()));
-                }
+
+    fn schedule_if_needed(
+        &mut self,
+        device: &MpdDevice,
+        resolver: &StreamArtResolver,
+        shared: &Arc<Mutex<BtSharedUpdate>>,
+        status: &MpdStatus,
+    ) {
+        let next_track = status.current_track.as_ref().filter(|t| !t.file.is_empty());
+        let next_key = next_track.map(MpdArtKey::from_track);
+        let (Some(track), Some(key)) = (next_track, next_key) else {
+            if self.last_key.is_some() || self.in_flight.is_some() {
+                self.reset(shared);
             }
+            return;
+        };
+        if self.last_key.as_ref() == Some(&key)
+            || self.in_flight.as_ref().is_some_and(|(k, _)| k == &key)
+        {
+            return;
         }
-        Ok(None) => {
-            last_art_file.clone_from(&next_file);
-            *last_failed_art = None;
+        if let Some((failed_key, at)) = &self.last_failed
+            && failed_key == &key
+            && at.elapsed() < COVER_DECODE_RETRY
+        {
+            return;
+        }
+        self.cancel_in_flight();
+        let dev = device.clone();
+        let res = resolver.clone();
+        let tr = track.clone();
+        let key_clone = key.clone();
+        let handle = tokio::spawn(async move {
+            let art = res.resolve_for_track(&tr, &dev).await;
+            let (decoded, decode_failed) = if let Some(bytes) = art.image_bytes {
+                match tokio::task::spawn_blocking(move || decode_cover_bytes(&bytes)).await {
+                    Ok(Some(buf_seed)) => (Some(buf_seed), false),
+                    Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+                    Ok(None) | Err(_) => (None, true),
+                }
+            } else {
+                (None, false)
+            };
+            ArtTaskOutcome {
+                key: key_clone,
+                file: tr.file,
+                title: tr.title,
+                station_name: tr.station_name,
+                probed_codec: art.probed_codec,
+                source: art.source,
+                transient_error: art.transient_error,
+                decoded,
+                decode_failed,
+            }
+        });
+        self.in_flight = Some((key, handle));
+    }
+
+    fn apply_outcome(&mut self, outcome: ArtTaskOutcome, shared: &Arc<Mutex<BtSharedUpdate>>) {
+        publish_mpd_probed_codec(shared, outcome.probed_codec);
+        if let Some((buf, seed)) = outcome.decoded {
+            self.last_key = Some(outcome.key);
+            self.last_failed = None;
+            tracing::info!(
+                file = %outcome.file,
+                title = ?outcome.title,
+                station = ?outcome.station_name,
+                source = ?outcome.source,
+                probed_codec = ?outcome.probed_codec,
+                "MPD cover art resolved"
+            );
+            publish_mpd_cover(shared, Some(buf), seed);
+        } else if outcome.decode_failed || outcome.transient_error {
+            self.last_failed = Some((outcome.key, Instant::now()));
+            tracing::info!(
+                file = %outcome.file,
+                source = ?outcome.source,
+                decode_failed = outcome.decode_failed,
+                transient_error = outcome.transient_error,
+                "MPD cover art probe/decode failed; will retry"
+            );
+        } else {
+            self.last_key = Some(outcome.key);
+            self.last_failed = None;
+            tracing::info!(
+                file = %outcome.file,
+                title = ?outcome.title,
+                station = ?outcome.station_name,
+                source = ?outcome.source,
+                probed_codec = ?outcome.probed_codec,
+                "MPD cover art unavailable for track"
+            );
             publish_mpd_cover(shared, None, None);
-        }
-        Err(e) => {
-            *last_failed_art = Some((file.clone(), Instant::now()));
-            tracing::debug!(error = %e.summary(), file = %file, "MPD album art fetch failed");
         }
     }
 }
@@ -518,14 +629,14 @@ async fn refresh_mpd_cover(
 )]
 async fn run_mpd_worker(
     device: &MpdDevice,
+    resolver: &StreamArtResolver,
     shared: &Arc<Mutex<BtSharedUpdate>>,
     running: &AtomicBool,
     commands: &MpdCommandQueue,
 ) {
     let mut backoff = Duration::from_secs(1);
     let mut last_status: Option<MpdStatus> = None;
-    let mut last_art_file: Option<Box<str>> = None;
-    let mut last_failed_art: Option<(Box<str>, Instant)> = None;
+    let mut art = ArtTracker::new();
 
     while running.load(Ordering::Relaxed) {
         let mut events = match device.subscribe_events().await {
@@ -547,9 +658,7 @@ async fn run_mpd_worker(
             // Publish an idle/stopped snapshot when MPD drops so the UI does
             // not keep showing a playing track for an unreachable server.
             if let Some(prev) = last_status.take() {
-                last_art_file = None;
-                last_failed_art = None;
-                publish_mpd_cover(shared, None, None);
+                art.reset(shared);
                 publish_mpd_status(
                     shared,
                     MpdStatus {
@@ -573,14 +682,7 @@ async fn run_mpd_worker(
         }
 
         if let Ok(st) = device.read_status().await {
-            refresh_mpd_cover(
-                device,
-                shared,
-                &mut last_art_file,
-                &mut last_failed_art,
-                &st,
-            )
-            .await;
+            art.schedule_if_needed(device, resolver, shared, &st);
             publish_mpd_status(shared, st.clone());
             last_status = Some(st);
         }
@@ -600,29 +702,44 @@ async fn run_mpd_worker(
                             cur_state = execute_mpd_command(device, cmd, cur_state).await;
                         }
                         if let Ok(st) = device.read_status().await {
-                            refresh_mpd_cover(device, shared, &mut last_art_file, &mut last_failed_art, &st).await;
+                            art.schedule_if_needed(device, resolver, shared, &st);
                             publish_mpd_status(shared, st.clone());
                             last_status = Some(st);
                         }
                     }
                 }
                 _ = pos_tick.tick() => {
+                    let retry_due = art
+                        .last_failed
+                        .as_ref()
+                        .is_some_and(|(_, at)| at.elapsed() >= COVER_DECODE_RETRY);
                     let should_poll = last_status.as_ref().is_none_or(|s| {
-                        matches!(s.state, MpdPlaybackState::Playing)
-                            || last_failed_art
-                                .as_ref()
-                                .is_some_and(|(_, at)| at.elapsed() >= COVER_DECODE_RETRY)
+                        matches!(s.state, MpdPlaybackState::Playing) || retry_due
                     });
                     if should_poll && let Ok(st) = device.read_status().await {
-                        let art_retry_due = last_failed_art
-                            .as_ref()
-                            .is_some_and(|(_, at)| at.elapsed() >= COVER_DECODE_RETRY);
-                        if last_status.as_ref() != Some(&st) || art_retry_due {
-                            refresh_mpd_cover(device, shared, &mut last_art_file, &mut last_failed_art, &st).await;
+                        if last_status.as_ref() != Some(&st) || retry_due {
+                            art.schedule_if_needed(device, resolver, shared, &st);
                         }
                         if last_status.as_ref() != Some(&st) {
                             publish_mpd_status(shared, st.clone());
                             last_status = Some(st);
+                        }
+                    }
+                }
+                art_done = async {
+                    match art.in_flight.as_mut() {
+                        Some((_, handle)) => Some(handle.await),
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    art.in_flight = None;
+                    if let Some(res) = art_done {
+                        match res {
+                            Ok(outcome) => art.apply_outcome(outcome, shared),
+                            Err(err) if err.is_panic() => {
+                                std::panic::resume_unwind(err.into_panic());
+                            }
+                            Err(_) => {}
                         }
                     }
                 }
@@ -640,7 +757,7 @@ async fn run_mpd_worker(
                         }
                         Some(speaker_mpd::MpdEvent::SubsystemChanged(_)) => {
                             if let Ok(st) = device.read_status().await {
-                                refresh_mpd_cover(device, shared, &mut last_art_file, &mut last_failed_art, &st).await;
+                                art.schedule_if_needed(device, resolver, shared, &st);
                                 publish_mpd_status(shared, st.clone());
                                 last_status = Some(st);
                             }

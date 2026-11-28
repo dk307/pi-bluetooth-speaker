@@ -269,14 +269,61 @@ pub struct MpdTrack {
     pub artist: Option<Box<str>>,
     /// Album tag, if present.
     pub album: Option<Box<str>>,
+    /// Radio station or stream `Name` tag, if present.
+    #[serde(default)]
+    pub station_name: Option<Box<str>>,
     /// Track duration, if known.
     pub duration: Option<Duration>,
 }
 
 impl MpdTrack {
+    /// Returns `true` when `file` is an HTTP or HTTPS stream URI.
+    #[must_use]
+    pub fn is_stream_url(&self) -> bool {
+        let trimmed = self.file.trim_start();
+        trimmed
+            .get(..7)
+            .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
+            || trimmed
+                .get(..8)
+                .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+    }
+
+    /// Resolves `(artist, title)`, splitting ICY `"Artist - Title"` strings when
+    /// `artist` is missing on an HTTP/HTTPS stream.
+    #[must_use]
+    pub fn resolved_artist_title(&self) -> (Option<&str>, Option<&str>) {
+        let artist = self.artist.as_deref().filter(|s| !s.trim().is_empty());
+        let title = self.title.as_deref().filter(|s| !s.trim().is_empty());
+        if artist.is_some() {
+            return (artist, title);
+        }
+        if self.is_stream_url()
+            && let Some(raw_title) = title
+            && let Some((left, right)) = raw_title.split_once(" - ")
+        {
+            let left_trimmed = left.trim();
+            let right_trimmed = right.trim();
+            if !left_trimmed.is_empty() && !right_trimmed.is_empty() {
+                return (Some(left_trimmed), Some(right_trimmed));
+            }
+        }
+        (None, title)
+    }
+
     /// Infers a short codec/container badge label from the track URI or file extension.
     #[must_use]
     pub fn codec_label(&self) -> &'static str {
+        self.codec_label_with_mime(None)
+    }
+
+    /// Infers a short codec/container badge label from an optional HTTP `Content-Type`
+    /// header, falling back to the track URI or file extension.
+    #[must_use]
+    pub fn codec_label_with_mime(&self, content_type: Option<&str>) -> &'static str {
+        if let Some(mime) = content_type.and_then(codec_from_mime) {
+            return mime;
+        }
         let path_part = self.file.split(['?', '#']).next().unwrap_or(&self.file);
         let ext = path_part
             .rsplit('/')
@@ -295,8 +342,56 @@ impl MpdTrack {
             "aiff" | "aif" => "AIFF",
             "dsf" | "dff" => "DSD",
             "wv" => "WV",
-            _ => "PCM",
+            "m3u8" => "HLS",
+            _ => {
+                if self.is_stream_url() {
+                    codec_from_stream_path(path_part).unwrap_or("PCM")
+                } else {
+                    "PCM"
+                }
+            }
         }
+    }
+}
+
+/// Maps an HTTP `Content-Type` header value to a short codec badge label.
+#[must_use]
+pub fn codec_from_mime(content_type: &str) -> Option<&'static str> {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    match mime.as_str() {
+        "audio/mpeg" | "audio/mp3" => Some("MP3"),
+        "audio/aac" | "audio/aacp" | "audio/mp4" | "audio/x-aac" => Some("AAC"),
+        "audio/flac" | "audio/x-flac" => Some("FLAC"),
+        "audio/opus" => Some("OPUS"),
+        "application/ogg" | "audio/ogg" | "audio/vorbis" => Some("OGG"),
+        "application/vnd.apple.mpegurl" | "application/x-mpegurl" => Some("HLS"),
+        "audio/wav" | "audio/x-wav" | "audio/wave" => Some("WAV"),
+        _ => None,
+    }
+}
+
+fn codec_from_stream_path(path_part: &str) -> Option<&'static str> {
+    let lower = path_part.to_ascii_lowercase();
+    let tail = lower.rsplit('/').next().unwrap_or(&lower);
+    if tail.contains("flac") {
+        Some("FLAC")
+    } else if tail.contains("opus") {
+        Some("OPUS")
+    } else if tail.contains("aacp") || tail.contains("aac") {
+        Some("AAC")
+    } else if tail.contains("mp3") {
+        Some("MP3")
+    } else if tail.contains("ogg") {
+        Some("OGG")
+    } else if tail.contains("hls") {
+        Some("HLS")
+    } else {
+        None
     }
 }
 
@@ -1127,16 +1222,7 @@ impl MpdDevice {
                 };
                 let protocol_version: Box<str> = client.protocol_version().into();
 
-                let current_track = song.map(|entry| {
-                    let s = entry.song;
-                    MpdTrack {
-                        file: s.url.as_str().into(),
-                        title: s.title().map(Box::from),
-                        artist: s.artists().first().map(|a| Box::from(a.as_str())),
-                        album: s.album().map(Box::from),
-                        duration: s.duration,
-                    }
-                });
+                let current_track = song.map(map_song_to_track);
 
                 Ok(MpdStatus {
                     host: host.clone(),
@@ -1452,6 +1538,23 @@ async fn fetch_art_chunks(
         if offset >= chunk.size {
             return Ok(Some(out));
         }
+    }
+}
+
+fn map_song_to_track(entry: mpd_client::responses::SongInQueue) -> MpdTrack {
+    let s = entry.song;
+    let station_name = s
+        .tags
+        .get(&mpd_client::tag::Tag::Name)
+        .and_then(|vals| vals.first())
+        .map(|n| Box::from(n.as_str()));
+    MpdTrack {
+        file: s.url.as_str().into(),
+        title: s.title().map(Box::from),
+        artist: s.artists().first().map(|a| Box::from(a.as_str())),
+        album: s.album().map(Box::from),
+        station_name,
+        duration: s.duration,
     }
 }
 

@@ -11,14 +11,22 @@ speaker-common = { workspace = true }
 mpd_client = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
 tracing = { workspace = true }
+ureq = { workspace = true, optional = true }
+lofty = { workspace = true, optional = true }
+m3u8-rs = { workspace = true, optional = true }
+lru = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
 
 [features]
 default = []
 test-util = []
+stream-art = ["dep:ureq", "dep:lofty", "dep:m3u8-rs", "dep:lru", "dep:regex", "dep:toml", "dep:serde_json"]
 
 [dev-dependencies]
-speaker-mpd = { path = ".", features = ["test-util"] }
+speaker-mpd = { path = ".", features = ["test-util", "stream-art"] }
 tokio = { workspace = true }
 
 [lints]

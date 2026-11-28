@@ -34,6 +34,8 @@ baseline/
 │   │   ├── org.speaker.Bluetooth.conf # D-Bus policy for active-source arbiter (bt-manager)
 │   │   └── org.speaker.CoverArt.conf  # D-Bus policy for BIP cover-art service (bt-manager)
 │   ├── mpd.conf                   # Streaming & internet-radio MPD v0.25 config (ALSA src_rmpd, mixer_type=null)
+│   ├── speaker/
+│   │   └── stations.toml          # Curated station logo manifest (234 rules from moOde cfg_radio -> /var/lib/speaker/station-logos/)
 │   └── systemd/
 │       └── system/
 │           ├── camilladsp.service     # CamillaDSP 5.0 engine daemon (-w wait mode, WS on 127.0.0.1:1234)
@@ -50,6 +52,8 @@ baseline/
 │   └── asound.state               # Persisted MA12070P hardware mixer gains & limiter states
 ├── bin/
 │   └── bt-auto-trust-agent.py     # Legacy Python D-Bus auto-trust pairing handler (superseded by bt-manager)
+├── var/lib/mpd/playlists/
+│   └── stream_art_test.m3u        # Curated MPD stream-art & metadata test playlist (HLS, ICY MP3/AAC/FLAC, Zeno)
 └── scripts/
     ├── read_temp.py               # DS18B20 1-Wire thermal monitor
     ├── read_light_level.py        # BH1750 ambient light lux reader (I2C)

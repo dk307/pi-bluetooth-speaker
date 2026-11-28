@@ -9,6 +9,7 @@ use std::time::Duration;
 use screen_manager::daemon::{BtSharedUpdate, apply_shared_bt_state};
 use screen_manager::ui::sources_worker::{
     join_worker, spawn_audio_sources_worker, spawn_mpd_monitor_with_device,
+    spawn_mpd_monitor_with_resolver,
 };
 use screen_manager::ui::{
     AppShell, AudioSourceEntry, AudioSourcesState, Framebuffer, MainWindow, MediaSourceKind,
@@ -16,7 +17,10 @@ use screen_manager::ui::{
     SourceCommand, SourceCommandQueue,
 };
 use speaker_bluetooth::{BtPlaybackState, TransportCommand, TransportCommandQueue};
-use speaker_mpd::{MpdDevice, MpdEvent, MpdMockCommand, MpdPlaybackState, MpdSubsystem, MpdTrack};
+use speaker_mpd::{
+    ArtSource, MpdDevice, MpdEvent, MpdMockCommand, MpdPlaybackState, MpdSubsystem, MpdTrack,
+    StationManifest, StreamArtResolver, StreamArtResult,
+};
 
 fn make_shell() -> (AppShell, Framebuffer) {
     let fb = Framebuffer::new_mocked().0;
@@ -65,6 +69,7 @@ fn now_playing_snapshot_maps_bluetooth_and_mpd_capabilities() {
             title: None,
             artist: Some("Bill Evans".into()),
             album: Some("Portrait in Jazz".into()),
+            station_name: None,
             duration: Some(Duration::from_secs(240)),
         }),
         Some(Duration::from_secs(60)),
@@ -138,6 +143,7 @@ fn shell_routes_transport_and_preserves_per_source_state_across_switches() {
             title: Some("MPD Song".into()),
             artist: Some("MPD Artist".into()),
             album: Some("MPD Album".into()),
+            station_name: None,
             duration: Some(Duration::from_secs(200)),
         }),
         Some(Duration::from_secs(50)),
@@ -266,6 +272,7 @@ fn mpd_and_audio_sources_workers_publish_and_execute_commands() {
             title: Some("Worker Track".into()),
             artist: Some("Worker Artist".into()),
             album: Some("Worker Album".into()),
+            station_name: None,
             duration: Some(Duration::from_secs(180)),
         }),
         Some(Duration::from_secs(30)),
@@ -309,6 +316,79 @@ fn mpd_and_audio_sources_workers_publish_and_execute_commands() {
             .commands()
             .contains(&MpdMockCommand::SetRepeat(true))
     );
+
+    running.store(false, Ordering::Relaxed);
+    join_worker(src_handle, "audio-sources");
+    join_worker(mpd_handle, "mpd-monitor");
+}
+
+#[test]
+fn mpd_stream_reconciles_station_name_icy_title_probed_codec_and_cover_changes() {
+    let (shell, _fb) = make_shell();
+    let shared = Arc::new(Mutex::new(BtSharedUpdate::default()));
+    let running = Arc::new(AtomicBool::new(true));
+    let mpd_cmds = MpdCommandQueue::new();
+    let source_cmds = SourceCommandQueue::new();
+
+    let (mpd_dev, mpd_mock) = MpdDevice::new_mocked();
+    let (resolver, art_mock) = StreamArtResolver::new_mocked(StationManifest::default());
+    let stream_url = "https://ice1.somafm.com/groovesalad-stream";
+
+    art_mock.set_stream_probe(
+        stream_url,
+        StreamArtResult {
+            image_bytes: None,
+            probed_codec: Some("AAC"),
+            source: ArtSource::None,
+            ..StreamArtResult::default()
+        },
+    );
+    art_mock.set_track_lookup("Boards of Canada", "Roygbiv", minimal_png_bytes());
+
+    mpd_mock.set_state(MpdPlaybackState::Playing);
+    mpd_mock.set_track(
+        Some(MpdTrack {
+            file: stream_url.into(),
+            title: Some("Boards of Canada - Roygbiv".into()),
+            artist: None,
+            album: None,
+            station_name: Some("SomaFM Groove Salad".into()),
+            duration: None,
+        }),
+        Some(Duration::from_secs(12)),
+        None,
+    );
+
+    let src_handle = spawn_audio_sources_worker(&shared, &running, &source_cmds, true);
+    let mpd_handle =
+        spawn_mpd_monitor_with_resolver(&shared, &running, &mpd_cmds, mpd_dev, resolver);
+    source_cmds.push(SourceCommand::SelectSource(SOURCE_ID_MPD.into()));
+    mpd_mock.emit_event(MpdEvent::SubsystemChanged(MpdSubsystem::Player));
+
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(25));
+        apply_shared_bt_state(&shell, &shared);
+        if shell.window().get_active_source_id().as_str() == SOURCE_ID_MPD
+            && shell.window().get_track_title().as_str() == "Roygbiv"
+            && shell.window().get_has_cover_art()
+            && shell.window().get_stream_codec().as_str() == "AAC"
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        shell.window().get_track_or_device().as_str(),
+        "SomaFM Groove Salad"
+    );
+    assert_eq!(
+        shell.window().get_track_artist().as_str(),
+        "Boards of Canada"
+    );
+    assert_eq!(shell.window().get_track_title().as_str(), "Roygbiv");
+    assert_eq!(shell.window().get_stream_codec().as_str(), "AAC");
+    assert!(!shell.window().get_seekable());
+    assert!(shell.window().get_has_cover_art());
 
     running.store(false, Ordering::Relaxed);
     join_worker(src_handle, "audio-sources");

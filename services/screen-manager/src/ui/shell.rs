@@ -293,6 +293,7 @@ pub struct AppShell {
     bt_cover_seed: Rc<Cell<Option<u32>>>,
     mpd_cover_image: Rc<RefCell<Option<slint::Image>>>,
     mpd_cover_seed: Rc<Cell<Option<u32>>>,
+    mpd_probed_codec: Cell<Option<&'static str>>,
     amp_commands: Rc<RefCell<Option<crate::volume::AmpVolumeCommandQueue>>>,
     brightness_commands: Rc<RefCell<Option<BrightnessCommandQueue>>>,
     /// Set when the overlay last issued an optimistic brightness command. Each
@@ -382,6 +383,7 @@ impl AppShell {
             bt_cover_seed: Rc::new(Cell::new(None)),
             mpd_cover_image: Rc::new(RefCell::new(None)),
             mpd_cover_seed: Rc::new(Cell::new(None)),
+            mpd_probed_codec: Cell::new(None),
             amp_commands: Rc::new(RefCell::new(None)),
             brightness_commands: Rc::new(RefCell::new(None)),
             last_brightness_command: Rc::new(Cell::new(None)),
@@ -1642,9 +1644,24 @@ impl AppShell {
         }
     }
 
+    /// Updates the HTTP-probed MPD stream codec override and refreshes the UI badge if active.
+    pub fn set_mpd_probed_codec(&self, codec: Option<&'static str>) {
+        self.mpd_probed_codec.set(codec);
+        if let Some(ref mut snap) = *self.mpd_snapshot.borrow_mut()
+            && let Some(ref mut info) = snap.stream_info
+            && let Some(c) = codec
+        {
+            info.codec = Box::from(c);
+            if *self.active_source.borrow() == crate::ui::MediaSourceKind::Mpd {
+                Self::apply_stream_info_to_window(&self.window, Some(info));
+            }
+        }
+    }
+
     /// Applies state from an MPD [`speaker_mpd::MpdStatus`] snapshot.
     pub fn apply_mpd_playback(&self, status: &speaker_mpd::MpdStatus) {
-        let snapshot = crate::ui::NowPlayingSnapshot::from_mpd(status);
+        let snapshot =
+            crate::ui::NowPlayingSnapshot::from_mpd_with_codec(status, self.mpd_probed_codec.get());
         *self.mpd_snapshot.borrow_mut() = Some(snapshot.clone());
         if *self.active_source.borrow() == crate::ui::MediaSourceKind::Mpd {
             self.apply_now_playing(&snapshot);

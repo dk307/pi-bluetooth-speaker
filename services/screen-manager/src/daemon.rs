@@ -652,6 +652,8 @@ pub struct BtSharedUpdate {
     pub devices: Option<crate::ui::BtDevicesUpdate>,
     /// Latest MPD playback status, if it changed since the last publish.
     pub mpd_playback: Option<speaker_mpd::MpdStatus>,
+    /// MPD HTTP-probed stream codec delta (`Some(Some("AAC"))` or `Some(None)`).
+    pub mpd_probed_codec: Option<Option<&'static str>>,
     /// MPD cover art delta: outer `Some` = cover state changed; inner `Some` =
     /// decoded pixel buffer, inner `None` = clear MPD cover art.
     pub mpd_cover: Option<Option<CoverPixelBuffer>>,
@@ -2425,6 +2427,9 @@ pub fn apply_shared_bt_state(shell: &AppShell, shared_state: &Arc<Mutex<BtShared
         }
         if let Some(seed) = lock.cover_seed.take() {
             shell.set_cover_seed(seed);
+        }
+        if let Some(codec) = lock.mpd_probed_codec.take() {
+            shell.set_mpd_probed_codec(codec);
         }
         if let Some(mpd) = lock.mpd_playback.take() {
             shell.apply_mpd_playback(&mpd);

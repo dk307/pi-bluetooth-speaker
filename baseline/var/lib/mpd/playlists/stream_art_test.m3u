@@ -1,0 +1,34 @@
+#EXTM3U
+# Test playlist for MPD stream metadata & cover-art waterfall scenarios
+#
+# 1. HLS (.m3u8) FIP Main — tests HLS master->media playlist + Radio-Browser station logo fallback
+#EXTINF:-1,FIP
+https://stream.radiofrance.fr/fip/fip.m3u8?id=radiofrance
+
+# 2. HLS (.m3u8) FIP Jazz — tests HLS .m3u8 + Radio-Browser station logo fallback
+#EXTINF:-1,FIP Jazz
+https://stream.radiofrance.fr/fipjazz/fipjazz.m3u8?id=radiofrance
+
+# 3. HLS (.m3u8) BBC 6 Music — tests international HLS .m3u8 + Radio-Browser station logo fallback
+#EXTINF:-1,BBC Radio 6 Music
+http://a.files.bbci.co.uk/media/live/manifesto/audio/simulcast/hls/nonuk/sbr_low/ak/bbc_6music.m3u8
+
+# 4. ICY MP3 (128k) — tests ICY "Artist - Title" splitting + MP3 codec badge + BroadcastStreamUrl
+#EXTINF:-1,SomaFM Groove Salad (ICY MP3)
+http://ice1.somafm.com/groovesalad-128-mp3
+
+# 5. ICY AAC (128k) — tests audio/aacp MIME probe + AAC codec badge + BroadcastStreamUrl
+#EXTINF:-1,SomaFM Drone Zone (ICY AAC)
+http://ice1.somafm.com/dronezone-128-aac
+
+# 6. Radio Paradise Main Mix (FLAC + ICY metadata) — tests FLAC/OGG stream + BroadcastStreamUrl
+#EXTINF:-1,Radio Paradise Main Mix (FLAC)
+https://stream.radioparadise.com/flacm
+
+# 7. Radio Paradise Main Mix (AAC 320k) — tests AAC stream + BroadcastStreamUrl
+#EXTINF:-1,Radio Paradise Main Mix (AAC 320k)
+http://stream-uk1.radioparadise.com/aac-320
+
+# 8. Zeno.fm ICY MP3 — tests redirect + audio/mpeg probe + TrackLookup / RadioBrowser fallback
+#EXTINF:-1,Hits Of Mohammed Rafi
+http://stream.zeno.fm/0zkr7x8ztm0uv
