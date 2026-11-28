@@ -1,0 +1,1173 @@
+# Auto-generated from moOde cfg_radio + radio-logos
+enable_track_art_lookup = true
+
+[[station]]
+name_match = "1\\.FM\\ \\-\\ Blues\\ Radio"
+url_match = "http://strm112\\.1\\.fm/blues_mobile_mp3"
+logo = "/var/lib/speaker/station-logos/1.FM - Blues Radio.jpg"
+
+[[station]]
+name_match = "2BOB\\ Radio\\ 104\\.7\\ FM"
+url_match = "http://playerservices\\.streamtheworld\\.com/api/livestream\\-redirect/2BOB\\.mp3"
+logo = "/var/lib/speaker/station-logos/2BOB Radio 104.7 FM.jpg"
+
+[[station]]
+name_match = "4ZZZ\\ FM\\ 102\\.1\\ \\-\\ Alternative"
+url_match = "https://iheart\\.4zzz\\.org\\.au/4zzz"
+logo = "/var/lib/speaker/station-logos/4ZZZ FM 102.1 - Alternative.jpg"
+
+[[station]]
+name_match = "6forty\\ Radio"
+url_match = "http://radio\\.6forty\\.com:8000/6forty"
+logo = "/var/lib/speaker/station-logos/6forty Radio.jpg"
+
+[[station]]
+name_match = "A\\.M\\.\\ Ambient"
+url_match = "http://radio\\.stereoscenic\\.com/ama\\-h"
+logo = "/var/lib/speaker/station-logos/A.M. Ambient.jpg"
+
+[[station]]
+name_match = "ABC\\ Country"
+url_match = "http://live\\-radio01\\.mediahubaustralia\\.com/CTRW/mp3/"
+logo = "/var/lib/speaker/station-logos/ABC Country.jpg"
+
+[[station]]
+name_match = "ABC\\ Jazz"
+url_match = "http://live\\-radio01\\.mediahubaustralia\\.com/JAZW/mp3/"
+logo = "/var/lib/speaker/station-logos/ABC Jazz.jpg"
+
+[[station]]
+name_match = "Absolut\\ Hot"
+url_match = "https://edge68\\.live\\-sm\\.absolutradio\\.de/absolut\\-hot/stream/aacp\\?aggregator=smk\\-m3u\\-aac"
+logo = "/var/lib/speaker/station-logos/Absolut Hot.jpg"
+
+[[station]]
+name_match = "Absolut\\ music\\ XL"
+url_match = "https://absolut\\-musicxl\\.live\\-sm\\.absolutradio\\.de/absolut\\-musicxl/stream/mp3"
+logo = "/var/lib/speaker/station-logos/Absolut music XL.jpg"
+
+[[station]]
+name_match = "Absolut\\ Relax"
+url_match = "https://edge12\\.live\\-sm\\.absolutradio\\.de/absolut\\-relax/stream/mp3"
+logo = "/var/lib/speaker/station-logos/Absolut Relax.jpg"
+
+[[station]]
+name_match = "Ambient\\ Sleeping\\ Pill"
+url_match = "http://radio\\.stereoscenic\\.com/asp\\-h"
+logo = "/var/lib/speaker/station-logos/Ambient Sleeping Pill.jpg"
+
+[[station]]
+name_match = "Ancient\\ FM\\ \\-\\ Mediaeval\\ and\\ Renaissance\\ Music"
+url_match = "https://mediaserv73\\.live\\-streams\\.nl:18058/stream"
+logo = "/var/lib/speaker/station-logos/Ancient FM - Mediaeval and Renaissance Music.jpg"
+
+[[station]]
+name_match = "ArtSound\\ FM\\ 92\\.7"
+url_match = "https://stream\\.artsound\\.fm/mp3"
+logo = "/var/lib/speaker/station-logos/ArtSound FM 92.7.jpg"
+
+[[station]]
+name_match = "Bayern\\ 2"
+url_match = "https://dispatcher\\.rndfnk\\.com/br/br2/live/mp3/mid"
+logo = "/var/lib/speaker/station-logos/Bayern 2.jpg"
+
+[[station]]
+name_match = "BBC\\ Asian\\ Network"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_asian_network\\&bitrate=96000"
+logo = "/var/lib/speaker/station-logos/BBC Asian Network.jpg"
+
+[[station]]
+name_match = "BBC\\ Asian\\ Network\\ \\(320K\\)"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_asian_network\\&bitrate=320000\\&uk=1"
+logo = "/var/lib/speaker/station-logos/BBC Asian Network (320K).jpg"
+
+[[station]]
+name_match = "BBC\\ Radio\\ 1"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_radio_one\\&bitrate=96000"
+logo = "/var/lib/speaker/station-logos/BBC Radio 1.jpg"
+
+[[station]]
+name_match = "BBC\\ Radio\\ 1\\ \\(320K\\)"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_radio_one\\&bitrate=320000\\&uk=1"
+logo = "/var/lib/speaker/station-logos/BBC Radio 1 (320K).jpg"
+
+[[station]]
+name_match = "BBC\\ Radio\\ 2"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_radio_two\\&bitrate=96000"
+logo = "/var/lib/speaker/station-logos/BBC Radio 2.jpg"
+
+[[station]]
+name_match = "BBC\\ Radio\\ 2\\ \\(320K\\)"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_radio_two\\&bitrate=320000\\&uk=1"
+logo = "/var/lib/speaker/station-logos/BBC Radio 2 (320K).jpg"
+
+[[station]]
+name_match = "BBC\\ Radio\\ 3"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_radio_three\\&bitrate=96000"
+logo = "/var/lib/speaker/station-logos/BBC Radio 3.jpg"
+
+[[station]]
+name_match = "BBC\\ Radio\\ 3\\ \\(320K\\)"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_radio_three\\&bitrate=320000\\&uk=1"
+logo = "/var/lib/speaker/station-logos/BBC Radio 3 (320K).jpg"
+
+[[station]]
+name_match = "BBC\\ Radio\\ 4\\ FM"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_radio_fourfm\\&bitrate=96000"
+logo = "/var/lib/speaker/station-logos/BBC Radio 4 FM.jpg"
+
+[[station]]
+name_match = "BBC\\ Radio\\ 4\\ FM\\ \\(320K\\)"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_radio_fourfm\\&bitrate=320000\\&uk=1"
+logo = "/var/lib/speaker/station-logos/BBC Radio 4 FM (320K).jpg"
+
+[[station]]
+name_match = "BBC\\ Radio\\ 5\\ live"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_radio_five_live\\&bitrate=96000"
+logo = "/var/lib/speaker/station-logos/BBC Radio 5 live.jpg"
+
+[[station]]
+name_match = "BBC\\ Radio\\ 5\\ live\\ \\(320K\\)"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_radio_five_live\\&bitrate=320000\\&uk=1"
+logo = "/var/lib/speaker/station-logos/BBC Radio 5 live (320K).jpg"
+
+[[station]]
+name_match = "BBC\\ Radio\\ 5\\ live\\ sports\\ extra\\ \\(320K\\)"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_radio_five_live_sports_extra\\&bitrate=320000\\&uk=1"
+logo = "/var/lib/speaker/station-logos/BBC Radio 5 live sports extra (320K).jpg"
+
+[[station]]
+name_match = "BBC\\ Radio\\ 6\\ music"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_6music\\&bitrate=96000"
+logo = "/var/lib/speaker/station-logos/BBC Radio 6 music.jpg"
+
+[[station]]
+name_match = "BBC\\ Radio\\ 6\\ music\\ \\(320K\\)"
+url_match = "http://lsn\\.lv/bbcradio\\.m3u8\\?station=bbc_6music\\&bitrate=320000\\&uk=1"
+logo = "/var/lib/speaker/station-logos/BBC Radio 6 music (320K).jpg"
+
+[[station]]
+name_match = "BR\\-Klassik"
+url_match = "https://dispatcher\\.rndfnk\\.com/br/brklassik/live/mp3/high"
+logo = "/var/lib/speaker/station-logos/BR-Klassik.jpg"
+
+[[station]]
+name_match = "Buddha\\ Radio"
+url_match = "https://legacy\\.scahw\\.com\\.au/2buddha_32"
+logo = "/var/lib/speaker/station-logos/Buddha Radio.jpg"
+
+[[station]]
+name_match = "ByteFM"
+url_match = "https://bytefm\\.cast\\.addradio\\.de/bytefm/main/high/stream"
+logo = "/var/lib/speaker/station-logos/ByteFM.jpg"
+
+[[station]]
+name_match = "CDNX"
+url_match = "http://msmn7\\.co:8018/stream"
+logo = "/var/lib/speaker/station-logos/CDNX.jpg"
+
+[[station]]
+name_match = "Classic\\ FM"
+url_match = "http://media\\-ice\\.musicradio\\.com/ClassicFMMP3"
+logo = "/var/lib/speaker/station-logos/Classic FM.jpg"
+
+[[station]]
+name_match = "Czech\\ Radio\\ Classical"
+url_match = "https://rozhlas\\.stream/ddur_mp3_256\\.mp3"
+logo = "/var/lib/speaker/station-logos/Czech Radio Classical.jpg"
+
+[[station]]
+name_match = "Dandelion\\ Radio"
+url_match = "http://stream\\.dandelionradio\\.com:9414"
+logo = "/var/lib/speaker/station-logos/Dandelion Radio.jpg"
+
+[[station]]
+name_match = "Davide\\ of\\ MIMIC"
+url_match = "https://streaming04\\.liveboxstream\\.uk/proxy/davideof\\?mp=/stream"
+logo = "/var/lib/speaker/station-logos/Davide of MIMIC.jpg"
+
+[[station]]
+name_match = "DR\\ P1"
+url_match = "http://live\\-icy\\.dr\\.dk/A/A03H\\.mp3"
+logo = "/var/lib/speaker/station-logos/DR P1.jpg"
+
+[[station]]
+name_match = "DR\\ P2"
+url_match = "http://live\\-icy\\.dr\\.dk/A/A04H\\.mp3"
+logo = "/var/lib/speaker/station-logos/DR P2.jpg"
+
+[[station]]
+name_match = "DR\\ P3"
+url_match = "http://live\\-icy\\.dr\\.dk/A/A05H\\.mp3"
+logo = "/var/lib/speaker/station-logos/DR P3.jpg"
+
+[[station]]
+name_match = "DR\\ P4"
+url_match = "http://live\\-icy\\.dr\\.dk/A/A08H\\.mp3"
+logo = "/var/lib/speaker/station-logos/DR P4.jpg"
+
+[[station]]
+name_match = "DR\\ P6\\ Beat"
+url_match = "http://live\\-icy\\.dr\\.dk/A/A29H\\.mp3"
+logo = "/var/lib/speaker/station-logos/DR P6 Beat.jpg"
+
+[[station]]
+name_match = "DR\\ P8\\ Jazz"
+url_match = "http://live\\-icy\\.dr\\.dk/A/A22H\\.mp3"
+logo = "/var/lib/speaker/station-logos/DR P8 Jazz.jpg"
+
+[[station]]
+name_match = "DR\\ P8\\ Jazz\\ \\(320K\\)"
+url_match = "https://DRliveradio\\.akamaized\\.net/hls/live/2022411/p8jazz/playlist\\-320000\\.m3u8"
+logo = "/var/lib/speaker/station-logos/DR P8 Jazz (320K).jpg"
+
+[[station]]
+name_match = "Eldoradio"
+url_match = "http://81\\.92\\.238\\.33:80"
+logo = "/var/lib/speaker/station-logos/Eldoradio.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ 2000s"
+url_match = "https://channels\\.fluxfm\\.de/2000er/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - 2000s.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ 60s"
+url_match = "https://channels\\.fluxfm\\.de/60s/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - 60s.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ 70s"
+url_match = "https://channels\\.fluxfm\\.de/70s/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - 70s.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ 80s"
+url_match = "https://channels\\.fluxfm\\.de/80s/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - 80s.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ 90s"
+url_match = "https://channels\\.fluxfm\\.de/90s/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - 90s.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Anima\\ Radio"
+url_match = "https://channels\\.fluxfm\\.de/anima\\-radio/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Anima Radio.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ B\\-Funk"
+url_match = "https://channels\\.fluxfm\\.de/b\\-funk/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - B-Funk.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Berlin\\ Beach\\ House\\ Radio"
+url_match = "https://channels\\.fluxfm\\.de/berlin\\-beach\\-house/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Berlin Beach House Radio.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ ChillHop"
+url_match = "https://channels\\.fluxfm\\.de/chillhop/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - ChillHop.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Chillout\\ Radio"
+url_match = "https://channels\\.fluxfm\\.de/chillout\\-radio/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Chillout Radio.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Clubsandwich"
+url_match = "https://channels\\.fluxfm\\.de/clubsandwich/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Clubsandwich.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ ElectroFlux"
+url_match = "https://channels\\.fluxfm\\.de/elektro\\-flux/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - ElectroFlux.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Electronic\\ Chillout"
+url_match = "https://channels\\.fluxfm\\.de/electronic\\-chillout/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Electronic Chillout.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ FluxFinest"
+url_match = "https://channels\\.fluxfm\\.de/fluxfm\\-finest/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - FluxFinest.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ FluxLounge"
+url_match = "https://channels\\.fluxfm\\.de/flux\\-lounge/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - FluxLounge.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ HipHop\\ Classics"
+url_match = "https://channels\\.fluxfm\\.de/boom\\-fm\\-classics/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - HipHop Classics.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Hippie\\ Trippy\\ Garden\\ Pretty"
+url_match = "https://channels\\.fluxfm\\.de/htgp/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Hippie Trippy Garden Pretty.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Indie\\ Disco"
+url_match = "https://channels\\.fluxfm\\.de/indiedisco/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Indie Disco.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Jazzradio\\ Schwarzenstein"
+url_match = "https://channels\\.fluxfm\\.de/jazz\\-schwarzenstein/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Jazzradio Schwarzenstein.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ John\\ Reed\\ Radio"
+url_match = "https://streams\\.fluxfm\\.de/john\\-reed/mp3\\-320/streams\\.fluxfm\\.de/"
+logo = "/var/lib/speaker/station-logos/FluxFM - John Reed Radio.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Listen\\ To\\ Berlin"
+url_match = "https://channels\\.fluxfm\\.de/listen\\-to\\-berlin/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Listen To Berlin.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Livestream"
+url_match = "https://channels\\.fluxfm\\.de/FluxFM/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Livestream.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ MetalFM"
+url_match = "https://channels\\.fluxfm\\.de/metal\\-fm/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - MetalFM.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Mini\\ Flux"
+url_match = "https://channels\\.fluxfm\\.de/mini\\-flux/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Mini Flux.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Radio\\ Alternative"
+url_match = "https://channels\\.fluxfm\\.de/alternative/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Radio Alternative.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Sound\\ Of\\ Berlin"
+url_match = "https://channels\\.fluxfm\\.de/sound\\-of\\-berlin/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Sound Of Berlin.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Techno\\ Underground"
+url_match = "https://channels\\.fluxfm\\.de/techno\\-underground/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Techno Underground.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ XJAZZ"
+url_match = "https://channels\\.fluxfm\\.de/x\\-jazz/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - XJAZZ.jpg"
+
+[[station]]
+name_match = "FluxFM\\ \\-\\ Yoga\\ Sounds"
+url_match = "https://channels\\.fluxfm\\.de/yoga\\-sounds/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/FluxFM - Yoga Sounds.jpg"
+
+[[station]]
+name_match = "France\\ Culture\\ Live"
+url_match = "http://direct\\.franceculture\\.fr/live/franceculture\\-midfi\\.mp3"
+logo = "/var/lib/speaker/station-logos/France Culture Live.jpg"
+
+[[station]]
+name_match = "France\\ Inter\\ Paris\\ \\(FIP\\)"
+url_match = "http://direct\\.fipradio\\.fr/live/fip\\-midfi\\.mp3"
+logo = "/var/lib/speaker/station-logos/France Inter Paris (FIP).jpg"
+
+[[station]]
+name_match = "France\\ Musique\\ Classique\\ Plus"
+url_match = "http://direct\\.francemusique\\.fr/live/francemusiqueclassiqueplus\\-hifi\\.mp3"
+logo = "/var/lib/speaker/station-logos/France Musique Classique Plus.jpg"
+
+[[station]]
+name_match = "France\\ Musique\\ La\\ Contemporaine"
+url_match = "http://direct\\.francemusique\\.fr/live/francemusiquelacontemporaine\\-hifi\\.mp3"
+logo = "/var/lib/speaker/station-logos/France Musique La Contemporaine.jpg"
+
+[[station]]
+name_match = "France\\ Musique\\ La\\ Jazz"
+url_match = "http://direct\\.francemusique\\.fr/live/francemusiquelajazz\\-hifi\\.aac"
+logo = "/var/lib/speaker/station-logos/France Musique La Jazz.jpg"
+
+[[station]]
+name_match = "France\\ Musique\\ Live"
+url_match = "http://direct\\.francemusique\\.fr/live/francemusique\\-midfi\\.mp3"
+logo = "/var/lib/speaker/station-logos/France Musique Live.jpg"
+
+[[station]]
+name_match = "frequence3\\ \\(FLAC\\)"
+url_match = "http://hd\\.stream\\.frequence3\\.net/frequence3\\.flac"
+logo = "/var/lib/speaker/station-logos/frequence3 (FLAC).jpg"
+
+[[station]]
+name_match = "Hi\\ On\\ Line\\ \\-\\ Classical"
+url_match = "http://mediaserv30\\.live\\-streams\\.nl:8088/live"
+logo = "/var/lib/speaker/station-logos/Hi On Line - Classical.jpg"
+
+[[station]]
+name_match = "Hi\\ On\\ Line\\ \\-\\ France"
+url_match = "http://mediaserv21\\.live\\-streams\\.nl:8000/live"
+logo = "/var/lib/speaker/station-logos/Hi On Line - France.jpg"
+
+[[station]]
+name_match = "Hi\\ On\\ Line\\ \\-\\ Gold"
+url_match = "http://mediaserv30\\.live\\-streams\\.nl:8000/live"
+logo = "/var/lib/speaker/station-logos/Hi On Line - Gold.jpg"
+
+[[station]]
+name_match = "Hi\\ On\\ Line\\ \\-\\ Jazz"
+url_match = "http://mediaserv38\\.live\\-streams\\.nl:8006/live"
+logo = "/var/lib/speaker/station-logos/Hi On Line - Jazz.jpg"
+
+[[station]]
+name_match = "Hi\\ On\\ Line\\ \\-\\ Latin"
+url_match = "http://mediaserv33\\.live\\-streams\\.nl:8034/live"
+logo = "/var/lib/speaker/station-logos/Hi On Line - Latin.jpg"
+
+[[station]]
+name_match = "Hi\\ On\\ Line\\ \\-\\ Lounge"
+url_match = "http://mediaserv33\\.live\\-streams\\.nl:8036/live"
+logo = "/var/lib/speaker/station-logos/Hi On Line - Lounge.jpg"
+
+[[station]]
+name_match = "Hi\\ On\\ Line\\ \\-\\ Pop\\ \\(320K\\)"
+url_match = "https://mediaserv33\\.live\\-streams\\.nl:8036/stream"
+logo = "/var/lib/speaker/station-logos/Hi On Line - Pop (320K).jpg"
+
+[[station]]
+name_match = "Hi\\ On\\ Line\\ \\-\\ Pop\\ \\(FLAC\\)"
+url_match = "http://mscp2\\.live\\-streams\\.nl:8100/flac\\.flac"
+logo = "/var/lib/speaker/station-logos/Hi On Line - Pop (FLAC).jpg"
+
+[[station]]
+name_match = "Hi\\ On\\ Line\\ \\-\\ World"
+url_match = "http://mediaserv38\\.live\\-streams\\.nl:8027/live"
+logo = "/var/lib/speaker/station-logos/Hi On Line - World.jpg"
+
+[[station]]
+name_match = "Jazz\\ de\\ Ville\\ \\-\\ Chill"
+url_match = "https://onair22\\.xdevel\\.com/proxy/xautocloud_td3e_421\\?mp=/stream"
+logo = "/var/lib/speaker/station-logos/Jazz de Ville - Chill.jpg"
+
+[[station]]
+name_match = "Jazz\\ de\\ Ville\\ \\-\\ Dance"
+url_match = "https://onair22\\.xdevel\\.com/proxy/xautocloud_6cqz_422\\?mp=/stream"
+logo = "/var/lib/speaker/station-logos/Jazz de Ville - Dance.jpg"
+
+[[station]]
+name_match = "Jazz\\ de\\ Ville\\ \\-\\ Groove"
+url_match = "https://onair22\\.xdevel\\.com/proxy/xautocloud_1kha_423\\?mp=/stream"
+logo = "/var/lib/speaker/station-logos/Jazz de Ville - Groove.jpg"
+
+[[station]]
+name_match = "Jazz\\ de\\ Ville\\ \\-\\ Jazz"
+url_match = "https://onair22\\.xdevel\\.com/proxy/xautocloud_kkyb_420\\?mp=/stream"
+logo = "/var/lib/speaker/station-logos/Jazz de Ville - Jazz.jpg"
+
+[[station]]
+name_match = "Jazz24"
+url_match = "https://knkx\\-live\\-a\\.edge\\.audiocdn\\.com/6285_256k"
+logo = "/var/lib/speaker/station-logos/Jazz24.jpg"
+
+[[station]]
+name_match = "JB\\ Radio2\\ \\(320K\\)"
+url_match = "https://mediacp\\.jb\\-radio\\.net:8001/aac"
+logo = "/var/lib/speaker/station-logos/JB Radio2 (320K).jpg"
+
+[[station]]
+name_match = "Kanal\\ K"
+url_match = "https://play\\.kanalk\\.ch/kanalk/mp3\\-192/"
+logo = "/var/lib/speaker/station-logos/Kanal K.jpg"
+
+[[station]]
+name_match = "KCMP\\ 89\\.3\\ FM\\ \\-\\ The\\ Current"
+url_match = "http://current\\.stream\\.publicradio\\.org/kcmp\\.mp3"
+logo = "/var/lib/speaker/station-logos/KCMP 89.3 FM - The Current.jpg"
+
+[[station]]
+name_match = "KCSM"
+url_match = "http://ice5\\.securenetsystems\\.net/KCSM"
+logo = "/var/lib/speaker/station-logos/KCSM.jpg"
+
+[[station]]
+name_match = "KDHX\\ 88\\.1\\ FM\\ St\\.\\ Louis"
+url_match = "OFFLINE"
+logo = "/var/lib/speaker/station-logos/KDHX 88.1 FM St. Louis.jpg"
+
+[[station]]
+name_match = "KEXP\\ 90\\.3\\ FM\\ Seattle"
+url_match = "https://kexp\\.streamguys1\\.com/kexp160\\.aac"
+logo = "/var/lib/speaker/station-logos/KEXP 90.3 FM Seattle.jpg"
+
+[[station]]
+name_match = "KMHD\\ Portland\\ FM\\ 89\\.1\\ \\-\\ \\ Jazz"
+url_match = "http://stream1\\.opb\\.org/kmhd\\.mp3"
+logo = "/var/lib/speaker/station-logos/KMHD Portland FM 89.1 -  Jazz.jpg"
+
+[[station]]
+name_match = "KUVO\\ 89\\.3\\ FM\\ Denver"
+url_match = "http://kuvo\\-ice\\.streamguys\\.org/kuvo\\-aac\\-128"
+logo = "/var/lib/speaker/station-logos/KUVO 89.3 FM Denver.jpg"
+
+[[station]]
+name_match = "KUVO\\ HD2"
+url_match = "http://kuvo\\-ice\\.streamguys\\.org/kuvohd2\\-aac\\-128"
+logo = "/var/lib/speaker/station-logos/KUVO HD2.jpg"
+
+[[station]]
+name_match = "Linn\\ Classical"
+url_match = "http://linn\\.co\\.uk:8004/autodj"
+logo = "/var/lib/speaker/station-logos/Linn Classical.jpg"
+
+[[station]]
+name_match = "Linn\\ Jazz"
+url_match = "http://linn\\.co\\.uk:8000/autodj"
+logo = "/var/lib/speaker/station-logos/Linn Jazz.jpg"
+
+[[station]]
+name_match = "Linn\\ Radio"
+url_match = "http://linn\\.co\\.uk:8003/autodj"
+logo = "/var/lib/speaker/station-logos/Linn Radio.jpg"
+
+[[station]]
+name_match = "Mad\\ Music\\ Asylum"
+url_match = "http://albireo\\.shoutca\\.st:8250/stream"
+logo = "/var/lib/speaker/station-logos/Mad Music Asylum.jpg"
+
+[[station]]
+name_match = "MDR\\ Klassik"
+url_match = "http://mdr\\-284350\\-0\\.cast\\.mdr\\.de/mdr/284350/0/aac/high/stream\\.aac"
+logo = "/var/lib/speaker/station-logos/MDR Klassik.jpg"
+
+[[station]]
+name_match = "Morow\\ \\-\\ Retro\\ Progressive\\ Rock"
+url_match = "http://stream\\.fr\\.morow\\.com:8080/morow_hi\\.aacp"
+logo = "/var/lib/speaker/station-logos/Morow - Retro Progressive Rock.jpg"
+
+[[station]]
+name_match = "Musiq\\ 3"
+url_match = "https://radios\\.rtbf\\.be/musiq3\\-128\\.aac"
+logo = "/var/lib/speaker/station-logos/Musiq 3.jpg"
+
+[[station]]
+name_match = "Naim\\ Classical"
+url_match = "http://mscp3\\.live\\-streams\\.nl:8250/class\\-high\\.aac"
+logo = "/var/lib/speaker/station-logos/Naim Classical.jpg"
+
+[[station]]
+name_match = "Naim\\ Jazz"
+url_match = "http://mscp3\\.live\\-streams\\.nl:8340/jazz\\-high\\.aac"
+logo = "/var/lib/speaker/station-logos/Naim Jazz.jpg"
+
+[[station]]
+name_match = "Naim\\ Radio"
+url_match = "http://mscp3\\.live\\-streams\\.nl:8360/high\\.aac"
+logo = "/var/lib/speaker/station-logos/Naim Radio.jpg"
+
+[[station]]
+name_match = "NME\\ 1\\ \\-\\ Classic\\ \\&\\ New\\ Indie\\ Alt"
+url_match = "http://listen\\-nme\\.sharp\\-stream\\.com/nme1high\\.mp3"
+logo = "/var/lib/speaker/station-logos/NME 1 - Classic & New Indie Alt.jpg"
+
+[[station]]
+name_match = "NME\\ 2\\ \\-\\ New\\ \\&\\ Upfront\\ Indie\\ Alt"
+url_match = "http://listen\\-nme\\.sharp\\-stream\\.com/nme2high\\.mp3"
+logo = "/var/lib/speaker/station-logos/NME 2 - New & Upfront Indie Alt.jpg"
+
+[[station]]
+name_match = "NPO\\ Klassiek"
+url_match = "http://icecast\\.omroep\\.nl/radio4\\-bb\\-mp3"
+logo = "/var/lib/speaker/station-logos/NPO Klassiek.jpg"
+
+[[station]]
+name_match = "NPO\\ Radio\\ 1"
+url_match = "http://icecast\\.omroep\\.nl/radio1\\-bb\\-aac"
+logo = "/var/lib/speaker/station-logos/NPO Radio 1.jpg"
+
+[[station]]
+name_match = "NPO\\ Radio\\ 2"
+url_match = "http://icecast\\.omroep\\.nl/radio2\\-bb\\-aac"
+logo = "/var/lib/speaker/station-logos/NPO Radio 2.jpg"
+
+[[station]]
+name_match = "NTS\\ Live\\ 1"
+url_match = "http://stream\\-relay\\-geo\\.ntslive\\.net/stream"
+logo = "/var/lib/speaker/station-logos/NTS Live 1.jpg"
+
+[[station]]
+name_match = "NTS\\ Live\\ 2"
+url_match = "http://stream\\-relay\\-geo\\.ntslive\\.net/stream2"
+logo = "/var/lib/speaker/station-logos/NTS Live 2.jpg"
+
+[[station]]
+name_match = "Omroep\\ Zeeland"
+url_match = "https://d3isaxd2t6q8zm\\.cloudfront\\.net/icecast/omroepzeeland/omroepzeeland_radio"
+logo = "/var/lib/speaker/station-logos/Omroep Zeeland.jpg"
+
+[[station]]
+name_match = "Organ\\ Experience"
+url_match = "http://play2\\.organlive\\.com:7006/320"
+logo = "/var/lib/speaker/station-logos/Organ Experience.jpg"
+
+[[station]]
+name_match = "OrganLive\\.com"
+url_match = "http://play2\\.organlive\\.com:7000/320"
+logo = "/var/lib/speaker/station-logos/OrganLive.com.jpg"
+
+[[station]]
+name_match = "P1"
+url_match = "https://sverigesradio\\.se/topsy/direkt/132\\-hi\\-aac"
+logo = "/var/lib/speaker/station-logos/P1.jpg"
+
+[[station]]
+name_match = "P2"
+url_match = "https://http\\-live\\.sr\\.se/p2musik\\-aac\\-320"
+logo = "/var/lib/speaker/station-logos/P2.jpg"
+
+[[station]]
+name_match = "P3"
+url_match = "https://sverigesradio\\.se/topsy/direkt/164\\-hi\\-aac"
+logo = "/var/lib/speaker/station-logos/P3.jpg"
+
+[[station]]
+name_match = "Positivly\\ Baroque"
+url_match = "http://play2\\.organlive\\.com:7002/320"
+logo = "/var/lib/speaker/station-logos/Positivly Baroque.jpg"
+
+[[station]]
+name_match = "PRM\\ \\-\\ Prog\\ Rock\\ \\&\\ Metal"
+url_match = "http://shoutcastunlimited\\.com:8512"
+logo = "/var/lib/speaker/station-logos/PRM - Prog Rock & Metal.jpg"
+
+[[station]]
+name_match = "Radio\\ 357"
+url_match = "https://stream\\.rcs\\.revma\\.com/an1ugyygzk8uv"
+logo = "/var/lib/speaker/station-logos/Radio 357.jpg"
+
+[[station]]
+name_match = "Radio\\ Caroline"
+url_match = "http://sc3\\.radiocaroline\\.net:8030"
+logo = "/var/lib/speaker/station-logos/Radio Caroline.jpg"
+
+[[station]]
+name_match = "Radio\\ FM4"
+url_match = "https://orf\\-live\\.ors\\-shoutcast\\.at/fm4\\-q2a"
+logo = "/var/lib/speaker/station-logos/Radio FM4.jpg"
+
+[[station]]
+name_match = "Radio\\ New\\ Zealand\\ \\-\\ Concert"
+url_match = "http://radionz\\-ice\\.streamguys\\.com:80/concert\\.mp3"
+logo = "/var/lib/speaker/station-logos/Radio New Zealand - Concert.jpg"
+
+[[station]]
+name_match = "Radio\\ New\\ Zealand\\ \\-\\ National"
+url_match = "http://radionz\\-ice\\.streamguys\\.com:80/national\\.mp3"
+logo = "/var/lib/speaker/station-logos/Radio New Zealand - National.jpg"
+
+[[station]]
+name_match = "Radio\\ Nowy\\ Swiat"
+url_match = "https://stream\\.nowyswiat\\.online/mp3"
+logo = "/var/lib/speaker/station-logos/Radio Nowy Swiat.jpg"
+
+[[station]]
+name_match = "Radio\\ Paradise\\ \\-\\ Main\\ Mix"
+url_match = "https://stream\\.radioparadise\\.com/flacm"
+logo = "/var/lib/speaker/station-logos/Radio Paradise - Main Mix.jpg"
+
+[[station]]
+name_match = "Radio\\ Paradise\\ \\-\\ Mellow"
+url_match = "https://stream\\.radioparadise\\.com/mellow\\-flacm"
+logo = "/var/lib/speaker/station-logos/Radio Paradise - Mellow.jpg"
+
+[[station]]
+name_match = "Radio\\ Paradise\\ \\-\\ Rock"
+url_match = "https://stream\\.radioparadise\\.com/rock\\-flacm"
+logo = "/var/lib/speaker/station-logos/Radio Paradise - Rock.jpg"
+
+[[station]]
+name_match = "Radio\\ Paradise\\ \\-\\ World"
+url_match = "https://stream\\.radioparadise\\.com/world\\-flacm"
+logo = "/var/lib/speaker/station-logos/Radio Paradise - World.jpg"
+
+[[station]]
+name_match = "Radio\\ SRF\\ 1"
+url_match = "http://streaming\\.swisstxt\\.ch/m/drs1/mp3_128"
+logo = "/var/lib/speaker/station-logos/Radio SRF 1.jpg"
+
+[[station]]
+name_match = "Radio\\ SRF\\ 2\\ Kultur"
+url_match = "http://streaming\\.swisstxt\\.ch/m/drs2/mp3_128"
+logo = "/var/lib/speaker/station-logos/Radio SRF 2 Kultur.jpg"
+
+[[station]]
+name_match = "Radio\\ SRF\\ 3"
+url_match = "http://streaming\\.swisstxt\\.ch/m/drs3/mp3_128"
+logo = "/var/lib/speaker/station-logos/Radio SRF 3.jpg"
+
+[[station]]
+name_match = "Radio\\ SRF\\ 4\\ News"
+url_match = "http://streaming\\.swisstxt\\.ch/m/drs4news/mp3_128"
+logo = "/var/lib/speaker/station-logos/Radio SRF 4 News.jpg"
+
+[[station]]
+name_match = "Radio\\ SRF\\ Musikwelle"
+url_match = "http://streaming\\.swisstxt\\.ch/m/drsmw/mp3_128"
+logo = "/var/lib/speaker/station-logos/Radio SRF Musikwelle.jpg"
+
+[[station]]
+name_match = "Radio\\ SRF\\ Virus"
+url_match = "http://streaming\\.swisstxt\\.ch/m/drsvirus/mp3_128"
+logo = "/var/lib/speaker/station-logos/Radio SRF Virus.jpg"
+
+[[station]]
+name_match = "Radio\\ Swiss\\ Classic"
+url_match = "http://stream\\.srg\\-ssr\\.ch/m/rsc_de/aacp_96"
+logo = "/var/lib/speaker/station-logos/Radio Swiss Classic.jpg"
+
+[[station]]
+name_match = "Radio\\ Swiss\\ Jazz"
+url_match = "http://stream\\.srg\\-ssr\\.ch/m/rsj/aacp_96"
+logo = "/var/lib/speaker/station-logos/Radio Swiss Jazz.jpg"
+
+[[station]]
+name_match = "Radio\\ Swiss\\ Pop"
+url_match = "http://stream\\.srg\\-ssr\\.ch/m/rsp/aacp_96"
+logo = "/var/lib/speaker/station-logos/Radio Swiss Pop.jpg"
+
+[[station]]
+name_match = "RCO\\ Live"
+url_match = "https://ice\\.cr1\\.streamzilla\\.xlcdn\\.com:8000/sz=RCOLiveWebradio=mp3\\-192"
+logo = "/var/lib/speaker/station-logos/RCO Live.jpg"
+
+[[station]]
+name_match = "Resonance\\ Radio\\ 104\\.4\\ FM"
+url_match = "http://stream\\.resonance\\.fm/resonance"
+logo = "/var/lib/speaker/station-logos/Resonance Radio 104.4 FM.jpg"
+
+[[station]]
+name_match = "Roots\\ Legacy\\ Radio\\ \\-\\ Dub\\ UK\\ \\&\\ Roots\\ Reggae"
+url_match = "https://l\\.rootslegacy\\.fr/;"
+logo = "/var/lib/speaker/station-logos/Roots Legacy Radio - Dub UK & Roots Reggae.jpg"
+
+[[station]]
+name_match = "RSI\\ \\-\\ Rete\\ Due"
+url_match = "http://stream\\.srg\\-ssr\\.ch/m/retedue/mp3_128"
+logo = "/var/lib/speaker/station-logos/RSI - Rete Due.jpg"
+
+[[station]]
+name_match = "RSI\\ \\-\\ Rete\\ Tre"
+url_match = "http://stream\\.srg\\-ssr\\.ch/m/retetre/mp3_128"
+logo = "/var/lib/speaker/station-logos/RSI - Rete Tre.jpg"
+
+[[station]]
+name_match = "RSI\\ \\-\\ Rete\\ Uno"
+url_match = "http://stream\\.srg\\-ssr\\.ch/m/reteuno/mp3_128"
+logo = "/var/lib/speaker/station-logos/RSI - Rete Uno.jpg"
+
+[[station]]
+name_match = "RTR\\ Radio"
+url_match = "http://stream\\.srg\\-ssr\\.ch/m/rr/mp3_128"
+logo = "/var/lib/speaker/station-logos/RTR Radio.jpg"
+
+[[station]]
+name_match = "RTS\\ \\-\\ Couleur\\ 3"
+url_match = "http://stream\\.srg\\-ssr\\.ch/m/couleur3/mp3_128"
+logo = "/var/lib/speaker/station-logos/RTS - Couleur 3.jpg"
+
+[[station]]
+name_match = "RTS\\ \\-\\ Espace\\ 2"
+url_match = "http://stream\\.srg\\-ssr\\.ch/m/espace\\-2/mp3_128"
+logo = "/var/lib/speaker/station-logos/RTS - Espace 2.jpg"
+
+[[station]]
+name_match = "RTS\\ \\-\\ La\\ Premiere"
+url_match = "http://stream\\.srg\\-ssr\\.ch/m/la\\-1ere/mp3_128"
+logo = "/var/lib/speaker/station-logos/RTS - La Premiere.jpg"
+
+[[station]]
+name_match = "RTS\\ \\-\\ option\\ musique"
+url_match = "http://stream\\.srg\\-ssr\\.ch/m/option\\-musique/mp3_128"
+logo = "/var/lib/speaker/station-logos/RTS - option musique.jpg"
+
+[[station]]
+name_match = "San\\ Diego\\ Jazz\\ 88\\.3"
+url_match = "http://listen\\.jazz88\\.org/ksds\\.mp3"
+logo = "/var/lib/speaker/station-logos/San Diego Jazz 88.3.jpg"
+
+[[station]]
+name_match = "SmoothJazz\\ Global"
+url_match = "https://smoothjazz\\.cdnstream1\\.com/2585_320\\.mp3"
+logo = "/var/lib/speaker/station-logos/SmoothJazz Global.jpg"
+
+[[station]]
+name_match = "SmoothLounge\\ Global"
+url_match = "https://smoothjazz\\.cdnstream1\\.com/2586_320\\.mp3"
+logo = "/var/lib/speaker/station-logos/SmoothLounge Global.jpg"
+
+[[station]]
+name_match = "Soho\\ Radio\\ London"
+url_match = "https://sohoradiomusic\\.doughunt\\.co\\.uk:8010/320mp3"
+logo = "/var/lib/speaker/station-logos/Soho Radio London.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Beat\\ Blender"
+url_match = "http://ice1\\.somafm\\.com/beatblender\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Beat Blender.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Black\\ Rock\\ FM"
+url_match = "http://ice1\\.somafm\\.com/brfm\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Black Rock FM.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Boot\\ Liquor"
+url_match = "http://ice1\\.somafm\\.com/bootliquor\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Boot Liquor.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Bossa\\ Beyond"
+url_match = "https://ice5\\.somafm\\.com/bossa\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Bossa Beyond.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ cliqhop\\ idm"
+url_match = "http://ice1\\.somafm\\.com/cliqhop\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - cliqhop idm.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Covers"
+url_match = "http://ice1\\.somafm\\.com/covers\\-128\\-mp3"
+logo = "/var/lib/speaker/station-logos/Soma FM - Covers.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Deep\\ Space\\ One"
+url_match = "http://ice1\\.somafm\\.com/deepspaceone\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Deep Space One.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ DEF\\ CON\\ Radio"
+url_match = "http://ice1\\.somafm\\.com/defcon\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - DEF CON Radio.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Digitalis"
+url_match = "http://ice1\\.somafm\\.com/digitalis\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Digitalis.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Drone\\ Zone"
+url_match = "http://ice1\\.somafm\\.com/dronezone\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Drone Zone.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Dub\\ Step\\ Beyond"
+url_match = "http://ice1\\.somafm\\.com/dubstep\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Dub Step Beyond.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Fluid"
+url_match = "http://ice1\\.somafm\\.com/fluid\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Fluid.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Folk\\ Forward"
+url_match = "http://ice1\\.somafm\\.com/folkfwd\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Folk Forward.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Groove\\ Salad"
+url_match = "http://ice1\\.somafm\\.com/groovesalad\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Groove Salad.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Groove\\ Salad\\ Classic"
+url_match = "http://ice2\\.somafm\\.com/gsclassic\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Groove Salad Classic.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Heavyweight\\ Reggae"
+url_match = "http://ice4\\.somafm\\.com/reggae\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Heavyweight Reggae.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Illinois\\ Street\\ Lounge"
+url_match = "http://ice1\\.somafm\\.com/illstreet\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Illinois Street Lounge.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Indie\\ Pop\\ Rocks!"
+url_match = "http://ice1\\.somafm\\.com/indiepop\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Indie Pop Rocks!.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Left\\ Coast\\ 70s"
+url_match = "http://ice1\\.somafm\\.com/seventies\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Left Coast 70s.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Live"
+url_match = "http://ice1\\.somafm\\.com/live\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Live.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Lush"
+url_match = "http://ice1\\.somafm\\.com/lush\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Lush.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Metal\\ Detector"
+url_match = "http://ice1\\.somafm\\.com/metal\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Metal Detector.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Mission\\ Control"
+url_match = "http://ice1\\.somafm\\.com/missioncontrol\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Mission Control.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ n5MD\\ Radio"
+url_match = "https://ice6\\.somafm\\.com/n5md\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - n5MD Radio.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ PopTron"
+url_match = "http://ice1\\.somafm\\.com/poptron\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - PopTron.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Secret\\ Agent"
+url_match = "http://ice1\\.somafm\\.com/secretagent\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Secret Agent.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Seven\\ Inch\\ Soul"
+url_match = "http://ice1\\.somafm\\.com/7soul\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Seven Inch Soul.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ SF\\ 10\\-33"
+url_match = "http://ice1\\.somafm\\.com/sf1033\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - SF 10-33.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Sonic\\ Universe"
+url_match = "http://ice1\\.somafm\\.com/sonicuniverse\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Sonic Universe.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Space\\ Station\\ Soma"
+url_match = "http://ice1\\.somafm\\.com/spacestation\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Space Station Soma.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Suburbs\\ of\\ Goa"
+url_match = "http://ice1\\.somafm\\.com/suburbsofgoa\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Suburbs of Goa.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Synphaera"
+url_match = "https://ice6\\.somafm\\.com/synphaera\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Synphaera.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ The\\ Dark\\ Zone"
+url_match = "https://ice6\\.somafm\\.com/darkzone\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - The Dark Zone.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ The\\ In\\-Sound"
+url_match = "https://ice5\\.somafm\\.com/insound\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - The In-Sound.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ The\\ Trip"
+url_match = "http://ice1\\.somafm\\.com/thetrip\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - The Trip.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ ThistleRadio"
+url_match = "http://ice1\\.somafm\\.com/thistle\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - ThistleRadio.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Tiki\\ Time"
+url_match = "https://ice6\\.somafm\\.com/tikitime\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Tiki Time.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Underground\\ 80s"
+url_match = "http://ice1\\.somafm\\.com/u80s\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Underground 80s.jpg"
+
+[[station]]
+name_match = "Soma\\ FM\\ \\-\\ Vaporwaves"
+url_match = "https://ice1\\.somafm\\.com/vaporwaves\\-128\\-aac"
+logo = "/var/lib/speaker/station-logos/Soma FM - Vaporwaves.jpg"
+
+[[station]]
+name_match = "SUB\\.FM\\ \\-\\ Where\\ Bass\\ Matters"
+url_match = "http://subfm\\.radioca\\.st/Sub\\.FM"
+logo = "/var/lib/speaker/station-logos/SUB.FM - Where Bass Matters.jpg"
+
+[[station]]
+name_match = "SwissGroove"
+url_match = "http://158\\.69\\.74\\.203:80/"
+logo = "/var/lib/speaker/station-logos/SwissGroove.jpg"
+
+[[station]]
+name_match = "SWR\\ 2"
+url_match = "https://liveradio\\.swr\\.de/sw331ch/swr2/play\\.aac"
+logo = "/var/lib/speaker/station-logos/SWR 2.jpg"
+
+[[station]]
+name_match = "The\\ Jazz\\ Groove"
+url_match = "http://west\\-aac\\-64\\.streamthejazzgroove\\.com/stream"
+logo = "/var/lib/speaker/station-logos/The Jazz Groove.jpg"
+
+[[station]]
+name_match = "Triple\\ J"
+url_match = "http://live\\-radio01\\.mediahubaustralia\\.com/2TJW/mp3/"
+logo = "/var/lib/speaker/station-logos/Triple J.jpg"
+
+[[station]]
+name_match = "Triple\\ J\\ Unearthed"
+url_match = "http://live\\-radio01\\.mediahubaustralia\\.com/UNEW/mp3/"
+logo = "/var/lib/speaker/station-logos/Triple J Unearthed.jpg"
+
+[[station]]
+name_match = "Venice\\ Classic\\ Radio\\ Italia"
+url_match = "https://uk2\\.streamingpulse\\.com/ssl/vcr1"
+logo = "/var/lib/speaker/station-logos/Venice Classic Radio Italia.jpg"
+
+[[station]]
+name_match = "VRT\\ \\-\\ Klara"
+url_match = "http://icecast\\.vrtcdn\\.be/klara\\-high\\.mp3"
+logo = "/var/lib/speaker/station-logos/VRT - Klara.jpg"
+
+[[station]]
+name_match = "VRT\\ \\-\\ Klara\\ Continuo"
+url_match = "http://icecast\\.vrtcdn\\.be/klaracontinuo\\-high\\.mp3"
+logo = "/var/lib/speaker/station-logos/VRT - Klara Continuo.jpg"
+
+[[station]]
+name_match = "VRT\\ \\-\\ MNM"
+url_match = "http://icecast\\.vrtcdn\\.be/mnm\\-high\\.mp3"
+logo = "/var/lib/speaker/station-logos/VRT - MNM.jpg"
+
+[[station]]
+name_match = "VRT\\ \\-\\ MNM\\ Hits"
+url_match = "http://icecast\\.vrtcdn\\.be/mnm_hits\\-high\\.mp3"
+logo = "/var/lib/speaker/station-logos/VRT - MNM Hits.jpg"
+
+[[station]]
+name_match = "VRT\\ \\-\\ Radio\\ 1"
+url_match = "http://icecast\\.vrtcdn\\.be/radio1\\-high\\.mp3"
+logo = "/var/lib/speaker/station-logos/VRT - Radio 1.jpg"
+
+[[station]]
+name_match = "VRT\\ \\-\\ Radio\\ 2"
+url_match = "http://icecast\\.vrtcdn\\.be/ra2vlb\\-high\\.mp3"
+logo = "/var/lib/speaker/station-logos/VRT - Radio 2.jpg"
+
+[[station]]
+name_match = "VRT\\ \\-\\ Studio\\ Brussel"
+url_match = "http://icecast\\.vrtcdn\\.be/stubru\\-high\\.mp3"
+logo = "/var/lib/speaker/station-logos/VRT - Studio Brussel.jpg"
+
+[[station]]
+name_match = "WBJC\\ Baltimore\\ 91\\.5\\ \\-\\ Classical"
+url_match = "https://ice64\\.securenetsystems\\.net/WBJC"
+logo = "/var/lib/speaker/station-logos/WBJC Baltimore 91.5 - Classical.jpg"
+
+[[station]]
+name_match = "WCLV\\ Cleveland\\ 104\\.9\\ \\-\\ Classical"
+url_match = "http://audio1\\.ideastream\\.org/wclv\\.mp3"
+logo = "/var/lib/speaker/station-logos/WCLV Cleveland 104.9 - Classical.jpg"
+
+[[station]]
+name_match = "WCRB\\ Boston\\ 99\\.5\\ \\-\\ Classical"
+url_match = "https://wgbh\\-live\\.streamguys1\\.com/classical\\-hi"
+logo = "/var/lib/speaker/station-logos/WCRB Boston 99.5 - Classical.jpg"
+
+[[station]]
+name_match = "WDCB\\ Chicago\\ FM\\ 90\\.9\\ \\-\\ Jazz\\ \\&\\ Blues"
+url_match = "http://wdcb\\-ice\\.streamguys\\.org:80/wdcb128"
+logo = "/var/lib/speaker/station-logos/WDCB Chicago FM 90.9 - Jazz & Blues.jpg"
+
+[[station]]
+name_match = "WDR\\ 1LIVE"
+url_match = "http://wdr\\-1live\\-live\\.icecast\\.wdr\\.de/wdr/1live/live/mp3/128/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/WDR 1LIVE.jpg"
+
+[[station]]
+name_match = "WDR\\ 3"
+url_match = "https://wdr\\-wdr3\\-live\\.icecastssl\\.wdr\\.de/wdr/wdr3/live/mp3/256/stream\\.mp3"
+logo = "/var/lib/speaker/station-logos/WDR 3.jpg"
+
+[[station]]
+name_match = "WEMU\\ Ypsilanti\\ FM\\ 89\\.1\\ \\-\\ Jazz"
+url_match = "https://playerservices\\.streamtheworld\\.com/api/livestream\\-redirect/WEMUFM\\.mp3"
+logo = "/var/lib/speaker/station-logos/WEMU Ypsilanti FM 89.1 - Jazz.jpg"
+
+[[station]]
+name_match = "WFMT\\ Chicago\\ 98\\.7\\ \\-\\ Classical"
+url_match = "http://stream\\.wfmt\\.com/main"
+logo = "/var/lib/speaker/station-logos/WFMT Chicago 98.7 - Classical.jpg"
+
+[[station]]
+name_match = "WFMU\\ 91\\.1\\ FM"
+url_match = "http://stream0\\.wfmu\\.org/freeform\\-best\\-available"
+logo = "/var/lib/speaker/station-logos/WFMU 91.1 FM.jpg"
+
+[[station]]
+name_match = "WKCR\\ 89\\.9\\ FM"
+url_match = "http://wkcr\\.streamguys1\\.com:80/live"
+logo = "/var/lib/speaker/station-logos/WKCR 89.9 FM.jpg"
+
+[[station]]
+name_match = "WQED\\ Pittsburgh\\ 89\\.3\\ \\-\\ Classical"
+url_match = "http://ice\\-1\\.streamhoster\\.com/lv_wqed\\-\\-893"
+logo = "/var/lib/speaker/station-logos/WQED Pittsburgh 89.3 - Classical.jpg"
+
+[[station]]
+name_match = "WQXR\\ New\\ York\\ \\-\\ Classical\\ Music"
+url_match = "http://stream\\.wqxr\\.org/wqxr"
+logo = "/var/lib/speaker/station-logos/WQXR New York - Classical Music.jpg"
+
+[[station]]
+name_match = "WQXR\\ Q2\\ \\-\\ Living\\ Music,\\ Living\\ Composers"
+url_match = "http://q2stream\\.wqxr\\.org/q2"
+logo = "/var/lib/speaker/station-logos/WQXR Q2 - Living Music, Living Composers.jpg"
+
+[[station]]
+name_match = "WRTI\\ Philadelphia\\ 90\\.1\\ \\-\\ Classical"
+url_match = "https://wrti\\-live\\.streamguys1\\.com/classical\\-mp3"
+logo = "/var/lib/speaker/station-logos/WRTI Philadelphia 90.1 - Classical.jpg"
+
+[[station]]
+name_match = "WRTI\\ Philadelphia\\ 90\\.1\\ \\-\\ Jazz"
+url_match = "https://wrti\\-live\\.streamguys1\\.com/jazz\\-mp3"
+logo = "/var/lib/speaker/station-logos/WRTI Philadelphia 90.1 - Jazz.jpg"
+
+[[station]]
+name_match = "WWOZ\\ New\\ Orleans\\ FM\\ 90\\.7\\ \\-\\ Various\\ Artists"
+url_match = "https://www\\.wwoz\\.org/listen/hi"
+logo = "/var/lib/speaker/station-logos/WWOZ New Orleans FM 90.7 - Various Artists.jpg"
+
+[[station]]
+name_match = "Zappa\\ Stream\\ Radio"
+url_match = "http://streams\\.norbert\\.de:8000/zappa\\.aac"
+logo = "/var/lib/speaker/station-logos/Zappa Stream Radio.jpg"
+
+[[station]]
+name_match = "Zen\\ FM"
+url_match = "https://25583\\.live\\.streamtheworld\\.com/TOPZEN_SC"
+logo = "/var/lib/speaker/station-logos/Zen FM.jpg"
+

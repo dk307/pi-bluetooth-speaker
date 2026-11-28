@@ -43,6 +43,8 @@ On every MPD track, station, or ICY title change (`MpdArtKey` change), `mpd-moni
    * When enabled in config and `(artist, title)` are non-empty (and not a station-ID/ad string), query an artwork endpoint (e.g. iTunes Search API) with a short timeout and cache by normalized `(artist, title)`.
 4. **Station Fallback Manifest (`/etc/speaker/stations.toml`):**
    * Match `song.file` (`url_match` substring/regex) or `station_name` (`name_match` case-insensitive substring/regex) against local station logos (e.g. `/var/lib/speaker/station-logos/`).
+   * Baseline manifest committed at [`baseline/etc/speaker/stations.toml`](../baseline/etc/speaker/stations.toml) (234 station rules generated from `moode-player/moode` `cfg_radio`); populate `/var/lib/speaker/station-logos/` on a Pi with [`scripts/install_moode_station_logos.sh`](../scripts/install_moode_station_logos.sh).
+   * Curated test playlist committed at [`baseline/var/lib/mpd/playlists/stream_art_test.m3u`](../baseline/var/lib/mpd/playlists/stream_art_test.m3u).
 5. **Radio-Browser Station Logo Lookup:**
    * If no local manifest rule matches and `station_name` is present, query `https://de1.api.radio-browser.info/json/stations/search` (cached in LRU by cleaned station name) so HLS and ICY stations without `StreamUrl`/`icy-logo` still resolve official station artwork.
 6. **Default Fallback:**
