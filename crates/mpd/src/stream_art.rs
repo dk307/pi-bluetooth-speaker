@@ -129,6 +129,9 @@ pub struct StationManifestConfig {
     /// Whether to query track artwork by `(artist, title)` when broadcast art is absent.
     #[serde(default = "default_true")]
     pub enable_track_art_lookup: bool,
+    /// Whether to query Radio-Browser for station logos when no local manifest rule matches.
+    #[serde(default = "default_true")]
+    pub enable_station_art_lookup: bool,
     /// Ordered list of station matching rules.
     #[serde(default)]
     pub station: Vec<StationRuleConfig>,
@@ -139,6 +142,7 @@ impl Default for StationManifestConfig {
         Self {
             default_logo: None,
             enable_track_art_lookup: true,
+            enable_station_art_lookup: true,
             station: Vec::new(),
         }
     }
@@ -160,6 +164,7 @@ struct CompiledStationRule {
 pub struct StationManifest {
     default_logo: Option<Box<str>>,
     enable_track_art_lookup: bool,
+    enable_station_art_lookup: bool,
     rules: Vec<CompiledStationRule>,
 }
 
@@ -168,6 +173,7 @@ impl Default for StationManifest {
         Self {
             default_logo: None,
             enable_track_art_lookup: true,
+            enable_station_art_lookup: true,
             rules: Vec::new(),
         }
     }
@@ -204,6 +210,7 @@ impl StationManifest {
         Ok(Self {
             default_logo: cfg.default_logo,
             enable_track_art_lookup: cfg.enable_track_art_lookup,
+            enable_station_art_lookup: cfg.enable_station_art_lookup,
             rules,
         })
     }
@@ -228,6 +235,12 @@ impl StationManifest {
     #[must_use]
     pub const fn track_art_lookup_enabled(&self) -> bool {
         self.enable_track_art_lookup
+    }
+
+    /// Returns whether Radio-Browser station-logo lookup is enabled.
+    #[must_use]
+    pub const fn station_art_lookup_enabled(&self) -> bool {
+        self.enable_station_art_lookup
     }
 
     /// Returns the configured `default_logo` path, if any.
@@ -423,8 +436,11 @@ pub fn resolve_relative_url(base_url: &str, reference: &str) -> String {
             .next()
             .and_then(|p| p.rfind('/'))
             .filter(|&idx| idx >= origin_end)
-            .map_or(origin_end, |idx| idx + 1);
-        return format!("{}{trimmed}", &base_url[..base_dir_end]);
+            .map(|idx| idx + 1);
+        return match base_dir_end {
+            Some(dir_end) => format!("{}{trimmed}", &base_url[..dir_end]),
+            None => format!("{origin}/{trimmed}"),
+        };
     }
     trimmed.to_string()
 }
@@ -439,6 +455,7 @@ pub struct StreamArtResolverMock {
 struct MockArtState {
     stream_probes: HashMap<Box<str>, StreamArtResult>,
     track_lookup: HashMap<(Box<str>, Box<str>), Vec<u8>>,
+    station_lookup: HashMap<Box<str>, Vec<u8>>,
     local_files: HashMap<Box<str>, Vec<u8>>,
 }
 
@@ -465,6 +482,16 @@ impl StreamArtResolverMock {
                 ),
                 bytes,
             );
+    }
+
+    /// Registers a simulated Radio-Browser station-logo image for `station_name`.
+    pub fn set_station_lookup(&self, station_name: &str, bytes: Vec<u8>) {
+        let cleaned = clean_station_query(station_name).to_ascii_lowercase();
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .station_lookup
+            .insert(Box::from(cleaned), bytes);
     }
 
     /// Registers simulated local logo file bytes for a manifest path.
@@ -595,12 +622,14 @@ impl StreamArtResolver {
         }
 
         // Tier 3: Track metadata artwork lookup `(artist, title)`.
-        let lookup_enabled = self
-            .manifest
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .track_art_lookup_enabled();
-        if lookup_enabled
+        let (track_lookup_enabled, station_lookup_enabled) = {
+            let m = self
+                .manifest
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (m.track_art_lookup_enabled(), m.station_art_lookup_enabled())
+        };
+        if track_lookup_enabled
             && let (Some(artist), Some(title)) = track.resolved_artist_title()
             && let Some(bytes) = self.lookup_track_artwork(artist, title)
         {
@@ -612,10 +641,14 @@ impl StreamArtResolver {
             };
         }
 
-        // Tiers 4, 5 & 6: Station manifest, Radio-Browser station logo, & default logo fallback.
-        let mut fallback = self.resolve_manifest_fallback(track);
-        if fallback.image_bytes.is_none()
-            && lookup_enabled
+        // Tier 4: Station manifest rule match.
+        if let Some(mut res) = self.resolve_station_manifest(track) {
+            res.probed_codec = probed_codec;
+            return res;
+        }
+
+        // Tier 5: Radio-Browser station logo lookup.
+        if station_lookup_enabled
             && let Some(station) = track
                 .station_name
                 .as_deref()
@@ -629,6 +662,9 @@ impl StreamArtResolver {
                 transient_error: false,
             };
         }
+
+        // Tier 6: Default logo fallback.
+        let mut fallback = self.resolve_default_logo();
         fallback.probed_codec = probed_codec;
         if fallback.image_bytes.is_none() && broadcast.transient_error {
             fallback.transient_error = true;
@@ -641,12 +677,17 @@ impl StreamArtResolver {
         if cleaned.is_empty() {
             return None;
         }
-        let key = (
+        let key: (Box<str>, Box<str>) = (
             Box::from("__station__"),
             Box::from(cleaned.to_ascii_lowercase()),
         );
         match &*self.backend {
-            ResolverBackend::Mock(_) => None,
+            ResolverBackend::Mock(mock) => mock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .station_lookup
+                .get(key.1.as_ref())
+                .cloned(),
             ResolverBackend::Live {
                 agent, track_cache, ..
             } => {
@@ -700,28 +741,40 @@ impl StreamArtResolver {
     }
 
     fn resolve_manifest_fallback(&self, track: &MpdTrack) -> StreamArtResult {
-        let (matched_logo, default_logo) = {
+        self.resolve_station_manifest(track)
+            .unwrap_or_else(|| self.resolve_default_logo())
+    }
+
+    fn resolve_station_manifest(&self, track: &MpdTrack) -> Option<StreamArtResult> {
+        let matched_logo = {
             let manifest = self
                 .manifest
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let matched = manifest
+            manifest
                 .match_station_logo(track.file.as_ref(), track.station_name.as_deref())
-                .map(Box::<str>::from);
-            let default = manifest.default_logo().map(Box::<str>::from);
-            (matched, default)
+                .map(Box::<str>::from)
         };
-
         if let Some(path) = matched_logo
             && let Some(bytes) = self.read_local_logo(path.as_ref())
         {
-            return StreamArtResult {
+            return Some(StreamArtResult {
                 image_bytes: Some(bytes),
                 probed_codec: None,
                 source: ArtSource::StationManifest,
                 transient_error: false,
-            };
+            });
         }
+        None
+    }
+
+    fn resolve_default_logo(&self) -> StreamArtResult {
+        let default_logo = self
+            .manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .default_logo()
+            .map(Box::<str>::from);
         if let Some(path) = default_logo
             && let Some(bytes) = self.read_local_logo(path.as_ref())
         {

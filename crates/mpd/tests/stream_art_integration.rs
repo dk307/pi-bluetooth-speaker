@@ -171,6 +171,10 @@ fn hls_playlist_and_relative_url_resolution() {
         ),
         "https://other/a.aac"
     );
+    assert_eq!(
+        resolve_relative_url("http://host:8000", "seg.m3u8"),
+        "http://host:8000/seg.m3u8"
+    );
 
     let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=128000\naac/128.m3u8\n";
     assert_eq!(
@@ -327,6 +331,21 @@ logo = "/logos/somafm.png"
     assert_eq!(res4.image_bytes.as_deref(), Some(b"SOMAFM_LOGO".as_slice()));
 
     // 5. Unmatched station -> DefaultLogo
+    // 5. Unmatched station with station_name -> RadioBrowser wins over DefaultLogo
+    art_mock.set_station_lookup("FIP", b"RADIO_BROWSER_LOGO".to_vec());
+    let fip_stream = MpdTrack {
+        file: "https://fip.example/live.m3u8".into(),
+        station_name: Some("FIP (HLS)".into()),
+        ..MpdTrack::default()
+    };
+    let res5a = resolver.resolve_for_track(&fip_stream, &mpd).await;
+    assert_eq!(res5a.source, ArtSource::RadioBrowser);
+    assert_eq!(
+        res5a.image_bytes.as_deref(),
+        Some(b"RADIO_BROWSER_LOGO".as_slice())
+    );
+
+    // 6. Unmatched station with no RadioBrowser hit -> DefaultLogo
     let other_stream = MpdTrack {
         file: "https://other.example/live".into(),
         ..MpdTrack::default()
