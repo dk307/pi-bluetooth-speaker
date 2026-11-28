@@ -52,8 +52,10 @@ baseline/
 │   └── asound.state               # Persisted MA12070P hardware mixer gains & limiter states
 ├── bin/
 │   └── bt-auto-trust-agent.py     # Legacy Python D-Bus auto-trust pairing handler (superseded by bt-manager)
-├── var/lib/mpd/playlists/
-│   └── stream_art_test.m3u        # Curated MPD stream-art & metadata test playlist (HLS, ICY MP3/AAC/FLAC, Zeno)
+├── var/lib/
+│   ├── mpd/playlists/
+│   │   └── stream_art_test.m3u    # Curated MPD stream-art & metadata test playlist (HLS, ICY MP3/AAC/FLAC, Zeno)
+│   └── speaker/station-logos/     # 239 curated radio station logos (JPEG) from moode-player/moode
 └── scripts/
     ├── read_temp.py               # DS18B20 1-Wire thermal monitor
     ├── read_light_level.py        # BH1750 ambient light lux reader (I2C)
