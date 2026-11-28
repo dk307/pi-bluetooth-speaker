@@ -682,11 +682,11 @@ export component NowPlayingView inherits Rectangle {
                                 pointer-event(ev) => {
                                     if (ev.kind == PointerEventKind.down) {
                                         scrub_box.scrubbing = true;
-                                        scrub_box.scrub_ratio = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
+                                        scrub_box.scrub_ratio = self.width > 0px ? Math.max(0.0, Math.min(1.0, self.mouse-x / self.width)) : 0.0;
                                     } else if (ev.kind == PointerEventKind.move && scrub_box.scrubbing) {
-                                        scrub_box.scrub_ratio = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
+                                        scrub_box.scrub_ratio = self.width > 0px ? Math.max(0.0, Math.min(1.0, self.mouse-x / self.width)) : 0.0;
                                     } else if (ev.kind == PointerEventKind.up && scrub_box.scrubbing) {
-                                        scrub_box.scrub_ratio = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
+                                        scrub_box.scrub_ratio = self.width > 0px ? Math.max(0.0, Math.min(1.0, self.mouse-x / self.width)) : 0.0;
                                         scrub_box.scrubbing = false;
                                         root.seek_to(scrub_box.scrub_ratio);
                                     } else if (ev.kind == PointerEventKind.cancel) {
