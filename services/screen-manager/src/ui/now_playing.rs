@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use speaker_bluetooth::BtPlaybackState;
-use speaker_mpd::{MpdPlaybackState, MpdStatus};
+use speaker_mpd::{MpdPlaybackState, MpdStatus, MpdTrack};
 
 /// Canonical source IDs matching `audio-manager`'s `SourceRegistry`.
 pub const SOURCE_ID_BLUETOOTH: &str = "bluetooth";
@@ -230,22 +230,34 @@ impl NowPlayingSnapshot {
     /// Converts an MPD [`MpdStatus`] into a [`NowPlayingSnapshot`].
     #[must_use]
     pub fn from_mpd(status: &MpdStatus) -> Self {
+        Self::from_mpd_with_codec(status, None)
+    }
+
+    /// Converts an MPD [`MpdStatus`] into a [`NowPlayingSnapshot`], overriding the
+    /// inferred codec label when an HTTP stream probe has determined `probed_codec`.
+    #[must_use]
+    pub fn from_mpd_with_codec(status: &MpdStatus, probed_codec: Option<&str>) -> Self {
         let is_playing = matches!(status.state, MpdPlaybackState::Playing);
         let track = status.current_track.as_ref();
         let has_track = track.is_some();
 
+        let (resolved_artist, resolved_title) =
+            track.map_or((None, None), MpdTrack::resolved_artist_title);
+
         let title: Box<str> = match track {
-            Some(t) => t
-                .title
-                .as_deref()
-                .filter(|s| !s.is_empty())
+            Some(t) => resolved_title
                 .or_else(|| t.file.rsplit('/').next().filter(|s| !s.is_empty()))
                 .unwrap_or("Unknown Track")
                 .into(),
             None => MediaSourceKind::Mpd.idle_title().into(),
         };
-        let artist: Box<str> = track.and_then(|t| t.artist.as_deref()).unwrap_or("").into();
+        let artist: Box<str> = resolved_artist.unwrap_or("").into();
         let album: Box<str> = track.and_then(|t| t.album.as_deref()).unwrap_or("").into();
+        let source_label: Box<str> = track
+            .and_then(|t| t.station_name.as_deref())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("")
+            .into();
 
         let duration_ms = status
             .duration
@@ -258,7 +270,9 @@ impl NowPlayingSnapshot {
         let seekable = has_track && duration_ms > 0 && duration_ms != UNKNOWN_TIMELINE_MS;
 
         let stream_info = track.map(|t| {
-            let codec = t.codec_label();
+            let codec = probed_codec
+                .filter(|c| !c.is_empty())
+                .unwrap_or_else(|| t.codec_label());
             let sample_rate: Box<str> = status
                 .sample_rate_hz
                 .map_or_else(|| Box::from("—"), format_rate_khz);
@@ -287,7 +301,7 @@ impl NowPlayingSnapshot {
 
         Self {
             source: MediaSourceKind::Mpd,
-            source_label: Box::from(""),
+            source_label,
             title,
             artist,
             album,
