@@ -243,6 +243,7 @@ async fn run_live_audio_sources(
             }
         };
 
+        let mut snapshot_dirty = false;
         let mut has_initial_snapshot =
             match tokio::time::timeout(DBUS_CALL_TIMEOUT, read_sources_snapshot(&proxy)).await {
                 Ok(Ok(initial)) => {
@@ -252,10 +253,12 @@ async fn run_live_audio_sources(
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(error = %e, "Initial AudioSources1 snapshot failed; will retry");
+                    snapshot_dirty = true;
                     false
                 }
                 Err(_) => {
                     tracing::warn!("Initial AudioSources1 snapshot timed out; will retry");
+                    snapshot_dirty = true;
                     false
                 }
             };
@@ -289,7 +292,14 @@ async fn run_live_audio_sources(
             tokio::select! {
                 _ = cmd_tick.tick() => {
                     for cmd in commands.drain() {
-                        execute_source_command(&proxy, shared, cmd, &mut has_initial_snapshot).await;
+                        execute_source_command(
+                            &proxy,
+                            shared,
+                            cmd,
+                            &mut has_initial_snapshot,
+                            &mut snapshot_dirty,
+                        )
+                        .await;
                     }
                 }
                 maybe_sig = async {
@@ -301,17 +311,29 @@ async fn run_live_audio_sources(
                     if maybe_sig.is_none() {
                         break;
                     }
-                    if let Ok(snap) = read_sources_snapshot(&proxy).await {
-                        publish_audio_sources(shared, snap);
-                        has_initial_snapshot = true;
+                    match tokio::time::timeout(DBUS_CALL_TIMEOUT, read_sources_snapshot(&proxy)).await {
+                        Ok(Ok(snap)) => {
+                            publish_audio_sources(shared, snap);
+                            has_initial_snapshot = true;
+                            snapshot_dirty = false;
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "AudioSources1 snapshot refresh failed after signal");
+                            snapshot_dirty = true;
+                        }
+                        Err(_) => {
+                            tracing::warn!("AudioSources1 snapshot refresh timed out after signal");
+                            snapshot_dirty = true;
+                        }
                     }
                 }
                 _ = fallback_poll.tick() => {
-                    if (!has_initial_snapshot || changes.is_none())
-                        && let Ok(snap) = read_sources_snapshot(&proxy).await
+                    if (!has_initial_snapshot || snapshot_dirty || changes.is_none())
+                        && let Ok(Ok(snap)) = tokio::time::timeout(DBUS_CALL_TIMEOUT, read_sources_snapshot(&proxy)).await
                     {
                         publish_audio_sources(shared, snap);
                         has_initial_snapshot = true;
+                        snapshot_dirty = false;
                     }
                 }
             }
@@ -324,6 +346,7 @@ async fn execute_source_command(
     shared: &Arc<Mutex<BtSharedUpdate>>,
     cmd: SourceCommand,
     has_initial_snapshot: &mut bool,
+    snapshot_dirty: &mut bool,
 ) {
     let res = match cmd {
         SourceCommand::SelectSource(id) => tokio::time::timeout(
@@ -344,11 +367,20 @@ async fn execute_source_command(
         Ok(Err(e)) => tracing::warn!(error = %e, "AudioSources1 command failed"),
         Err(_) => tracing::warn!("AudioSources1 command timed out; refreshing state"),
     }
-    if let Ok(Ok(snap)) =
-        tokio::time::timeout(DBUS_CALL_TIMEOUT, read_sources_snapshot(proxy)).await
-    {
-        publish_audio_sources(shared, snap);
-        *has_initial_snapshot = true;
+    match tokio::time::timeout(DBUS_CALL_TIMEOUT, read_sources_snapshot(proxy)).await {
+        Ok(Ok(snap)) => {
+            publish_audio_sources(shared, snap);
+            *has_initial_snapshot = true;
+            *snapshot_dirty = false;
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "AudioSources1 snapshot refresh failed after command");
+            *snapshot_dirty = true;
+        }
+        Err(_) => {
+            tracing::warn!("AudioSources1 snapshot refresh timed out after command");
+            *snapshot_dirty = true;
+        }
     }
 }
 
@@ -451,13 +483,21 @@ async fn refresh_mpd_cover(
     }
     match device.read_album_art(file.as_ref()).await {
         Ok(Some(bytes)) => {
-            if let Some((buf, seed)) = decode_cover_bytes(&bytes) {
-                last_art_file.clone_from(&next_file);
-                *last_failed_art = None;
-                publish_mpd_cover(shared, Some(buf), seed);
-            } else {
-                *last_failed_art = Some((file.clone(), Instant::now()));
-                tracing::debug!(file = %file, "MPD album art decode failed; keeping prior art");
+            let decoded = tokio::task::spawn_blocking(move || decode_cover_bytes(&bytes)).await;
+            match decoded {
+                Ok(Some((buf, seed))) => {
+                    last_art_file.clone_from(&next_file);
+                    *last_failed_art = None;
+                    publish_mpd_cover(shared, Some(buf), seed);
+                }
+                Ok(None) => {
+                    *last_failed_art = Some((file.clone(), Instant::now()));
+                    tracing::debug!(file = %file, "MPD album art decode failed; keeping prior art");
+                }
+                Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+                Err(_) => {
+                    *last_failed_art = Some((file.clone(), Instant::now()));
+                }
             }
         }
         Ok(None) => {
